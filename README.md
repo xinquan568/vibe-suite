@@ -32,6 +32,7 @@ rather than left to be discovered.
 | `codex/` | generated Codex CLI mirror — never hand-edited |
 | `tests/` | test suites and fixtures |
 | `tools/` | developer utilities |
+| `schemas/` | JSON Schemas for machine-readable contracts (e.g. audit output) |
 | `docs/` | ADRs, contributor docs, and historical planning records |
 
 > **`commands/` and `agents/` carry inert `.gitkeep` markers, not READMEs.** Claude Code scans those
@@ -42,8 +43,9 @@ rather than left to be discovered.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests    # run the suite
-jq empty .claude-plugin/plugin.json      # validate a manifest
+python3 -m unittest discover -s tests               # run the suite
+jq empty .claude-plugin/plugin.json                 # validate a manifest
+python3 scripts/validate_audit_output.py <report>   # validate an audit report
 ```
 
 Validate the plugin manifests — note these are two separate targets:

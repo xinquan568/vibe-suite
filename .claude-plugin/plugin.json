@@ -17,5 +17,7 @@
   ],
   "commands": [],
   "agents": [],
-  "skills": []
+  "skills": [
+    "./skills/vibe-core"
+  ]
 }

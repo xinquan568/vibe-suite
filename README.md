@@ -21,8 +21,8 @@ rather than left to be discovered.
 | Path | Holds |
 |---|---|
 | `.claude-plugin/` | `plugin.json` (component manifest) + `marketplace.json` (installation pointer) |
-| `commands/` | `/vibe-suite:*` slash commands, plus shared partials |
-| `agents/` | subagent definitions |
+| `commands/` | `/vibe-suite:*` slash commands, plus shared partials — see note below |
+| `agents/` | subagent definitions — see note below |
 | `skills/` | knowledge and workflow skills |
 | `hooks/` | plugin hook registrations |
 | `scripts/` | shared Bash/Python libraries |
@@ -34,6 +34,11 @@ rather than left to be discovered.
 | `tools/` | developer utilities |
 | `docs/` | ADRs, contributor docs, and historical planning records |
 
+> **`commands/` and `agents/` carry inert `.gitkeep` markers, not READMEs.** Claude Code scans those
+> two directories for flat component files, so a bare `.md` in either is parsed as a command or agent
+> and fails `claude plugin validate --strict` for want of frontmatter. Their descriptions live in the
+> table above instead. Every other skeleton directory carries an explanatory `README.md`.
+
 ## Development
 
 ```bash
@@ -41,7 +46,15 @@ python3 -m unittest discover -s tests    # run the suite
 jq empty .claude-plugin/plugin.json      # validate a manifest
 ```
 
-CI runs manifest validation, Python/Node lint, and the test suite on every pull request.
+Validate the plugin manifests — note these are two separate targets:
+
+```bash
+claude plugin validate . --strict                          # marketplace.json
+claude plugin validate .claude-plugin/plugin.json --strict # plugin.json + component scan
+```
+
+CI runs manifest validation, Python/Node lint, a pinned-model-identifier scan, and the test suite on
+every pull request.
 
 ## Acknowledgements
 

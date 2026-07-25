@@ -1,0 +1,18 @@
+{
+  "name": "vibe-suite",
+  "description": "Vibe coding suite for Claude Code \u2014 NL-artifact quality tooling, cross-model review, and workflow loops, bridged to Codex CLI.",
+  "owner": {
+    "name": "Eric Y. Liu",
+    "url": "https://github.com/xinquan568"
+  },
+  "plugins": [
+    {
+      "name": "vibe-suite",
+      "description": "Vibe coding suite for Claude Code \u2014 NL-artifact quality tooling, cross-model review, and workflow loops, bridged to Codex CLI.",
+      "source": {
+        "source": "github",
+        "repo": "xinquan568/vibe-suite"
+      }
+    }
+  ]
+}

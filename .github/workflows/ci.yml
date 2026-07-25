@@ -1,0 +1,113 @@
+# vibe-suite CI (E0.1 / vibe-3).
+#
+# Three jobs: manifest validation, lint (Python + Node, with shell as a separate optional step),
+# and test execution. At scaffold time most discovery sets are empty by design — every job prints
+# what it found and exits 0 on zero targets, so "nothing to check" is visibly distinct from a
+# broken matcher. Each job becomes a real gate the moment its first target lands.
+#
+# No model identifiers appear anywhere in this workflow (principle P9): every tool uses its own
+# default. POSIX-only (bash/python3/node) — see README.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  manifest-validation:
+    name: manifest validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Both manifests parse as JSON
+        run: |
+          set -euo pipefail
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json; do
+            test -f "$f" || { echo "missing required manifest: $f"; exit 1; }
+            jq empty "$f"
+            echo "ok: $f parses"
+          done
+
+      - name: Every other JSON file parses
+        run: |
+          set -euo pipefail
+          count=0
+          while IFS= read -r f; do
+            jq empty "$f" && count=$((count + 1))
+          done < <(find . -name '*.json' -not -path './.git/*' -not -path './node_modules/*' \
+                        -not -path './.claude-plugin/*')
+          echo "checked $count additional JSON file(s)"
+
+  lint:
+    name: lint (python + node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Python syntax
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find . -name '*.py' -not -path './.git/*')
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no Python files to check"; exit 0
+          fi
+          printf 'checking %d Python file(s)\n' "${#files[@]}"
+          python3 -m py_compile "${files[@]}"
+
+      - name: Node syntax
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find . \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
+                                    -not -path './.git/*' -not -path './node_modules/*')
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no Node files to check"; exit 0
+          fi
+          printf 'checking %d Node file(s)\n' "${#files[@]}"
+          for f in "${files[@]}"; do node --check "$f"; done
+
+      - name: Shell lint (advisory)
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find . -name '*.sh' -not -path './.git/*')
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no shell files to check"; exit 0
+          fi
+          printf 'checking %d shell file(s)\n' "${#files[@]}"
+          for f in "${files[@]}"; do bash -n "$f"; done
+          shellcheck "${files[@]}"
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run the suite
+        run: |
+          set -euo pipefail
+          if [ -z "$(find tests -name 'test_*.py' -print -quit 2>/dev/null)" ]; then
+            echo "no tests found under tests/"; exit 0
+          fi
+          python3 -m unittest discover -s tests -v

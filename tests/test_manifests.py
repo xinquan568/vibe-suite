@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: ISC
+"""Validate the vibe-suite plugin manifest pair (E0.1 / vibe-3).
+
+These assertions are the scaffold's contract. `.claude-plugin/plugin.json` is the component
+manifest — its `name` also fixes the command namespace (`/vibe-suite:*`), so it is asserted
+exactly. `.claude-plugin/marketplace.json` is the installation pointer; its `source` object is
+what a local install resolves, so its shape is asserted rather than merely its presence.
+"""
+
+import json
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PLUGIN_MANIFEST = REPO_ROOT / ".claude-plugin" / "plugin.json"
+MARKETPLACE_MANIFEST = REPO_ROOT / ".claude-plugin" / "marketplace.json"
+
+PLUGIN_NAME = "vibe-suite"
+REPO_SLUG = "xinquan568/vibe-suite"
+COMPONENT_KEYS = ("commands", "agents", "skills")
+
+
+def _load(path):
+    if not path.exists():
+        raise AssertionError(f"manifest not found: {path.relative_to(REPO_ROOT)}")
+    with path.open(encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+class TestPluginManifest(unittest.TestCase):
+    def setUp(self):
+        self.manifest = _load(PLUGIN_MANIFEST)
+
+    def test_name_fixes_the_command_namespace(self):
+        # Claude Code derives a command's prefix from this field; `vibe-suite` yields
+        # `/vibe-suite:*` (D1-revised). Changing it renames every command in the plugin.
+        self.assertEqual(self.manifest.get("name"), PLUGIN_NAME)
+
+    def test_required_metadata_present(self):
+        for key in ("version", "description"):
+            with self.subTest(key=key):
+                self.assertTrue(str(self.manifest.get(key, "")).strip(), f"{key} must be non-empty")
+
+    def test_component_arrays_present_and_empty(self):
+        # The scaffold declares the component keys explicitly and ships them empty; each later
+        # issue registers its own artifact. Emptiness is the contract at this commit, so assert
+        # it rather than assume it.
+        for key in COMPONENT_KEYS:
+            with self.subTest(key=key):
+                self.assertIn(key, self.manifest, f"{key} must be declared explicitly")
+                self.assertIsInstance(self.manifest[key], list, f"{key} must be a list")
+                self.assertEqual(self.manifest[key], [], f"{key} must be empty in the scaffold")
+
+    def test_license_is_isc(self):
+        self.assertEqual(self.manifest.get("license"), "ISC")
+
+
+class TestMarketplaceManifest(unittest.TestCase):
+    def setUp(self):
+        self.manifest = _load(MARKETPLACE_MANIFEST)
+
+    def test_declares_exactly_one_plugin(self):
+        plugins = self.manifest.get("plugins")
+        self.assertIsInstance(plugins, list, "plugins must be a list")
+        self.assertEqual(len(plugins), 1, "single-plugin marketplace: expected exactly one entry")
+
+    def test_entry_name_matches_plugin_manifest(self):
+        self.assertEqual(self.manifest["plugins"][0].get("name"), PLUGIN_NAME)
+
+    def test_source_pointer_shape(self):
+        # This object is what a local install resolves. A malformed source would pass a mere
+        # presence check while making the plugin uninstallable.
+        source = self.manifest["plugins"][0].get("source")
+        self.assertIsInstance(source, dict, "source must be an object")
+        self.assertEqual(source.get("source"), "github")
+        self.assertEqual(source.get("repo"), REPO_SLUG)
+
+
+if __name__ == "__main__":
+    unittest.main()

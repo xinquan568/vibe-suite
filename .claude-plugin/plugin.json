@@ -1,0 +1,22 @@
+{
+  "name": "vibe-suite",
+  "version": "0.0.1",
+  "description": "Vibe coding suite for Claude Code — NL-artifact quality tooling, cross-model review, and workflow loops, bridged to Codex CLI.",
+  "author": {
+    "name": "Eric Y. Liu"
+  },
+  "license": "ISC",
+  "homepage": "https://github.com/xinquan568/vibe-suite",
+  "repository": "https://github.com/xinquan568/vibe-suite",
+  "category": "developer-tools",
+  "keywords": [
+    "code-review",
+    "quality",
+    "natural-language-programming",
+    "workflow",
+    "codex"
+  ],
+  "commands": [],
+  "agents": [],
+  "skills": []
+}

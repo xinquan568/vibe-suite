@@ -42,15 +42,30 @@ class TestPluginManifest(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertTrue(str(self.manifest.get(key, "")).strip(), f"{key} must be non-empty")
 
-    def test_component_arrays_present_and_empty(self):
-        # The scaffold declares the component keys explicitly and ships them empty; each later
-        # issue registers its own artifact. Emptiness is the contract at this commit, so assert
-        # it rather than assume it.
+    def test_component_arrays_declared_as_lists(self):
+        # The manifest declares each component key explicitly and each later issue registers its
+        # own artifact. The durable contract is that the arrays are ACCURATE, not that they are
+        # empty — emptiness held only for the scaffold commit, before anything was registered.
         for key in COMPONENT_KEYS:
             with self.subTest(key=key):
                 self.assertIn(key, self.manifest, f"{key} must be declared explicitly")
                 self.assertIsInstance(self.manifest[key], list, f"{key} must be a list")
-                self.assertEqual(self.manifest[key], [], f"{key} must be empty in the scaffold")
+
+    def test_registered_components_exist_on_disk(self):
+        # An entry naming a path that is not there is worse than no entry: the manifest asserts a
+        # component the loader cannot find.
+        for key in COMPONENT_KEYS:
+            for entry in self.manifest.get(key, []):
+                with self.subTest(key=key, entry=entry):
+                    self.assertTrue(
+                        (REPO_ROOT / entry).exists(),
+                        f"{key} registers {entry}, which does not exist",
+                    )
+
+    def test_vibe_core_skill_is_registered(self):
+        # E0.2 ships the first component. Registering it is the pattern every later
+        # artifact-adding issue follows.
+        self.assertIn("./skills/vibe-core", self.manifest.get("skills", []))
 
     def test_license_is_isc(self):
         self.assertEqual(self.manifest.get("license"), "ISC")

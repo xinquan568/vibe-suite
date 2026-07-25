@@ -62,9 +62,16 @@ correspond.
 | 5–9 | `[MEDIUM]` |
 | < 5 | `[LOW]` |
 
-nlpm emits no `[CRITICAL]`: its penalties measure artifact-quality deductions, which do not express
-immediate operational danger. A finding warranting `[CRITICAL]` from an nlpm-style analysis is one a
-human raised, not one the penalty table produced.
+**Why ≥ 10 is `[HIGH]` and not an inflation.** nlpm's penalties measure how badly an NL artifact
+fails at its job. A ≥ 10 deduction is not a cosmetic complaint — it is the band where a skill's
+description will not trigger when it should, or its structure prevents a consumer from applying it.
+That satisfies the `[HIGH]` definition directly: the artifact materially fails its purpose and a
+consumer cannot route around it. The definition is phrased in terms of purpose-failure rather than
+exploitation precisely so this mapping holds.
+
+nlpm emits no `[CRITICAL]`: an artifact-quality deduction, however large, does not by itself mean
+nothing downstream can rely on the artifact at all. A `[CRITICAL]` on an NL artifact is a judgement a
+reviewer makes, not one the penalty table produces.
 
 ### cc-suite audit severities
 

@@ -12,8 +12,15 @@
   "properties": {
     "agent": {
       "type": "string",
-      "minLength": 1,
-      "description": "The <name> from the output header '## [Agent: <name>] Findings'."
+      "enum": [
+        "vibe-suite:recon",
+        "vibe-suite:architecture",
+        "vibe-suite:error-handling",
+        "vibe-suite:edge-cases",
+        "vibe-suite:security",
+        "vibe-suite:testing"
+      ],
+      "description": "The <name> from the output header '## [Agent: <name>] Findings'. Constrained to the canonical qualified names: an unqualified name such as 'security' is rejected, because the agent-specific variant rules key on this value and a bare name would bypass them."
     },
     "findings": {
       "type": "array",

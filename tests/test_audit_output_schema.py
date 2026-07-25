@@ -179,6 +179,63 @@ class TestContractRejections(unittest.TestCase):
         }, self.schema)  # must not raise: file is optional for the sentinel
 
 
+class TestAgentNameIsCanonical(unittest.TestCase):
+    """The variant rules key on `agent`, so an unqualified name must not slip past them."""
+
+    def setUp(self):
+        self.v = _validator()
+        self.schema = _load(SCHEMA_PATH)
+
+    def test_rejects_unqualified_agent_name(self):
+        report = {
+            "agent": "security",  # bare, not vibe-suite:security
+            "findings": [{
+                "file": "a.py:1", "observation": "x", "severity": "[HIGH]",
+                "evidence": "y", "proposed_change": "z", "tradeoff": "w",
+            }],
+        }
+        with self.assertRaises(self.v.ValidationError):
+            self.v.validate(report, self.schema)
+
+    def test_rejects_unknown_agent_name(self):
+        report = {
+            "agent": "vibe-suite:invented",
+            "findings": [{
+                "file": "a.py:1", "observation": "x", "severity": "[LOW]",
+                "evidence": "y", "proposed_change": "z", "tradeoff": "w",
+            }],
+        }
+        with self.assertRaises(self.v.ValidationError):
+            self.v.validate(report, self.schema)
+
+
+class TestJsonSemantics(unittest.TestCase):
+    """JSON Schema's data model differs from Python's in two ways that bite hand-rolled checkers."""
+
+    def setUp(self):
+        self.v = _validator()
+
+    def test_integral_float_is_a_json_integer(self):
+        self.v.validate(1.0, {"type": "integer"})  # must not raise: 1.0 is integral
+
+    def test_non_integral_float_is_not_an_integer(self):
+        with self.assertRaises(self.v.ValidationError):
+            self.v.validate(1.5, {"type": "integer"})
+
+    def test_boolean_is_not_an_integer(self):
+        with self.assertRaises(self.v.ValidationError):
+            self.v.validate(True, {"type": "integer"})
+
+    def test_boolean_does_not_satisfy_numeric_enum(self):
+        # Python says True == 1; JSON Schema does not.
+        with self.assertRaises(self.v.ValidationError):
+            self.v.validate(True, {"enum": [1]})
+
+    def test_number_accepts_boolean_never(self):
+        with self.assertRaises(self.v.ValidationError):
+            self.v.validate(False, {"type": "number"})
+
+
 class TestCheckerFailsClosed(unittest.TestCase):
     """The checker must halt on anything it does not implement, never skip it."""
 

@@ -62,10 +62,19 @@ class TestPluginManifest(unittest.TestCase):
                         f"{key} registers {entry}, which does not exist",
                     )
 
-    def test_vibe_core_skill_is_registered(self):
-        # E0.2 ships the first component. Registering it is the pattern every later
-        # artifact-adding issue follows.
-        self.assertIn("./skills/vibe-core", self.manifest.get("skills", []))
+    def test_registered_skills_match_disk_exactly(self):
+        # D-f: `skills` contains exactly the skills that exist. assertIn would miss both failure
+        # directions — a stale entry for a deleted skill, and a skill on disk nobody registered.
+        # Deriving the expected set from disk catches each.
+        on_disk = {
+            f"./skills/{d.name}"
+            for d in (REPO_ROOT / "skills").iterdir()
+            if d.is_dir() and (d / "SKILL.md").is_file()
+        }
+        self.assertEqual(
+            set(self.manifest.get("skills", [])), on_disk,
+            "plugin.json:skills must match the skills present on disk exactly",
+        )
 
     def test_license_is_isc(self):
         self.assertEqual(self.manifest.get("license"), "ISC")

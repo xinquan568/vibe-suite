@@ -57,6 +57,30 @@ _TYPES = {
 }
 
 
+def _is_json_type(instance, expected):
+    """JSON Schema's type predicate, which is not Python's.
+
+    Two divergences matter. `True` is a Python `int`, but JSON Schema treats booleans as a distinct
+    type. And `1.0` is a JSON *integer* — the spec judges by mathematical value, not representation.
+    """
+    if isinstance(instance, bool):
+        return expected == "boolean"
+    if expected == "integer":
+        if isinstance(instance, int):
+            return True
+        return isinstance(instance, float) and instance.is_integer()
+    if expected == "boolean":
+        return False  # only real booleans, handled above
+    return isinstance(instance, _TYPES[expected])
+
+
+def _json_equal(a, b):
+    """Equality with JSON's type distinctions, so `True` does not equal `1`."""
+    if isinstance(a, bool) != isinstance(b, bool):
+        return False
+    return a == b
+
+
 class ValidationError(Exception):
     """The instance does not satisfy the schema."""
 
@@ -123,15 +147,12 @@ def _matches(instance, schema):
 def _validate(instance, schema, path):
     if "type" in schema:
         expected = schema["type"]
-        py = _TYPES[expected]
-        # bool is a subclass of int; JSON Schema treats them as distinct.
-        if expected in ("integer", "number") and isinstance(instance, bool):
-            raise ValidationError(f"{path}: expected {expected}, got boolean")
-        if not isinstance(instance, py):
+        if not _is_json_type(instance, expected):
             raise ValidationError(f"{path}: expected {expected}, got {type(instance).__name__}")
 
-    if "enum" in schema and instance not in schema["enum"]:
-        raise ValidationError(f"{path}: {instance!r} is not one of {schema['enum']}")
+    if "enum" in schema:
+        if not any(_json_equal(instance, option) for option in schema["enum"]):
+            raise ValidationError(f"{path}: {instance!r} is not one of {schema['enum']}")
 
     if "minLength" in schema and isinstance(instance, str):
         if len(instance) < schema["minLength"]:

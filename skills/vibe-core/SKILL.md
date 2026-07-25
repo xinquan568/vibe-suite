@@ -20,14 +20,20 @@ across agents.
 
 | Level | Means |
 |---|---|
-| `[CRITICAL]` | Causes loss, corruption, or unauthorised access **now**, on a path that runs in normal use. No workaround the user can reasonably apply. Merits stopping other work. |
-| `[HIGH]` | Wrong behaviour or a real exposure on a reachable path, but bounded — it needs a specific input, configuration, or sequence. A user hitting it cannot easily recover, and there is no safe workaround. |
-| `[MEDIUM]` | Wrong or fragile, but the blast radius is contained: a workaround exists, the path is uncommon, or the damage is recoverable. Most correctness findings live here. |
-| `[LOW]` | Real but minor — inefficiency, a rough edge, a latent hazard that today's code does not reach. Worth fixing when the file is next touched. |
+| `[CRITICAL]` | The thing cannot be relied on at all. Executing code that causes loss, corruption, or unauthorised access on a path that runs in normal use; or an artifact so defective it fails at its stated purpose. Nothing downstream should build on it until this is fixed. |
+| `[HIGH]` | A defect that **materially undermines the artifact's purpose**, and that a consumer cannot route around. For code: wrong behaviour or a real exposure on a reachable path with no safe workaround. For a document or prompt: a flaw that makes it do the wrong thing in ordinary use — a description that will not trigger, guidance that misleads, a contract that contradicts itself. |
+| `[MEDIUM]` | Wrong, substandard, or fragile, but **contained**: a workaround exists, the path is uncommon, the damage is recoverable, or the defect degrades quality without defeating the purpose. Most findings land here. |
+| `[LOW]` | Real but minor — inefficiency, a rough edge, a latent hazard nothing currently reaches, a stylistic inconsistency. Worth fixing when the file is next touched. |
 | `[GOOD]` | **Nothing to report.** Not a weak finding; the explicit signal that a review ran and raised nothing. See *Zero findings* below. |
 
-The boundary that matters most is `[HIGH]` / `[MEDIUM]`: ask whether the user can recover. If they
-can work around it or undo it, it is `[MEDIUM]`.
+**These definitions are deliberately not phrased in terms of exploitation.** The suite reviews prose
+artifacts (skills, commands, agent prompts) as often as it reviews code, and the two producer scales
+that map into this vocabulary — nlpm's artifact-quality penalties and cc-suite's audit severities —
+must both land coherently. A severity here is a claim about **how badly the thing fails at its job
+and how easily a consumer can work around it**, whatever kind of thing it is.
+
+The boundary that matters most is `[HIGH]` / `[MEDIUM]`: ask whether a consumer can route around it.
+If they can work around it, undo it, or still get the intended result despite it, it is `[MEDIUM]`.
 
 ## Effort classes
 
@@ -64,7 +70,9 @@ Every report opens:
 ## [Agent: <name>] Findings
 ```
 
-`<name>` is the agent's own name, and becomes `agent` in the JSON form.
+`<name>` is the agent's **qualified** name — `vibe-suite:security`, not `security` — and becomes
+`agent` in the JSON form. The schema constrains it to the six canonical names, because the
+variant rules key on this value and a bare name would silently bypass them.
 
 ## Zero findings
 

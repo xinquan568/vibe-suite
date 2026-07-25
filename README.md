@@ -46,7 +46,14 @@ rather than left to be discovered.
 python3 -m unittest discover -s tests               # run the suite
 jq empty .claude-plugin/plugin.json                 # validate a manifest
 python3 scripts/validate_audit_output.py <report>   # validate an audit report
+python3 tools/model-pin-lint.py                     # scan for pinned model identifiers (P9)
 ```
+
+`model-pin-lint` enforces P9: shipped artifacts never name a versioned model ID. It scans **tracked
+files only**, so a newly created file is invisible to it until `git add` — run the lint after
+staging, not before. Scope is an explicit allowlist of top-level entries in the tool itself;
+`docs/`, `tests/`, `tools/` and `.github/` are outside it, and an entry in neither list is an error
+rather than a silent pass, so adding a directory fails the suite until it is classified.
 
 Validate the plugin manifests — note these are two separate targets:
 

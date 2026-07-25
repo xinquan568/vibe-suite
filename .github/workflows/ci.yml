@@ -127,19 +127,17 @@ jobs:
           shellcheck "${files[@]}"
 
       - name: No pinned model identifiers (P9)
-        # Shipped artifacts must never name a versioned model. `docs/discussion/` is excluded by
-        # design: it holds verbatim historical planning records whose prose discusses model naming,
-        # and each file carries a banner marking it superseded. The exclusion is declared here so it
-        # is auditable rather than implicit — see docs/discussion/README.md.
+        # The pattern set and the scan scope live in the tool, not here. This step previously
+        # carried its own copy of the pattern, which drifted from AC-9 with nothing comparing the
+        # two: it covered `gpt-<digit>` and `gemini-<digit>` but missed `o<digit>-` and the dated
+        # `claude-*-20*` forms entirely, and reported success the whole time (#67, #68).
+        #
+        # This step runs inside `lint (python + node)` rather than as a job of its own because the
+        # three job names are required status contexts on main. A fourth job would not be one, so
+        # it could fail without blocking a merge — a gate that exists and does not gate.
         run: |
           set -euo pipefail
-          pattern='gpt-[0-9]|claude-(opus|sonnet|haiku|fable)-[0-9]|gemini-[0-9]'
-          if grep -rnEI "$pattern" . \
-               --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=discussion; then
-            echo "P9 violation: a versioned model identifier appears in a shipped artifact"
-            exit 1
-          fi
-          echo "ok: no pinned model identifiers outside docs/discussion/"
+          python3 tools/model-pin-lint.py
 
   test:
     name: test

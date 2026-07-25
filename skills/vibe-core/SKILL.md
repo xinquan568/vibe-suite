@@ -32,6 +32,10 @@ that map into this vocabulary — nlpm's artifact-quality penalties and cc-suite
 must both land coherently. A severity here is a claim about **how badly the thing fails at its job
 and how easily a consumer can work around it**, whatever kind of thing it is.
 
+**Where a producer scale disagrees with these definitions, the definition wins** and the finding says
+why in one line. The nlpm and cc-suite mappings give a starting severity, not a verdict — see
+[`references/severity.md`](references/severity.md).
+
 The boundary that matters most is `[HIGH]` / `[MEDIUM]`: ask whether a consumer can route around it.
 If they can work around it, undo it, or still get the intended result despite it, it is `[MEDIUM]`.
 

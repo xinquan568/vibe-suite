@@ -231,6 +231,19 @@ class TestJsonSemantics(unittest.TestCase):
         with self.assertRaises(self.v.ValidationError):
             self.v.validate(True, {"enum": [1]})
 
+    def test_boolean_inside_array_does_not_match_numeric_array(self):
+        # Python: [True] == [1]. JSON Schema: they are different values.
+        with self.assertRaises(self.v.ValidationError):
+            self.v.validate([True], {"enum": [[1]]})
+
+    def test_boolean_inside_object_does_not_match_numeric_object(self):
+        with self.assertRaises(self.v.ValidationError):
+            self.v.validate({"x": True}, {"enum": [{"x": 1}]})
+
+    def test_matching_nested_value_still_accepted(self):
+        self.v.validate([1], {"enum": [[1]]})          # must not raise
+        self.v.validate({"x": True}, {"enum": [{"x": True}]})
+
     def test_number_accepts_boolean_never(self):
         with self.assertRaises(self.v.ValidationError):
             self.v.validate(False, {"type": "number"})

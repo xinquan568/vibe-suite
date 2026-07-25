@@ -75,9 +75,18 @@ def _is_json_type(instance, expected):
 
 
 def _json_equal(a, b):
-    """Equality with JSON's type distinctions, so `True` does not equal `1`."""
+    """Equality with JSON's type distinctions, so `True` does not equal `1`.
+
+    Recursive, because the distinction has to hold inside containers too: Python says
+    `[True] == [1]` and `{"x": True} == {"x": 1}`, JSON does not. A shallow check would compare
+    the outer types, find both are lists, and fall through to Python equality.
+    """
     if isinstance(a, bool) != isinstance(b, bool):
         return False
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_json_equal(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_json_equal(a[k], b[k]) for k in a)
     return a == b
 
 

@@ -54,6 +54,29 @@ Two producer-side scales map into this vocabulary. They are **independent** mapp
 target, not a crosswalk between each other — a numeric penalty and a judged level need not
 correspond.
 
+### How a mechanical mapping relates to the definitions
+
+**The mapping produces a starting severity; the definition decides the final one.**
+
+This has to be stated, because the two cannot be made perfectly consistent and pretending otherwise
+would quietly corrupt the scale. nlpm's mapping is arithmetic: a score crosses 10, the band says
+`[HIGH]`. The `[HIGH]` definition is a judgement: *does this materially undermine the artifact's
+purpose, in a way a consumer cannot route around?* Some ≥ 10 scores are assembled from deductions —
+excessive length, missing examples — that plainly fail that test.
+
+So the procedure is:
+
+1. Apply the mapping. It gives you a **starting** severity, and it is right far more often than not.
+2. Check it against the definition.
+3. If they disagree, **the definition wins** — and the finding states in one line why the band was
+   not followed. For example: *"nlpm scored 12, which bands to `[HIGH]`; recorded `[MEDIUM]` because
+   the deductions are length and example-count, and the skill still triggers and applies correctly."*
+
+Adjustments are expected to be uncommon and always downward-justified in writing. An unexplained
+departure from the band is severity inflation or deflation, which the anti-patterns forbid.
+
+The band tables below are **unchanged** — this section governs how they are read, not what they say.
+
 ### nlpm numeric penalties
 
 | Penalty | Level |
@@ -62,12 +85,11 @@ correspond.
 | 5–9 | `[MEDIUM]` |
 | < 5 | `[LOW]` |
 
-**Why ≥ 10 is `[HIGH]` and not an inflation.** nlpm's penalties measure how badly an NL artifact
-fails at its job. A ≥ 10 deduction is not a cosmetic complaint — it is the band where a skill's
-description will not trigger when it should, or its structure prevents a consumer from applying it.
-That satisfies the `[HIGH]` definition directly: the artifact materially fails its purpose and a
-consumer cannot route around it. The definition is phrased in terms of purpose-failure rather than
-exploitation precisely so this mapping holds.
+**Why ≥ 10 bands to `[HIGH]`.** That range is typically reached when a skill's description will not
+trigger when it should, or its structure prevents a consumer from applying it — which satisfies the
+`[HIGH]` definition directly. *Typically*, not always: a score can also reach 10 by accumulating
+deductions that do not defeat the artifact's purpose. That is exactly the case the procedure above
+covers — band first, definition decides, disagreement recorded.
 
 nlpm emits no `[CRITICAL]`: an artifact-quality deduction, however large, does not by itself mean
 nothing downstream can rely on the artifact at all. A `[CRITICAL]` on an NL artifact is a judgement a

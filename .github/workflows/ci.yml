@@ -1,9 +1,13 @@
 # vibe-suite CI (E0.1 / vibe-3).
 #
-# Three jobs: manifest validation, lint (Python + Node, with shell as a separate optional step),
-# and test execution. At scaffold time most discovery sets are empty by design — every job prints
-# what it found and exits 0 on zero targets, so "nothing to check" is visibly distinct from a
-# broken matcher. Each job becomes a real gate the moment its first target lands.
+# Three jobs: manifest validation, lint (Python + Node, with shell as a separate step), and test
+# execution. At scaffold time most discovery sets are empty by design — every job prints what it
+# found and exits 0 on zero targets, so "nothing to check" is visibly distinct from a broken matcher.
+#
+# Discovery must never fail open. `mapfile < <(find ...)` silently discards find's exit status, so a
+# discovery error would look identical to an empty result and the job would pass. Every discovery
+# below therefore redirects find to a file inside an `if`, which does propagate the exit status, and
+# reads null-delimited names so paths with spaces survive.
 #
 # No model identifiers appear anywhere in this workflow (principle P9): every tool uses its own
 # default. POSIX-only (bash/python3/node) — see README.
@@ -29,6 +33,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
       - name: Both manifests parse as JSON
         run: |
           set -euo pipefail
@@ -38,15 +46,27 @@ jobs:
             echo "ok: $f parses"
           done
 
+      - name: Manifest semantics
+        # The same assertions the shipped suite makes, invoked rather than duplicated so the two
+        # cannot drift apart.
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_manifests -v
+
       - name: Every other JSON file parses
         run: |
           set -euo pipefail
-          count=0
-          while IFS= read -r f; do
-            jq empty "$f" && count=$((count + 1))
-          done < <(find . -name '*.json' -not -path './.git/*' -not -path './node_modules/*' \
-                        -not -path './.claude-plugin/*')
-          echo "checked $count additional JSON file(s)"
+          tmp=$(mktemp)
+          if ! find . -name '*.json' -not -path './.git/*' -not -path './node_modules/*' \
+                      -not -path './.claude-plugin/*' -print0 > "$tmp"; then
+            echo "discovery failed"; rm -f "$tmp"; exit 1
+          fi
+          mapfile -d '' -t files < "$tmp"; rm -f "$tmp"
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no additional JSON files to check"; exit 0
+          fi
+          printf 'checking %d additional JSON file(s)\n' "${#files[@]}"
+          for f in "${files[@]}"; do jq empty "$f"; done
 
   lint:
     name: lint (python + node)
@@ -65,7 +85,11 @@ jobs:
       - name: Python syntax
         run: |
           set -euo pipefail
-          mapfile -t files < <(find . -name '*.py' -not -path './.git/*')
+          tmp=$(mktemp)
+          if ! find . -name '*.py' -not -path './.git/*' -print0 > "$tmp"; then
+            echo "discovery failed"; rm -f "$tmp"; exit 1
+          fi
+          mapfile -d '' -t files < "$tmp"; rm -f "$tmp"
           if [ ${#files[@]} -eq 0 ]; then
             echo "no Python files to check"; exit 0
           fi
@@ -75,24 +99,47 @@ jobs:
       - name: Node syntax
         run: |
           set -euo pipefail
-          mapfile -t files < <(find . \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
-                                    -not -path './.git/*' -not -path './node_modules/*')
+          tmp=$(mktemp)
+          if ! find . \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) \
+                      -not -path './.git/*' -not -path './node_modules/*' -print0 > "$tmp"; then
+            echo "discovery failed"; rm -f "$tmp"; exit 1
+          fi
+          mapfile -d '' -t files < "$tmp"; rm -f "$tmp"
           if [ ${#files[@]} -eq 0 ]; then
             echo "no Node files to check"; exit 0
           fi
           printf 'checking %d Node file(s)\n' "${#files[@]}"
           for f in "${files[@]}"; do node --check "$f"; done
 
-      - name: Shell lint (advisory)
+      - name: Shell syntax and lint
         run: |
           set -euo pipefail
-          mapfile -t files < <(find . -name '*.sh' -not -path './.git/*')
+          tmp=$(mktemp)
+          if ! find . -name '*.sh' -not -path './.git/*' -print0 > "$tmp"; then
+            echo "discovery failed"; rm -f "$tmp"; exit 1
+          fi
+          mapfile -d '' -t files < "$tmp"; rm -f "$tmp"
           if [ ${#files[@]} -eq 0 ]; then
             echo "no shell files to check"; exit 0
           fi
           printf 'checking %d shell file(s)\n' "${#files[@]}"
           for f in "${files[@]}"; do bash -n "$f"; done
           shellcheck "${files[@]}"
+
+      - name: No pinned model identifiers (P9)
+        # Shipped artifacts must never name a versioned model. `docs/discussion/` is excluded by
+        # design: it holds verbatim historical planning records whose prose discusses model naming,
+        # and each file carries a banner marking it superseded. The exclusion is declared here so it
+        # is auditable rather than implicit — see docs/discussion/README.md.
+        run: |
+          set -euo pipefail
+          pattern='gpt-[0-9]|claude-(opus|sonnet|haiku|fable)-[0-9]|gemini-[0-9]'
+          if grep -rnEI "$pattern" . \
+               --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=discussion; then
+            echo "P9 violation: a versioned model identifier appears in a shipped artifact"
+            exit 1
+          fi
+          echo "ok: no pinned model identifiers outside docs/discussion/"
 
   test:
     name: test
@@ -107,7 +154,13 @@ jobs:
       - name: Run the suite
         run: |
           set -euo pipefail
-          if [ -z "$(find tests -name 'test_*.py' -print -quit 2>/dev/null)" ]; then
+          tmp=$(mktemp)
+          if ! find tests -name 'test_*.py' -print0 > "$tmp"; then
+            echo "test discovery failed"; rm -f "$tmp"; exit 1
+          fi
+          mapfile -d '' -t files < "$tmp"; rm -f "$tmp"
+          if [ ${#files[@]} -eq 0 ]; then
             echo "no tests found under tests/"; exit 0
           fi
+          printf 'discovered %d test module(s)\n' "${#files[@]}"
           python3 -m unittest discover -s tests -v

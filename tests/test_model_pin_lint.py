@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -98,6 +99,10 @@ MATCHING_CASES = [
     ("gpt-4o", True, "continuation: alphanumeric suffix"),
     ("gemini-2-pro", True, "continuation: hyphenated suffix"),
     ("o1-preview", True, "continuation: o-series"),
+    # Vendor-qualified dated forms. Both are official and both evade a grammar that requires the
+    # date to end the token: Bedrock keeps a `-v2` suffix after it, Vertex puts the date after `@`.
+    ("anthropic.claude-3-5-sonnet-20241022-v2:0", True, "vendor form: Bedrock"),
+    ("claude-3-5-sonnet-v2@20241022", True, "vendor form: Vertex"),
     # Permitted by AC-9: tier aliases carry no version or date.
     ("tier: sonnet", False, "permitted: bare tier alias"),
     ("opus-class", False, "permitted: tier alias"),
@@ -109,6 +114,10 @@ MATCHING_CASES = [
     ("claude-x-20241022suffix", False, "near-miss: dated claude with trailing garbage"),
     ("claude-workflow-2025", False, "near-miss: 4-digit year, not an 8-digit date"),
     ("gpt-x", False, "near-miss: no digit after the hyphen"),
+    # `@` belongs to the token class, so this is one token rather than a bare `gpt-5`. With `@` as
+    # a separator it would fail the build on an email address — on a required check, for everyone.
+    ("support@gpt-5.com", False, "near-miss: address containing a family prefix"),
+    ("release-2026-07-26", False, "near-miss: a plain date"),
 ]
 
 
@@ -126,10 +135,10 @@ class TestTokenMatching(unittest.TestCase):
                 )
 
     def test_case_set_is_complete(self):
-        # Guards the suite against silently shrinking. The plan fixes this at 20 cases: 5 family
-        # rejections, 2 dotted-suffix, 4 continuation, 3 permitted, 6 near-miss.
-        self.assertEqual(len(MATCHING_CASES), 20)
-        self.assertEqual(sum(1 for _, flag, _ in MATCHING_CASES if flag), 11)
+        # Guards the suite against silently shrinking. 24 cases: 5 family rejections, 2
+        # dotted-suffix, 4 continuation, 2 vendor-qualified, 3 permitted, 8 near-miss.
+        self.assertEqual(len(MATCHING_CASES), 24)
+        self.assertEqual(sum(1 for _, flag, _ in MATCHING_CASES if flag), 13)
 
     def test_every_ac9_family_has_a_grammar(self):
         self.assertEqual(len(lint.GRAMMARS), 4)
@@ -138,6 +147,10 @@ class TestTokenMatching(unittest.TestCase):
         # The load-bearing tokenizer property. If `.` were a token character,
         # `claude-sonnet-4-20250514.json` would be one token and the end anchor would reject it.
         self.assertEqual(lint.tokenize("a.b-c"), ["a", "b-c"])
+
+    def test_at_sign_is_a_token_character(self):
+        # The converse property. Vertex writes the date after `@`; splitting there would hide it.
+        self.assertEqual(lint.tokenize("a@b.c"), ["a@b", "c"])
 
     def test_reports_the_matched_token(self):
         self.assertEqual(lint.find_pins('model = "o3-mini"'), ["o3-mini"])
@@ -190,7 +203,18 @@ class TestScope(unittest.TestCase):
                     _write(tmp, relpath, "gpt-5.6-sol\n")
                     self.assertEqual(len(lint.scan(tmp, lister=_tree_lister)), 1)
 
+    def test_root_changelog_is_not_scanned(self):
+        # AC-9 places `docs/CHANGELOG` outside enforcement. None exists yet, so the classification
+        # is pre-declared: adding one should be an ordinary commit, not a build break.
+        for name in ("CHANGELOG", "CHANGELOG.md", "CHANGELOG.rst"):
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    _write(tmp, name, "gpt-5.6-sol\n")
+                    self.assertEqual(lint.scan(tmp, lister=_tree_lister), [])
+
     def test_nested_changelog_inside_a_scanned_directory_is_scanned(self):
+        # Exemption is positional, matching the README rule: a changelog shipped inside a skill is
+        # a shipped artifact.
         with tempfile.TemporaryDirectory() as tmp:
             _write(tmp, "skills/CHANGELOG.md", "gpt-5.6-sol\n")
             self.assertEqual(len(lint.scan(tmp, lister=_tree_lister)), 1)
@@ -269,6 +293,25 @@ class TestTraversal(unittest.TestCase):
             with self.assertRaises(lint.EnumerationError):
                 lint.git_lister(tmp)
 
+    def test_git_lister_survives_an_undecodable_tracked_filename(self):
+        # A POSIX filename is an arbitrary byte string, and decoding git's output strictly would
+        # raise UnicodeDecodeError out of the lister rather than the documented EnumerationError.
+        # The decode path is driven directly rather than through a fixture: APFS refuses to create
+        # a file whose name is not valid UTF-8 (EILSEQ), so an end-to-end version of this test
+        # would be impossible to run on macOS and would only ever execute on CI.
+        class _Completed:
+            returncode = 0
+            stdout = b"skills/bad\xff\xfename.md\x00skills/ok.md\x00"
+            stderr = b""
+
+        with unittest.mock.patch.object(lint.subprocess, "run", return_value=_Completed()):
+            listed = lint.git_lister(".")
+        self.assertEqual(len(listed), 2)
+        self.assertIn("skills/ok.md", listed)
+        # Round-trips back to the original bytes, which is what lets the file actually be opened.
+        recovered = [name.encode("utf-8", "surrogateescape") for name in listed]
+        self.assertIn(b"skills/bad\xff\xfename.md", recovered)
+
 
 def _git_repo(root, files):
     """Build a temporary git repository with `files` staged.
@@ -322,12 +365,28 @@ class TestSubprocessLayer(unittest.TestCase):
             out = self._run(tmp).stdout
             self.assertIn("gpt-5.6-sol", out)
 
-    def test_explicit_root_argument(self):
+    def test_untracked_violation_is_not_reported(self):
+        # The tracked-only rule through the production lister rather than an injected one. An
+        # in-process test that hands `scan` a list omitting the file cannot catch `git_lister`
+        # regressing to enumerate untracked paths, because it never calls it.
         with tempfile.TemporaryDirectory() as tmp:
-            _git_repo(tmp, {"skills/bad.md": "o3-mini\n"})
-            with tempfile.TemporaryDirectory() as elsewhere:
-                result = self._run(elsewhere, tmp)
+            _git_repo(tmp, {"skills/ok.md": "the sonnet tier\n"})
+            _write(tmp, "skills/untracked.md", "o3-mini\n")
+            result = self._run(tmp)
+            self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_explicit_root_argument(self):
+        # Run from a *clean repository* rather than a non-repository. Invoked from a bare temp dir
+        # this would exit 1 whether or not the root argument was honoured — enumeration would fail
+        # either way — so the assertion could not distinguish the two.
+        with tempfile.TemporaryDirectory() as violating:
+            _git_repo(violating, {"skills/bad.md": "o3-mini\n"})
+            with tempfile.TemporaryDirectory() as clean:
+                _git_repo(clean, {"skills/ok.md": "the sonnet tier\n"})
+                self.assertEqual(self._run(clean).returncode, 0, "fixture must be clean")
+                result = self._run(clean, violating)
                 self.assertEqual(result.returncode, 1)
+                self.assertIn("skills/bad.md", result.stdout)
 
     def test_non_repository_root_exits_one(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -347,16 +406,35 @@ class TestCIWiring(unittest.TestCase):
     def setUp(self):
         self.workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
+    @staticmethod
+    def _invocations(text):
+        """Executable invocations of the lint — comments excluded.
+
+        Counting the bare substring is not enough: a commented-out `# python3
+        tools/model-pin-lint.py` satisfies a substring count and a region check while the gate no
+        longer runs at all.
+        """
+        return [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip().startswith("python3 tools/model-pin-lint.py")
+        ]
+
     def test_required_lint_job_invokes_the_tool_exactly_once(self):
         # Positive half. A purely negative assertion would also pass if the step were deleted
         # outright, leaving P9 unenforced and the test still green.
-        self.assertEqual(self.workflow.count("tools/model-pin-lint.py"), 1)
+        self.assertEqual(len(self._invocations(self.workflow)), 1)
 
     def test_the_invocation_lives_in_the_required_job(self):
         # `lint (python + node)` is a required status context on main; a new job would not be,
         # so it could fail without blocking a merge.
         lint_job = self.workflow.split("name: lint (python + node)", 1)[1].split("\n  test:", 1)[0]
-        self.assertIn("tools/model-pin-lint.py", lint_job)
+        self.assertEqual(len(self._invocations(lint_job)), 1)
+
+    def test_a_commented_out_invocation_does_not_count(self):
+        # Pins the discriminating property itself, so the check cannot quietly weaken back into a
+        # substring count.
+        self.assertEqual(self._invocations("        # python3 tools/model-pin-lint.py"), [])
 
     def test_no_inline_family_pattern_remains(self):
         # Negative half. Two copies of the pattern is how the shipped gap arose: the inline step

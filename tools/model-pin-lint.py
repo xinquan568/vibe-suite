@@ -17,13 +17,17 @@ scanned with nothing to say so. Refusing to guess turns that silence into a loud
 alternative, scanning everything except a deny-list, would enforce a broader policy than AC-9
 authorises.
 
-**Matching is full-token, and `.` is a token separator.** Each line is split into tokens and each
-whole token is matched with `fullmatch`. An unanchored search reports `photo3-processing` and
-`my-gpt-5-wrapper`; anchoring only the front reports `claude-x-20241022suffix`. Both matter more
-than they look, because this runs inside a required status check where a false positive blocks every
-pull request in the repository. Treating `.` as a separator is what keeps
-`claude-sonnet-4-20250514.json` in scope: as one token it would end in `.json` and the trailing
-anchor would let it through. The cost is that the reported token can be a prefix of the id as
+**Matching is full-token.** Each line is split into tokens and each whole token is matched with
+`fullmatch`. An unanchored search reports `photo3-processing` and `my-gpt-5-wrapper`; anchoring only
+the front reports `claude-x-20241022suffix`. Both matter more than they look, because this runs
+inside a required status check where a false positive blocks every pull request in the repository.
+
+The token class is what makes that work, and it is deliberate in both directions. `.` is a
+*separator*, which keeps `claude-sonnet-4-20250514.json` in scope — as one token it would end in
+`.json` and the trailing anchor would let it through. `@` is a *token character*, because Vertex
+writes the date after it (`claude-3-5-sonnet-v2@20241022`) and splitting there would hide the date;
+it also prevents `foo@gpt-5.com` from yielding a bare `gpt-5` token and failing the build on an
+email address. The cost of splitting at `.` is that the reported token can be a prefix of the id as
 written — `gpt-5.6-sol` is reported via `gpt-5` — which is why the diagnostic prints the source line
 as well as the token.
 
@@ -67,23 +71,38 @@ EXCLUDED = frozenset(
         "docs",
         "tests",  # a test asserting `o3-mini` is caught must contain `o3-mini`
         "tools",  # "not shipped as plugin functionality and not registered in the manifest"
+        # AC-9 names `docs/CHANGELOG` as outside enforcement. None of these exists yet; they are
+        # classified in advance so that adding one is an ordinary commit rather than a build break.
+        # Exemption stays positional — a CHANGELOG nested inside a scanned directory is a shipped
+        # artifact and is scanned.
+        "CHANGELOG",
+        "CHANGELOG.md",
+        "CHANGELOG.rst",
     }
 )
 
-# AC-9(a)'s four families, matched against a whole token. The trailing `[A-Za-z0-9_-]*` on the
+# AC-9(a)'s four families, matched against a whole token. The trailing `[A-Za-z0-9_@-]*` on the
 # first three is load-bearing: without it `gpt-5-mini` and `gpt-4o` pass while `gpt-5` is caught.
+#
+# The dated-Claude grammar accepts a suffix after the date, but only a delimited one. That is what
+# separates the vendor-qualified forms — Bedrock's `anthropic.claude-3-5-sonnet-20241022-v2:0` and
+# Vertex's `claude-3-5-sonnet-v2@20241022` — from `claude-x-20241022suffix`, where the trailing text
+# runs straight on from the digits and the token is not an identifier at all.
 GRAMMARS = tuple(
     re.compile(pattern)
     for pattern in (
-        r"gpt-[0-9][A-Za-z0-9_-]*",
-        r"gemini-[0-9][A-Za-z0-9_-]*",
-        r"o[0-9]-[A-Za-z0-9_-]*",
-        r"claude-[A-Za-z0-9_-]*-20[0-9]{6}",
+        r"gpt-[0-9][A-Za-z0-9_@-]*",
+        r"gemini-[0-9][A-Za-z0-9_@-]*",
+        r"o[0-9]-[A-Za-z0-9_@-]*",
+        r"claude-[A-Za-z0-9_@-]*[-@]20[0-9]{6}(?:[-@][A-Za-z0-9_@-]*)?",
     )
 )
 
-# `.` is absent from the token class deliberately — see the module docstring.
-_SEPARATOR = re.compile(r"[^A-Za-z0-9_-]+")
+# `.` is absent from the token class deliberately — see the module docstring. `@` is present for the
+# same reason in reverse: Vertex separates a Claude id from its date with `@`, so splitting there
+# would hide the date. It also removes a false positive — with `@` as a separator, `foo@gpt-5.com`
+# yields a bare `gpt-5` token and fails the build on an email address.
+_SEPARATOR = re.compile(r"[^A-Za-z0-9_@-]+")
 
 
 class EnumerationError(Exception):
@@ -135,18 +154,23 @@ def git_lister(root):
     same CI job and leaves `__pycache__/*.pyc` behind.
     """
     try:
+        # Bytes, not text: a tracked filename is an arbitrary byte string on POSIX, and decoding
+        # it strictly would raise UnicodeDecodeError out of here rather than the documented
+        # EnumerationError. `surrogateescape` is the filesystem convention and round-trips.
         result = subprocess.run(
             ["git", "-C", str(root), "ls-files", "-z"],
             capture_output=True,
-            text=True,
         )
     except OSError as exc:  # git missing
         raise EnumerationError(f"could not run git: {exc}") from exc
     if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
         raise EnumerationError(
-            f"git ls-files failed in {root}: {result.stderr.strip() or 'not a git repository'}"
+            f"git ls-files failed in {root}: {detail or 'not a git repository'}"
         )
-    return sorted(part for part in result.stdout.split("\0") if part)
+    return sorted(
+        part.decode("utf-8", "surrogateescape") for part in result.stdout.split(b"\0") if part
+    )
 
 
 def in_scope(relpath):

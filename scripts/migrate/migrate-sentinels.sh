@@ -70,8 +70,9 @@ def write_atomically(path, text):
     with os.fdopen(handle, "w", encoding="utf-8") as out:
         out.write(text)
         out.flush()
+        # fchmod on the descriptor, never chmod on the path — see the note in migrate-history.sh.
+        os.fchmod(out.fileno(), 0o644)
         os.fsync(out.fileno())
-    os.chmod(tmp, 0o644)
     os.replace(tmp, path)
     fd = os.open(path.parent, os.O_RDONLY)
     try:

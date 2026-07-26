@@ -104,8 +104,11 @@ try:
     with os.fdopen(handle, "wb") as out:
         out.write(body)
         out.flush()
+        # fchmod on the descriptor, never chmod on the path: a path-based operation after the
+        # descriptor closes can be redirected by swapping the name for a symlink, which would both
+        # chmod someone else's file and publish the substituted one.
+        os.fchmod(out.fileno(), 0o644)
         os.fsync(out.fileno())
-    os.chmod(tmp_path, 0o644)
     try:
         # link, not replace: it fails if the target exists, so a new store that appeared while
         # this ran still wins. Publication is a single atomic step over a fully written inode.

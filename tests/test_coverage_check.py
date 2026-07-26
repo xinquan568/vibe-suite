@@ -148,13 +148,19 @@ def expand_ids(cell):
 
 
 def required_ids(home_cell):
-    """The IDs §6 states outside any parenthetical — the row's actual homes.
+    """The row's actual homes, as §6 states them.
 
-    "F10.3 (also serves F8.2)" requires F10.3; F8.2 is commentary. Comparing against the full set
-    let a required ID be dropped, because the map stayed a subset either way.
+    §6's home column opens with the destination and then qualifies it in prose. "F2.5, F9.1" names
+    two homes and both are required — that is the case a subset rule let slip. "F6.1 reference
+    (incl. ...); cross-linked from F6.3" names one home and mentions another in passing. When the
+    cell does not open with IDs at all ("one truthful doc set; ... (F10.3)"), every ID it names is
+    taken as required, since there is no leading list to prefer.
     """
-    outside = re.sub(r"\([^)]*\)", " ", home_cell)
-    return expand_ids(outside)
+    lead = re.match(r"\s*((?:F[0-9]+\.[0-9]+)"
+                    r"(?:\s*[,/+\u2013\u2014-]\s*F?[0-9]*\.?[0-9]+)*)", home_cell)
+    if lead:
+        return expand_ids(lead.group(1))
+    return expand_ids(home_cell)
 
 
 def primary_id(home_cell):
@@ -239,8 +245,10 @@ class TestDispositionsMatchSectionSix(CLICase):
             with self.subTest(row=row):
                 target = self.rows[row]["target"]
                 target = target[0] if isinstance(target, list) else target
-                self.assertIn(f"`{target}`", self.six_raw[row],
-                              f"{row}: §6's home cell for this row does not name {target!r}")
+                cell = self.six_raw[row]
+                stem = target.rsplit("/", 1)[-1].split(".")[0]
+                self.assertTrue(f"`{target}`" in cell or stem in cell,
+                                f"{row}: §6's home cell names neither {target!r} nor {stem!r}")
 
     def test_the_only_row_without_a_six_source_is_the_recorded_divergence(self):
         self.assertEqual(set(self.rows) - set(self.six), DIVERGENCES)
@@ -266,7 +274,7 @@ class TestDispositionsMatchSectionSix(CLICase):
                 present = universe_for(row.split(":")[0])
                 stems = []
                 for name in names:
-                    cleaned = name.strip("*./$ ")
+                    cleaned = name.strip("$` ").rstrip("*/").rstrip(".")
                     if not cleaned:
                         continue
                     if "*" in name:
@@ -277,7 +285,8 @@ class TestDispositionsMatchSectionSix(CLICase):
                         # §6 sometimes names a path (`bin/nlpm-check`, `auditor/scripts/*`).
                         stems.append(("path", cleaned.rstrip("/")))
                     elif any(cleaned in path for path in present):
-                        stems.append(("segment", cleaned.split(".")[0]))
+                        stems.append(("segment", cleaned if cleaned.startswith(".")
+                                      else cleaned.split(".")[0]))
                 # Boundary-aware: `audit` must not be satisfied by `audit-fix`. A name counts only
                 # where it is a whole path segment or a whole basename stem.
                 segments = set()

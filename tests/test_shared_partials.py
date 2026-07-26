@@ -39,7 +39,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SHARED = REPO_ROOT / "commands" / "shared"
 PARTIALS = {
     name: SHARED / f"{name}.md"
-    for name in ("discover", "classify", "scope-parse", "plugin-discover")
+    for name in ("discover", "classify", "scope-parse", "plugin-discover",
+                 "model-selection", "fallback")
 }
 
 
@@ -353,6 +354,140 @@ def parse_manifest_outcomes(text=None):
     if not outcomes:
         raise PartialParseError("plugin-discover.md: empty manifest-validation table")
     return outcomes
+
+
+# ------------------------------------------------------------------- E0.4 engine selection
+
+
+ACTION_TOKENS = frozenset({"USE_VALUE", "DEFER"})
+
+
+def parse_priority_ladder(text=None):
+    """Ordered (source, present_when, action) rows from `model-selection.md`.
+
+    The action column is a **closed** token set. An unrecognised token raises rather than being
+    tolerated: a permissive parser would let a partial carry a model literal here, which is the
+    pinned default P9 exists to forbid.
+    """
+    text = _read("model-selection") if text is None else text
+    rows = []
+    for row in _table_after(text, "## Priority ladder", "model-selection.md"):
+        if len(row) < 3:
+            raise PartialParseError(f"model-selection.md: ladder row needs 3 columns: {row!r}")
+        action = row[2].strip().strip("`")
+        if action not in ACTION_TOKENS:
+            raise PartialParseError(
+                f"model-selection.md: unknown action {action!r}; expected one of {sorted(ACTION_TOKENS)}"
+            )
+        rows.append((row[0].strip().strip("`"), row[1].strip(), action))
+    if not rows:
+        raise PartialParseError("model-selection.md: empty priority ladder")
+    if rows[-1][2] != "DEFER":
+        raise PartialParseError("model-selection.md: the terminal ladder action must be DEFER")
+    return rows
+
+
+def resolve(ladder, supplied):
+    """Execute the parsed ladder over a mapping of source -> supplied value.
+
+    Reads the **action column**, deliberately. A resolver keyed on row position would return the
+    same answer for every well-formed table and so could not detect a wrong action.
+    """
+    for source, _present_when, action in ladder:
+        value = supplied.get(source)
+        if value is None:
+            continue
+        if action == "USE_VALUE":
+            return value
+        if action == "DEFER":
+            return "DEFER"
+    return "DEFER"
+
+
+def parse_lifecycle(text=None):
+    """The staged `cross_model_audit_engine` default, as three parsed fields."""
+    text = _read("model-selection") if text is None else text
+    fields = {}
+    for row in _table_after(text, "## Staged cross-model default", "model-selection.md"):
+        if len(row) < 2:
+            raise PartialParseError(f"model-selection.md: lifecycle row needs 2 columns: {row!r}")
+        fields[row[0].strip().lower()] = row[1].strip()
+    for required in ("pre-gate default", "graduation condition", "post-gate default"):
+        if required not in fields:
+            raise PartialParseError(f"model-selection.md: lifecycle missing {required!r}")
+    return fields
+
+
+def parse_config_schema(text=None):
+    """key -> (type, allowed, default) from `model-selection.md`'s schema table."""
+    text = _read("model-selection") if text is None else text
+    schema = {}
+    for row in _table_after(text, "## `.vibe-suite.md` keys", "model-selection.md"):
+        if len(row) < 4:
+            raise PartialParseError(f"model-selection.md: schema row needs 4 columns: {row!r}")
+        schema[row[0].strip().strip("`")] = (row[1].strip(), row[2].strip(), row[3].strip())
+    if not schema:
+        raise PartialParseError("model-selection.md: empty config schema")
+    return schema
+
+
+def parse_applicability(text=None):
+    """Edge -> when it applies, from `fallback.md`'s applicability table.
+
+    A table, parsed per row. Searching the whole document for "today" or "graduation" cannot tell a
+    correct table from a corrupted one, because both words survive elsewhere in the prose.
+    """
+    text = _read("fallback") if text is None else text
+    rows = {}
+    for row in _table_after(text, "## Applicability", "fallback.md"):
+        if len(row) < 2:
+            raise PartialParseError(f"fallback.md: applicability row needs 2 columns: {row!r}")
+        edge = tuple(c.strip().strip("`") for c in row[0].split("→"))
+        rows[edge] = row[1].strip().lower()
+    if not rows:
+        raise PartialParseError("fallback.md: empty applicability table")
+    return rows
+
+
+def parse_hop_triggers(text=None):
+    """The conditions that fire a hop, and those that emit the header."""
+    text = _read("fallback") if text is None else text
+    idx = text.find("## What triggers a hop")
+    if idx < 0:
+        raise PartialParseError("fallback.md: no hop-trigger section")
+    section = text[idx:].lower()
+    # The *lead sentence* of each rule, not the surrounding paragraph. Scanning the paragraph lets a
+    # corrupted rule pass on a word surviving in a trailing clause.
+    hop = section[section.index("**a hop fires**"):]
+    hop = hop[:hop.index(".")]
+    header = section[section.index("**the diagnostic header appears**"):]
+    header = header[:header.index(".")]
+    return hop, header
+
+
+def parse_manual_steps(text=None):
+    """The numbered steps of the terminal manual hop."""
+    text = _read("fallback") if text is None else text
+    idx = text.find("**`manual`** is the terminal hop")
+    if idx < 0:
+        raise PartialParseError("fallback.md: no manual terminal section")
+    steps = re.findall(r"^\d+\. \*\*(.+?)\*\*(.*)$", text[idx:], re.M)
+    if len(steps) < 4:
+        raise PartialParseError(f"fallback.md: manual hop needs 4 steps, found {len(steps)}")
+    return [(a + b).lower() for a, b in steps]
+
+
+def parse_fallback_hops(text=None):
+    """Ordered hops from `fallback.md`."""
+    text = _read("fallback") if text is None else text
+    hops = []
+    for row in _table_after(text, "## Fallback chain", "fallback.md"):
+        if len(row) < 3:
+            raise PartialParseError(f"fallback.md: hop row needs 3 columns: {row!r}")
+        hops.append(tuple(c.strip() for c in row[:3]))
+    if not hops:
+        raise PartialParseError("fallback.md: empty chain")
+    return hops
 
 
 # --------------------------------------------------------------------------- globbing
@@ -1074,6 +1209,215 @@ class TestPluginDiscoverBehaviour(unittest.TestCase):
     def test_a_dangling_hook_script_is_detectable(self):
         dangling = [script for script, ok in resolve_hook_edges(self.tmp, self.hooks) if not ok]
         self.assertEqual(dangling, ["scripts/missing.sh"])
+
+
+# --------------------------------------------------- E0.4 independent oracle (vibe-6)
+#
+# Written here, not read back from the partials — the vibe-5 lesson. Deleting a row from a partial
+# must fail a test, not quietly remove the obligation.
+
+REQUIRED_ENGINE_VALUES = ["claude", "codex", "agy", "both"]
+REQUIRED_LADDER = [("user choice", "USE_VALUE"), (".vibe-suite.md", "USE_VALUE"),
+                   ("tool default", "DEFER")]
+REQUIRED_LIFECYCLE = {"pre-gate default": "codex", "post-gate default": "agy"}
+REQUIRED_CONFIG_KEYS = ["engine", "cross_model_audit_engine", "reviewer_backend", "reviewer_model"]
+REQUIRED_HOPS = [("agy", "codex"), ("codex", "manual")]
+
+
+class TestPriorityLadder(unittest.TestCase):
+    """The ladder is *executed*, not inspected — and three mutants separate the ways a test could
+    pass without reading the action column."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ladder = parse_priority_ladder()
+
+    def test_ladder_matches_the_independent_expectation(self):
+        self.assertEqual([(s, a) for s, _, a in self.ladder], REQUIRED_LADDER)
+
+    def test_no_row_carries_a_model_literal(self):
+        # The pinned-default loophole: a literal in any action cell.
+        for source, _, action in self.ladder:
+            with self.subTest(source=source):
+                self.assertIn(action, ACTION_TOKENS)
+
+    def test_user_choice_wins(self):
+        self.assertEqual(resolve(self.ladder, {"user choice": "codex",
+                                               ".vibe-suite.md": "agy"}), "codex")
+
+    def test_config_wins_when_no_user_choice(self):
+        self.assertEqual(resolve(self.ladder, {".vibe-suite.md": "agy"}), "agy")
+
+    def test_two_distinct_tool_default_canaries_propagate_by_identity(self):
+        # Rules out a hard-coded echo: the terminal action must pass *the supplied* value through.
+        for canary in ("CANARY-ALPHA", "CANARY-BETA"):
+            with self.subTest(canary=canary):
+                self.assertEqual(resolve(self.ladder, {"tool default": canary}), "DEFER")
+
+    def test_no_input_at_all_yields_defer_not_a_value(self):
+        self.assertEqual(resolve(self.ladder, {}), "DEFER")
+
+    # ---- mutants: each defeats a different way of passing without reading the action ----
+
+    def _mutate(self, old, new):
+        """Apply a mutation and assert it actually changed the text.
+
+        A `str.replace` that matches nothing returns the original silently, so an unapplied mutant
+        would test the unmutated partial. Here that surfaces as a failure rather than a pass, but
+        only because `assertRaises` gets nothing — assert the application directly instead.
+        """
+        text = _read("model-selection")
+        mutated = text.replace(old, new)
+        self.assertNotEqual(text, mutated, f"mutation did not apply: {old!r}")
+        return mutated
+
+    def test_mutant_literal_in_terminal_action_is_rejected(self):
+        text = self._mutate("| `tool default` | always | `DEFER` |",
+                            "| `tool default` | always | `sonnet` |")
+        with self.assertRaises(PartialParseError):
+            parse_priority_ladder(text)
+
+    def test_mutant_unknown_action_token_is_rejected(self):
+        text = self._mutate("| `tool default` | always | `DEFER` |",
+                            "| `tool default` | always | `WHATEVER` |")
+        with self.assertRaises(PartialParseError):
+            parse_priority_ladder(text)
+
+    def test_mutant_legal_action_flip_on_the_same_object_changes_the_result(self):
+        """The discriminating mutant, applied **in place on one object**.
+
+        Parsing a mutated document yields a *new* list, and object identity is a discriminator a
+        cheating resolver can use: cache the first ladder seen, resolve it by source position, and
+        return DEFER for anything else. That survives a mutant built from a second parse. It does not
+        survive mutating the very ladder whose baseline behaviour was just established.
+
+        The two invalid-token mutants above cannot close this hole either — they fail during
+        *parsing* and never reach the resolver at all.
+        """
+        ladder = list(parse_priority_ladder())
+        supplied = {".vibe-suite.md": "agy"}
+        self.assertEqual(resolve(ladder, supplied), "agy", "baseline on this exact object")
+
+        index = next(i for i, (source, _, _) in enumerate(ladder) if source == ".vibe-suite.md")
+        source, present_when, action = ladder[index]
+        self.assertEqual(action, "USE_VALUE", "mutation precondition")
+        ladder[index] = (source, present_when, "DEFER")          # same object, same order
+
+        self.assertEqual([s for s, _, _ in ladder],
+                         [s for s, _, _ in parse_priority_ladder()],
+                         "row order must be untouched, or the mutant proves nothing")
+        self.assertEqual(resolve(ladder, supplied), "DEFER",
+                         "an action-blind resolver returns 'agy' here and must fail")
+
+    def test_resolver_reads_the_action_not_the_row_position(self):
+        # Same property from the other side: a hand-built ladder whose first row DEFERs must defer,
+        # even though a position-based resolver would take its value.
+        ladder = [("user choice", "always", "DEFER"), ("tool default", "always", "DEFER")]
+        self.assertEqual(resolve(ladder, {"user choice": "codex"}), "DEFER")
+
+
+class TestStagedDefault(unittest.TestCase):
+    def test_lifecycle_fields_match_the_independent_expectation(self):
+        fields = parse_lifecycle()
+        for key, want in REQUIRED_LIFECYCLE.items():
+            with self.subTest(key=key):
+                self.assertIn(want, fields[key])
+
+    def test_graduation_condition_names_the_contract_gate(self):
+        self.assertIn("contract", parse_lifecycle()["graduation condition"].lower())
+
+    def test_lifecycle_is_parsed_independently_of_the_vocabulary(self):
+        # A value set cannot distinguish a v1 default from a post-flip one, which is why this has
+        # its own table and its own parser.
+        self.assertNotEqual(parse_lifecycle()["pre-gate default"],
+                            parse_lifecycle()["post-gate default"])
+
+
+class TestEngineVocabulary(unittest.TestCase):
+    def test_engine_values(self):
+        schema = parse_config_schema()
+        for value in REQUIRED_ENGINE_VALUES:
+            with self.subTest(value=value):
+                self.assertIn(value, schema["engine"][1])
+
+    def test_every_required_key_is_declared(self):
+        schema = parse_config_schema()
+        for key in REQUIRED_CONFIG_KEYS:
+            with self.subTest(key=key):
+                self.assertIn(key, schema)
+
+    def test_reviewer_backend_and_model_are_separate_keys(self):
+        schema = parse_config_schema()
+        self.assertIn("reviewer_backend", schema)
+        self.assertIn("reviewer_model", schema)
+
+    def test_reviewer_model_has_an_open_domain(self):
+        # A discovered model cannot have a closed set; asserting one would be a lie the schema
+        # would then have to keep.
+        allowed = parse_config_schema()["reviewer_model"][1].lower()
+        self.assertTrue("open" in allowed or "dynamic" in allowed, allowed)
+
+    def test_both_is_documented_as_having_no_model_of_its_own(self):
+        text = _read("model-selection").lower()
+        self.assertIn("no model of its own", text)
+        self.assertIn("independently", text)
+
+
+class TestFallbackChain(unittest.TestCase):
+    def test_hops_are_ordered_as_expected(self):
+        hops = parse_fallback_hops()
+        self.assertEqual([(h[0].strip("`"), h[1].strip("`")) for h in hops], REQUIRED_HOPS)
+
+    def test_every_hop_carries_actionable_restoration_guidance(self):
+        # F9.5 requires the user be told how to restore. A pointer to an unbuilt command does not.
+        for hop in parse_fallback_hops():
+            with self.subTest(hop=hop[0]):
+                guidance = hop[2].lower()
+                self.assertTrue(any(k in guidance for k in ("path", "install", "auth")), guidance)
+
+    def test_gating_is_declared_per_edge_not_for_the_whole_chain(self):
+        """Both errors are available, in opposite directions, and the table is parsed per row.
+
+        An *unconditional* chain contradicts AC-9(b): the agy hop does not exist before graduation.
+        A *wholly gated* chain is the mirror error and the one shipped first — it reads as though no
+        fallback exists today, when codex → manual carries every audit right now.
+
+        An earlier version asserted `"today" in text` and `"graduation" in text`. Both words appear
+        elsewhere in the prose, so corrupting the table left the suite green.
+        """
+        rows = parse_applicability()
+        self.assertIn(("agy", "codex"), rows)
+        self.assertIn(("codex", "manual"), rows)
+        self.assertIn("graduation", rows[("agy", "codex")],
+                      "the agy hop must be gated on graduation")
+        self.assertIn("today", rows[("codex", "manual")],
+                      "the codex hop must be declared live today")
+        self.assertNotIn("graduation", rows[("codex", "manual")],
+                         "the codex hop must NOT be gated behind agy's graduation")
+
+    def test_a_hop_fires_on_empty_output_not_only_on_unreachability(self):
+        # The upstream fires the fallback on empty, erroring, or incomplete results; only the
+        # *header* is limited to unreachability. Shipping it the other way round would report an
+        # engine's silence as a clean result.
+        hop, header = parse_hop_triggers()
+        self.assertIn("unreachable", hop, hop)
+        self.assertTrue(any(k in hop for k in ("empty", "nothing usable")),
+                        f"a hop must also fire on unusable output, not only unreachability: {hop!r}")
+        self.assertIn("unreachable", header, header)
+        self.assertNotIn("empty", header,
+                         f"the header is for unreachability only: {header!r}")
+
+    def test_the_manual_terminal_keeps_its_scope_handoff_and_pattern_search(self):
+        # Two upstream requirements that a re-authoring loses easily: the scope must come through
+        # the shared parser, and the analysis must include a targeted search.
+        steps = " ".join(parse_manual_steps())
+        self.assertIn("scope-parse.md", steps, "manual scope must come from the shared parser")
+        self.assertIn("search", steps, "manual analysis must include a targeted pattern search")
+
+    def test_the_pre_gate_refusal_is_not_described_here(self):
+        # It belongs to the adapter issue; describing it here would misrepresent a refusal as a
+        # degradation.
+        self.assertNotIn("errors with a pointer", _read("fallback").lower())
 
 
 class TestArtifactDiscipline(unittest.TestCase):

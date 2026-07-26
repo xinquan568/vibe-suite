@@ -244,18 +244,21 @@ class TestDispositionsMatchSectionSix(CLICase):
         for row in sorted(cc.PATH_TARGET_ROWS):
             with self.subTest(row=row):
                 target = self.rows[row]["target"]
-                target = target[0] if isinstance(target, list) else target
+                # Every target, not just the first: `[literal/path.md, bogus/path.md]` passed while
+                # only target[0] was checked.
+                targets = target if isinstance(target, list) else [target]
                 cell = self.six_raw[row]
                 literal = re.findall(r"`([^`]*/[^`]*)`", cell)
-                if literal:
-                    self.assertIn(target, literal,
-                                  f"{row}: §6 names {literal}; the map targets {target!r}")
-                else:
-                    # Only where §6's home is prose (workspace:12) may the target be matched by its
-                    # distinguishing stem.
-                    stem = target.rsplit("/", 1)[-1].split(".")[0]
-                    self.assertIn(stem, cell,
-                                  f"{row}: §6's prose home does not mention {stem!r}")
+                for one in targets:
+                    if literal:
+                        self.assertIn(one, literal,
+                                      f"{row}: §6 names {literal}; the map targets {one!r}")
+                    else:
+                        # Only where §6's home is prose (workspace:12) may a target be matched by
+                        # its distinguishing stem.
+                        stem = one.rsplit("/", 1)[-1].split(".")[0]
+                        self.assertIn(stem, cell,
+                                      f"{row}: §6's prose home does not mention {stem!r}")
 
     def test_the_only_row_without_a_six_source_is_the_recorded_divergence(self):
         self.assertEqual(set(self.rows) - set(self.six), DIVERGENCES)

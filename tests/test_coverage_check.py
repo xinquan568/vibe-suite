@@ -147,6 +147,16 @@ def expand_ids(cell):
     return frozenset(ids)
 
 
+def required_ids(home_cell):
+    """The IDs §6 states outside any parenthetical — the row's actual homes.
+
+    "F10.3 (also serves F8.2)" requires F10.3; F8.2 is commentary. Comparing against the full set
+    let a required ID be dropped, because the map stayed a subset either way.
+    """
+    outside = re.sub(r"\([^)]*\)", " ", home_cell)
+    return expand_ids(outside)
+
+
 def primary_id(home_cell):
     """The first function ID in §6's home cell — the row's primary destination."""
     match = re.search(r"F[0-9]+\.[0-9]+", home_cell)
@@ -215,25 +225,22 @@ class TestDispositionsMatchSectionSix(CLICase):
             with self.subTest(row=row):
                 target = self.rows[row].get("target", [])
                 mapped = frozenset(target if isinstance(target, list) else [target])
-                self.assertTrue(mapped, f"{row}: §6 names {sorted(ids)}; the map names none")
+                required = required_ids(self.six_raw[row])
                 self.assertTrue(mapped <= ids,
                                 f"{row}: map invents {sorted(mapped - ids)}; §6 names {sorted(ids)}")
-                primary = primary_id(self.six_raw[row])
-                if primary is None:
-                    continue
-                self.assertIn(primary, mapped,
-                              f"{row}: the map drops §6's primary home {primary}")
+                self.assertEqual(mapped, required,
+                                 f"{row}: §6 states {sorted(required)} outside parentheses; "
+                                 f"the map names {sorted(mapped)}")
 
     def test_path_targets_match_the_path_six_names(self):
         """§6 gives three workspace rows a repository path as their home. Allowing a path there is
         not the same as checking it is the right one."""
-        text = PROPOSAL.read_text(encoding="utf-8")
         for row in sorted(cc.PATH_TARGET_ROWS):
             with self.subTest(row=row):
                 target = self.rows[row]["target"]
                 target = target[0] if isinstance(target, list) else target
-                self.assertIn(f"`{target}`", text,
-                              f"{row}: §6 does not name the path {target!r}")
+                self.assertIn(f"`{target}`", self.six_raw[row],
+                              f"{row}: §6's home cell for this row does not name {target!r}")
 
     def test_the_only_row_without_a_six_source_is_the_recorded_divergence(self):
         self.assertEqual(set(self.rows) - set(self.six), DIVERGENCES)
@@ -259,17 +266,37 @@ class TestDispositionsMatchSectionSix(CLICase):
                 present = universe_for(row.split(":")[0])
                 stems = []
                 for name in names:
-                    stem = name.strip("*./$").split(".")[0]
-                    if not stem:
+                    cleaned = name.strip("*./$ ")
+                    if not cleaned:
                         continue
                     if "*" in name:
-                        head = re.match(r"[A-Za-z0-9_-]*", name.lstrip("`")).group(0)
+                        head = re.match(r"[A-Za-z0-9_-]*", cleaned).group(0)
                         if head:
                             stems.append(("prefix", head))
-                    elif any(stem in path for path in present):
-                        stems.append(("exact", stem))
-                missing = [s for kind, s in stems
-                           if (s not in claimed if kind == "exact" else s not in claimed)]
+                    elif "/" in cleaned:
+                        # §6 sometimes names a path (`bin/nlpm-check`, `auditor/scripts/*`).
+                        stems.append(("path", cleaned.rstrip("/")))
+                    elif any(cleaned in path for path in present):
+                        stems.append(("segment", cleaned.split(".")[0]))
+                # Boundary-aware: `audit` must not be satisfied by `audit-fix`. A name counts only
+                # where it is a whole path segment or a whole basename stem.
+                segments = set()
+                for path in mapping.get("paths", []) + mapping.get("corpus_roots", []):
+                    parts = path.split("/")
+                    segments.update(parts)
+                    segments.add(parts[-1].split(".")[0])
+                paths = mapping.get("paths", []) + mapping.get("corpus_roots", [])
+                missing = []
+                for kind, stem in stems:
+                    if kind == "prefix":
+                        ok = any(s.startswith(stem) for s in segments)
+                    elif kind == "path":
+                        ok = any(p == stem or p.startswith(stem + "/") or p.endswith("/" + stem)
+                                 for p in paths)
+                    else:
+                        ok = stem in segments
+                    if not ok:
+                        missing.append(stem)
                 self.assertEqual(missing, [],
                                  f"{row}: §6 names {names}; the row does not claim {missing}")
             checked += 1

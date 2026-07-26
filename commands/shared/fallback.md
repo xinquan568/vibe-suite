@@ -17,16 +17,24 @@ instructions, and neither may be echoed if it contains a credential. See
 not the obligation. Silence here is the worst outcome — degraded output that reads as clean output
 produces confidence nothing checked.
 
-## Applicability
+## Applicability — per edge, not per chain
 
-This chain is **post-gate only**. It describes what happens once the agy adapter has passed its
-graduation gate and is then unavailable at run time.
+Only the **`agy` → `codex` edge** is graduation-gated. The `codex` → `manual` edge is **live today**
+and applies to every engine-dispatching command right now.
+
+| Edge | Applies |
+|------|---------|
+| `agy` → `codex` | only after the agy adapter passes its graduation gate |
+| `codex` → `manual` | **today**, independently of agy's status |
 
 **Before graduation, an `--engine agy` request does not enter this chain at all** — it is refused
 outright, with a pointer to the gate's status, by the adapter issue that owns that behaviour. A
 refusal and a degradation are different things: the first says *this is not available yet*, the
 second says *this ran, but not the way you asked*. Describing the pre-gate state as a fallback would
 tell a user their audit ran when it did not.
+
+Gating the whole chain would be the mirror error: it would read as though no fallback exists until
+agy graduates, when the codex → manual path is the one carrying every audit today.
 
 ## Fallback chain
 
@@ -37,10 +45,21 @@ Ordered. Each hop fires only when the one before it is unavailable or returns no
 | `agy` | `codex` | Check the binary is on `PATH`; if absent, install the agy CLI; if present, check authentication and that a model is available to the account |
 | `codex` | `manual` | Check the binary is on `PATH`; if absent, `npm install -g @openai/codex`; if present, run `codex login` to refresh authentication |
 
-**`manual`** is the terminal hop and always succeeds: read the files in scope directly, apply the
-calling command's dimensions and criteria in-session, and report in that command's format. Manual
-analysis is held to the same standard — do not skip dimensions, and do not reduce depth because the
-fast path was unavailable.
+**`manual`** is the terminal hop and always succeeds. It is not "look at some files" — it has four
+steps, and skipping any of them silently narrows the analysis:
+
+1. **Take the scope from `commands/shared/scope-parse.md`**, not from an ad-hoc reading of the
+   arguments. The scope grammar and the skip patterns apply here exactly as they do on the fast
+   path; a manual run that examines a different file set is answering a different question.
+2. **Apply the calling command's own dimensions and criteria** in-session.
+3. **Search for the patterns that task cares about** — security markers, dead-code indicators,
+   `TODO`/`FIXME`/`HACK`, whatever the command's framework names. Reading files sequentially misses
+   what a targeted search finds.
+4. **Report in the calling command's format**, so a fallback result is comparable with a fast-path
+   one.
+
+Manual analysis is held to the same standard: do not skip dimensions, and do not reduce depth
+because the fast path was unavailable.
 
 ## Diagnostic header
 
@@ -61,9 +80,18 @@ probe, a doctor command, a repair command — and those may be named as *forthco
 they are not the remedy. A pointer to a command that does not exist yet reads as actionable and is
 not, which is worse than offering nothing.
 
-## Empty results are not failures
+## What triggers a hop, and what triggers the header
 
-An engine that runs and returns no findings has done its job; report the clean result. Only
-unreachability — a missing binary, an authentication failure, a timeout, a quota signature — triggers
-a hop and the diagnostic header. Conflating the two would make every clean audit look like an
-outage.
+These are two different conditions and collapsing them loses work in one direction or invents
+outages in the other.
+
+**A hop fires** when the engine is unreachable **or** returns nothing usable — empty output, a
+truncated response, or results that do not cover what the calling command asked for. An engine that
+produced nothing has not done the job, and reporting its silence as a clean result is the failure
+this partial exists to prevent: never stop merely because an engine returned nothing.
+
+**The diagnostic header appears** only when the engine was **unreachable** — a missing binary, an
+authentication failure, a timeout, a quota signature. An engine that ran and came back empty needs no
+restoration advice, because nothing is broken to restore.
+
+So: empty output hops without a header; an unreachable engine hops with one.

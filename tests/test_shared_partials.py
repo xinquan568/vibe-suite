@@ -431,6 +431,52 @@ def parse_config_schema(text=None):
     return schema
 
 
+def parse_applicability(text=None):
+    """Edge -> when it applies, from `fallback.md`'s applicability table.
+
+    A table, parsed per row. Searching the whole document for "today" or "graduation" cannot tell a
+    correct table from a corrupted one, because both words survive elsewhere in the prose.
+    """
+    text = _read("fallback") if text is None else text
+    rows = {}
+    for row in _table_after(text, "## Applicability", "fallback.md"):
+        if len(row) < 2:
+            raise PartialParseError(f"fallback.md: applicability row needs 2 columns: {row!r}")
+        edge = tuple(c.strip().strip("`") for c in row[0].split("→"))
+        rows[edge] = row[1].strip().lower()
+    if not rows:
+        raise PartialParseError("fallback.md: empty applicability table")
+    return rows
+
+
+def parse_hop_triggers(text=None):
+    """The conditions that fire a hop, and those that emit the header."""
+    text = _read("fallback") if text is None else text
+    idx = text.find("## What triggers a hop")
+    if idx < 0:
+        raise PartialParseError("fallback.md: no hop-trigger section")
+    section = text[idx:].lower()
+    # The *lead sentence* of each rule, not the surrounding paragraph. Scanning the paragraph lets a
+    # corrupted rule pass on a word surviving in a trailing clause.
+    hop = section[section.index("**a hop fires**"):]
+    hop = hop[:hop.index(".")]
+    header = section[section.index("**the diagnostic header appears**"):]
+    header = header[:header.index(".")]
+    return hop, header
+
+
+def parse_manual_steps(text=None):
+    """The numbered steps of the terminal manual hop."""
+    text = _read("fallback") if text is None else text
+    idx = text.find("**`manual`** is the terminal hop")
+    if idx < 0:
+        raise PartialParseError("fallback.md: no manual terminal section")
+    steps = re.findall(r"^\d+\. \*\*(.+?)\*\*(.*)$", text[idx:], re.M)
+    if len(steps) < 4:
+        raise PartialParseError(f"fallback.md: manual hop needs 4 steps, found {len(steps)}")
+    return [(a + b).lower() for a, b in steps]
+
+
 def parse_fallback_hops(text=None):
     """Ordered hops from `fallback.md`."""
     text = _read("fallback") if text is None else text
@@ -1237,17 +1283,37 @@ class TestPriorityLadder(unittest.TestCase):
         with self.assertRaises(PartialParseError):
             parse_priority_ladder(text)
 
-    def test_mutant_legal_action_flip_preserving_row_order_changes_the_result(self):
-        # The discriminating one. Flipping the config row's action leaves shape and ordering
-        # identical, so a resolver keyed on row position returns the config value either way. Only
-        # a resolver that reads the action column sees the difference.
-        text = self._mutate("| `.vibe-suite.md` | key is set | `USE_VALUE` |",
-                            "| `.vibe-suite.md` | key is set | `DEFER` |")
-        mutant = parse_priority_ladder(text)
-        self.assertEqual([s for s, _, _ in mutant], [s for s, _, _ in self.ladder],
-                         "the mutant must preserve row order, or it proves nothing")
-        self.assertEqual(resolve(self.ladder, {".vibe-suite.md": "agy"}), "agy")
-        self.assertEqual(resolve(mutant, {".vibe-suite.md": "agy"}), "DEFER")
+    def test_mutant_legal_action_flip_on_the_same_object_changes_the_result(self):
+        """The discriminating mutant, applied **in place on one object**.
+
+        Parsing a mutated document yields a *new* list, and object identity is a discriminator a
+        cheating resolver can use: cache the first ladder seen, resolve it by source position, and
+        return DEFER for anything else. That survives a mutant built from a second parse. It does not
+        survive mutating the very ladder whose baseline behaviour was just established.
+
+        The two invalid-token mutants above cannot close this hole either — they fail during
+        *parsing* and never reach the resolver at all.
+        """
+        ladder = list(parse_priority_ladder())
+        supplied = {".vibe-suite.md": "agy"}
+        self.assertEqual(resolve(ladder, supplied), "agy", "baseline on this exact object")
+
+        index = next(i for i, (source, _, _) in enumerate(ladder) if source == ".vibe-suite.md")
+        source, present_when, action = ladder[index]
+        self.assertEqual(action, "USE_VALUE", "mutation precondition")
+        ladder[index] = (source, present_when, "DEFER")          # same object, same order
+
+        self.assertEqual([s for s, _, _ in ladder],
+                         [s for s, _, _ in parse_priority_ladder()],
+                         "row order must be untouched, or the mutant proves nothing")
+        self.assertEqual(resolve(ladder, supplied), "DEFER",
+                         "an action-blind resolver returns 'agy' here and must fail")
+
+    def test_resolver_reads_the_action_not_the_row_position(self):
+        # Same property from the other side: a hand-built ladder whose first row DEFERs must defer,
+        # even though a position-based resolver would take its value.
+        ladder = [("user choice", "always", "DEFER"), ("tool default", "always", "DEFER")]
+        self.assertEqual(resolve(ladder, {"user choice": "codex"}), "DEFER")
 
 
 class TestStagedDefault(unittest.TestCase):
@@ -1309,14 +1375,48 @@ class TestFallbackChain(unittest.TestCase):
                 guidance = hop[2].lower()
                 self.assertTrue(any(k in guidance for k in ("path", "install", "auth")), guidance)
 
-    def test_the_chain_declares_itself_post_gate_only(self):
-        # Without this an unconditional chain would pass while contradicting AC-9(b).
-        text = _read("fallback").lower()
-        self.assertIn("post-gate", text)
-        self.assertIn("graduation", text)
+    def test_gating_is_declared_per_edge_not_for_the_whole_chain(self):
+        """Both errors are available, in opposite directions, and the table is parsed per row.
+
+        An *unconditional* chain contradicts AC-9(b): the agy hop does not exist before graduation.
+        A *wholly gated* chain is the mirror error and the one shipped first — it reads as though no
+        fallback exists today, when codex → manual carries every audit right now.
+
+        An earlier version asserted `"today" in text` and `"graduation" in text`. Both words appear
+        elsewhere in the prose, so corrupting the table left the suite green.
+        """
+        rows = parse_applicability()
+        self.assertIn(("agy", "codex"), rows)
+        self.assertIn(("codex", "manual"), rows)
+        self.assertIn("graduation", rows[("agy", "codex")],
+                      "the agy hop must be gated on graduation")
+        self.assertIn("today", rows[("codex", "manual")],
+                      "the codex hop must be declared live today")
+        self.assertNotIn("graduation", rows[("codex", "manual")],
+                         "the codex hop must NOT be gated behind agy's graduation")
+
+    def test_a_hop_fires_on_empty_output_not_only_on_unreachability(self):
+        # The upstream fires the fallback on empty, erroring, or incomplete results; only the
+        # *header* is limited to unreachability. Shipping it the other way round would report an
+        # engine's silence as a clean result.
+        hop, header = parse_hop_triggers()
+        self.assertIn("unreachable", hop, hop)
+        self.assertTrue(any(k in hop for k in ("empty", "nothing usable")),
+                        f"a hop must also fire on unusable output, not only unreachability: {hop!r}")
+        self.assertIn("unreachable", header, header)
+        self.assertNotIn("empty", header,
+                         f"the header is for unreachability only: {header!r}")
+
+    def test_the_manual_terminal_keeps_its_scope_handoff_and_pattern_search(self):
+        # Two upstream requirements that a re-authoring loses easily: the scope must come through
+        # the shared parser, and the analysis must include a targeted search.
+        steps = " ".join(parse_manual_steps())
+        self.assertIn("scope-parse.md", steps, "manual scope must come from the shared parser")
+        self.assertIn("search", steps, "manual analysis must include a targeted pattern search")
 
     def test_the_pre_gate_refusal_is_not_described_here(self):
-        # It belongs to E1.7; describing it here would misrepresent a refusal as a degradation.
+        # It belongs to the adapter issue; describing it here would misrepresent a refusal as a
+        # degradation.
         self.assertNotIn("errors with a pointer", _read("fallback").lower())
 
 

@@ -246,9 +246,16 @@ class TestDispositionsMatchSectionSix(CLICase):
                 target = self.rows[row]["target"]
                 target = target[0] if isinstance(target, list) else target
                 cell = self.six_raw[row]
-                stem = target.rsplit("/", 1)[-1].split(".")[0]
-                self.assertTrue(f"`{target}`" in cell or stem in cell,
-                                f"{row}: §6's home cell names neither {target!r} nor {stem!r}")
+                literal = re.findall(r"`([^`]*/[^`]*)`", cell)
+                if literal:
+                    self.assertIn(target, literal,
+                                  f"{row}: §6 names {literal}; the map targets {target!r}")
+                else:
+                    # Only where §6's home is prose (workspace:12) may the target be matched by its
+                    # distinguishing stem.
+                    stem = target.rsplit("/", 1)[-1].split(".")[0]
+                    self.assertIn(stem, cell,
+                                  f"{row}: §6's prose home does not mention {stem!r}")
 
     def test_the_only_row_without_a_six_source_is_the_recorded_divergence(self):
         self.assertEqual(set(self.rows) - set(self.six), DIVERGENCES)
@@ -278,7 +285,7 @@ class TestDispositionsMatchSectionSix(CLICase):
                     if not cleaned:
                         continue
                     if "*" in name:
-                        head = re.match(r"[A-Za-z0-9_-]*", cleaned).group(0)
+                        head = re.match(r"\.?[A-Za-z0-9_-]*", cleaned).group(0)
                         if head:
                             stems.append(("prefix", head))
                     elif "/" in cleaned:

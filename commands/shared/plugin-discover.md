@@ -70,8 +70,12 @@ is expected to carry:
 | MCP config | `.mcp.json` | an object with `mcpServers` |
 | Marketplace | `.claude-plugin/marketplace.json` | marketplace manifest |
 
-For each markdown artifact: read it, split the YAML frontmatter from the body, and keep both — the
-body is what the cross-reference pass reads.
+For each **markdown** artifact: read it, split the YAML frontmatter from the body, and keep both —
+the body is what the cross-reference pass reads.
+
+For each **JSON** artifact (`hooks/hooks.json`, `.mcp.json`, `.claude-plugin/marketplace.json`):
+read and parse it, and keep the parsed object. Parsing is required, not optional — the hook edges
+below are read out of it, and an unparsed hook file makes every hook reference invisible.
 
 ## Cross-reference map
 
@@ -79,8 +83,13 @@ Build the edges between components so a caller can find what is unreachable or d
 
 1. **Command → agent**: an agent named or dispatched from a command's body.
 2. **Command → shared partial**: a `commands/shared/<name>.md` path referenced in a body.
-3. **Agent → skill**: skills declared in an agent's frontmatter.
-4. **Any → skill**: a skill referenced by name in a body.
+3. **Agent → skill**: skills declared in an agent's frontmatter or referenced by name in its body.
+4. **Hook → script**: the script path in each hook definition's `command` field, read from the
+   parsed `hooks/hooks.json`, resolved against the plugin root.
+
+The hook edge is the one that most often dangles and the least often noticed: a renamed or deleted
+script leaves a hook that registers cleanly and fails only when the event fires. Resolving it here is
+why the JSON artifacts must be parsed rather than merely inventoried.
 
 Report each edge with its source, target, and whether the target resolves. An unresolved edge is a
 finding; so is a component with no inbound edge, which is how orphans surface.

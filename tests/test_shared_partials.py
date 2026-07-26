@@ -115,22 +115,29 @@ def parse_skip_dirs(text=None):
 
 
 def parse_exclusions(text=None):
-    """Glob -> excluded path prefix, from an "excludes <prefix>" marker in the Notes cell.
+    """Glob -> excluded path prefix, from the dedicated `Excludes` column.
 
-    Exclusions must be machine-readable, not prose: a note the consumer cannot apply is a rule that
-    silently does not exist. Both of this partial's exclusions were prose in the first draft, and the
-    suite caught both.
+    A column, not prose. Scraping the word "excludes" out of a Notes cell made the executable rule
+    depend on wording: a rephrase, a negation or a second prefix would silently change behaviour.
     """
     text = _read("discover") if text is None else text
     exclusions = {}
     for letter in "ABCDEF":
-        for row in _table_after(text, f"## Category {letter} —", "discover.md"):
-            if len(row) < 2 or "excludes" not in row[1].lower():
+        rows = _table_after(text, f"## Category {letter} —", "discover.md")
+        for row in rows:
+            if len(row) < 3:
+                raise PartialParseError(
+                    f"discover.md category {letter}: expected Pattern|Excludes|Notes, got {row!r}"
+                )
+            cell = row[1].strip()
+            if cell in ("", "—", "-"):
                 continue
-            after = row[1][row[1].lower().index("excludes"):]
-            prefixes = _ticked(after)
-            if not prefixes:
-                raise PartialParseError(f"discover.md: 'excludes' with no backticked prefix: {row[1]!r}")
+            prefixes = _ticked(cell)
+            if len(prefixes) != 1:
+                raise PartialParseError(
+                    f"discover.md category {letter}: Excludes must hold exactly one backticked "
+                    f"prefix, got {cell!r}"
+                )
             for glob in _ticked(row[0]):
                 exclusions[glob] = prefixes[0]
     return exclusions
@@ -142,7 +149,8 @@ def parse_content_qualified(text=None):
     qualified = set()
     for letter in "ABCDEF":
         for row in _table_after(text, f"## Category {letter} —", "discover.md"):
-            if len(row) > 1 and "content-qualified" in row[1].lower():
+            # Notes is the third column now that Excludes is structured (finding 7).
+            if len(row) > 2 and "content-qualified" in row[2].lower():
                 qualified.update(_ticked(row[0]))
     return qualified
 
@@ -170,7 +178,10 @@ def parse_precedence(text=None):
     match = re.search(r"\*\*Precedence:\*\*\s*([A-F](?:\s*→\s*[A-F])+)", text)
     if not match:
         raise PartialParseError("discover.md: no '**Precedence:** A → B → …' line")
-    return [p.strip() for p in match.group(1).split("→")]
+    order = [p.strip() for p in match.group(1).split("→")]
+    if order != list("ABCDEF"):
+        raise PartialParseError(f"discover.md: precedence must be exactly A→B→C→D→E→F, got {order}")
+    return order
 
 
 # Closed condition vocabulary for classify.md. Anything else raises (fail-closed).
@@ -232,7 +243,7 @@ def _parse_condition(cond, row_no):
 def parse_classify_rules(text=None):
     """Ordered list of (row_number, predicate, type) from `classify.md`."""
     text = _read("classify") if text is None else text
-    rules = []
+    rules, _is_fallback = [], {}
     for row in _table_after(text, "## Classification rules", "classify.md"):
         if len(row) < 3:
             raise PartialParseError(f"classify.md: malformed row {row!r}")
@@ -243,9 +254,17 @@ def parse_classify_rules(text=None):
         types = _ticked(row[2])
         if not types:
             raise PartialParseError(f"classify.md row {number}: no type in {row[2]!r}")
+        _is_fallback[number] = row[1].strip() == "fallback"
         rules.append((number, _parse_condition(row[1], number), types[0]))
+    if not rules:
+        raise PartialParseError("classify.md: empty rule set")
     if [n for n, _, _ in rules] != list(range(1, len(rules) + 1)):
         raise PartialParseError("classify.md: row numbers are not 1..N in order")
+    fallbacks = [n for n, _, _ in rules if _is_fallback[n]]
+    if fallbacks != [len(rules)]:
+        raise PartialParseError(
+            f"classify.md: expected exactly one fallback, as the last row; found rows {fallbacks}"
+        )
     return rules
 
 
@@ -259,6 +278,70 @@ def parse_scope_forms(text=None):
     if not forms:
         raise PartialParseError("scope-parse.md: empty scope grammar")
     return forms
+
+
+def parse_inventory_classes(text=None):
+    """Inventory class -> (glob, expected frontmatter), from `plugin-discover.md`."""
+    text = _read("plugin-discover") if text is None else text
+    classes = {}
+    for row in _table_after(text, "## Artifact inventory", "plugin-discover.md"):
+        globs = _ticked(row[1])
+        if not globs:
+            raise PartialParseError(f"plugin-discover.md: inventory row without a glob: {row!r}")
+        classes[row[0].strip().lower()] = (globs[0], row[2].strip())
+    if not classes:
+        raise PartialParseError("plugin-discover.md: empty artifact inventory")
+    return classes
+
+
+def parse_crossref_edges(text=None):
+    """Ordered edge names from `plugin-discover.md`'s cross-reference list."""
+    text = _read("plugin-discover") if text is None else text
+    idx = text.find("## Cross-reference map")
+    if idx < 0:
+        raise PartialParseError("plugin-discover.md: no '## Cross-reference map' section")
+    edges = []
+    for line in text[idx:].splitlines():
+        if match := re.match(r"^\d+\.\s+\*\*(.+?)\*\*", line.strip()):
+            edges.append(match.group(1).strip().lower())
+        elif line.startswith("## ") and edges:
+            break
+    if not edges:
+        raise PartialParseError("plugin-discover.md: no cross-reference edges listed")
+    return edges
+
+
+def parse_never_trivial(text=None):
+    """The never-trivial guards from `scope-parse.md`."""
+    text = _read("scope-parse") if text is None else text
+    idx = text.find("**Never trivial when ANY")
+    if idx < 0:
+        raise PartialParseError("scope-parse.md: no never-trivial guard list")
+    guards = []
+    for line in text[idx:].splitlines()[1:]:
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            guards.append(stripped[2:].lower())
+        elif stripped.startswith("**") and guards:
+            break
+    if not guards:
+        raise PartialParseError("scope-parse.md: never-trivial list is empty")
+    return guards
+
+
+def resolve_hook_edges(plugin_root, hooks_json):
+    """Resolve Hook -> script edges, as `plugin-discover.md` specifies.
+
+    Executable, unlike the rest of that partial: the edge is a path in a JSON `command` field and
+    either resolves on disk or does not. A dangling hook script registers cleanly and fails only
+    when the event fires, which is why it gets a real test rather than a prose check.
+    """
+    edges = []
+    for hook in json.loads(hooks_json):
+        command = hook.get("command", "")
+        script = command.split()[-1] if command else ""
+        edges.append((script, (Path(plugin_root) / script).exists() if script else False))
+    return edges
 
 
 def parse_manifest_outcomes(text=None):
@@ -357,7 +440,25 @@ def dedup(records):
     return out
 
 
+def normalise(path):
+    """Normalise to the classifier's documented input contract.
+
+    `classify.md` takes a scan-root-relative POSIX path, or a `~/`-prefixed home path for category F.
+    An absolute filesystem path is a caller error: every anchored glob and every `not under` prefix
+    would silently mismatch, so `/repo/agents/a.md` would classify `framework-agent` rather than
+    `agent`. Rejecting is the fail-closed choice; guessing a scan root is not this partial's job.
+    """
+    if path.startswith("./"):
+        path = path[2:]
+    if path.startswith("/"):
+        raise PartialParseError(
+            f"absolute path {path!r}: classify takes scan-root-relative paths (or ~/ for memory)"
+        )
+    return path
+
+
 def classify(path, rules):
+    path = normalise(path)
     for _, predicate, artifact_type in rules:
         if predicate(path):
             return artifact_type
@@ -476,6 +577,119 @@ class FixtureCase(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- tests
+
+
+# --------------------------------------------------------------------- independent oracle
+#
+# Written here, deliberately NOT derived from the partials. Every assertion above that iterates
+# `parse_*()` output shares its oracle with the thing under test: delete the `.mcp.json` row and the
+# coverage check simply stops requiring it. These tables are the second opinion. They are a copy of
+# the *expectations*, not of the rules — the rules still live only in the partials.
+
+REQUIRED_PATTERNS = {
+    "A": [".claude-plugin/plugin.json", ".claude-plugin/marketplace.json", "commands/**/*.md",
+          "commands/shared/**/*.md", "agents/**/*.md", "skills/**/SKILL.md", "hooks/**/*.json",
+          ".mcp.json", ".lsp.json", "settings.json"],
+    "B": ["CLAUDE.md", ".claude/CLAUDE.md", "**/CLAUDE.md", ".claude/rules/**/*.md",
+          ".claude/settings.json", ".claude/settings.local.json", ".claude/**/*.local.md",
+          ".claude/commands/**/*.md"],
+    "C": ["prompts/**/*.md", "templates/**/*.md", "**/system-prompt*.md", "**/*-prompt.md",
+          "**/*_prompt.md"],
+    "D": ["**/agents/*.md", "**/agents/*.yaml", "**/skills/*.md", "**/skills/**/*.md",
+          "**/manifest.yaml", "**/manifest.json", "**/frameworks/**/*.md"],
+    "E": ["docs/**/*.md", "dev-docs/**/*.md", "specs/**/*.md", "design/**/*.md", "plans/**/*.md",
+          "decisions/**/*.md", "README.md", "CONTRIBUTING.md"],
+    "F": ["~/.claude/projects/*/memory/*.md", "~/.claude/projects/*/memory/MEMORY.md"],
+}
+
+REQUIRED_SKIP_DIRS = ["node_modules/", ".git/", "target/", "dist/", "build/", "vendor/",
+                      "__pycache__/", ".next/", ".venv/", ".cache/"]
+
+REQUIRED_EXCLUSIONS = {"commands/**/*.md": "commands/shared/",
+                       "**/skills/*.md": "skills/", "**/skills/**/*.md": "skills/"}
+
+# fixture path -> (category, type). Independent of what the partials say.
+EXPECTED = {
+    ".claude-plugin/plugin.json": ("A", "manifest"),
+    ".claude-plugin/marketplace.json": ("A", "marketplace"),
+    "commands/x.md": ("A", "command"),
+    "commands/shared/p.md": ("A", "shared-partial"),
+    "agents/a.md": ("A", "agent"),
+    "skills/s/SKILL.md": ("A", "skill"),
+    "hooks/hooks.json": ("A", "hook-config"),
+    ".mcp.json": ("A", "mcp-config"),
+    ".lsp.json": ("A", "lsp-config"),
+    "settings.json": ("A", "document"),
+    "CLAUDE.md": ("B", "claude-md"),
+    ".claude/CLAUDE.md": ("B", "claude-md"),
+    "pkg/CLAUDE.md": ("B", "claude-md"),
+    ".claude/rules/r.md": ("B", "rule"),
+    ".claude/settings.json": ("B", "settings"),
+    ".claude/settings.local.json": ("B", "settings"),
+    ".claude/vibe.local.md": ("B", "plugin-config"),
+    ".claude/commands/u.md": ("B", "user-command"),
+    "prompts/p.md": ("C", "prompt"),
+    "templates/prompt-ish.md": ("C", "document"),
+    "lib/system-prompt.md": ("C", "prompt"),
+    "x/review-prompt.md": ("C", "prompt"),
+    "x/review_prompt.md": ("C", "prompt"),
+    "fw/agents/y.md": ("D", "framework-agent"),
+    "fw/agents/y.yaml": ("D", "framework-agent"),
+    "fw/skills/z.md": ("D", "framework-skill"),
+    "fw/skills/nested/z2.md": ("D", "framework-skill"),
+    "fw/manifest.yaml": ("D", "framework-manifest"),
+    "fw/manifest.json": ("D", "framework-manifest"),
+    "frameworks/f.md": ("D", "framework-config"),
+    "docs/d.md": ("E", "design-doc"),
+    "dev-docs/d.md": ("E", "design-doc"),
+    "specs/s.md": ("E", "design-doc"),
+    "design/d.md": ("E", "design-doc"),
+    "plans/p.md": ("E", "design-doc"),
+    "decisions/d.md": ("E", "design-doc"),
+    "README.md": ("E", "design-doc"),
+    "CONTRIBUTING.md": ("E", "design-doc"),
+}
+
+# Scope forms and never-trivial guards the gate must carry, written independently.
+REQUIRED_SCOPE_FORMS = ["(empty)", "staged", "commit -1", "commit -N", "path"]
+REQUIRED_NEVER_TRIVIAL = ["logic", "security", "dependen", "runtime", "error handling"]
+REQUIRED_INVENTORY_CLASSES = ["commands", "shared partials", "agents", "skills", "hooks",
+                              "mcp config", "marketplace"]
+REQUIRED_CROSSREF_EDGES = ["command → agent", "command → shared partial", "agent → skill",
+                           "hook → script"]
+
+
+class TestIndependentOracle(FixtureCase):
+    """The partials must satisfy expectations written without reference to them."""
+
+    def test_every_required_pattern_is_present(self):
+        for letter, required in REQUIRED_PATTERNS.items():
+            for pattern in required:
+                with self.subTest(category=letter, pattern=pattern):
+                    self.assertIn(pattern, self.categories[letter],
+                                  f"{letter} lost a required pattern — deleting a row must fail here")
+
+    def test_no_extra_patterns_smuggled_in(self):
+        for letter, required in REQUIRED_PATTERNS.items():
+            with self.subTest(category=letter):
+                self.assertEqual(self.categories[letter], required,
+                                 "pattern set or order diverged from the specification")
+
+    def test_every_required_skip_dir_is_present(self):
+        self.assertEqual(self.skip_dirs, REQUIRED_SKIP_DIRS)
+
+    def test_required_exclusions_are_declared(self):
+        self.assertEqual(self.exclusions, REQUIRED_EXCLUSIONS)
+
+    def test_expected_category_and_type_for_every_fixture(self):
+        actual = {path: cat for path, cat, _ in self.deduped}
+        for path, (want_cat, want_type) in EXPECTED.items():
+            with self.subTest(path=path):
+                self.assertEqual(actual.get(path), want_cat, "wrong category")
+                self.assertEqual(classify(path, self.rules), want_type, "wrong type")
+
+    def test_plain_template_is_not_discovered(self):
+        self.assertNotIn("templates/plain.md", [p for p, _, _ in self.deduped])
 
 
 class TestParserFailsClosed(unittest.TestCase):
@@ -623,7 +837,23 @@ class TestClassifierDirect(unittest.TestCase):
         self.assertEqual(self._type("commands/score.md"), "command")
 
     def test_memory_path_classifies_by_segment(self):
-        self.assertEqual(self._type("/Users/x/.claude/projects/p/memory/note.md"), "memory")
+        # Category F paths arrive `~/`-prefixed, which is the documented contract.
+        self.assertEqual(self._type("~/.claude/projects/p/memory/note.md"), "memory")
+
+    def test_dot_relative_paths_are_normalised(self):
+        # `./agents/a.md` must not fall through to the framework rules.
+        self.assertEqual(self._type("./agents/a.md"), "agent")
+        self.assertEqual(self._type("./commands/x.md"), "command")
+
+    def test_absolute_paths_are_rejected_not_misclassified(self):
+        # An anchored glob silently mismatches an absolute path: `/repo/agents/a.md` would have
+        # classified `framework-agent`, and `/repo/skills/s/references/ref.md` would have bypassed
+        # the `not under skills/` guard entirely. Failing loudly is the fail-closed choice.
+        for path in ("/repo/agents/a.md", "/repo/commands/x.md",
+                     "/repo/skills/s/references/ref.md", "/repo/docs/d.md"):
+            with self.subTest(path=path):
+                with self.assertRaises(PartialParseError):
+                    self._type(path)
 
     def test_fallback_catches_the_unknown(self):
         self.assertEqual(self._type("random/thing.txt"), "document")
@@ -714,6 +944,104 @@ class TestPluginDiscover(unittest.TestCase):
         # The boundary: baseline here, manifest-vs-disk and frontmatter elsewhere.
         text = _read("plugin-discover").lower()
         self.assertIn("f4.4", text)
+
+
+class TestScopeParseBehaviour(unittest.TestCase):
+    """The gate is an instruction to an agent, so the strongest available check is that every
+    required rule is present — asserted against a list written independently in this module, not
+    read back out of the partial."""
+
+    def test_every_required_scope_form_is_present(self):
+        forms = " ".join(parse_scope_forms())
+        for token in REQUIRED_SCOPE_FORMS:
+            with self.subTest(token=token):
+                self.assertIn(token, forms)
+
+    def test_every_never_trivial_guard_is_present(self):
+        guards = " ".join(parse_never_trivial())
+        for required in REQUIRED_NEVER_TRIVIAL:
+            with self.subTest(guard=required):
+                self.assertIn(required, guards, f"the gate lost its {required!r} guard")
+
+    def test_dependency_churn_is_never_trivial(self):
+        # The regression this guards: an earlier draft listed lockfile churn as *trivial*, so a
+        # dependency change could be skipped silently. A lockfile is the most mechanical-looking
+        # representation of exactly the change the gate must not skip.
+        text = _read("scope-parse").lower()
+        idx = text.find("**never trivial when any")
+        self.assertGreater(idx, 0)
+        self.assertIn("depend", text[idx:idx + 800])
+        trivial_block = text[text.find("**trivial only when all"):idx]
+        self.assertNotIn("lockfile", trivial_block)
+
+    def test_the_gate_asks_before_skipping(self):
+        text = _read("scope-parse")
+        self.assertIn("AskUserQuestion", text)
+        self.assertIn("Analyze anyway", text)
+
+    def test_a_five_line_threshold_is_stated(self):
+        self.assertRegex(_read("scope-parse"), r"≤\s*5\s+lines")
+
+
+class TestPluginDiscoverBehaviour(unittest.TestCase):
+    """Inventory globs and hook edges, executed against a fixture plugin."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.classes = parse_inventory_classes()
+        cls.edges = parse_crossref_edges()
+        cls.tmp = tempfile.mkdtemp(prefix="vibe5-plugin-")
+        cls.hooks = json.dumps([
+            {"event": "PostToolUse", "command": "scripts/present.sh"},
+            {"event": "Stop", "command": "scripts/missing.sh"},
+        ])
+        for rel, body in {
+            ".claude-plugin/plugin.json": '{"name":"fixture"}',
+            "commands/c.md": "---\ndescription: c\n---\n",
+            "commands/shared/s.md": "---\nuser-invocable: false\n---\n",
+            "agents/a.md": "---\ndescription: a\n---\n",
+            "skills/k/SKILL.md": "# k\n",
+            "hooks/hooks.json": cls.hooks,
+            ".mcp.json": '{"mcpServers":{}}',
+            ".claude-plugin/marketplace.json": '{"plugins":[]}',
+            "scripts/present.sh": "#!/bin/sh\n",
+        }.items():
+            path = Path(cls.tmp) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_every_required_inventory_class_is_declared(self):
+        for required in REQUIRED_INVENTORY_CLASSES:
+            with self.subTest(cls=required):
+                self.assertIn(required, self.classes)
+
+    def test_each_inventory_glob_finds_its_fixture(self):
+        for name, (glob, _) in self.classes.items():
+            with self.subTest(cls=name):
+                found = [
+                    path.relative_to(self.tmp).as_posix()
+                    for path in Path(self.tmp).rglob("*")
+                    if path.is_file() and glob_match(path.relative_to(self.tmp).as_posix(), glob)
+                ]
+                self.assertTrue(found, f"inventory glob {glob!r} for {name!r} matched nothing")
+
+    def test_every_required_crossref_edge_is_declared(self):
+        joined = " ".join(self.edges)
+        for required in REQUIRED_CROSSREF_EDGES:
+            with self.subTest(edge=required):
+                self.assertIn(required, joined, f"cross-reference map lost the {required!r} edge")
+
+    def test_hook_edges_resolve_and_dangle_correctly(self):
+        resolved = resolve_hook_edges(self.tmp, self.hooks)
+        self.assertEqual(resolved, [("scripts/present.sh", True), ("scripts/missing.sh", False)])
+
+    def test_a_dangling_hook_script_is_detectable(self):
+        dangling = [script for script, ok in resolve_hook_edges(self.tmp, self.hooks) if not ok]
+        self.assertEqual(dangling, ["scripts/missing.sh"])
 
 
 class TestArtifactDiscipline(unittest.TestCase):

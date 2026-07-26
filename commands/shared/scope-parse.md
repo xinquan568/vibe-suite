@@ -62,16 +62,49 @@ without parsing a scope.
 
 ## Trivial-change gate
 
-Before dispatching expensive analysis, decide whether the scope is worth it. A change is **trivial**
-when every file in it is limited to:
+Before dispatching expensive analysis, decide whether the scope warrants it.
 
-- whitespace, indentation or line-ending changes;
-- comment or docstring text, with no code statement altered;
-- lockfile or generated-artifact churn;
-- a version-string bump alone.
+**Get the diff** — the scope form decides how:
 
-On a trivial scope, report what was found and stop rather than dispatching. State the reason — a
-skipped analysis that looks like a clean analysis is worse than no analysis, because it produces
-confidence that nothing checked.
+| Scope | Diff command |
+|-------|--------------|
+| `(empty)` | `git diff HEAD` |
+| `staged` | `git diff --cached` |
+| `commit -N` | `git diff HEAD~N` |
+| `path` | read the files directly |
 
-When any file falls outside those categories, the whole scope is non-trivial and proceeds.
+**Trivial only when ALL hold:**
+
+- total code changes are **≤ 5 lines**, excluding blank lines and comments;
+- the changes are purely mechanical — typo fixes, formatting, whitespace, import reordering,
+  comment edits, version bumps in config files;
+- **no** logic, control-flow or data-handling change whatsoever.
+
+**Never trivial when ANY of these apply**, however small the diff:
+
+- any change to logic, conditionals, loops or data flow — a single character counts (`>` versus `>=`);
+- files on security-sensitive paths — auth, crypto, permissions, payments, sessions;
+- a dependency added or removed;
+- config that affects runtime behaviour — environment variables, feature flags, API endpoints;
+- a change to error handling or validation.
+
+Note what the second list does to a lockfile: dependency churn is **never** trivial, however
+mechanical the diff looks. A lockfile is the most mechanical-looking representation of exactly the
+change this gate must not skip.
+
+**If trivial, ask before skipping — never skip silently:**
+
+```
+AskUserQuestion:
+  question: "This looks like a trivial change ({N} lines — {description}). Analysis is unlikely to find anything. Proceed anyway?"
+  header: "Scope"
+  options:
+    - label: "Skip (Recommended)"
+      description: "Change is too minor to warrant analysis"
+    - label: "Analyze anyway"
+      description: "Run the analysis regardless"
+```
+
+On **Skip**, report "Scope too trivial — no issues expected." and stop. On **Analyze anyway**,
+proceed with the full scope. The choice belongs to the caller's user: a skipped analysis that reads
+as a clean analysis is worse than no analysis, because it produces confidence nothing checked.

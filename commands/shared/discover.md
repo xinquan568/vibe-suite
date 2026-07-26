@@ -28,81 +28,81 @@ plugin's own artifacts (A) must be claimed before D is consulted.
 
 ## Category A — plugin artifacts
 
-| Pattern | Notes |
-|---------|-------|
-| `.claude-plugin/plugin.json` | Component manifest |
-| `.claude-plugin/marketplace.json` | Marketplace entry |
-| `commands/**/*.md` | Slash commands — excludes `commands/shared/`, which is the row below |
-| `commands/shared/**/*.md` | Shared partials such as this file |
-| `agents/**/*.md` | Agent definitions |
-| `skills/**/SKILL.md` | Skill definitions |
-| `hooks/**/*.json` | Hook registrations |
-| `.mcp.json` | MCP server config |
-| `.lsp.json` | LSP server config |
-| `settings.json` | Root-level plugin settings |
+| Pattern | Excludes | Notes |
+|---------|----------|-------|
+| `.claude-plugin/plugin.json` | — | Component manifest |
+| `.claude-plugin/marketplace.json` | — | Marketplace entry |
+| `commands/**/*.md` | `commands/shared/` | Slash commands; shared partials are the row below |
+| `commands/shared/**/*.md` | — | Shared partials such as this file |
+| `agents/**/*.md` | — | Agent definitions |
+| `skills/**/SKILL.md` | — | Skill definitions |
+| `hooks/**/*.json` | — | Hook registrations |
+| `.mcp.json` | — | MCP server config |
+| `.lsp.json` | — | LSP server config |
+| `settings.json` | — | Root-level plugin settings |
 
 ## Category B — project config
 
-| Pattern | Notes |
-|---------|-------|
-| `CLAUDE.md` | Root project instructions |
-| `.claude/CLAUDE.md` | Config-directory instructions |
-| `**/CLAUDE.md` | Subdirectory instructions (monorepo packages) — deduplicated against the two rows above |
-| `.claude/rules/**/*.md` | Rule files |
-| `.claude/settings.json` | Project settings — flag `inline_hooks` if it carries a top-level `hooks` key |
-| `.claude/settings.local.json` | Local settings — same `inline_hooks` check |
-| `.claude/**/*.local.md` | Local plugin config |
-| `.claude/commands/**/*.md` | User-level commands |
+| Pattern | Excludes | Notes |
+|---------|----------|-------|
+| `CLAUDE.md` | — | Root project instructions |
+| `.claude/CLAUDE.md` | — | Config-directory instructions |
+| `**/CLAUDE.md` | — | Subdirectory instructions (monorepo packages) — deduplicated against the two rows above |
+| `.claude/rules/**/*.md` | — | Rule files |
+| `.claude/settings.json` | — | Project settings — flag `inline_hooks` if it carries a top-level `hooks` key |
+| `.claude/settings.local.json` | — | Local settings — same `inline_hooks` check |
+| `.claude/**/*.local.md` | — | Local plugin config |
+| `.claude/commands/**/*.md` | — | User-level commands |
 
 ## Category C — prompt artifacts
 
-| Pattern | Notes |
-|---------|-------|
-| `prompts/**/*.md` | Prompt templates |
-| `templates/**/*.md` | **content-qualified** — only when the prompt-content predicate below matches |
-| `**/system-prompt*.md` | System prompts |
-| `**/*-prompt.md` | Named prompts |
-| `**/*_prompt.md` | Named prompts, underscore form |
+| Pattern | Excludes | Notes |
+|---------|----------|-------|
+| `prompts/**/*.md` | — | Prompt templates |
+| `templates/**/*.md` | — | **content-qualified** — only when the prompt-content predicate below matches |
+| `**/system-prompt*.md` | — | System prompts |
+| `**/*-prompt.md` | — | Named prompts |
+| `**/*_prompt.md` | — | Named prompts, underscore form |
 
 ## Category D — non-plugin agent/skill frameworks
 
-| Pattern | Notes |
-|---------|-------|
-| `**/agents/*.md` | Third-party agent definitions |
-| `**/agents/*.yaml` | Third-party agent definitions, YAML form |
-| `**/skills/*.md` | Third-party skills — excludes `skills/`, the discovery root's own tree |
-| `**/skills/**/*.md` | Nested third-party skill assets — excludes `skills/` |
-| `**/manifest.yaml` | Framework manifests |
-| `**/manifest.json` | Framework manifests, JSON form |
-| `**/frameworks/**/*.md` | Framework configs |
+| Pattern | Excludes | Notes |
+|---------|----------|-------|
+| `**/agents/*.md` | — | Third-party agent definitions |
+| `**/agents/*.yaml` | — | Third-party agent definitions, YAML form |
+| `**/skills/*.md` | `skills/` | Third-party skills; the root tree is category A's |
+| `**/skills/**/*.md` | `skills/` | Nested third-party skill assets |
+| `**/manifest.yaml` | — | Framework manifests |
+| `**/manifest.json` | — | Framework manifests, JSON form |
+| `**/frameworks/**/*.md` | — | Framework configs |
 
 **The root `skills/` tree belongs to category A, not D.** A file such as
 `skills/<name>/references/x.md` is a first-party skill asset: it is not `SKILL.md`, so category A's
 rule does not name it, but filing it under "non-plugin frameworks" would be a contradiction in
-terms. Exclude the discovery root's own `skills/` directory from both D patterns above. A genuine
+terms. The `Excludes` column carries this mechanically: a pattern's exclusion is a path prefix, one per row, and a consumer that cannot parse the column must fail rather than ignore it. A genuine
 third-party tree — `vendor-free/fw/skills/x.md`, say — is still category D.
 
 ## Category E — design and architecture docs
 
-| Pattern | Notes |
-|---------|-------|
-| `docs/**/*.md` | Documentation |
-| `dev-docs/**/*.md` | Developer documentation |
-| `specs/**/*.md` | Specifications |
-| `design/**/*.md` | Design documents |
-| `plans/**/*.md` | Plans |
-| `decisions/**/*.md` | ADRs and decision records |
-| `README.md` | Project readme |
-| `CONTRIBUTING.md` | Contribution guide |
+| Pattern | Excludes | Notes |
+|---------|----------|-------|
+| `docs/**/*.md` | — | Documentation |
+| `dev-docs/**/*.md` | — | Developer documentation |
+| `specs/**/*.md` | — | Specifications |
+| `design/**/*.md` | — | Design documents |
+| `plans/**/*.md` | — | Plans |
+| `decisions/**/*.md` | — | ADRs and decision records |
+| `README.md` | — | Project readme |
+| `CONTRIBUTING.md` | — | Contribution guide |
 
 Every pattern is `.md`-scoped. A `docs/schema.json` is **not** a category-E artifact.
 
 ## Category F — memory files
 
-| Pattern | Notes |
-|---------|-------|
-| `~/.claude/projects/*/memory/*.md` | Project memory files — expand `~` to the user's home directory |
-| `~/.claude/projects/*/memory/MEMORY.md` | Memory index |
+| Pattern | Excludes | Notes |
+|---------|----------|-------|
+| `~/.claude/projects/*/memory/*.md` | — | Project memory files — expand `~` to the user's home directory |
+| `~/.claude/projects/*/memory/MEMORY.md` | — | Memory index |
 
 Category F lives outside any repository, so it is the one category a repository scan cannot reach;
 callers scanning a project only must omit it rather than report it empty.

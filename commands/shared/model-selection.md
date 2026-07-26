@@ -39,6 +39,13 @@ reconciled. It is not a fourth engine and it does not select a model: each const
 own model **independently**, through the ladder below. Asking "which model does `both` use" is a
 category error, and the answer a consumer would invent for it is the reason this paragraph exists.
 
+## Loading configuration
+
+Project configuration is read through the suite's single reader — `python3 scripts/lib/config.py
+--json <root>` — never by parsing `.vibe-suite.md` in place. The reader owns the grammar, the
+domains and the defaults; a command that parses the file itself becomes a second implementation of
+this schema and will drift from it.
+
 ## Priority ladder
 
 Highest wins. The `action` column is a **closed two-token vocabulary** — `USE_VALUE` takes the value
@@ -77,10 +84,10 @@ cannot drift apart.
 
 | Key | Type | Allowed | Default |
 |-----|------|---------|---------|
-| `engine` | enum | `claude`, `codex`, `agy`, `both` | unset → the calling command's own default |
-| `cross_model_audit_engine` | enum | `codex`, `agy` | `codex` until graduation |
+| `engine` | enum | `claude`, `codex`, `agy`, `both` | unset |
+| `cross_model_audit_engine` | enum | `codex`, `agy` | `codex` |
 | `reviewer_backend` | enum | `codex` | `codex` |
-| `reviewer_model` | string | **open / dynamic — no closed set** | unset → `DEFER` |
+| `reviewer_model` | string | **open / dynamic — no closed set** | unset |
 
 `reviewer_backend` and `reviewer_model` are separate keys, not one concept: the backend is which
 tool runs the critic, the model is optional and, when absent, defers. `reviewer_model` deliberately

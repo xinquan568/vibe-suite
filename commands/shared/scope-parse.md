@@ -48,6 +48,11 @@ that is easy to assert and easy to get wrong:
 
 A whole-codebase audit is expressed by passing a path (`.`), and depth stays the caller's flag.
 
+## Loading configuration
+
+`skip_patterns` comes from the suite's single reader — `python3 scripts/lib/config.py --json <root>`
+— never from parsing `.vibe-suite.md` directly.
+
 ## Skip-pattern enforcement
 
 When the project config sets skip patterns, filter the resolved list:

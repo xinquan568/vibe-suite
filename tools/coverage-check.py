@@ -35,9 +35,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # --------------------------------------------------------------------------- pins
 # Full commits for the short forms the issue names. Constants, so re-pinning is reviewable.
 PINS = {
-    "cc-suite":         "bb605ec4",
-    "grill-for-claude": "938b1e83",
-    "nlpm":             "4ef75d4a",
+    "cc-suite":         "bb605ec441862e1d35f182af5d9f0503c7d27d79",
+    "grill-for-claude": "938b1e83b2135bc923b2d7312f82b654a76539c5",
+    "nlpm":             "4ef75d4aa1626c0d06336f01227b6c07cfbf809f",
 }
 
 # --------------------------------------------------------------------------- AC-1's two lists
@@ -49,6 +49,12 @@ ALLOWLIST = (
     "hooks/**",
     "scripts/**/*",                # including nested libraries, e.g. scripts/lib/*.mjs
     "auditor/scripts/**/*",
+    "auditor/prompts/**",          # §6 nlpm: "auditor pipeline workflows + prompts + SCHEMAS.md + registry"
+    "auditor/registry/**",
+    "auditor/SCHEMAS.md",
+    ".nlpm-test/**",               # §6 nlpm: "test + tester + .nlpm-test specs" (K, F4.5)
+    "analysis/scripts/**",         # §6 nlpm: extract-vocabulary.py ...
+    "analysis/vocabulary-design-principles.md",   # ... + the vocabulary-design principles
     "bin/*",
     ".github/workflows/**",        # "workflows"
     "templates/**",
@@ -90,6 +96,13 @@ WORKSPACE_RESOURCE_COUNT = 14
 
 DISPOSITIONS = frozenset("KMRGD")
 _TARGET = re.compile(r"F[0-9]+\.[0-9]+$")
+#: §6's "vibe-suite home" column is a function ID, several IDs, or — for three workspace rows — a
+#: repository path. Encoding only the first would have forced those rows to name a function that
+#: §6 does not give them.
+#: A path target must actually look like a repository path — it needs a directory separator and a
+#: file extension. Accepting any bare word would have let `target: nonsense` through, which is the
+#: weakening that admitting path targets introduced.
+_TARGET_PATH = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+\.[A-Za-z0-9]+$")
 
 
 class CoverageError(Exception):
@@ -155,9 +168,9 @@ ROW_INVENTORY = tuple(
     [f"cc-suite:{n:02d}" for n in range(1, 30)] +          # 29
     [f"grill-for-claude:{n:02d}" for n in range(1, 8)] +   # 7
     [f"nlpm:{n:02d}" for n in range(1, 26)] +              # 25
-    [f"workspace:{n:02d}" for n in range(1, 16)]           # 15
+    [f"workspace:{n:02d}" for n in range(1, 15)]           # 14
 )
-assert len(ROW_INVENTORY) == 76, "the §6 inventory is 76 rows"
+assert len(ROW_INVENTORY) == 75, "the §6 inventory is 75 rows"
 
 TREES = ("cc-suite", "grill-for-claude", "nlpm", "workspace")
 
@@ -170,7 +183,7 @@ def load_manifest(path):
         raise CoverageError(f"{path}: unknown repo {repo!r}")
     if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise CoverageError(f"{path}: commit must be 40 lowercase hex characters")
-    if not commit.startswith(PINS[repo]):
+    if commit != PINS[repo]:
         raise CoverageError(
             f"{path}: commit {commit[:8]} is not the pinned {PINS[repo]} — re-pinning must be a "
             f"change to {Path(__file__).name}, not a data edit")
@@ -203,11 +216,15 @@ def parse_disposition(text, source="docs/disposition.yaml"):
         if line.startswith("mappings:"):
             section = "mappings"; continue
         if line.startswith("version:"):
+            if line.strip() != "version: 1":
+                raise CoverageError(f"{source}:{number}: only 'version: 1' is supported")
             continue
         if section == "trees":
             match = re.fullmatch(r"  ([A-Za-z0-9._-]+): *\{commit: *([0-9a-f]{40}|null)\}", line)
             if not match:
                 raise CoverageError(f"{source}:{number}: expected '  <tree>: {{commit: <sha|null>}}'")
+            if match.group(1) in trees:
+                raise CoverageError(f"{source}:{number}: duplicate tree key {match.group(1)!r}")
             trees[match.group(1)] = None if match.group(2) == "null" else match.group(2)
             continue
         if section != "mappings":
@@ -226,7 +243,13 @@ def parse_disposition(text, source="docs/disposition.yaml"):
             raise CoverageError(f"{source}:{number}: duplicate key {key!r} in one mapping")
         if value.startswith("[") and value.endswith("]"):
             inner = value[1:-1].strip()
-            current[key] = [part.strip() for part in inner.split(",") if part.strip()] if inner else []
+            if inner:
+                parts = [part.strip() for part in inner.split(",")]
+                if any(not part for part in parts):
+                    raise CoverageError(f"{source}:{number}: empty item in list for {key!r}")
+                current[key] = parts
+            else:
+                current[key] = []
         else:
             current[key] = value
     return trees, mappings
@@ -264,22 +287,35 @@ def validate_schema(trees, mappings, function_ids):
         has_paths, has_roots = "paths" in mapping, "corpus_roots" in mapping
         if has_paths == has_roots:
             errors.append(f"{where}: exactly one of 'paths' or 'corpus_roots' is required")
+        if has_paths and not mapping["paths"]:
+            errors.append(f"{where}: 'paths' is empty — a row that claims nothing covers nothing")
+        if has_roots and not mapping["corpus_roots"]:
+            errors.append(f"{where}: 'corpus_roots' is empty")
+        for key in mapping:
+            if key not in ("row", "tree", "paths", "corpus_roots", "disposition", "target",
+                           "note", "_line"):
+                errors.append(f"{where}: unknown key {key!r}")
         if disposition == "D" and has_paths:
             errors.append(f"{where}: a D row describes data, so it uses 'corpus_roots'")
         if disposition and disposition != "D" and has_roots:
             errors.append(f"{where}: only a D row may use 'corpus_roots'")
         target = mapping.get("target")
+        if isinstance(target, str) and " " in target:
+            errors.append(f"{where}: target {target!r} must be a single value or a list")
+        targets = target if isinstance(target, list) else ([target] if target else [])
         if disposition in ("K", "M", "R", "G"):
             # §6's legend: "R retired with replacement noted" — the replacement is the point of an
             # R row, so a target is required for it too. Only D has no function ID.
-            if not target:
+            if not targets:
                 errors.append(f"{where}: disposition {disposition} requires a 'target'")
-            elif not _TARGET.fullmatch(target):
-                errors.append(f"{where}: target {target!r} is not a function ID")
-            elif target not in function_ids:
-                errors.append(f"{where}: target {target!r} is well-formed but is not one of the "
-                              f"{len(function_ids)} function IDs")
-        elif target:
+            for one in targets:
+                if _TARGET.fullmatch(one):
+                    if one not in function_ids:
+                        errors.append(f"{where}: target {one!r} is well-formed but is not one of "
+                                      f"the {len(function_ids)} function IDs")
+                elif not _TARGET_PATH.fullmatch(one):
+                    errors.append(f"{where}: target {one!r} is neither a function ID nor a path")
+        elif targets:
             errors.append(f"{where}: a D row has no target")
         for path in mapping.get("paths", []) + mapping.get("corpus_roots", []):
             if path.startswith("/") or ".." in path.split("/") or path != path.strip():

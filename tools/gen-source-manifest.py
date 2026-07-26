@@ -51,18 +51,17 @@ def git_files(tree):
 def workspace_files(root):
     """Every file beneath the three skill roots, relative to `root`.
 
-    Unfiltered like the git listings: the checker decides what counts. OS junk is the one thing
-    dropped here, because `.DS_Store` appearing or vanishing is not a change to the tree's content
-    and would make the snapshot non-reproducible for no benefit.
+    Unfiltered, exactly like the git listings. An earlier version dropped OS junk here, which put a
+    second filtering rule outside the checker — the thing AC-1's "single definition" forbids. The
+    checker excludes those names anyway, so the snapshot stays faithful and the rule stays in one
+    place.
     """
-    junk = {".DS_Store", "Thumbs.db", "desktop.ini"}
     out = []
     for skill in WORKSPACE_ROOTS:
         base = Path(root) / skill
         if not base.is_dir():
             raise SystemExit(f"error: {base} not found")
-        out += [str(p.relative_to(root)) for p in base.rglob("*")
-                if p.is_file() and p.name not in junk and not p.name.startswith("._")]
+        out += [str(p.relative_to(root)) for p in base.rglob("*") if p.is_file()]
     return sorted(out)
 
 

@@ -68,8 +68,8 @@ class TestBaseline(CLICase):
     def test_the_shipped_artifacts_pass(self):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("288 source artifacts", result.stdout)
-        self.assertIn("76 disposition rows", result.stdout)
+        self.assertIn("300 source artifacts", result.stdout)
+        self.assertIn("75 disposition rows", result.stdout)
 
     def test_every_tree_contributes(self):
         universe, _ = cc.build_universe(MANIFESTS)
@@ -85,7 +85,7 @@ class TestAcceptanceCriterion(CLICase):
         tmp = self.sandbox()
         text = (tmp / "disposition.yaml").read_text(encoding="utf-8")
         rows = re.findall(r"^  - row: (\S+)$", text, re.M)
-        self.assertEqual(len(rows), 76, "the map must encode all 76 §6 rows")
+        self.assertEqual(len(rows), 75, "the map must encode all 75 §6 rows")
 
         blocks, current = [], None
         for line in text.splitlines(keepends=True):
@@ -95,7 +95,7 @@ class TestAcceptanceCriterion(CLICase):
                 current.append(line)
             else:
                 current = None
-        self.assertEqual(len(blocks), 76)
+        self.assertEqual(len(blocks), 75)
 
         for row, block in zip(rows, blocks):
             with self.subTest(row=row):
@@ -119,6 +119,78 @@ class TestAcceptanceCriterion(CLICase):
         result = self.run_check(disposition=target, manifests=tmp / "manifests")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("§6 rows absent from the map", result.stderr)
+
+
+# --------------------------------------------------------------------------- the semantic oracle
+#: §6's disposition and target for a sample of rows, transcribed BY HAND from the proposal rather
+#: than read from the artifact under test. Coverage proves the map is *complete*; nothing else
+#: proves it is *correct*, and a green run told me nothing about a batch of wrong-but-well-formed
+#: targets that review caught. Every entry below was a defect at some point in this issue.
+SIX_ORACLE = {
+    # grill-for-claude — every one of these was wrong in the first draft
+    "grill-for-claude:01": ("K", ["F3.1"]),              # `roast` command — was M
+    "grill-for-claude:02": ("K", ["F3.2", "F3.3", "F3.4", "F3.5", "F3.6", "F3.7"]),
+    "grill-for-claude:03": ("M", ["F9.1", "F9.2"]),      # grill-core skill — was K/F3.2
+    "grill-for-claude:04": ("G", ["F9.6"]),
+    "grill-for-claude:05": ("M", ["F4.4", "F1.2"]),      # validate-plugin.sh
+    # nlpm
+    "nlpm:01": ("K", ["F4.1"]),                          # ls + scanner
+    "nlpm:02": ("K", ["F4.2"]),                          # score + scorer
+    "nlpm:03": ("M", ["F3.8"]),                          # `fix` — was K/F4.3
+    "nlpm:04": ("K", ["F4.3"]),                          # check + checker
+    "nlpm:06": ("K", ["F4.5"]),                          # test + tester + .nlpm-test specs
+    "nlpm:14": ("M", ["F1.1"]),                          # init
+    "nlpm:25": ("D", []),                                # accumulated ops data
+    # cc-suite
+    "cc-suite:10": ("R", ["F3.1"]),                      # `audit` retired with replacement
+    "cc-suite:14": ("R", ["F6.1"]),                      # `review-plan` retired with replacement
+    # workspace — three §6 homes are paths, not function IDs
+    "workspace:01": ("K", ["F6.1"]),                     # refine-proposal/SKILL.md
+    "workspace:05": ("K", ["F6.2"]),                     # issue2pr/SKILL.md
+    "workspace:09": ("K", ["examples/profiles/roamex.md"]),
+    "workspace:10": ("K", ["templates/pr-body.md"]),
+    "workspace:12": ("M", ["examples/profiles/roamex.md"]),
+    "workspace:13": ("K", ["F8.5"]),
+}
+
+
+class TestDispositionsMatchSectionSix(CLICase):
+    """Coverage proves completeness. This proves the map says what §6 says."""
+
+    def parsed(self):
+        text = DISPOSITION.read_text(encoding="utf-8")
+        _, mappings = cc.parse_disposition(text)
+        return {m["row"]: m for m in mappings}
+
+    def test_sampled_rows_carry_sixs_disposition_and_target(self):
+        rows = self.parsed()
+        for row, (disposition, target) in SIX_ORACLE.items():
+            with self.subTest(row=row):
+                self.assertIn(row, rows)
+                self.assertEqual(rows[row]["disposition"], disposition)
+                actual = rows[row].get("target", [])
+                actual = actual if isinstance(actual, list) else [actual]
+                self.assertEqual(actual, target)
+
+    def test_a_permuted_disposition_is_caught_by_the_oracle(self):
+        """The check itself accepts any legal disposition, so this fixture is the only thing
+        standing between a permuted map and a green run."""
+        rows = self.parsed()
+        self.assertNotEqual(rows["nlpm:03"]["disposition"], "K",
+                            "nlpm `fix` is M into F3.8, not K — the first draft had this wrong")
+        self.assertNotEqual(rows["grill-for-claude:03"]["disposition"], "K",
+                            "grill-core is merged into the suite contract, not kept")
+
+    def test_every_row_id_in_the_oracle_exists(self):
+        rows = self.parsed()
+        self.assertEqual(sorted(set(SIX_ORACLE) - set(rows)), [])
+
+    def test_retired_rows_name_their_replacement(self):
+        """§6's legend: "R retired with replacement noted"."""
+        for row, mapping in self.parsed().items():
+            if mapping.get("disposition") == "R":
+                with self.subTest(row=row):
+                    self.assertTrue(mapping.get("target"))
 
 
 class TestCoverageIsBidirectional(CLICase):
@@ -154,7 +226,7 @@ class TestCoverageIsBidirectional(CLICase):
         self.assertIn("commands/update.md", result.stderr)
 
     def test_a_corpus_root_matching_nothing_fails(self):
-        result = self._mutate("    corpus_roots: [case-studies]", "    corpus_roots: [nonesuch]")
+        result = self._mutate("auditor/reports, auditor/exemplars", "nonesuch-corpus, auditor/exemplars")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("matches nothing", result.stderr)
 

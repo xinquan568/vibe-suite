@@ -328,5 +328,64 @@ class TestOrphanBranchAndRedaction(RowNineFixture):
         self.assertIn("***@example.invalid", combined)
 
 
+class TestSymlinkAttack(RowNineFixture):
+    """A destination branch is not trusted input. It can carry a symlink, and `write_bytes`
+    follows one — verified: writing to a planted link reached a file outside the clone entirely.
+    So the managed paths are checked against the tree, and writes use O_NOFOLLOW."""
+
+    def seed_branch_symlink(self, path, target):
+        work = self.tmp / "seed-link"
+        git("clone", "--quiet", "--branch", BRANCH, str(self.dest), str(work), cwd=self.tmp)
+        link = work / path
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+        git("add", "--", path, cwd=work)
+        git("-c", "user.name=t", "-c", "user.email=t@t.invalid",
+            "commit", "--quiet", "-m", "seed link", cwd=work)
+        git("push", "--quiet", "origin", f"HEAD:{BRANCH}", cwd=work)
+
+    def test_a_symlink_at_a_corpus_path_refuses(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        victim = outside / "secret.txt"
+        victim.write_text("ORIGINAL\n", encoding="utf-8")
+        self.seed_branch_symlink("reports/alpha.json", str(victim))
+        before = self.tip()
+        result = self.run_tool(expect=3)
+        # Assert the REASON, not just the code. Reading through the link would also produce a
+        # content mismatch and exit 3, so a test that checked only the code would pass against a
+        # tool with no symlink handling at all — which is exactly what a mutation run showed.
+        self.assertIn("symlink", result.stderr.lower())
+        self.assertEqual(victim.read_text(encoding="utf-8"), "ORIGINAL\n",
+                         "the tool must not write through a destination-controlled symlink")
+        self.assertEqual(self.tip(), before)
+
+    def test_a_symlinked_ancestor_refuses(self):
+        outside = self.tmp / "outside-dir"
+        outside.mkdir()
+        self.seed_branch_symlink("reports/docs", str(outside))
+        before = self.tip()
+        result = self.run_tool(expect=3)
+        self.assertIn("symlink", result.stderr.lower())
+        self.assertEqual(list(outside.iterdir()), [],
+                         "nothing may be written beneath a symlinked directory")
+        self.assertEqual(self.tip(), before)
+
+
+class TestVerificationIsNotJustACount(RowNineFixture):
+
+    def test_verification_compares_every_blob_not_merely_a_count(self):
+        """A seeded `.keep` alone satisfies "the tree is non-empty". The verification must compare
+        each manifest entry against the branch by content address."""
+        self.run_tool()
+        manifest = git("show", f"{BRANCH}:{PREFIX}/manifest.sha256", cwd=self.dest).stdout
+        listed = {line.split("  ", 1)[1] for line in manifest.splitlines() if line}
+        self.assertEqual(listed, EXPECTED)
+        on_branch = self.branch_paths()
+        for rel in listed:
+            with self.subTest(path=rel):
+                self.assertIn(rel, on_branch)
+
+
 if __name__ == "__main__":
     unittest.main()

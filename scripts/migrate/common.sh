@@ -76,8 +76,19 @@ vibe_provenance_write() {
         printf '}\n'
     } > "$path.tmp"
     mv -f "$path.tmp" "$path"
-    # fsync the directory so the record survives a crash between here and the mutation it guards.
-    command -v sync >/dev/null 2>&1 && sync || true
+    vibe_fsync_dir "$(dirname "$path")"
+}
+
+# vibe_fsync_dir <dir> — flush the directory entry, so a record written before a mutation is really
+# on disk when the crash that makes it necessary happens. Without this, the provenance ordering is
+# an ordering in the page cache only.
+vibe_fsync_dir() {
+    python3 -c 'import os,sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)' "$1"
 }
 
 vibe_json_list() {

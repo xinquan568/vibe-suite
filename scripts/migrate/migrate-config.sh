@@ -83,7 +83,15 @@ if nlpm_path.is_file():
         raise SystemExit(1)
     for key, value in parsed.items():
         if key in config.SCHEMA:
-            nlpm_values[key] = value
+            # Flatten one level so a map supplied whole (`model_overrides: {codex: x}`) compares
+            # against the same map supplied per leaf (`model_overrides.codex`). Comparing at the top
+            # level lets two sources disagree about one leaf without registering a conflict, and the
+            # later merge then picks one silently.
+            if isinstance(value, dict) and config.SCHEMA[key].type == "map":
+                for sub, sub_value in value.items():
+                    nlpm_values[key + "." + sub] = sub_value
+            else:
+                nlpm_values[key] = value
         else:
             sys.stderr.write(f"note: row 2: {key!r} has no equivalent in the new schema — not "
                              "migrated\n")

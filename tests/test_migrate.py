@@ -332,6 +332,19 @@ command = "keep-me"
 """
 
 
+QUOTED_TOML = """[general]
+keep = true
+
+[mcp_servers.cc-suite-mcp]
+command = "cc-suite-server"
+
+[mcp_servers.cc-suite-mcp.env]
+TOKEN = "keep-this"
+
+[mcp_servers."cc-suite-agent:auditor"]
+command = "cc-suite-auditor"
+"""
+
 class TestRowSix(MigrationCase):
 
     LEGACY = MigrationCase.LEGACY  # .mcp.json is mutated by design; it is not a legacy *store*
@@ -347,12 +360,66 @@ class TestRowSix(MigrationCase):
     def _toml(self):
         return (self.ws / ".codex" / "config.toml").read_text(encoding="utf-8")
 
-    def test_without_confirmation_nothing_changes(self):
+    def test_without_confirmation_only_the_decision_report_appears(self):
+        """Exit 3 must write a machine-readable report — the caller cannot parse prose on stderr —
+        and must change nothing else. An earlier version of this test asserted the whole workspace
+        was byte-identical, which forbade the very report the exit contract requires."""
         self._setup_sentinels()
         before = snapshot(self.ws)
         self.run_helper("migrate-sentinels.sh", expect=EXIT_DECISION)
-        self.assertEqual(snapshot(self.ws), before,
-                         "the default run must report and change nothing")
+        report = self.ws / ".vibe-suite-state" / "row6-decision.json"
+        self.assertTrue(report.exists(), "exit 3 must write a decision report")
+        payload = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(set(payload["remove"][".mcp.json"]),
+                         {"cc-suite-mcp", "cc-suite-agent:auditor"})
+        self.assertEqual(payload["register"][".codex/config.toml"], ["vibe-mcp"])
+
+        after = snapshot(self.ws)
+        self.assertEqual(set(after) - set(before),
+                         {".vibe-suite-state", ".vibe-suite-state/row6-decision.json"},
+                         "nothing beyond the report may be created")
+        for path in set(before):
+            with self.subTest(path=path):
+                self.assertEqual(after[path], before[path], "no existing path may change")
+
+    def test_quoted_headers_and_subtables_migrate(self):
+        """A sentinel whose name carries a colon is normally spelled
+        [mcp_servers."cc-suite-agent:auditor"], and a sentinel may own subtables. A splitter that
+        treats "." as an unconditional separator misses both."""
+        self.write(".mcp.json", json.dumps({"mcpServers": {}}, indent=2) + "\n")
+        self.write(".codex/config.toml", QUOTED_TOML)
+        self.guard_legacy()
+        self.run_helper("migrate-sentinels.sh", "--confirm")
+        toml = self._toml()
+        self.assertIn("[mcp_servers.vibe-mcp]", toml)
+        self.assertIn("[mcp_servers.vibe-mcp.env]", toml, "subtables must come across")
+        self.assertIn('TOKEN = "keep-this"', toml)
+        self.assertIn('[mcp_servers."vibe-agent:auditor"]', toml,
+                      "a quoted sentinel name must be recognised and requoted")
+        # The *headers* must be gone. The command values legitimately still name the
+        # `cc-suite-server` executable: re-registration points the new sentinel at the same
+        # server, so asserting the string "cc-suite" is absent would forbid a correct migration.
+        headers = [line for line in toml.splitlines() if line.startswith("[")]
+        self.assertEqual([h for h in headers if "cc-suite" in h], [],
+                         "every legacy sentinel header must be pruned")
+        self.assertIn("[general]", toml)
+        self.assertIn('command = "cc-suite-server"', toml,
+                      "the server the sentinel points at is unchanged by a rename")
+
+    def test_provenance_records_both_stores_in_restorable_form(self):
+        """Recording only the JSON side would make the removal reversible in one file and
+        irreversible in the other."""
+        self._setup_sentinels()
+        self.run_helper("migrate-sentinels.sh", "--confirm")
+        restore = self._provenance()["restore"]
+        self.assertEqual(set(restore[".mcp.json"]), {"cc-suite-mcp", "cc-suite-agent:auditor"})
+        self.assertIn('command = "cc-suite-server"', restore[".codex/config.toml"]["cc-suite-mcp"])
+
+    def test_no_temporary_file_is_left_behind(self):
+        """Atomic writes go through a temporary in the same directory; none may survive the run."""
+        self._setup_sentinels()
+        self.run_helper("migrate-sentinels.sh", "--confirm")
+        self.assertEqual([str(p) for p in self.ws.rglob("*.vibe-tmp")], [])
 
     def test_confirmed_run_registers_then_prunes(self):
         self._setup_sentinels()

@@ -132,10 +132,47 @@ if prefix_dir.exists():
             f"remove {prefix}/ if it is not from a previous run of this tool.\n")
         raise SystemExit(3)
 
+# --- refuse to write through anything that is not a regular file --------------------------------
+# A destination branch can carry a symlink. `write_bytes` follows one, so a branch containing
+# `reports/alpha.json` as a link to somewhere outside the clone would have this tool write through
+# it — verified, and the reason this check reads the tree rather than the checkout.
+tree = git("ls-tree", "-r", "-z", f"origin/{branch}", check=False)
+entries = {}
+if tree.returncode == 0:
+    for record in tree.stdout.split("\0"):
+        if not record:
+            continue
+        meta, _, path = record.partition("\t")
+        entries[path] = meta.split()[0]        # mode
+
+MANAGED = ("reports/", "exemplars/", "audits/", "ledgers/", "articles/", prefix + "/")
+bad = sorted(path for path, mode in entries.items()
+             if mode != "100644" and mode != "100755" and path.startswith(MANAGED))
+if bad:
+    sys.stderr.write("decision required: the destination branch carries non-regular entries on "
+                     "managed paths (symlink or gitlink). Nothing was staged.\n")
+    for path in bad[:20]:
+        sys.stderr.write(f"  {path} (mode {entries[path]})\n")
+    raise SystemExit(3)
+
+def refuse_symlinked_ancestors(target):
+    walk = target
+    while walk != clone:
+        walk = walk.parent
+        if walk.is_symlink():
+            sys.stderr.write(f"decision required: {walk.relative_to(clone)} is a symlink; refusing "
+                             "to write beneath it. Nothing was staged.\n")
+            raise SystemExit(3)
+
 # --- D-F: refuse to overwrite differing destination content -------------------------------------
 conflicts, to_write = [], []
 for dest_path, src_path in sorted(corpus.items()):
     existing = clone / dest_path
+    refuse_symlinked_ancestors(existing)
+    if existing.is_symlink():
+        sys.stderr.write(f"decision required: {dest_path} is a symlink in the destination; "
+                         "refusing to write through it. Nothing was staged.\n")
+        raise SystemExit(3)
     if not existing.exists():
         to_write.append((dest_path, src_path))
     elif sha256_of(existing) != sha256_of(src_path):
@@ -164,7 +201,12 @@ if not to_write and manifest_current == manifest_body:
 for dest_path, src_path in to_write:
     target = clone / dest_path
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(src_path.read_bytes())
+    refuse_symlinked_ancestors(target)
+    # O_NOFOLLOW so that a link created between the check above and this write is still refused,
+    # rather than quietly followed.
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(src_path.read_bytes())
 
 manifest_path.parent.mkdir(parents=True, exist_ok=True)
 manifest_path.write_text(manifest_body, encoding="utf-8")
@@ -192,9 +234,55 @@ status=$?
 [ "$status" -eq 0 ] || exit "$status"
 
 # --- verification reads the BRANCH, never the working tree --------------------------------------
+# Counting non-empty is not verification: a seeded `.keep` would satisfy it. Every corpus blob is
+# compared against the source by content address, and the manifest must be present.
 log "verifying against $branch on $safe_dest"
 git -C "$clone" fetch --quiet origin "$branch"
-tree_count="$(git -C "$clone" ls-tree -r --name-only "origin/$branch" | grep -vc "^$TOOL_PREFIX/" || true)"
-log "branch carries $tree_count corpus file(s) plus the $TOOL_PREFIX/ namespace"
-[ "$tree_count" -gt 0 ] || die "the branch tree is empty — nothing was published"
+python3 - "$source_dir" "$clone" "$branch" "$TOOL_PREFIX" <<'VERIFY'
+import subprocess, sys
+from pathlib import Path
+
+source, clone, branch, prefix = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+
+def git(*args):
+    return subprocess.run(["git", "-C", str(clone), *args], capture_output=True, text=True,
+                          check=True).stdout
+
+published = {}
+for record in git("ls-tree", "-r", "-z", f"origin/{branch}").split("\0"):
+    if not record:
+        continue
+    meta, _, path = record.partition("\t")
+    mode, _, rest = meta.partition(" ")
+    published[path] = (mode, rest.split()[1])
+
+manifest_path = f"{prefix}/manifest.sha256"
+if manifest_path not in published:
+    sys.stderr.write(f"error: {manifest_path} is not on the branch\n")
+    raise SystemExit(1)
+
+manifest = git("show", f"origin/{branch}:{manifest_path}")
+listed = [line.split("  ", 1)[1] for line in manifest.splitlines() if line]
+
+missing, mismatched = [], []
+for rel in listed:
+    if rel not in published:
+        missing.append(rel)
+        continue
+    mode, blob = published[rel]
+    if mode not in ("100644", "100755"):
+        mismatched.append(f"{rel} (mode {mode})")
+        continue
+    src = git("hash-object", str((clone / rel)))
+    if blob != src.strip():
+        mismatched.append(rel)
+
+if missing or mismatched:
+    for rel in missing:
+        sys.stderr.write(f"error: manifest lists {rel} but the branch does not carry it\n")
+    for rel in mismatched:
+        sys.stderr.write(f"error: {rel} on the branch does not match the manifest\n")
+    raise SystemExit(1)
+sys.stderr.write(f"verified {len(listed)} file(s) against {branch} by content address\n")
+VERIFY
 exit 0

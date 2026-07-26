@@ -41,7 +41,9 @@ import json, os, re, sys
 from pathlib import Path
 
 ws, confirm = Path(sys.argv[1]), sys.argv[2] == "1"
-provenance = ws / ".vibe-suite-state" / "row6-provenance.json"
+state = ws / ".vibe-suite-state"
+provenance = state / "row6-provenance.json"
+report_path = state / "row6-decision.json"
 
 # A test hook, and only that: named steps abort immediately after completing, so the ordering can
 # be proved rather than asserted. Unset in every real run.
@@ -53,6 +55,26 @@ def vibe_name(legacy):
 
 mcp_path, toml_path = ws / ".mcp.json", ws / ".codex" / "config.toml"
 
+def write_atomically(path, text):
+    """Write through a temporary file in the same directory, then fsync file and directory.
+
+    Row 6 mutates live configuration. A truncating write that is interrupted leaves the user with a
+    half-written `.mcp.json` or `config.toml` — which is worse than either outcome this row is
+    allowed to produce, because it is not a registration state at all.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".vibe-tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
 def read_json(path):
     if not path.is_file():
         return None
@@ -62,18 +84,50 @@ def read_json(path):
         sys.stderr.write(f"error: row 6: {path} is not readable JSON: {exc}\n")
         raise SystemExit(1)
 
+# --- TOML: split into header-delimited blocks, understanding quoted keys ------------------------
+# `[mcp_servers."cc-suite-agent:auditor"]` is the normal spelling for a sentinel whose name carries
+# a colon, and `[mcp_servers.cc-suite-mcp.env]` is a subtable of one. A splitter that treats "." as
+# a separator unconditionally misses both: the first because the quotes become part of the name,
+# the second because the name gains a suffix.
+def split_key(text):
+    parts, current, quoted, index = [], "", False, 0
+    while index < len(text):
+        char = text[index]
+        if char == '"' and not quoted:
+            quoted = True
+        elif char == '"' and quoted:
+            quoted = False
+        elif char == "." and not quoted:
+            parts.append(current); current = ""; index += 1; continue
+        else:
+            current += char
+        index += 1
+    parts.append(current)
+    return [part.strip() for part in parts]
+
+def quote_key(name):
+    return f'"{name}"' if re.search(r"[^A-Za-z0-9_-]", name) else name
+
 def toml_blocks(text):
-    """Split TOML into (header, block-text) pairs, preserving everything verbatim."""
     blocks, header, buf = [], None, []
     for line in text.splitlines(keepends=True):
         stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
+        if stripped.startswith("[") and stripped.endswith("]") and not stripped.startswith("[["):
             blocks.append((header, "".join(buf)))
             header, buf = stripped[1:-1].strip(), [line]
         else:
             buf.append(line)
     blocks.append((header, "".join(buf)))
     return blocks
+
+def server_of(header):
+    """The sentinel a header belongs to, or None. Covers the table and all its subtables."""
+    if not header:
+        return None
+    parts = split_key(header)
+    if len(parts) < 2 or parts[0] != "mcp_servers":
+        return None
+    return parts[1]
 
 data = read_json(mcp_path) or {}
 servers = data.get("mcpServers") if isinstance(data, dict) else None
@@ -82,10 +136,8 @@ json_legacy = sorted(name for name in servers if LEGACY.match(name))
 
 toml_text = toml_path.read_text(encoding="utf-8") if toml_path.is_file() else ""
 blocks = toml_blocks(toml_text) if toml_text else []
-toml_legacy = sorted({
-    header.split(".", 1)[1] for header, _ in blocks
-    if header and header.startswith("mcp_servers.") and LEGACY.match(header.split(".", 1)[1])
-})
+toml_legacy = sorted({name for name, _ in ((server_of(h), b) for h, b in blocks)
+                      if name and LEGACY.match(name)})
 
 if not json_legacy and not toml_legacy:
     sys.stderr.write("note: row 6: no cc-suite sentinels found — nothing to migrate\n")
@@ -97,77 +149,93 @@ for name in toml_legacy:
     sys.stderr.write(f"note: row 6: .codex/config.toml carries legacy sentinel {name!r}\n")
 
 if not confirm:
+    # Exit 3 writes a machine-readable report, as the shared exit contract requires: the caller
+    # needs to know what it is being asked to confirm, and it cannot parse prose on stderr.
+    state.mkdir(parents=True, exist_ok=True)
+    write_atomically(report_path, json.dumps({
+        "row": 6,
+        "decision": "confirm re-registration under vibe-* sentinels and removal of the legacy blocks",
+        "register": {".mcp.json": [vibe_name(n) for n in json_legacy],
+                     ".codex/config.toml": [vibe_name(n) for n in toml_legacy]},
+        "remove": {".mcp.json": json_legacy, ".codex/config.toml": toml_legacy},
+        "rerun_with": "--confirm",
+    }, indent=2, sort_keys=True) + "\n")
     sys.stderr.write("row 6: re-registration under vibe-* sentinels and removal of the legacy "
                      "blocks require explicit confirmation.\n")
-    sys.stderr.write("Re-run with --confirm to perform the transition. Nothing has been changed.\n")
+    sys.stderr.write(f"decision required — see {report_path}\n")
     raise SystemExit(3)
 
 def checkpoint(step):
-    """Record a completed step, then honour the failure hook if it names this step."""
     record = json.loads(provenance.read_text(encoding="utf-8"))
     if step not in record["steps"]:
         record["steps"].append(step)
-    tmp = provenance.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(provenance)
+    write_atomically(provenance, json.dumps(record, indent=2, sort_keys=True) + "\n")
     if FAIL_AFTER == step:
         sys.stderr.write(f"error: row 6: aborting after {step} (VIBE_FAIL_AFTER)\n")
         raise SystemExit(1)
 
-# --- step 1: provenance, before any mutation ---------------------------------------------------
+# --- step 1: provenance, before any mutation, recording enough to restore ----------------------
 if not provenance.is_file():
     if FAIL_AFTER == "start":
         sys.stderr.write("error: row 6: aborting before provenance (VIBE_FAIL_AFTER)\n")
         raise SystemExit(1)
-    provenance.parent.mkdir(parents=True, exist_ok=True)
-    provenance.write_text(json.dumps({
+    state.mkdir(parents=True, exist_ok=True)
+    write_atomically(provenance, json.dumps({
         "row": 6, "schema": 1, "steps": [],
         "legacy": {"mcp.json": json_legacy, "codex/config.toml": toml_legacy},
-        "restore": {"mcp.json": {name: servers[name] for name in json_legacy}},
-    }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # Both stores are recorded in restorable form. Recording only the JSON side would make the
+        # removal reversible in one file and irreversible in the other.
+        "restore": {
+            ".mcp.json": {name: servers[name] for name in json_legacy},
+            ".codex/config.toml": {
+                name: "".join(text for header, text in blocks if server_of(header) == name)
+                for name in toml_legacy
+            },
+        },
+    }, indent=2, sort_keys=True) + "\n")
     checkpoint("provenance")
 record = json.loads(provenance.read_text(encoding="utf-8"))
 done = set(record.get("steps", []))
 
 # --- step 2: register vibe-* in .mcp.json ------------------------------------------------------
 if "register-json" not in done and json_legacy:
-    added = []
     for name in json_legacy:
         new = vibe_name(name)
         if new in servers:
-            sys.stderr.write(f"note: row 6: {new!r} already registered — preserved as it is\n")
+            sys.stderr.write(f"note: row 6: {new!r} already registered in .mcp.json — preserved\n")
             continue
         servers[new] = servers[name]
-        added.append(new)
     data["mcpServers"] = servers
-    tmp = mcp_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(mcp_path)
-    sys.stderr.write(f"note: row 6: registered {len(added)} vibe sentinel(s) in .mcp.json\n")
+    write_atomically(mcp_path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+    sys.stderr.write("note: row 6: registered vibe sentinel(s) in .mcp.json\n")
     checkpoint("register-json")
 
 # --- step 3: register vibe-* in .codex/config.toml ---------------------------------------------
 if "register-toml" not in done and toml_legacy:
-    present = {header.split(".", 1)[1] for header, _ in blocks
-               if header and header.startswith("mcp_servers.")}
+    present = {server_of(header) for header, _ in blocks if server_of(header)}
     appended = []
     for name in toml_legacy:
         new = vibe_name(name)
         if new in present:
-            sys.stderr.write(f"note: row 6: {new!r} already registered — preserved as it is\n")
+            sys.stderr.write(f"note: row 6: {new!r} already registered in config.toml — preserved\n")
             continue
-        source = next(text for header, text in blocks if header == f"mcp_servers.{name}")
-        appended.append(source.replace(f"[mcp_servers.{name}]", f"[mcp_servers.{new}]", 1))
+        # Every block belonging to the sentinel, including its subtables, with only the sentinel
+        # segment of each header rewritten.
+        for header, text in blocks:
+            if server_of(header) != name:
+                continue
+            parts = split_key(header)
+            parts[1] = quote_key(new)
+            appended.append(text.replace(f"[{header}]", "[" + ".".join(parts) + "]", 1))
     if appended:
-        body = toml_text if toml_text.endswith("\n") or not toml_text else toml_text + "\n"
-        toml_path.write_text(body + "".join(appended), encoding="utf-8")
+        body = toml_text if (not toml_text or toml_text.endswith("\n")) else toml_text + "\n"
+        write_atomically(toml_path, body + "".join(appended))
         toml_text = toml_path.read_text(encoding="utf-8")
         blocks = toml_blocks(toml_text)
-    sys.stderr.write(f"note: row 6: registered {len(appended)} vibe sentinel(s) in "
-                     ".codex/config.toml\n")
+    sys.stderr.write("note: row 6: registered vibe sentinel(s) in .codex/config.toml\n")
     checkpoint("register-toml")
 
-# --- step 4: verify both registrations before removing anything --------------------------------
+# --- step 4: verify BOTH registrations before removing anything --------------------------------
 verified = True
 if json_legacy:
     current = read_json(mcp_path).get("mcpServers", {})
@@ -177,8 +245,9 @@ if json_legacy:
                          "anything\n")
         verified = False
 if toml_legacy:
-    headers = {h for h, _ in toml_blocks(toml_path.read_text(encoding="utf-8")) if h}
-    missing = [vibe_name(n) for n in toml_legacy if f"mcp_servers.{vibe_name(n)}" not in headers]
+    have = {server_of(h) for h, _ in toml_blocks(toml_path.read_text(encoding="utf-8"))
+            if server_of(h)}
+    missing = [vibe_name(n) for n in toml_legacy if vibe_name(n) not in have]
     if missing:
         sys.stderr.write(f"error: row 6: .codex/config.toml is missing {missing} — refusing to "
                          "remove anything\n")
@@ -192,14 +261,11 @@ if json_legacy:
     current = read_json(mcp_path)
     for name in json_legacy:
         current.get("mcpServers", {}).pop(name, None)
-    tmp = mcp_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(mcp_path)
+    write_atomically(mcp_path, json.dumps(current, indent=2, sort_keys=True) + "\n")
 if toml_legacy:
     kept = [text for header, text in toml_blocks(toml_path.read_text(encoding="utf-8"))
-            if not (header and header.startswith("mcp_servers.")
-                    and header.split(".", 1)[1] in toml_legacy)]
-    toml_path.write_text("".join(kept), encoding="utf-8")
+            if server_of(header) not in toml_legacy]
+    write_atomically(toml_path, "".join(kept))
 checkpoint("pruned")
 sys.stderr.write("note: row 6: transition complete — vibe sentinels registered, legacy blocks "
                  "removed, provenance retained\n")

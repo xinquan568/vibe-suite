@@ -39,7 +39,8 @@ import json, os, sys, hashlib, datetime
 legacy_path, target_path = sys.argv[1], sys.argv[2]
 raw = open(legacy_path, "rb").read()
 try:
-    data = json.loads(raw.decode("utf-8"))
+    text = raw.decode("utf-8")
+    data = json.loads(text)
 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
     sys.stderr.write(f"error: {legacy_path} is not readable JSON: {exc}\n")
     raise SystemExit(1)
@@ -53,28 +54,55 @@ marker = {
     }
 }
 
-# The schema is unchanged, so the copy is verbatim and the marker is added alongside it. A list
-# history gets the marker appended as one entry; a mapping gets it as one member. Either way there
-# is exactly one, and a run that finds one already present adds nothing.
-if isinstance(data, list):
-    if any(isinstance(item, dict) and "migrated_from" in item for item in data):
-        sys.stderr.write("note: row 3: a migrated_from marker is already present — not adding another\n")
-    else:
-        data.append(marker)
-elif isinstance(data, dict):
-    if "migrated_from" in data:
-        sys.stderr.write("note: row 3: a migrated_from marker is already present — not adding another\n")
-    else:
-        data["migrated_from"] = marker["migrated_from"]
+# §7A says "copy verbatim", so the original bytes are spliced rather than reserialised. A round
+# trip through json.dumps preserves the values and loses the file: key order and whitespace both
+# change, and the result is a re-rendering of the history rather than a copy of it.
+def markers_in(value):
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict) and "migrated_from" in item]
+    return [value] if isinstance(value, dict) and "migrated_from" in value else []
+
+present = markers_in(data)
+if len(present) > 1:
+    sys.stderr.write(f"error: {legacy_path} already carries {len(present)} migrated_from markers; "
+                     "refusing to guess which one is authoritative\n")
+    raise SystemExit(1)
+
+stripped = text.rstrip()
+if present:
+    sys.stderr.write("note: row 3: a migrated_from marker is already present — copied as is\n")
+    body = raw
+elif isinstance(data, list) and stripped.endswith("]"):
+    inner = stripped[:-1].rstrip()
+    separator = "" if inner.endswith("[") else ","
+    body = (inner + separator + "\n" + json.dumps(marker, indent=2) + "\n]\n").encode("utf-8")
+elif isinstance(data, dict) and stripped.endswith("}"):
+    inner = stripped[:-1].rstrip()
+    separator = "" if inner.endswith("{") else ","
+    body = (inner + separator + "\n  \"migrated_from\": "
+            + json.dumps(marker["migrated_from"], indent=2) + "\n}\n").encode("utf-8")
 else:
     sys.stderr.write(f"error: {legacy_path}: expected a JSON list or object at the top level\n")
     raise SystemExit(1)
 
-tmp = target_path + ".tmp"
-with open(tmp, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, indent=2, sort_keys=True)
-    handle.write("\n")
-os.replace(tmp, target_path)
+# O_EXCL rather than check-then-write: the existence check earlier in this script is advisory, and
+# a new store that appears between that check and this write still wins.
+try:
+    handle = os.open(target_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+except FileExistsError:
+    sys.stderr.write("note: row 3: .claude/vibe-history.json appeared concurrently — left as it is "
+                     "(new store wins)\n")
+    raise SystemExit(0)
+with os.fdopen(handle, "wb") as out:
+    out.write(body)
+    out.flush()
+    os.fsync(out.fileno())
+
+# The splice is textual, so the result is checked rather than assumed.
+check = json.loads(open(target_path, encoding="utf-8").read())
+if len(markers_in(check)) != 1:
+    sys.stderr.write("error: row 3: the copy does not carry exactly one migrated_from marker\n")
+    raise SystemExit(1)
 PY
 
 vibe_note "row 3: copied .claude/nlpm-history.json → .claude/vibe-history.json with one marker"

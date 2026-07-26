@@ -37,7 +37,7 @@ done
 
 set +e
 VIBE_FAIL_AFTER="${VIBE_FAIL_AFTER:-}" python3 - "$workspace" "$confirm" <<'PY'
-import json, os, re, sys
+import json, os, re, sys, tempfile
 from pathlib import Path
 
 ws, confirm = Path(sys.argv[1]), sys.argv[2] == "1"
@@ -63,11 +63,15 @@ def write_atomically(path, text):
     allowed to produce, because it is not a registration state at all.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".vibe-tmp")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
+    # mkstemp rather than a predictable sibling name: `open()` follows a symlink, so a guessable
+    # temporary path lets anyone who can plant one redirect this write. mkstemp uses
+    # O_CREAT|O_EXCL, which fails on an existing path of any kind.
+    handle, tmp = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + ".", suffix=".tmp")
+    with os.fdopen(handle, "w", encoding="utf-8") as out:
+        out.write(text)
+        out.flush()
+        os.fsync(out.fileno())
+    os.chmod(tmp, 0o644)
     os.replace(tmp, path)
     fd = os.open(path.parent, os.O_RDONLY)
     try:

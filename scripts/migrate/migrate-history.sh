@@ -34,7 +34,7 @@ fi
 
 mkdir -p "$(dirname "$target")"
 python3 - "$legacy" "$target" <<'PY'
-import json, os, sys, hashlib, datetime
+import json, os, sys, hashlib, datetime, tempfile
 
 legacy_path, target_path = sys.argv[1], sys.argv[2]
 raw = open(legacy_path, "rb").read()
@@ -87,23 +87,28 @@ else:
 
 # O_EXCL rather than check-then-write: the existence check earlier in this script is advisory, and
 # a new store that appears between that check and this write still wins.
-# Write and validate a complete temporary file first, then publish it with os.link, which fails
-# if the target exists. Writing straight to the final path under O_EXCL is exclusive but not
-# atomic: an interruption mid-write leaves a truncated store that the next run's existence check
-# treats as "already migrated", so the damage is permanent and silent.
-tmp_path = target_path + ".vibe-tmp"
-with open(tmp_path, "wb") as out:
-    out.write(body)
-    out.flush()
-    os.fsync(out.fileno())
+# The splice is textual, so the result is validated in memory — before any file exists. Validating
+# a file on disk and then publishing it invites a race in between; there is nothing to race with
+# here.
+check = json.loads(body.decode("utf-8"))
+if len(markers_in(check)) != 1:
+    sys.stderr.write("error: row 3: the copy does not carry exactly one migrated_from marker\n")
+    raise SystemExit(1)
 
+# mkstemp, not a predictable "<target>.vibe-tmp": that name is guessable, and `open(path, "wb")`
+# follows a symlink, so anyone able to plant one could have this migration overwrite a file of
+# their choosing. mkstemp creates with O_CREAT|O_EXCL, which fails on an existing path of any kind.
+directory = os.path.dirname(target_path) or "."
+handle, tmp_path = tempfile.mkstemp(dir=directory, prefix=".vibe-history-", suffix=".tmp")
 try:
-    # The splice is textual, so the result is checked before it is published, not after.
-    check = json.loads(open(tmp_path, encoding="utf-8").read())
-    if len(markers_in(check)) != 1:
-        sys.stderr.write("error: row 3: the copy does not carry exactly one migrated_from marker\n")
-        raise SystemExit(1)
+    with os.fdopen(handle, "wb") as out:
+        out.write(body)
+        out.flush()
+        os.fsync(out.fileno())
+    os.chmod(tmp_path, 0o644)
     try:
+        # link, not replace: it fails if the target exists, so a new store that appeared while
+        # this ran still wins. Publication is a single atomic step over a fully written inode.
         os.link(tmp_path, target_path)
     except FileExistsError:
         sys.stderr.write("note: row 3: .claude/vibe-history.json appeared concurrently — left as "
@@ -115,7 +120,7 @@ finally:
     except FileNotFoundError:
         pass
 
-fd = os.open(os.path.dirname(target_path) or ".", os.O_RDONLY)
+fd = os.open(directory, os.O_RDONLY)
 try:
     os.fsync(fd)
 finally:

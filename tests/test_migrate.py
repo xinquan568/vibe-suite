@@ -460,10 +460,11 @@ class TestRowSix(MigrationCase):
         self.assertIn('command = "cc-suite-server"', restore[".codex/config.toml"]["cc-suite-mcp"])
 
     def test_no_temporary_file_is_left_behind(self):
-        """Atomic writes go through a temporary in the same directory; none may survive the run."""
+        """Atomic writes go through an mkstemp temporary in the same directory — an unpredictable
+        name, so it cannot be pre-planted as a symlink. None may survive the run."""
         self._setup_sentinels()
         self.run_helper("migrate-sentinels.sh", "--confirm")
-        self.assertEqual([str(p) for p in self.ws.rglob("*.vibe-tmp")], [])
+        self.assertEqual([str(p) for p in self.ws.rglob("*.tmp")], [])
 
     def test_confirmed_run_registers_then_prunes(self):
         self._setup_sentinels()

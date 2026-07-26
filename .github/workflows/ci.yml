@@ -162,3 +162,22 @@ jobs:
           fi
           printf 'discovered %d test module(s)\n' "${#files[@]}"
           python3 -m unittest discover -s tests -v
+
+  coverage:
+    name: coverage (AC-1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # The three referenced repositories are not checked out here — that is why
+      # `tests/source-manifests/*.json` exist. They are unfiltered `git ls-files` snapshots at the
+      # pinned commits, and the allowlist and exclusion list are applied by the checker, in one
+      # place, so there is no second copy of them to drift.
+      - name: Every source artifact is claimed by docs/disposition.yaml
+        run: |
+          set -euo pipefail
+          python3 tools/coverage-check.py

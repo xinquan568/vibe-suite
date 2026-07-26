@@ -30,6 +30,15 @@ from pathlib import Path
 
 REPOS = ("cc-suite", "grill-for-claude", "nlpm")
 
+#: The three workspace skills are the owner's own work. They are **not** in the vibe-suite
+#: repository and the directory holding them is not a git checkout, so CI — which clones only
+#: vibe-suite — cannot see them at all. They therefore need a snapshot exactly as the pinned trees
+#: do, but an unpinned one: `commit` is null and regeneration is from the workspace rather than
+#: from a commit. What makes it a *complete* tree rather than an allowlisted one is that the
+#: checker applies no allowlist to it, per AC-1's "complete file trees ... not just the SKILL.md".
+WORKSPACE = "workspace"
+WORKSPACE_ROOTS = ("issue2pr", "refine-proposal", "runs-stats")
+
 
 def git_files(tree):
     """Every tracked path, decoded so an undecodable byte cannot silently drop a file."""
@@ -37,6 +46,24 @@ def git_files(tree):
                          capture_output=True, check=True).stdout
     return sorted(part.decode("utf-8", "surrogateescape")
                   for part in raw.split(b"\0") if part)
+
+
+def workspace_files(root):
+    """Every file beneath the three skill roots, relative to `root`.
+
+    Unfiltered like the git listings: the checker decides what counts. OS junk is the one thing
+    dropped here, because `.DS_Store` appearing or vanishing is not a change to the tree's content
+    and would make the snapshot non-reproducible for no benefit.
+    """
+    junk = {".DS_Store", "Thumbs.db", "desktop.ini"}
+    out = []
+    for skill in WORKSPACE_ROOTS:
+        base = Path(root) / skill
+        if not base.is_dir():
+            raise SystemExit(f"error: {base} not found")
+        out += [str(p.relative_to(root)) for p in base.rglob("*")
+                if p.is_file() and p.name not in junk and not p.name.startswith("._")]
+    return sorted(out)
 
 
 def head_commit(tree):
@@ -55,17 +82,20 @@ def render(repo, commit, files):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tree", type=Path)
-    parser.add_argument("--repo", required=True, choices=REPOS)
+    parser.add_argument("--repo", required=True, choices=REPOS + (WORKSPACE,))
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
 
-    if not (args.tree / ".git").exists():
-        sys.stderr.write(f"error: {args.tree} is not a git checkout\n")
-        return 1
-    commit = head_commit(args.tree)
-    files = git_files(args.tree)
+    if args.repo == WORKSPACE:
+        commit, files = None, workspace_files(args.tree)
+    else:
+        if not (args.tree / ".git").exists():
+            sys.stderr.write(f"error: {args.tree} is not a git checkout\n")
+            return 1
+        commit, files = head_commit(args.tree), git_files(args.tree)
     args.out.write_text(render(args.repo, commit, files), encoding="utf-8")
-    sys.stderr.write(f"{args.repo}: {len(files)} files at {commit[:7]} -> {args.out}\n")
+    sys.stderr.write(f"{args.repo}: {len(files)} files at "
+                     f"{commit[:7] if commit else 'unpinned'} -> {args.out}\n")
     return 0
 
 

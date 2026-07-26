@@ -363,8 +363,17 @@ def load_workspace_manifest(path):
     if data.get("commit") is not None:
         raise CoverageError(f"{path}: the workspace tree is unpinned; commit must be null")
     files = data.get("files")
-    if not isinstance(files, list) or files != sorted(files) or len(files) != len(set(files)):
-        raise CoverageError(f"{path}: 'files' must be a sorted, unique list")
+    if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+        raise CoverageError(f"{path}: 'files' must be a list of strings")
+    # The same path rules the pinned manifests get. An unvalidated entry here would be the one
+    # place a manifest could carry `..` or an absolute path into the coverage universe.
+    for entry in files:
+        if entry.startswith("/") or ".." in entry.split("/") or "\\" in entry or entry != entry.strip():
+            raise CoverageError(f"{path}: entry {entry!r} is not a clean relative POSIX path")
+    if files != sorted(files):
+        raise CoverageError(f"{path}: entries must be sorted")
+    if len(files) != len(set(files)):
+        raise CoverageError(f"{path}: entries must be unique")
     return [f for f in files if not is_excluded(f)]
 
 

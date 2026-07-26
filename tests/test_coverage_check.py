@@ -168,7 +168,7 @@ def read_six():
             if len(cells) < 3 or cells[1] in ("Disp.",):
                 continue
             number += 1
-            out[f"{tree}:{number:02d}"] = (cells[1], expand_ids(cells[2]))
+            out[f"{tree}:{number:02d}"] = (cells[1], expand_ids(cells[2]), cells[0])
     return out
 
 
@@ -188,14 +188,14 @@ class TestDispositionsMatchSectionSix(CLICase):
                 self.assertEqual(sum(1 for k in self.six if k.startswith(tree + ":")), expected)
 
     def test_every_row_carries_sixs_disposition(self):
-        for row, (disposition, _) in self.six.items():
+        for row, (disposition, _, _source) in self.six.items():
             with self.subTest(row=row):
                 self.assertEqual(self.rows[row]["disposition"], disposition,
                                  f"{row}: §6 says {disposition}")
 
     def test_every_function_target_is_one_six_names(self):
         """Where §6's home column names function IDs, the map must not invent different ones."""
-        for row, (_, ids) in self.six.items():
+        for row, (_, ids, _source) in self.six.items():
             if not ids:
                 continue
             with self.subTest(row=row):
@@ -208,6 +208,25 @@ class TestDispositionsMatchSectionSix(CLICase):
         self.assertEqual(set(self.rows) - set(self.six), DIVERGENCES)
         note = self.rows["cc-suite:30"].get("note", "")
         self.assertIn("DIVERGENCE", note)
+
+    def test_each_rows_paths_answer_to_sixs_source_cell(self):
+        """Dispositions and targets alone cannot catch an artifact swapped between two rows that
+        share both. §6 names its artifacts in backticks; at least one of those names must appear in
+        the paths the row claims."""
+        checked = 0
+        for row, (_, _ids, source) in self.six.items():
+            names = [n for n in re.findall(r"`([^`]+)`", source)
+                     if not n.startswith("-") and "/" not in n.rstrip("/*")]
+            if not names:
+                continue                      # prose-only source cells carry no checkable token
+            mapping = self.rows[row]
+            claimed = " ".join(mapping.get("paths", []) + mapping.get("corpus_roots", []))
+            with self.subTest(row=row):
+                stems = [n.strip("*./$").split(".")[0] for n in names]
+                self.assertTrue(any(stem and stem in claimed for stem in stems),
+                                f"{row}: §6 names {names}, but the row claims {claimed[:120]!r}")
+            checked += 1
+        self.assertGreater(checked, 40, "the source-cell check must cover most rows")
 
     def test_retired_rows_name_their_replacement(self):
         """§6's legend: "R retired with replacement noted"."""
@@ -436,6 +455,86 @@ class TestManifestsAreReproducible(unittest.TestCase):
                 self.assertEqual(out.read_text(encoding="utf-8"),
                                  (MANIFESTS / f"{repo}.json").read_text(encoding="utf-8"),
                                  f"{repo}.json is stale against its pinned commit")
+
+
+class TestChecksAreWiredIntoTheCLI(CLICase):
+    """The helper tests above prove each check is *correct*. These prove each is *called*.
+
+    Removing an integration call — `check_counts` from `run()`, say — would leave every helper test
+    and the passing baseline green, which is exactly the hole the review named. Each case here
+    perturbs real input so that only a wired-in check can fail it.
+    """
+
+    def manifest_mutated(self, repo, mutate):
+        tmp = self.sandbox()
+        path = tmp / "manifests" / f"{repo}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        mutate(data)
+        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return self.run_check(manifests=tmp / "manifests")
+
+    def test_the_count_check_is_called(self):
+        """Drop a SKILL.md from the manifest: only a wired-in count check notices."""
+        def drop_a_skill(data):
+            skill = next(f for f in data["files"] if f.endswith("/SKILL.md"))
+            data["files"] = [f for f in data["files"] if f != skill]
+        result = self.manifest_mutated("cc-suite", drop_a_skill)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected 13 skills", result.stderr)
+
+    def test_the_nested_script_library_count_is_called(self):
+        def drop_a_lib(data):
+            lib = next(f for f in data["files"] if f.startswith("scripts/lib/"))
+            data["files"] = [f for f in data["files"] if f != lib]
+        result = self.manifest_mutated("cc-suite", drop_a_lib)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("scripts/lib", result.stderr)
+
+    def test_the_exclusion_list_is_called(self):
+        """An OS-junk file added to a manifest must not become a coverage obligation."""
+        def add_junk(data):
+            data["files"] = sorted(data["files"] + ["commands/.DS_Store"])
+        self.assertEqual(self.manifest_mutated("cc-suite", add_junk).returncode, 0,
+                         "an excluded file must not require a disposition row")
+
+    def test_the_allowlist_is_called(self):
+        """A newly allowlisted file with no row must fail — proving the walk reaches the manifest."""
+        def add_command(data):
+            data["files"] = sorted(data["files"] + ["commands/brand-new.md"])
+        result = self.manifest_mutated("cc-suite", add_command)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("commands/brand-new.md", result.stderr)
+
+    def test_the_workspace_walk_is_called(self):
+        def add_resource(data):
+            data["files"] = sorted(data["files"] + ["issue2pr/brand-new.md"])
+        result = self.manifest_mutated("workspace", add_resource)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_workspace_path_validation_is_called(self):
+        def poison(data):
+            data["files"] = sorted(data["files"] + ["../escape.md"])
+        result = self.manifest_mutated("workspace", poison)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("clean relative POSIX path", result.stderr)
+
+
+class TestWorkspaceManifestIsReproducible(unittest.TestCase):
+    """The workspace tree is unpinned and lives outside this repository, so its snapshot is the one
+    manifest that can drift without a commit to compare against."""
+
+    WORKSPACE_ROOT = REPO_ROOT.parent.parent.parent.parent / ".claude" / "skills"
+
+    def test_regenerating_workspace_json_reproduces_it(self):
+        if not self.WORKSPACE_ROOT.is_dir():
+            self.skipTest(f"workspace skills not present at {self.WORKSPACE_ROOT}")
+        out = Path(tempfile.mkdtemp()) / "workspace.json"
+        self.addCleanup(shutil.rmtree, out.parent, ignore_errors=True)
+        subprocess.run([sys.executable, str(GEN), str(self.WORKSPACE_ROOT), "--repo", "workspace",
+                        "--out", str(out)], capture_output=True, check=True)
+        self.assertEqual(out.read_text(encoding="utf-8"),
+                         (MANIFESTS / "workspace.json").read_text(encoding="utf-8"),
+                         "workspace.json is stale against the live workspace skills")
 
 
 if __name__ == "__main__":

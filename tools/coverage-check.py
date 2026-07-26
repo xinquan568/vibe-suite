@@ -94,7 +94,10 @@ NESTED_SCRIPT_LIB_COUNTS = {("cc-suite", "scripts/lib/**"): 7, ("nlpm", "auditor
 #: because the difference is accounted for rather than absorbed.
 WORKSPACE_RESOURCE_COUNT = 14
 
-DISPOSITIONS = frozenset("KMRGD")
+#: §6's five letters, plus the two compound forms it actually writes: row 19's "K/M" (partials,
+#: some kept and some merged) and row 22's "M/K" (conventions merged, agent-design kept). A
+#: single-letter rule would force a choice §6 declines to make.
+DISPOSITIONS = frozenset(("K", "M", "R", "G", "D", "K/M", "M/K"))
 _TARGET = re.compile(r"F[0-9]+\.[0-9]+$")
 #: §6's "vibe-suite home" column is a function ID, several IDs, or — for three workspace rows — a
 #: repository path. Encoding only the first would have forced those rows to name a function that
@@ -165,12 +168,16 @@ def is_allowlisted(path):
 # were derived, deleting a row would delete its own test, and a row claiming no allowlisted path
 # could vanish silently. This is what makes "removing any row fails CI" true for every row.
 ROW_INVENTORY = tuple(
-    [f"cc-suite:{n:02d}" for n in range(1, 30)] +          # 29
+    [f"cc-suite:{n:02d}" for n in range(1, 31)] +          # 29 from §6 + one divergence (30)
     [f"grill-for-claude:{n:02d}" for n in range(1, 8)] +   # 7
     [f"nlpm:{n:02d}" for n in range(1, 26)] +              # 25
     [f"workspace:{n:02d}" for n in range(1, 15)]           # 14
 )
-assert len(ROW_INVENTORY) == 75, "the §6 inventory is 75 rows"
+#: §6 has 75 rows. `cc-suite:30` is a deliberate 76th: §6's cc-suite subsection has no row for that
+#: tree's manifests and top-level docs, although grill and nlpm both do and AC-1 allowlists those
+#: files. The divergence is carried here rather than papered over by absorbing §6's real rows into
+#: neighbours — which is what produced three rounds of mistranscription.
+assert len(ROW_INVENTORY) == 76, "§6's 75 rows plus cc-suite:30, the recorded divergence"
 
 TREES = ("cc-suite", "grill-for-claude", "nlpm", "workspace")
 
@@ -295,6 +302,8 @@ def validate_schema(trees, mappings, function_ids):
             if key not in ("row", "tree", "paths", "corpus_roots", "disposition", "target",
                            "note", "_line"):
                 errors.append(f"{where}: unknown key {key!r}")
+        if disposition in ("K/M", "M/K") and not mapping.get("note"):
+            errors.append(f"{where}: a compound disposition must carry a note saying which is which")
         if disposition == "D" and has_paths:
             errors.append(f"{where}: a D row describes data, so it uses 'corpus_roots'")
         if disposition and disposition != "D" and has_roots:
@@ -303,7 +312,7 @@ def validate_schema(trees, mappings, function_ids):
         if isinstance(target, str) and " " in target:
             errors.append(f"{where}: target {target!r} must be a single value or a list")
         targets = target if isinstance(target, list) else ([target] if target else [])
-        if disposition in ("K", "M", "R", "G"):
+        if disposition and disposition != "D":
             # §6's legend: "R retired with replacement noted" — the replacement is the point of an
             # R row, so a target is required for it too. Only D has no function ID.
             if not targets:

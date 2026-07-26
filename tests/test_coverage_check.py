@@ -69,7 +69,7 @@ class TestBaseline(CLICase):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("300 source artifacts", result.stdout)
-        self.assertIn("75 disposition rows", result.stdout)
+        self.assertIn("76 disposition rows", result.stdout)
 
     def test_every_tree_contributes(self):
         universe, _ = cc.build_universe(MANIFESTS)
@@ -85,7 +85,7 @@ class TestAcceptanceCriterion(CLICase):
         tmp = self.sandbox()
         text = (tmp / "disposition.yaml").read_text(encoding="utf-8")
         rows = re.findall(r"^  - row: (\S+)$", text, re.M)
-        self.assertEqual(len(rows), 75, "the map must encode all 75 §6 rows")
+        self.assertEqual(len(rows), 76, "§6's 75 rows plus cc-suite:30, the recorded divergence")
 
         blocks, current = [], None
         for line in text.splitlines(keepends=True):
@@ -95,7 +95,7 @@ class TestAcceptanceCriterion(CLICase):
                 current.append(line)
             else:
                 current = None
-        self.assertEqual(len(blocks), 75)
+        self.assertEqual(len(blocks), 76)
 
         for row, block in zip(rows, blocks):
             with self.subTest(row=row):
@@ -122,72 +122,96 @@ class TestAcceptanceCriterion(CLICase):
 
 
 # --------------------------------------------------------------------------- the semantic oracle
-#: §6's disposition and target for a sample of rows, transcribed BY HAND from the proposal rather
-#: than read from the artifact under test. Coverage proves the map is *complete*; nothing else
-#: proves it is *correct*, and a green run told me nothing about a batch of wrong-but-well-formed
-#: targets that review caught. Every entry below was a defect at some point in this issue.
-SIX_ORACLE = {
-    # grill-for-claude — every one of these was wrong in the first draft
-    "grill-for-claude:01": ("K", ["F3.1"]),              # `roast` command — was M
-    "grill-for-claude:02": ("K", ["F3.2", "F3.3", "F3.4", "F3.5", "F3.6", "F3.7"]),
-    "grill-for-claude:03": ("M", ["F9.1", "F9.2"]),      # grill-core skill — was K/F3.2
-    "grill-for-claude:04": ("G", ["F9.6"]),
-    "grill-for-claude:05": ("M", ["F4.4", "F1.2"]),      # validate-plugin.sh
-    # nlpm
-    "nlpm:01": ("K", ["F4.1"]),                          # ls + scanner
-    "nlpm:02": ("K", ["F4.2"]),                          # score + scorer
-    "nlpm:03": ("M", ["F3.8"]),                          # `fix` — was K/F4.3
-    "nlpm:04": ("K", ["F4.3"]),                          # check + checker
-    "nlpm:06": ("K", ["F4.5"]),                          # test + tester + .nlpm-test specs
-    "nlpm:14": ("M", ["F1.1"]),                          # init
-    "nlpm:25": ("D", []),                                # accumulated ops data
-    # cc-suite
-    "cc-suite:10": ("R", ["F3.1"]),                      # `audit` retired with replacement
-    "cc-suite:14": ("R", ["F6.1"]),                      # `review-plan` retired with replacement
-    # workspace — three §6 homes are paths, not function IDs
-    "workspace:01": ("K", ["F6.1"]),                     # refine-proposal/SKILL.md
-    "workspace:05": ("K", ["F6.2"]),                     # issue2pr/SKILL.md
-    "workspace:09": ("K", ["examples/profiles/roamex.md"]),
-    "workspace:10": ("K", ["templates/pr-body.md"]),
-    "workspace:12": ("M", ["examples/profiles/roamex.md"]),
-    "workspace:13": ("K", ["F8.5"]),
-}
+PROPOSAL = REPO_ROOT / "docs/discussion/2026-07-18-vibe-suite-merge/iter-1/round-1/plan-i1-r1.md"
+
+#: §6's subsections, in the order the map numbers them.
+SUBSECTIONS = (("cc-suite", "### cc-suite"), ("grill-for-claude", "### grill-for-claude"),
+               ("nlpm", "### nlpm"), ("workspace", "### Workspace skills"))
+#: cc-suite:30 has no §6 row — it is the recorded divergence (see the checker's ROW_INVENTORY note).
+DIVERGENCES = {"cc-suite:30"}
+
+
+def expand_ids(cell):
+    """Function IDs named by a §6 home cell, expanding the ranges §6 writes.
+
+    grill's agent row reads "F3.2-F3.7", meaning six functions. A plain findall sees two, so a map
+    that correctly lists all six would look like it had invented four.
+    """
+    ids = set(re.findall(r"F[0-9]+\.[0-9]+", cell))
+    for match in re.finditer(r"F([0-9]+)\.([0-9]+)\s*[-\u2013\u2014]\s*F?([0-9]+)?\.?([0-9]+)", cell):
+        group, start = int(match.group(1)), int(match.group(2))
+        end = int(match.group(4))
+        if match.group(3) and int(match.group(3)) != group:
+            continue
+        ids.update(f"F{group}.{n}" for n in range(start, end + 1))
+    return frozenset(ids)
+
+
+def read_six():
+    """Parse §6's tables out of the shipped proposal.
+
+    The oracle is §6 itself, not a hand-copied sample of it. Three rounds of review found
+    mistranscriptions in this map, and a 20-row sample missed them for the same reason every sample
+    does: the rows I checked were right and the rows I did not check were wrong. Reading the source
+    removes the sampling step entirely.
+    """
+    text = PROPOSAL.read_text(encoding="utf-8")
+    bounds = [text.index(marker) for _, marker in SUBSECTIONS] + [text.index("\n## 7")]
+    out = {}
+    for index, (tree, _) in enumerate(SUBSECTIONS):
+        body = text[bounds[index]:bounds[index + 1]]
+        number = 0
+        for line in body.splitlines():
+            if not line.startswith("|") or line.startswith("|---"):
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) < 3 or cells[1] in ("Disp.",):
+                continue
+            number += 1
+            out[f"{tree}:{number:02d}"] = (cells[1], expand_ids(cells[2]))
+    return out
 
 
 class TestDispositionsMatchSectionSix(CLICase):
-    """Coverage proves completeness. This proves the map says what §6 says."""
+    """Coverage proves the map is complete. This proves it says what §6 says."""
 
-    def parsed(self):
-        text = DISPOSITION.read_text(encoding="utf-8")
-        _, mappings = cc.parse_disposition(text)
-        return {m["row"]: m for m in mappings}
+    def setUp(self):
+        self.six = read_six()
+        _, mappings = cc.parse_disposition(DISPOSITION.read_text(encoding="utf-8"))
+        self.rows = {m["row"]: m for m in mappings}
 
-    def test_sampled_rows_carry_sixs_disposition_and_target(self):
-        rows = self.parsed()
-        for row, (disposition, target) in SIX_ORACLE.items():
+    def test_the_proposal_yields_seventy_five_rows(self):
+        self.assertEqual(len(self.six), 75)
+        for tree, expected in (("cc-suite", 29), ("grill-for-claude", 7), ("nlpm", 25),
+                               ("workspace", 14)):
+            with self.subTest(tree=tree):
+                self.assertEqual(sum(1 for k in self.six if k.startswith(tree + ":")), expected)
+
+    def test_every_row_carries_sixs_disposition(self):
+        for row, (disposition, _) in self.six.items():
             with self.subTest(row=row):
-                self.assertIn(row, rows)
-                self.assertEqual(rows[row]["disposition"], disposition)
-                actual = rows[row].get("target", [])
-                actual = actual if isinstance(actual, list) else [actual]
-                self.assertEqual(actual, target)
+                self.assertEqual(self.rows[row]["disposition"], disposition,
+                                 f"{row}: §6 says {disposition}")
 
-    def test_a_permuted_disposition_is_caught_by_the_oracle(self):
-        """The check itself accepts any legal disposition, so this fixture is the only thing
-        standing between a permuted map and a green run."""
-        rows = self.parsed()
-        self.assertNotEqual(rows["nlpm:03"]["disposition"], "K",
-                            "nlpm `fix` is M into F3.8, not K — the first draft had this wrong")
-        self.assertNotEqual(rows["grill-for-claude:03"]["disposition"], "K",
-                            "grill-core is merged into the suite contract, not kept")
+    def test_every_function_target_is_one_six_names(self):
+        """Where §6's home column names function IDs, the map must not invent different ones."""
+        for row, (_, ids) in self.six.items():
+            if not ids:
+                continue
+            with self.subTest(row=row):
+                target = self.rows[row].get("target", [])
+                mapped = frozenset(target if isinstance(target, list) else [target])
+                self.assertTrue(mapped <= ids,
+                                f"{row}: map has {sorted(mapped - ids)}, §6 names {sorted(ids)}")
 
-    def test_every_row_id_in_the_oracle_exists(self):
-        rows = self.parsed()
-        self.assertEqual(sorted(set(SIX_ORACLE) - set(rows)), [])
+    def test_the_only_row_without_a_six_source_is_the_recorded_divergence(self):
+        self.assertEqual(set(self.rows) - set(self.six), DIVERGENCES)
+        note = self.rows["cc-suite:30"].get("note", "")
+        self.assertIn("DIVERGENCE", note)
 
     def test_retired_rows_name_their_replacement(self):
         """§6's legend: "R retired with replacement noted"."""
-        for row, mapping in self.parsed().items():
+        for row, mapping in self.rows.items():
             if mapping.get("disposition") == "R":
                 with self.subTest(row=row):
                     self.assertTrue(mapping.get("target"))

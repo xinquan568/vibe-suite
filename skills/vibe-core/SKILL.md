@@ -117,6 +117,89 @@ Role-scoped, not universal:
 - **Every agent**: a secret discovered in a file is a finding about the secret's presence, not an
   occasion to quote it.
 
+## Project configuration — `.vibe-suite.md`
+
+One file, one schema, one reader: `scripts/lib/config.py`. Commands load configuration through it
+rather than parsing the file themselves, because a second parser is a second statement of this
+schema and the two will diverge.
+
+### Schema
+
+| Key | Type | Domain | Default |
+|-----|------|--------|---------|
+| `engine` | enum | `claude`\|`codex`\|`agy`\|`both` | unset — the calling command decides |
+| `cross_model_audit_engine` | enum | `codex`\|`agy` | `codex` |
+| `reviewer_backend` | enum | `codex` | `codex` |
+| `reviewer_model` | string | open | unset |
+| `effort` | enum | `low`\|`medium`\|`high` | `medium` |
+| `sandbox` | enum | `read-only`\|`workspace-write`\|`danger-full-access` | `read-only` |
+| `audit_depth` | enum | `mini`\|`full` | unset — ask |
+| `model_overrides` | map | `codex`\|`agy` | empty |
+| `skip_patterns` | list | open | empty |
+| `focus_instructions` | string | open | empty |
+| `project_instructions` | string | open | empty |
+| `score_threshold` | int | `0-100` | `70` |
+| `rule_overrides` | map | closed | empty |
+| `issue2pr_profile` | string | id | unset |
+| `gate` | map | closed | unset |
+
+Every model-valued key's stored default is **absent**. Absence means *defer to the tool's own
+default*, which is how P9 is honoured at rest: a populated default here would be a pinned model in
+configuration form.
+
+`issue2pr_profile` is an **id**, not a path — `[a-z0-9][a-z0-9-]*`, resolved as `profiles/<id>.md`.
+A `/` or `.` in it is rejected before any path is constructed.
+
+### Map openness
+
+| Level | Openness | An unknown key |
+|-------|----------|----------------|
+| top level | open | warns; the load continues |
+| `model_overrides` | closed to `codex`, `agy` | errors |
+| `rule_overrides` (both levels) | closed | errors |
+| `gate` | closed | errors |
+
+Unknown top-level keys warn rather than fail because the file is user-authored and a newer suite
+version will add keys an older reader has not seen. Every other failure — an invalid value,
+malformed syntax, a duplicate key, a path leaving the project — is fatal. Warnings name the key and
+never the value: an unrecognised key may be a typo whose value is a credential.
+
+### Accepted grammar
+
+YAML frontmatter over a closed subset. Anything outside it is a syntax error, never a partial parse.
+
+| Construct | Accepted |
+|-----------|----------|
+| Delimiters | a leading `---` and a closing `---`; the body after it is ignored |
+| Indentation | two spaces per level, spaces only |
+| Map depth | three levels |
+| Plain scalars | to end of line; `*`, `?`, `[`, `]` are ordinary characters, so globs parse |
+| Quoted scalars | `'…'` with `''`; `"…"` with `\\`, `\"`, `\n`, `\t` — **always strings** |
+| Typed scalars | `true`/`false`, integers, empty or `null` → absent (plain scalars only) |
+| Sequences | block form, scalars only, one level, directly under a key |
+| Block scalars | `\|` literal and `>` folded, with `-`/`+` chomping |
+| Comments | `#` at line start or after whitespace, outside quotes |
+| Rejected | flow collections, tags, anchors, aliases, merge keys, directives, explicit keys, `...`, over-depth maps, nested or mapping sequence items, malformed quotes, trailing junk |
+
+## Runtime state — the toggle store
+
+Separate from project configuration and machine-managed: `<workspace>/.vibe-suite-state/state.json`,
+with settings under a top-level `config` member. One state file per workspace.
+
+| Key | Type | Fresh default |
+|-----|------|---------------|
+| `gate.stop_review_gate` | bool | `false` — the gate ships **off**, opt-in |
+| `gate.model` | string | **unset** — dynamic, never a pinned version |
+| `gate.fail_policy` | enum `open`\|`closed` | `open` — fail-open |
+
+**Only these three keys are shadowable.** A runtime write to anything else is rejected: the rest of
+the schema belongs to the project file, which a user edits deliberately.
+
+Where both name a setting, **runtime state wins for the session**. The `gate` block in
+`.vibe-suite.md` supplies defaults and display only — the store owns live values, and setting one
+leaves the project file byte-identical. An unset key is *absent* from the JSON rather than null, and
+a write preserves every sibling member, so job records survive a toggle.
+
 ## Further detail
 
 [`references/severity.md`](references/severity.md) — a worked example per level, effort-estimation

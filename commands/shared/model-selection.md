@@ -39,6 +39,13 @@ reconciled. It is not a fourth engine and it does not select a model: each const
 own model **independently**, through the ladder below. Asking "which model does `both` use" is a
 category error, and the answer a consumer would invent for it is the reason this paragraph exists.
 
+## Loading configuration
+
+Project configuration is read through the suite's single reader — `python3 scripts/lib/config.py
+--json <root>` — never by parsing `.vibe-suite.md` in place. The reader owns the grammar, the
+domains and the defaults; a command that parses the file itself becomes a second implementation of
+this schema and will drift from it.
+
 ## Priority ladder
 
 Highest wins. The `action` column is a **closed two-token vocabulary** — `USE_VALUE` takes the value

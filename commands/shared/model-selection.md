@@ -84,10 +84,10 @@ cannot drift apart.
 
 | Key | Type | Allowed | Default |
 |-----|------|---------|---------|
-| `engine` | enum | `claude`, `codex`, `agy`, `both` | unset → the calling command's own default |
-| `cross_model_audit_engine` | enum | `codex`, `agy` | `codex` until graduation |
+| `engine` | enum | `claude`, `codex`, `agy`, `both` | unset |
+| `cross_model_audit_engine` | enum | `codex`, `agy` | `codex` |
 | `reviewer_backend` | enum | `codex` | `codex` |
-| `reviewer_model` | string | **open / dynamic — no closed set** | unset → `DEFER` |
+| `reviewer_model` | string | **open / dynamic — no closed set** | unset |
 
 `reviewer_backend` and `reviewer_model` are separate keys, not one concept: the backend is which
 tool runs the critic, the model is optional and, when absent, defers. `reviewer_model` deliberately

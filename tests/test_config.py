@@ -55,21 +55,21 @@ config = _load(CONFIG_PY, "vibe_config")
 # Hand-written specification fixture. Never regenerated from any artifact.
 
 EXPECTED_SCHEMA = {
-    "engine":                   ("enum",   "claude|codex|agy|both",                  None),
+    "engine":                   ("enum",   "claude|codex|agy|both",                  "unset"),
     "cross_model_audit_engine": ("enum",   "codex|agy",                              "codex"),
     "reviewer_backend":         ("enum",   "codex",                                  "codex"),
-    "reviewer_model":           ("string", "open",                                   None),
+    "reviewer_model":           ("string", "open",                                   "unset"),
     "effort":                   ("enum",   "low|medium|high",                        "medium"),
     "sandbox":                  ("enum",   "read-only|workspace-write|danger-full-access", "read-only"),
-    "audit_depth":              ("enum",   "mini|full",                              None),
-    "model_overrides":          ("map",    "codex|agy",                              {}),
-    "skip_patterns":            ("list",   "open",                                   []),
-    "focus_instructions":       ("string", "open",                                   ""),
-    "project_instructions":     ("string", "open",                                   ""),
-    "score_threshold":          ("int",    "0-100",                                  70),
-    "rule_overrides":           ("map",    "closed",                                 {}),
-    "issue2pr_profile":         ("string", "id",                                     None),
-    "gate":                     ("map",    "closed",                                 None),
+    "audit_depth":              ("enum",   "mini|full",                              "unset"),
+    "model_overrides":          ("map",    "codex|agy",                              "empty"),
+    "skip_patterns":            ("list",   "open",                                   "empty"),
+    "focus_instructions":       ("string", "open",                                   "empty"),
+    "project_instructions":     ("string", "open",                                   "empty"),
+    "score_threshold":          ("int",    "0-100",                                  "70"),
+    "rule_overrides":           ("map",    "closed",                                 "empty"),
+    "issue2pr_profile":         ("string", "id",                                     "unset"),
+    "gate":                     ("map",    "closed",                                 "unset"),
 }
 
 SHADOWABLE = {"gate.stop_review_gate", "gate.model", "gate.fail_policy"}
@@ -159,7 +159,7 @@ class TestSchemaAgreement(unittest.TestCase):
             with self.subTest(key=key):
                 row = config.SCHEMA.get(key)
                 self.assertIsNotNone(row, f"{key} missing from the reader registry")
-                self.assertEqual((row.type, row.domain, row.default), want)
+                self.assertEqual((row.type, row.domain, config.canonical_default(row.default)), want)
 
     def test_reader_registry_has_no_extra_keys(self):
         self.assertEqual(set(config.SCHEMA) - set(EXPECTED_SCHEMA), set())
@@ -207,6 +207,79 @@ class TestGrammarRejections(unittest.TestCase):
 
     def test_duplicate_key_when_nested(self):
         self._rejects("rule_overrides:\n  R51:\n    enabled: true\n    enabled: false\n")
+
+
+class TestAdversarialGrammar(unittest.TestCase):
+    """Inputs a hand-written parser accepts by accident. Each was found by attacking the code."""
+
+    def _rejects(self, frontmatter):
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, frontmatter)
+            with self.assertRaises(config.ConfigSyntaxError):
+                config.load(root)
+
+    def test_malformed_single_quote_is_rejected(self):
+        # `'a'b'` had decoded to a'b: the naive check was starts-and-ends-with-a-quote.
+        self._rejects("reviewer_model: 'a'b'\n")
+
+    def test_doubled_quote_inside_single_quotes_still_works(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "reviewer_model: 'it''s fine'\n")
+            self.assertEqual(config.load(root)["reviewer_model"], "it's fine")
+
+    def test_junk_after_a_block_header_is_rejected(self):
+        self._rejects("focus_instructions: |garbage\n  x\n")
+
+    def test_over_indented_sequence_item_is_rejected(self):
+        # Indentation-based nesting was silently flattened into the parent list.
+        self._rejects("skip_patterns:\n  - a\n    - b\n")
+
+    def test_an_indented_marker_inside_block_content_is_content(self):
+        # The closing delimiter is recognised only at document level. Treating an indented `---`
+        # as the marker truncated the file and discarded everything after it.
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "focus_instructions: |\n  ---\n  after\n")
+            self.assertEqual(config.load(root)["focus_instructions"], "---\nafter\n")
+
+    def test_profile_id_rejects_a_trailing_newline(self):
+        # `$` matches before a final newline; only fullmatch excludes it.
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, 'issue2pr_profile: "safe\\n"\n')
+            with self.assertRaises(config.ConfigValueError):
+                config.load(root)
+
+    def test_an_explicitly_empty_value_falls_back_to_the_default(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "engine:\nscore_threshold:\n")
+            cfg = config.load(root)
+            self.assertIsNone(cfg["engine"])
+            self.assertEqual(cfg["score_threshold"], 70, "an empty value means absent")
+
+    def test_model_overrides_values_must_be_strings(self):
+        for bad in ("model_overrides:\n  codex: true\n", "model_overrides:\n  codex:\n    a: b\n"):
+            with self.subTest(fragment=bad):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, bad)
+                    with self.assertRaises(config.ConfigValueError):
+                        config.load(root)
+
+
+class TestDocumentedDefaults(unittest.TestCase):
+    """The documented default column is parsed, not borrowed from the code."""
+
+    def test_parse_schema_table_reads_the_default_cell(self):
+        table = ("| Key | Type | Domain | Default |\n|---|---|---|---|\n"
+                 "| `score_threshold` | int | `0-100` | `999` |\n")
+        self.assertEqual(config.parse_schema_table(table)["score_threshold"][2], "999",
+                         "the documented default must come from the document")
+
+    def test_a_wrong_documented_default_is_detectable(self):
+        # Previously parse_schema_table substituted SCHEMA's default, so documentation could say
+        # anything and the comparison still passed.
+        table = ("| Key | Type | Domain | Default |\n|---|---|---|---|\n"
+                 "| `score_threshold` | int | `0-100` | `999` |\n")
+        self.assertNotEqual(config.parse_schema_table(table)["score_threshold"],
+                            EXPECTED_SCHEMA["score_threshold"])
 
 
 class TestFailureModes(unittest.TestCase):

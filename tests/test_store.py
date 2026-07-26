@@ -48,11 +48,21 @@ class TestOnDiskLayout(unittest.TestCase):
             self.assertIn("config", raw, "settings must sit under state.json's `config` member")
             self.assertIs(raw["config"]["gate"]["stop_review_gate"], True)
 
-    def test_the_state_file_is_named_state_json(self):
+    def test_the_state_file_is_at_the_documented_path(self):
+        # Constructed here, not taken from store.state_path — trusting the module's own answer
+        # would let any workspace-relative file named state.json satisfy this.
         with tempfile.TemporaryDirectory() as ws:
             store.Store(ws).set("gate.fail_policy", "closed")
-            self.assertEqual(store.state_path(ws).name, "state.json")
-            self.assertTrue(store.state_path(ws).exists())
+            expected = Path(ws) / ".vibe-suite-state" / "state.json"
+            self.assertTrue(expected.exists(), f"expected state at {expected}")
+
+    def test_every_unset_shadowable_key_is_absent(self):
+        with tempfile.TemporaryDirectory() as ws:
+            store.Store(ws).set("gate.stop_review_gate", True)
+            gate = json.loads(store.state_path(ws).read_text(encoding="utf-8"))["config"]["gate"]
+            for unset in ("model", "fail_policy"):
+                with self.subTest(key=unset):
+                    self.assertNotIn(unset, gate)
 
     def test_an_unset_key_is_absent_from_the_json_not_null(self):
         with tempfile.TemporaryDirectory() as ws:
@@ -64,11 +74,15 @@ class TestOnDiskLayout(unittest.TestCase):
         with tempfile.TemporaryDirectory() as ws:
             path = store.state_path(ws)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"jobs": {"j1": {"status": "done"}}}), encoding="utf-8")
+            path.write_text(json.dumps({
+                "jobs": {"j1": {"status": "done"}},
+                "config": {"other_section": {"keep": 1}, "gate": {"model": "preset"}},
+            }), encoding="utf-8")
             store.Store(ws).set("gate.stop_review_gate", True)
             raw = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(raw["jobs"], {"j1": {"status": "done"}}, "sibling state was clobbered")
-            self.assertIn("config", raw)
+            self.assertEqual(raw["jobs"], {"j1": {"status": "done"}}, "top-level sibling clobbered")
+            self.assertEqual(raw["config"]["other_section"], {"keep": 1}, "config sibling clobbered")
+            self.assertEqual(raw["config"]["gate"]["model"], "preset", "gate sibling clobbered")
 
     def test_values_survive_a_fresh_process(self):
         with tempfile.TemporaryDirectory() as ws:
@@ -79,6 +93,38 @@ class TestOnDiskLayout(unittest.TestCase):
                     f"print(m.Store(r'{ws}').get('gate.fail_policy'))")
             result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
             self.assertEqual(result.stdout.strip(), "closed", result.stderr)
+
+
+class TestDamagedState(unittest.TestCase):
+    """A state file we cannot read is a state file we must not overwrite."""
+
+    def test_malformed_json_raises_rather_than_being_overwritten(self):
+        with tempfile.TemporaryDirectory() as ws:
+            path = store.state_path(ws)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"jobs": {"j1": "important"}, TRUNCATED', encoding="utf-8")
+            with self.assertRaises(store.StoreFormatError):
+                store.Store(ws).set("gate.stop_review_gate", True)
+            self.assertIn("important", path.read_text(encoding="utf-8"),
+                          "job records must survive a refused write")
+
+    def test_a_hand_edited_invalid_override_is_rejected_on_read(self):
+        # set() validates; a file edited by hand does not go through set().
+        with tempfile.TemporaryDirectory() as ws:
+            path = store.state_path(ws)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"config": {"gate": {"fail_policy": "sideways"}}}),
+                            encoding="utf-8")
+            with self.assertRaises(store.StoreValueError):
+                store.Store(ws).overrides()
+
+    def test_an_unknown_persisted_key_is_rejected_on_read(self):
+        with tempfile.TemporaryDirectory() as ws:
+            path = store.state_path(ws)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"config": {"gate": {"nonsense": True}}}), encoding="utf-8")
+            with self.assertRaises(store.StoreKeyError):
+                store.Store(ws).overrides()
 
 
 class TestDefaultsAndIsolation(unittest.TestCase):

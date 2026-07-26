@@ -127,13 +127,13 @@ schema and the two will diverge.
 
 | Key | Type | Domain | Default |
 |-----|------|--------|---------|
-| `engine` | enum | `claude`\|`codex`\|`agy`\|`both` | unset — the calling command decides |
+| `engine` | enum | `claude`\|`codex`\|`agy`\|`both` | unset |
 | `cross_model_audit_engine` | enum | `codex`\|`agy` | `codex` |
 | `reviewer_backend` | enum | `codex` | `codex` |
 | `reviewer_model` | string | open | unset |
 | `effort` | enum | `low`\|`medium`\|`high` | `medium` |
 | `sandbox` | enum | `read-only`\|`workspace-write`\|`danger-full-access` | `read-only` |
-| `audit_depth` | enum | `mini`\|`full` | unset — ask |
+| `audit_depth` | enum | `mini`\|`full` | unset |
 | `model_overrides` | map | `codex`\|`agy` | empty |
 | `skip_patterns` | list | open | empty |
 | `focus_instructions` | string | open | empty |

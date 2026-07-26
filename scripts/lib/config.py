@@ -34,7 +34,7 @@ from pathlib import Path
 CONFIG_FILENAME = ".vibe-suite.md"
 MAX_DEPTH = 3
 _KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
-_PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9-]*$")
+_PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9-]*")   # applied with fullmatch — `$` would admit "safe\n"
 _INT = re.compile(r"-?[0-9]+$")
 
 
@@ -91,7 +91,9 @@ def _split_frontmatter(text, source):
     if not lines or lines[0].strip() != "---":
         raise ConfigSyntaxError(f"{source}: expected a leading '---' frontmatter marker")
     for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
+        # Only at document level. An indented `---` is block-scalar content; treating it as the
+        # closing marker silently truncates the file and discards everything after it.
+        if lines[index] == "---":
             return lines[1:index]
     raise ConfigSyntaxError(f"{source}: unterminated frontmatter — no closing '---'")
 
@@ -125,9 +127,17 @@ def _unescape(text, line_no, source):
 def _decode_scalar(raw, line_no, source):
     text = raw.strip()
     if text.startswith("'"):
-        if not text.endswith("'") or len(text) < 2:
-            raise ConfigSyntaxError(f"{source}:{line_no}: unterminated single-quoted scalar")
-        return text[1:-1].replace("''", "'")
+        index, out = 1, []
+        while index < len(text):
+            if text[index] == "'":
+                if text[index + 1:index + 2] == "'":
+                    out.append("'"); index += 2; continue
+                if index != len(text) - 1:
+                    raise ConfigSyntaxError(
+                        f"{source}:{line_no}: trailing text after a quoted scalar")
+                return "".join(out)
+            out.append(text[index]); index += 1
+        raise ConfigSyntaxError(f"{source}:{line_no}: unterminated single-quoted scalar")
     if text.startswith('"'):
         closing = _find_closing_quote(text, line_no, source)
         if closing != len(text) - 1:
@@ -215,8 +225,11 @@ def _sequence(lines, start, indent, source):
         raw = lines[index]
         if not raw.strip():
             index += 1; continue
-        if _indent_of(raw, index + 2, source) <= indent:
+        depth = _indent_of(raw, index + 2, source)
+        if depth <= indent:
             break
+        if depth != indent + 1:
+            raise ConfigSyntaxError(f"{source}:{index + 2}: sequence item is over-indented")
         content = _strip_comment(raw).strip()
         if not content.startswith("- "):
             break
@@ -265,14 +278,20 @@ def parse_frontmatter(text, source=CONFIG_FILENAME):
         if key in container:
             raise ConfigSyntaxError(f"{source}:{line_no}: duplicate key {key!r}")
         if rest[:1] in ("|", ">"):
-            style = rest[0]
-            chomp = rest[1:2] if rest[1:2] in ("-", "+") else ""
+            if rest not in ("|", ">", "|-", "|+", ">-", ">+"):
+                raise ConfigSyntaxError(
+                    f"{source}:{line_no}: block header must be one of | > |- |+ >- >+")
+            style, chomp = rest[0], rest[1:2]
             container[key], index = _block_scalar(lines, index + 1, depth, style, chomp, source)
             continue
         if rest == "":
             following = _peek(lines, index + 1)
             if following is not None and _strip_comment(following).strip().startswith("- "):
                 container[key], index = _sequence(lines, index + 1, depth, source)
+                continue
+            if following is None or _indent_of(following, 0, source) <= depth:
+                container[key] = None      # `key:` with no child is absent, per the schema
+                index += 1
                 continue
             child = {}
             container[key] = child
@@ -300,7 +319,7 @@ def _check_scalar(key, value, row):
     elif row.type == "string":
         if not isinstance(value, str):
             raise ConfigValueError(f"{key}: expected a string")
-        if row.domain == "id" and not _PROFILE_ID.match(value):
+        if row.domain == "id" and not _PROFILE_ID.fullmatch(value):
             raise ConfigValueError(f"{key}: expected an id matching [a-z0-9][a-z0-9-]*")
     elif row.type == "list":
         if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
@@ -320,9 +339,11 @@ def _check_map(key, value):
     if not isinstance(value, dict):
         raise ConfigValueError(f"{key}: expected a mapping")
     if key in OPEN_MAPS:
-        for sub in value:
+        for sub, sub_value in value.items():
             if sub not in OPEN_MAPS[key]:
                 raise ConfigValueError(f"{key}.{sub}: expected one of {'|'.join(OPEN_MAPS[key])}")
+            if not isinstance(sub_value, str):
+                raise ConfigValueError(f"{key}.{sub}: expected a string")
         return
     allowed = CLOSED_MAPS[key]
     for sub, sub_value in value.items():
@@ -387,11 +408,41 @@ def parse_schema_table(text):
         if len(cells) < 4:
             continue
         key = cells[0].strip("`")
-        if key in SCHEMA:
-            rows[key] = (cells[1].replace("**", "").strip(),
-                         _normalise_domain(cells[2]),
-                         SCHEMA[key].default)
+        # Every cell is parsed from the document. Taking the default from SCHEMA would compare the
+        # code against itself and pass however wrong the documentation was.
+        rows[key] = (cells[1].replace("**", "").strip(),
+                     _normalise_domain(cells[2]),
+                     _normalise_default(cells[3]))
     return rows
+
+
+def canonical_default(value):
+    """Reduce a default — documented or coded — to one comparable token.
+
+    Both sides of the schema comparison pass through here, so the test compares like with like
+    rather than a prose cell against a Python object.
+    """
+    if isinstance(value, str) and value.strip().lower() in ("unset", "absent", "none"):
+        return "unset"
+    if value is None:
+        return "unset"
+    if value == {} or value == [] or value == "":
+        return "empty"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    text = str(value).strip().strip("`").strip()
+    return "empty" if text.lower() == "empty" else text
+
+
+def _normalise_default(cell):
+    text = cell.replace("**", "").strip()
+    # Documented cells may carry a clarifying clause; the value is the part before it.
+    for separator in ("—", " until ", " -- "):
+        if separator in text:
+            text = text.split(separator)[0]
+    return canonical_default(text.strip().strip("`").strip())
 
 
 def _fresh(default):
@@ -414,6 +465,8 @@ def load_with_warnings(root="."):
         if row is None:
             warnings.append(f"unknown key {key!r} in {CONFIG_FILENAME} — ignored")
             continue
+        if value is None:
+            continue                       # explicitly empty — the default applies
         if row.type == "map":
             _check_map(key, value)
         else:

@@ -35,18 +35,34 @@ class StoreValueError(Exception):
     """A shadowable key with a value outside its domain."""
 
 
+class StoreFormatError(Exception):
+    """The state file exists but is not readable as the expected shape."""
+
+
 def state_path(workspace):
     """The one state file for a workspace."""
     return Path(workspace) / STATE_DIRNAME / STATE_FILENAME
 
 
 def _read(path):
+    """Load the state file, refusing to proceed over damage.
+
+    Swallowing a JSONDecodeError and returning `{}` looks defensive and is destructive: the next
+    write would serialize that empty object over a file whose job records are still there but
+    unparsed. A state file we cannot read is a state file we must not overwrite.
+    """
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise StoreFormatError(f"{path}: not valid JSON — refusing to overwrite") from error
+    if not isinstance(raw, dict):
+        raise StoreFormatError(f"{path}: expected a JSON object at the top level")
+    config = raw.get("config", {})
+    if not isinstance(config, dict):
+        raise StoreFormatError(f"{path}: 'config' must be an object")
+    return raw
 
 
 def _validate(key, value):
@@ -81,13 +97,29 @@ class Store:
         _validate(key, value)
         section, _, leaf = key.partition(".")
         raw = _read(self.path)         # read first, so sibling members survive
-        raw.setdefault("config", {}).setdefault(section, {})[leaf] = value
+        config = raw.setdefault("config", {})
+        if not isinstance(config.setdefault(section, {}), dict):
+            raise StoreFormatError(f"config.{section}: expected an object")
+        config[section][leaf] = value
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # Write to a temporary file and rename, so an interrupted write cannot truncate the state.
+        temporary = self.path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(self.path)
 
     def overrides(self):
-        """The shadowed values actually stored, as a nested mapping."""
-        return _read(self.path).get("config", {})
+        """The shadowed values actually stored, validated on the way out.
+
+        A file edited by hand can hold keys `set()` would have rejected. Validating only on write
+        would let those reach `effective_config()` unchecked, so the same rules apply on read.
+        """
+        stored = _read(self.path).get("config", {})
+        for section, values in stored.items():
+            if not isinstance(values, dict):
+                raise StoreFormatError(f"config.{section}: expected an object")
+            for leaf, value in values.items():
+                _validate(f"{section}.{leaf}", value)
+        return stored
 
 
 def effective_config(workspace):

@@ -9,8 +9,15 @@ user-invocable: false
 
 **Purpose:** determine a file's artifact **type** from its path.
 
-**Input:** one path, relative to the scan root (or absolute — only the path text is examined).
+**Input:** one path, **relative to the scan root**, POSIX-separated. A leading `./` is stripped
+before matching. A `~/`-prefixed path is accepted for memory files, which live outside any
+repository. An **absolute filesystem path is a caller error** — reject it rather than classify it.
 **Output:** one type string.
+
+Normalisation is part of this contract, not a caller convenience, because every rule below is
+anchored: `/repo/agents/a.md` matches none of the `agents/**/*.md` forms and would fall through to
+`framework-agent`, and `/repo/skills/x/references/y.md` would slip past row 19's `not under
+`skills`` guard entirely. Silently misclassifying is worse than refusing, so refuse.
 
 **Classification is path-based only.** No file is opened and no content is read. A rule that needs
 content does not belong here — see `commands/shared/discover.md`'s prompt-content predicate, which

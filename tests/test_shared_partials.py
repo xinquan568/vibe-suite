@@ -651,7 +651,15 @@ EXPECTED = {
 }
 
 # Scope forms and never-trivial guards the gate must carry, written independently.
-REQUIRED_SCOPE_FORMS = ["(empty)", "staged", "commit -1", "commit -N", "path"]
+# Scope form -> the exact resolution it must specify. Independent of the partial: a token-presence
+# check let `staged` resolve to `git diff HEAD` and stayed green.
+REQUIRED_SCOPE_RESOLUTIONS = {
+    "(empty)": "git diff HEAD --name-only",
+    "staged": "git diff --cached --name-only",
+    "commit -1": "git diff HEAD~1 --name-only",
+    "commit -N": "git diff HEAD~N --name-only",
+}
+REQUIRED_SCOPE_FORMS = list(REQUIRED_SCOPE_RESOLUTIONS) + ["path"]
 REQUIRED_NEVER_TRIVIAL = ["logic", "security", "dependen", "runtime", "error handling"]
 REQUIRED_INVENTORY_CLASSES = ["commands", "shared partials", "agents", "skills", "hooks",
                               "mcp config", "marketplace"]
@@ -773,10 +781,20 @@ class TestDiscovery(FixtureCase):
         matches = [(p, c, pat) for p, c, pat in self.raw if p == "CLAUDE.md"]
         self.assertGreaterEqual(len(matches), 2, f"expected CLAUDE.md to match >1 pattern, got {matches}")
 
-    def test_dedup_collapses_the_root_claude_md_to_one_record(self):
-        # And the post-dedup side must be an ordered list, or the collapse is unproven.
-        matches = [r for r in self.deduped if r[0] == "CLAUDE.md"]
-        self.assertEqual(len(matches), 1)
+    def test_dedup_keeps_the_first_complete_record_not_merely_one_path(self):
+        # Comparing paths (or paths and categories) proves only that a collapse happened. First-match
+        # -wins says *which* record survives, so the whole tuple must be compared: a mutant keeping
+        # the later `**/CLAUDE.md` match passes a path-only assertion.
+        first = next(r for r in self.raw if r[0] == "CLAUDE.md")
+        kept = [r for r in self.deduped if r[0] == "CLAUDE.md"]
+        self.assertEqual(kept, [first])
+        self.assertEqual(first[2], "CLAUDE.md", "the root pattern should win, not `**/CLAUDE.md`")
+
+    def test_dedup_keeps_the_first_complete_record_for_every_path(self):
+        firsts = {}
+        for record in self.raw:
+            firsts.setdefault(record[0], record)
+        self.assertEqual(self.deduped, [firsts[path] for path in dict.fromkeys(p for p, _, _ in self.raw)])
 
     def test_dedup_preserves_order_and_drops_only_duplicates(self):
         self.assertEqual([r[0] for r in self.deduped], list(dict.fromkeys(p for p, _, _ in self.raw)))
@@ -957,6 +975,20 @@ class TestScopeParseBehaviour(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, forms)
 
+    def test_each_scope_form_resolves_to_the_right_command(self):
+        # The check that distinguishes a correct table from a plausible one.
+        forms = parse_scope_forms()
+        for token, want in REQUIRED_SCOPE_RESOLUTIONS.items():
+            with self.subTest(token=token):
+                row = next((v for k, v in forms.items() if token in k), None)
+                self.assertIsNotNone(row, f"scope form {token!r} missing")
+                self.assertIn(want, row, f"{token!r} must resolve via `{want}`")
+
+    def test_a_path_scope_does_not_resolve_through_git(self):
+        forms = parse_scope_forms()
+        row = next(v for k, v in forms.items() if "path" in k)
+        self.assertNotIn("git diff", row, "a path is read directly, not diffed")
+
     def test_every_never_trivial_guard_is_present(self):
         guards = " ".join(parse_never_trivial())
         for required in REQUIRED_NEVER_TRIVIAL:
@@ -1045,6 +1077,14 @@ class TestPluginDiscoverBehaviour(unittest.TestCase):
 
 
 class TestArtifactDiscipline(unittest.TestCase):
+    def test_classify_documents_its_path_contract(self):
+        # The rule has to live in the partial, not only in this module's normalise(). A test that
+        # enforces a contract the shipped artifact does not state is checking its own invention.
+        text = _read("classify")
+        self.assertIn("relative to the scan root", text)
+        self.assertIn("absolute filesystem path is a caller error", text)
+        self.assertIn("`./`", text)
+
     def test_all_four_partials_exist_with_frontmatter(self):
         for name, path in PARTIALS.items():
             with self.subTest(partial=name):

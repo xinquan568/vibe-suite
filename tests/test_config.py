@@ -62,12 +62,12 @@ EXPECTED_SCHEMA = {
     "effort":                   ("enum",   "low|medium|high",                        "medium"),
     "sandbox":                  ("enum",   "read-only|workspace-write|danger-full-access", "read-only"),
     "audit_depth":              ("enum",   "mini|full",                              "unset"),
-    "model_overrides":          ("map",    "codex|agy",                              "empty"),
-    "skip_patterns":            ("list",   "open",                                   "empty"),
-    "focus_instructions":       ("string", "open",                                   "empty"),
-    "project_instructions":     ("string", "open",                                   "empty"),
+    "model_overrides":          ("map",    "codex|agy",                              "empty-map"),
+    "skip_patterns":            ("list",   "open",                                   "empty-list"),
+    "focus_instructions":       ("string", "open",                                   "empty-string"),
+    "project_instructions":     ("string", "open",                                   "empty-string"),
     "score_threshold":          ("int",    "0-100",                                  "70"),
-    "rule_overrides":           ("map",    "closed",                                 "empty"),
+    "rule_overrides":           ("map",    "closed",                                 "empty-map"),
     "issue2pr_profile":         ("string", "id",                                     "unset"),
     "gate":                     ("map",    "closed",                                 "unset"),
 }
@@ -159,7 +159,7 @@ class TestSchemaAgreement(unittest.TestCase):
             with self.subTest(key=key):
                 row = config.SCHEMA.get(key)
                 self.assertIsNotNone(row, f"{key} missing from the reader registry")
-                self.assertEqual((row.type, row.domain, config.canonical_default(row.default)), want)
+                self.assertEqual((row.type, row.domain, config.canonical_default(row.default, row.type)), want)
 
     def test_reader_registry_has_no_extra_keys(self):
         self.assertEqual(set(config.SCHEMA) - set(EXPECTED_SCHEMA), set())
@@ -262,6 +262,29 @@ class TestAdversarialGrammar(unittest.TestCase):
                     write_config(root, bad)
                     with self.assertRaises(config.ConfigValueError):
                         config.load(root)
+
+
+class TestCanonicalDefaultIsNotLossy(unittest.TestCase):
+    """A normaliser on both sides can hide a difference as easily as expose one."""
+
+    def test_empty_containers_are_distinguished_by_type(self):
+        self.assertNotEqual(config.canonical_default([], "list"),
+                            config.canonical_default({}, "map"))
+        self.assertNotEqual(config.canonical_default([], "list"),
+                            config.canonical_default("", "string"))
+        self.assertNotEqual(config.canonical_default({}, "map"),
+                            config.canonical_default("", "string"))
+
+    def test_none_is_not_the_string_unset_after_normalisation_of_a_typed_default(self):
+        # Both map to "unset" by design — absence is absence — but a *populated* string default
+        # must never collapse into it.
+        self.assertNotEqual(config.canonical_default("codex", "enum"),
+                            config.canonical_default(None, "enum"))
+
+    def test_a_wrong_empty_default_in_the_reader_would_fail(self):
+        # The concrete regression: skip_patterns defaulting to {} rather than [].
+        self.assertNotEqual(config.canonical_default({}, "list"),
+                            EXPECTED_SCHEMA["skip_patterns"][2])
 
 
 class TestDocumentedDefaults(unittest.TestCase):

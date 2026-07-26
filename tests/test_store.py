@@ -57,12 +57,19 @@ class TestOnDiskLayout(unittest.TestCase):
             self.assertTrue(expected.exists(), f"expected state at {expected}")
 
     def test_every_unset_shadowable_key_is_absent(self):
-        with tempfile.TemporaryDirectory() as ws:
-            store.Store(ws).set("gate.stop_review_gate", True)
-            gate = json.loads(store.state_path(ws).read_text(encoding="utf-8"))["config"]["gate"]
-            for unset in ("model", "fail_policy"):
-                with self.subTest(key=unset):
-                    self.assertNotIn(unset, gate)
+        # Each key is written in turn and the *other two* asserted absent, so no key's absence goes
+        # untested. Writing only stop_review_gate would never exercise its own absence.
+        keys = {"stop_review_gate": True, "model": "some-model", "fail_policy": "closed"}
+        for written, value in keys.items():
+            with self.subTest(written=written):
+                with tempfile.TemporaryDirectory() as ws:
+                    store.Store(ws).set(f"gate.{written}", value)
+                    gate = json.loads(
+                        store.state_path(ws).read_text(encoding="utf-8"))["config"]["gate"]
+                    self.assertIn(written, gate)
+                    for other in keys:
+                        if other != written:
+                            self.assertNotIn(other, gate, f"{other} must be absent, not null")
 
     def test_an_unset_key_is_absent_from_the_json_not_null(self):
         with tempfile.TemporaryDirectory() as ws:

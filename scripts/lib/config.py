@@ -410,39 +410,46 @@ def parse_schema_table(text):
         key = cells[0].strip("`")
         # Every cell is parsed from the document. Taking the default from SCHEMA would compare the
         # code against itself and pass however wrong the documentation was.
-        rows[key] = (cells[1].replace("**", "").strip(),
+        declared_type = cells[1].replace("**", "").strip()
+        rows[key] = (declared_type,
                      _normalise_domain(cells[2]),
-                     _normalise_default(cells[3]))
+                     _normalise_default(cells[3], declared_type))
     return rows
 
 
-def canonical_default(value):
+def canonical_default(value, declared_type=None):
     """Reduce a default — documented or coded — to one comparable token.
 
-    Both sides of the schema comparison pass through here, so the test compares like with like
-    rather than a prose cell against a Python object.
+    **Type-aware, deliberately.** An earlier version mapped `[]`, `{}` and `""` all to "empty" and
+    both `None` and the string "unset" to "unset". Applied to both sides of a comparison that made
+    the test weaker than the key-membership check it replaced: a reader whose `skip_patterns`
+    default was `{}` rather than `[]` compared equal. The empties are now distinguished by the type
+    they belong to, and a documented cell is read together with its type column.
     """
-    if isinstance(value, str) and value.strip().lower() in ("unset", "absent", "none"):
-        return "unset"
     if value is None:
         return "unset"
-    if value == {} or value == [] or value == "":
-        return "empty"
+    if isinstance(value, str) and value.strip().lower() in ("unset", "absent", "none"):
+        return "unset"
+    if isinstance(value, list):
+        return "empty-list" if not value else "|".join(value)
+    if isinstance(value, dict):
+        return "empty-map" if not value else "map"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
     text = str(value).strip().strip("`").strip()
-    return "empty" if text.lower() == "empty" else text
+    if text.lower() == "empty":
+        return {"list": "empty-list", "map": "empty-map"}.get(declared_type, "empty-string")
+    return text if text else "empty-string"
 
 
-def _normalise_default(cell):
+def _normalise_default(cell, declared_type=None):
     text = cell.replace("**", "").strip()
-    # Documented cells may carry a clarifying clause; the value is the part before it.
     for separator in ("—", " until ", " -- "):
         if separator in text:
             text = text.split(separator)[0]
-    return canonical_default(text.strip().strip("`").strip())
+    return canonical_default(text.strip().strip("`").strip(), declared_type)
 
 
 def _fresh(default):

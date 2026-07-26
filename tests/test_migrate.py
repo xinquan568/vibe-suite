@@ -345,6 +345,20 @@ TOKEN = "keep-this"
 command = "cc-suite-auditor"
 """
 
+SUBTABLE_ONLY_TOML = """[mcp_servers.cc-suite-mcp]
+command = "cc-suite-server"
+
+[mcp_servers.vibe-mcp.env]
+TOKEN = "pre-existing"
+"""
+
+ODD_HEADER_TOML = """[mcp_servers.'cc-suite-agent:auditor']
+command = "cc-suite-auditor"
+
+[mcp_servers.cc-suite-mcp]  # the primary server
+command = "cc-suite-server"
+"""
+
 class TestRowSix(MigrationCase):
 
     LEGACY = MigrationCase.LEGACY  # .mcp.json is mutated by design; it is not a legacy *store*
@@ -405,6 +419,36 @@ class TestRowSix(MigrationCase):
         self.assertIn("[general]", toml)
         self.assertIn('command = "cc-suite-server"', toml,
                       "the server the sentinel points at is unchanged by a rename")
+
+    def test_a_subtable_alone_is_not_a_registration(self):
+        """`[mcp_servers.vibe-mcp.env]` without `[mcp_servers.vibe-mcp]` describes the environment
+        of a server that is not declared. Treating it as "already registered" skips installing the
+        real table, lets verification pass, and then prunes the only functional legacy block — the
+        forbidden neither state, reached by a route that looks like success."""
+        self.write(".mcp.json", json.dumps({"mcpServers": {}}, indent=2) + "\n")
+        self.write(".codex/config.toml", SUBTABLE_ONLY_TOML)
+        self.guard_legacy()
+        self.run_helper("migrate-sentinels.sh", "--confirm")
+        toml = self._toml()
+        self.assertIn("[mcp_servers.vibe-mcp]", toml,
+                      "the root table must be installed even when a subtable already exists")
+        self.assertIn('command = "cc-suite-server"', toml,
+                      "the working server definition must survive the transition")
+        headers = [line for line in toml.splitlines() if line.startswith("[")]
+        self.assertEqual([h for h in headers if "cc-suite" in h], [])
+
+    def test_single_quoted_and_commented_headers_are_recognised(self):
+        """Both quote styles are valid TOML, and a trailing comment is legal on a header line."""
+        self.write(".mcp.json", json.dumps({"mcpServers": {}}, indent=2) + "\n")
+        self.write(".codex/config.toml", ODD_HEADER_TOML)
+        self.guard_legacy()
+        self.run_helper("migrate-sentinels.sh", "--confirm")
+        toml = self._toml()
+        headers = [line for line in toml.splitlines() if line.startswith("[")]
+        self.assertEqual([h for h in headers if "cc-suite" in h], [],
+                         "a single-quoted or commented legacy header must still be pruned")
+        self.assertTrue(any("vibe-agent:auditor" in h for h in headers))
+        self.assertTrue(any("vibe-mcp" in h for h in headers))
 
     def test_provenance_records_both_stores_in_restorable_form(self):
         """Recording only the JSON side would make the removal reversible in one file and

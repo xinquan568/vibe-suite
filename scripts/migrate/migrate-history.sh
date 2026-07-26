@@ -87,22 +87,39 @@ else:
 
 # O_EXCL rather than check-then-write: the existence check earlier in this script is advisory, and
 # a new store that appears between that check and this write still wins.
-try:
-    handle = os.open(target_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-except FileExistsError:
-    sys.stderr.write("note: row 3: .claude/vibe-history.json appeared concurrently — left as it is "
-                     "(new store wins)\n")
-    raise SystemExit(0)
-with os.fdopen(handle, "wb") as out:
+# Write and validate a complete temporary file first, then publish it with os.link, which fails
+# if the target exists. Writing straight to the final path under O_EXCL is exclusive but not
+# atomic: an interruption mid-write leaves a truncated store that the next run's existence check
+# treats as "already migrated", so the damage is permanent and silent.
+tmp_path = target_path + ".vibe-tmp"
+with open(tmp_path, "wb") as out:
     out.write(body)
     out.flush()
     os.fsync(out.fileno())
 
-# The splice is textual, so the result is checked rather than assumed.
-check = json.loads(open(target_path, encoding="utf-8").read())
-if len(markers_in(check)) != 1:
-    sys.stderr.write("error: row 3: the copy does not carry exactly one migrated_from marker\n")
-    raise SystemExit(1)
+try:
+    # The splice is textual, so the result is checked before it is published, not after.
+    check = json.loads(open(tmp_path, encoding="utf-8").read())
+    if len(markers_in(check)) != 1:
+        sys.stderr.write("error: row 3: the copy does not carry exactly one migrated_from marker\n")
+        raise SystemExit(1)
+    try:
+        os.link(tmp_path, target_path)
+    except FileExistsError:
+        sys.stderr.write("note: row 3: .claude/vibe-history.json appeared concurrently — left as "
+                         "it is (new store wins)\n")
+        raise SystemExit(0)
+finally:
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+
+fd = os.open(os.path.dirname(target_path) or ".", os.O_RDONLY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
 PY
 
 vibe_note "row 3: copied .claude/nlpm-history.json → .claude/vibe-history.json with one marker"

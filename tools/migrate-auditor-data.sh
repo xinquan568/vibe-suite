@@ -147,7 +147,9 @@ if tree.returncode == 0:
 
 MANAGED = ("reports/", "exemplars/", "audits/", "ledgers/", "articles/", prefix + "/")
 bad = sorted(path for path, mode in entries.items()
-             if mode != "100644" and mode != "100755" and path.startswith(MANAGED))
+             if mode not in ("100644", "100755")
+             and (path.startswith(MANAGED) or path == prefix
+                  or path.split("/")[0] in {m.rstrip("/") for m in MANAGED}))
 if bad:
     sys.stderr.write("decision required: the destination branch carries non-regular entries on "
                      "managed paths (symlink or gitlink). Nothing was staged.\n")
@@ -239,7 +241,7 @@ status=$?
 log "verifying against $branch on $safe_dest"
 git -C "$clone" fetch --quiet origin "$branch"
 python3 - "$source_dir" "$clone" "$branch" "$TOOL_PREFIX" <<'VERIFY'
-import subprocess, sys
+import hashlib, subprocess, sys
 from pathlib import Path
 
 source, clone, branch, prefix = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
@@ -262,7 +264,9 @@ if manifest_path not in published:
     raise SystemExit(1)
 
 manifest = git("show", f"origin/{branch}:{manifest_path}")
-listed = [line.split("  ", 1)[1] for line in manifest.splitlines() if line]
+expected = {line.split("  ", 1)[1]: line.split("  ", 1)[0]
+            for line in manifest.splitlines() if line}
+listed = sorted(expected)
 
 missing, mismatched = [], []
 for rel in listed:
@@ -273,8 +277,13 @@ for rel in listed:
     if mode not in ("100644", "100755"):
         mismatched.append(f"{rel} (mode {mode})")
         continue
-    src = git("hash-object", str((clone / rel)))
-    if blob != src.strip():
+    # Compare against the manifest's own digest, computed from the published blob. Hashing the
+    # local checkout would compare the branch against a file this run just wrote, which proves
+    # nothing about what was published.
+    published_bytes = subprocess.run(
+        ["git", "-C", str(clone), "cat-file", "blob", f"origin/{branch}:{rel}"],
+        capture_output=True, check=True).stdout
+    if hashlib.sha256(published_bytes).hexdigest() != expected[rel]:
         mismatched.append(rel)
 
 if missing or mismatched:

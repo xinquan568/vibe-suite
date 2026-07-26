@@ -90,14 +90,15 @@ def read_json(path):
 # a separator unconditionally misses both: the first because the quotes become part of the name,
 # the second because the name gains a suffix.
 def split_key(text):
-    parts, current, quoted, index = [], "", False, 0
+    """Split a TOML key path on unquoted dots. Both quote styles are valid TOML."""
+    parts, current, quote, index = [], "", None, 0
     while index < len(text):
         char = text[index]
-        if char == '"' and not quoted:
-            quoted = True
-        elif char == '"' and quoted:
-            quoted = False
-        elif char == "." and not quoted:
+        if quote is None and char in "\"'":
+            quote = char
+        elif quote is not None and char == quote:
+            quote = None
+        elif char == "." and quote is None:
             parts.append(current); current = ""; index += 1; continue
         else:
             current += char
@@ -108,10 +109,27 @@ def split_key(text):
 def quote_key(name):
     return f'"{name}"' if re.search(r"[^A-Za-z0-9_-]", name) else name
 
+def strip_inline_comment(line):
+    """Drop a trailing `# comment`, respecting quotes. `[mcp_servers.x] # note` is a valid header
+    and an earlier version did not recognise it as one."""
+    quote, index = None, 0
+    while index < len(line):
+        char = line[index]
+        if quote is None and char in "\"'":
+            quote = char
+        elif quote is not None and char == quote:
+            quote = None
+        elif char == "#" and quote is None:
+            return line[:index].strip()
+        index += 1
+    return line
+
+
 def toml_blocks(text):
     blocks, header, buf = [], None, []
     for line in text.splitlines(keepends=True):
         stripped = line.strip()
+        stripped = strip_inline_comment(stripped)
         if stripped.startswith("[") and stripped.endswith("]") and not stripped.startswith("[["):
             blocks.append((header, "".join(buf)))
             header, buf = stripped[1:-1].strip(), [line]
@@ -126,6 +144,21 @@ def server_of(header):
         return None
     parts = split_key(header)
     if len(parts) < 2 or parts[0] != "mcp_servers":
+        return None
+    return parts[1]
+
+
+def registered(header):
+    """The sentinel this header *registers*, or None — the root table only.
+
+    A subtable is not a registration. `[mcp_servers.vibe-mcp.env]` without
+    `[mcp_servers.vibe-mcp]` describes the environment of a server that is not declared; treating
+    it as "already registered" would skip installing the real table, let verification pass, and
+    then prune the only functional legacy block. That is the forbidden neither state reached by a
+    route that looks like success.
+    """
+    parts = split_key(header) if header else []
+    if len(parts) != 2 or parts[0] != "mcp_servers":
         return None
     return parts[1]
 
@@ -212,7 +245,7 @@ if "register-json" not in done and json_legacy:
 
 # --- step 3: register vibe-* in .codex/config.toml ---------------------------------------------
 if "register-toml" not in done and toml_legacy:
-    present = {server_of(header) for header, _ in blocks if server_of(header)}
+    present = {registered(header) for header, _ in blocks if registered(header)}
     appended = []
     for name in toml_legacy:
         new = vibe_name(name)
@@ -245,8 +278,8 @@ if json_legacy:
                          "anything\n")
         verified = False
 if toml_legacy:
-    have = {server_of(h) for h, _ in toml_blocks(toml_path.read_text(encoding="utf-8"))
-            if server_of(h)}
+    have = {registered(h) for h, _ in toml_blocks(toml_path.read_text(encoding="utf-8"))
+            if registered(h)}
     missing = [vibe_name(n) for n in toml_legacy if vibe_name(n) not in have]
     if missing:
         sys.stderr.write(f"error: row 6: .codex/config.toml is missing {missing} — refusing to "

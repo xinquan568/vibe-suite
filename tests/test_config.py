@@ -467,5 +467,103 @@ class TestConsumerWiring(unittest.TestCase):
                 self.assertIn("scripts/lib/config.py", partial.read_text(encoding="utf-8"))
 
 
+class TestRender(unittest.TestCase):
+    """`render` is the write half of E0.5's grammar ownership (E0.8 / vibe-10).
+
+    Round-tripping alone would prove only that the renderer and the reader share a convention —
+    including a wrong one. So the expectations here are **golden**: exact bytes, written by hand.
+    The round-trip tests that follow then prove those bytes mean what they are supposed to mean.
+    """
+
+    def test_scalars_render_exactly(self):
+        self.assertEqual(
+            config.render({"engine": "codex", "score_threshold": 42}),
+            "---\nengine: codex\nscore_threshold: 42\n---\n")
+
+    def test_key_order_follows_the_schema_not_the_input(self):
+        # `engine` precedes `audit_depth` in SCHEMA but follows it alphabetically, so this pair
+        # distinguishes schema order from sorted order. A pair that agrees under both — such as
+        # engine/score_threshold — cannot, and a mutation test caught that version passing against
+        # a renderer that sorted its keys.
+        self.assertLess(list(config.SCHEMA).index("engine"),
+                        list(config.SCHEMA).index("audit_depth"))
+        self.assertGreater("engine", "audit_depth")
+        self.assertEqual(config.render({"audit_depth": "full", "engine": "codex"}),
+                         "---\nengine: codex\naudit_depth: full\n---\n")
+        self.assertEqual(config.render({"audit_depth": "full", "engine": "codex"}),
+                         config.render({"engine": "codex", "audit_depth": "full"}))
+
+    def test_list_renders_as_a_block_sequence(self):
+        self.assertEqual(config.render({"skip_patterns": ["a/**", "b/*.py"]}),
+                         "---\nskip_patterns:\n  - a/**\n  - b/*.py\n---\n")
+
+    def test_nested_map_renders_indented_with_sorted_keys(self):
+        self.assertEqual(
+            config.render({"gate": {"stop_review_gate": True, "model": "x"}}),
+            "---\ngate:\n  model: x\n  stop_review_gate: true\n---\n")
+
+    def test_multiline_string_renders_as_a_literal_block(self):
+        self.assertEqual(config.render({"focus_instructions": "one\ntwo\n"}),
+                         "---\nfocus_instructions: |\n  one\n  two\n---\n")
+
+    def test_values_needing_quotes_get_them(self):
+        # A bare `a: b` would parse as a nested key; `42` would decode as an int.
+        self.assertEqual(config.render({"reviewer_model": "a: b"}),
+                         '---\nreviewer_model: "a: b"\n---\n')
+        self.assertEqual(config.render({"reviewer_model": "42"}),
+                         '---\nreviewer_model: "42"\n---\n')
+        self.assertEqual(config.render({"reviewer_model": "# not a comment"}),
+                         '---\nreviewer_model: "# not a comment"\n---\n')
+
+    def test_defaults_are_omitted_because_the_grammar_cannot_express_them(self):
+        """`key:` with no child parses as absent, so `[]` and `{}` have no written form.
+
+        Omitting a key at its default is therefore not an optimisation, it is the only
+        representation the accepted subset has for one.
+        """
+        self.assertEqual(config.render({"skip_patterns": [], "model_overrides": {},
+                                        "engine": "codex"}),
+                         "---\nengine: codex\n---\n")
+
+    def test_unknown_keys_are_refused(self):
+        with self.assertRaises(config.ConfigValueError):
+            config.render({"not_a_schema_key": 1})
+
+    def test_invalid_values_are_refused(self):
+        with self.assertRaises(config.ConfigValueError):
+            config.render({"engine": "nonesuch"})
+        with self.assertRaises(config.ConfigValueError):
+            config.render({"score_threshold": 101})
+
+
+class TestRenderRoundTrip(unittest.TestCase):
+    """The golden bytes above are only correct if the reader agrees with them."""
+
+    def _round_trip(self, mapping):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / config.CONFIG_FILENAME).write_text(config.render(mapping),
+                                                             encoding="utf-8")
+            return config.load(root)
+
+    def test_every_rendered_value_reads_back_through_the_public_loader(self):
+        mapping = {
+            "engine": "codex",
+            "reviewer_model": "a: b",
+            "score_threshold": 42,
+            "skip_patterns": ["a/**", "b/*.py"],
+            "focus_instructions": "one\ntwo\n",
+            "gate": {"stop_review_gate": True, "model": "x"},
+        }
+        loaded = self._round_trip(mapping)
+        for key, want in mapping.items():
+            with self.subTest(key=key):
+                self.assertEqual(loaded[key], want)
+
+    def test_rendered_output_parses_under_the_strict_grammar(self):
+        text = config.render({"engine": "codex", "skip_patterns": ["*.py"],
+                              "focus_instructions": "x\n"})
+        self.assertEqual(config.parse_frontmatter(text)["skip_patterns"], ["*.py"])
+
+
 if __name__ == "__main__":
     unittest.main()

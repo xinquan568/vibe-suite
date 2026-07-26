@@ -460,6 +460,85 @@ def _fresh(default):
     return default
 
 
+# ----------------------------------------------------------------------------- rendering
+# The write half of this module's grammar ownership (E0.8). It exists so that no other artifact —
+# least of all a shell script — has to know how `.vibe-suite.md` is spelled. Everything it emits is
+# inside the subset `parse_frontmatter` accepts; anything it cannot express, it omits.
+
+_UNSAFE_LEADING = "'\"{[!&*|>#"
+
+
+def _needs_quotes(value):
+    """True when a plain scalar would not read back as this exact string."""
+    if value == "" or value != value.strip():
+        return True                                   # empty decodes as None; spaces are stripped
+    if value in ("null", "true", "false") or _INT.match(value):
+        return True                                   # would decode as None / bool / int
+    if value[0] in _UNSAFE_LEADING or value.startswith("<<"):
+        return True                                   # quote, block, flow, tag, anchor or comment
+    return ":" in value or "#" in value               # key separator and comment introducer
+
+
+def _quote(value):
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\t", "\\t")
+    return f'"{escaped}"'
+
+
+def _render_scalar(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    return _quote(value) if _needs_quotes(value) else value
+
+
+def _render_into(out, key, value, depth):
+    pad = "  " * depth
+    if isinstance(value, dict):
+        out.append(f"{pad}{key}:")
+        for sub in sorted(value):
+            _render_into(out, sub, value[sub], depth + 1)
+        return
+    if isinstance(value, list):
+        out.append(f"{pad}{key}:")
+        out.extend(f"{pad}  - {_render_scalar(item)}" for item in value)
+        return
+    if isinstance(value, str) and "\n" in value:
+        # A literal block is the only multi-line form in the subset. `|` keeps the trailing
+        # newline the value already has; `|-` is for one that has none.
+        body = value[:-1] if value.endswith("\n") else value
+        out.append(f"{pad}{key}: |" if value.endswith("\n") else f"{pad}{key}: |-")
+        out.extend(f"{pad}  {line}" for line in body.split("\n"))
+        return
+    out.append(f"{pad}{key}: {_render_scalar(value)}")
+
+
+def render(mapping):
+    """Render a validated configuration as `.vibe-suite.md` frontmatter.
+
+    Keys are emitted in `SCHEMA` order so the output never depends on the caller's dict order, and
+    nested keys are sorted. A key whose value equals its schema default is **omitted**: the accepted
+    grammar has no way to write an empty list or map — `key:` with no child parses as absent — so
+    omission is that value's only representation, not an optimisation.
+    """
+    for key in mapping:
+        if key not in SCHEMA:
+            raise ConfigValueError(f"{key}: not a key of the .vibe-suite.md schema")
+    out = []
+    for key, row in SCHEMA.items():
+        if key not in mapping:
+            continue
+        value = mapping[key]
+        if value is None or value == _fresh(row.default):
+            continue
+        if row.type == "map":
+            _check_map(key, value)
+        else:
+            _check_scalar(key, value, row)
+        _render_into(out, key, value, 0)
+    return "---\n" + "".join(line + "\n" for line in out) + "---\n"
+
+
 def load_with_warnings(root="."):
     """Return `(config, warnings)`. Never writes to stdout."""
     warnings, data = [], {}

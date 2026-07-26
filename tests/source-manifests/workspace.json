@@ -1,0 +1,27 @@
+{
+  "commit": null,
+  "files": [
+    "issue2pr/.DS_Store",
+    "issue2pr/ROAMEX.md",
+    "issue2pr/SKILL.md",
+    "issue2pr/examples/roamex/brief-A-3.md",
+    "issue2pr/examples/roamex/manifest-A-3.json",
+    "issue2pr/manifest-schema.json",
+    "issue2pr/profiles/roamex.md",
+    "issue2pr/profiles/vibe-suite.md",
+    "issue2pr/scripts/roamex-manifest.py",
+    "issue2pr/scripts/watch-pr.sh",
+    "issue2pr/templates/roamex-pr-body.md",
+    "issue2pr/templates/vibe-suite-pr-body.md",
+    "refine-proposal/.DS_Store",
+    "refine-proposal/SKILL.md",
+    "refine-proposal/references/review-rubric.md",
+    "refine-proposal/scripts/codex_review.sh",
+    "refine-proposal/scripts/render_final.sh",
+    "runs-stats/.DS_Store",
+    "runs-stats/SKILL.md",
+    "runs-stats/scripts/generate_runs_stats.py"
+  ],
+  "generated_by": "tools/gen-source-manifest.py",
+  "repo": "workspace"
+}

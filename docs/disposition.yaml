@@ -1,0 +1,469 @@
+# SPDX-License-Identifier: ISC
+# §6 source-artifact disposition map, machine-readable (E0.6 / vibe-8).
+#
+# Transcribed from §6 row by row — dispositions and targets are §6's, not a re-derivation.
+# Every source artifact is claimed by exactly one row; tools/coverage-check.py enforces that
+# in both directions against the vendored manifests.
+#
+# K kept (possibly renamed) · M merged · R retired with replacement noted · G now generated
+# · D migrated as data. A target is a function ID, several of them, or — for three workspace
+# rows whose §6 home is a path rather than a function — a repository path.
+#
+# Per D7 a K/M row means the capability is reimplemented at functional parity in
+# vibe-suite's own code. This is a coverage-planning artifact, not attribution.
+version: 1
+trees:
+  cc-suite: {commit: bb605ec441862e1d35f182af5d9f0503c7d27d79}
+  grill-for-claude: {commit: 938b1e83b2135bc923b2d7312f82b654a76539c5}
+  nlpm: {commit: 4ef75d4aa1626c0d06336f01227b6c07cfbf809f}
+  workspace: {commit: null}
+mappings:
+  # --- cc-suite ---
+  - row: cc-suite:01
+    tree: cc-suite
+    paths: [commands/init.md]
+    disposition: M
+    target: F1.1
+    note: merged with nlpm init
+  - row: cc-suite:02
+    tree: cc-suite
+    paths: [commands/update.md]
+    disposition: K
+    target: F1.7
+  - row: cc-suite:03
+    tree: cc-suite
+    paths: [commands/repair.md]
+    disposition: K
+    target: F1.3
+  - row: cc-suite:04
+    tree: cc-suite
+    paths: [commands/diagnose.md]
+    disposition: M
+    target: F1.2
+  - row: cc-suite:05
+    tree: cc-suite
+    paths: [commands/setup.md]
+    disposition: M
+    target: F1.8
+    note: gate toggle
+  - row: cc-suite:06
+    tree: cc-suite
+    paths: [commands/preflight.md]
+    disposition: K
+    target: F1.5
+  - row: cc-suite:07
+    tree: cc-suite
+    paths: [commands/unbridge.md]
+    disposition: K
+    target: F1.4
+    note: completed teardown
+  - row: cc-suite:08
+    tree: cc-suite
+    paths: [commands/bridge-hooks.md, commands/bridge-mcp.md, commands/bridge-skills.md]
+    disposition: M
+    target: F1.6
+    note: subcommands
+  - row: cc-suite:09
+    tree: cc-suite
+    paths: [commands/add-agent.md, commands/list-agents.md, commands/remove-agent.md]
+    disposition: M
+    target: F7.1
+  - row: cc-suite:10
+    tree: cc-suite
+    paths: [commands/audit.md]
+    disposition: R
+    target: F3.1
+    note: --engine codex|agy; nine dimensions preserved
+  - row: cc-suite:11
+    tree: cc-suite
+    paths: [commands/audit-fix.md, commands/verify.md]
+    disposition: M
+    target: F3.8
+  - row: cc-suite:12
+    tree: cc-suite
+    paths: [commands/audit-agent.md, commands/audit-command.md, commands/audit-nlp.md, commands/audit-plugin.md, commands/audit-rules.md, commands/audit-skill.md]
+    disposition: M
+    target: F4.9
+    note: --type; dimensions, discovery A-E, depth flags, output contract preserved
+  - row: cc-suite:13
+    tree: cc-suite
+    paths: [commands/implement.md]
+    disposition: K
+    target: F2.2
+    note: renamed delegate
+  - row: cc-suite:14
+    tree: cc-suite
+    paths: [commands/review-plan.md]
+    disposition: R
+    target: F6.1
+    note: --review-mode single
+  - row: cc-suite:15
+    tree: cc-suite
+    paths: [commands/bug-analyze.md]
+    disposition: K
+    target: F2.3
+  - row: cc-suite:16
+    tree: cc-suite
+    paths: [commands/continue.md]
+    disposition: K
+    target: F2.4
+  - row: cc-suite:17
+    tree: cc-suite
+    paths: [commands/cancel.md, commands/result.md, commands/status.md]
+    disposition: M
+    target: F2.5
+  - row: cc-suite:18
+    tree: cc-suite
+    paths: [commands/refresh-knowledge.md]
+    disposition: K
+    target: F8.4
+  - row: cc-suite:19
+    tree: cc-suite
+    paths: [commands/shared/codex-call.md, commands/shared/fallback.md, commands/shared/model-selection.md, commands/shared/plugin-discover.md, commands/shared/scope-parse.md]
+    disposition: K/M
+    target: [F2.1, F9.4, F9.3, F9.5, F9.3]
+    note: partials: codex-call, model-selection, scope-parse, fallback, plugin-discover — kept and merged respectively
+  - row: cc-suite:20
+    tree: cc-suite
+    paths: [skills/cc-suite/audit-fix/SKILL.md, skills/cc-suite/audit/SKILL.md, skills/cc-suite/claude-debug/SKILL.md, skills/cc-suite/claude-implement/SKILL.md, skills/cc-suite/claude-plan/SKILL.md, skills/cc-suite/claude-review/SKILL.md, skills/cc-suite/verify/SKILL.md]
+    disposition: G
+    target: F9.6
+    note: Codex-side reverse delegation, regenerated into codex/
+  - row: cc-suite:21
+    tree: cc-suite
+    paths: [skills/cc-suite/diagnose/SKILL.md, skills/cc-suite/init/SKILL.md, skills/cc-suite/repair/SKILL.md]
+    disposition: M
+    target: [F1.1, F1.2, F1.3]
+    note: conversational counterparts, folded into the skill descriptions
+  - row: cc-suite:22
+    tree: cc-suite
+    paths: [skills/cc-suite/agent-design/SKILL.md, skills/cc-suite/claude-code-conventions/SKILL.md]
+    disposition: M/K
+    target: F4.8
+    note: conventions merged; agent-design kept
+  - row: cc-suite:23
+    tree: cc-suite
+    paths: [skills/cc-suite/vocabulary/SKILL.md]
+    disposition: M
+    target: F4.6
+    note: suite registry seeded from both sources
+  - row: cc-suite:24
+    tree: cc-suite
+    paths: [hooks/hooks.json]
+    disposition: K
+    target: F2.6
+    note: SessionStart/SessionEnd/Stop gate; ships opt-in (D3)
+  - row: cc-suite:25
+    tree: cc-suite
+    paths: [scripts/codex-runner.mjs, scripts/lib/boot_test_claude_mcp.mjs, scripts/lib/claude-octopus-pin.txt, scripts/lib/job-control.mjs, scripts/lib/process.mjs, scripts/lib/state.mjs, scripts/lib/workspace.mjs]
+    disposition: K
+    target: F2.1
+    note: render.mjs is §6 row 28, an orphan, not part of lib/*
+  - row: cc-suite:26
+    tree: cc-suite
+    paths: [scripts/bridge_agents.py, scripts/bridge_hooks.py, scripts/bridge_mcp.sh, scripts/bridge_skills.sh, scripts/codex-preflight.sh, scripts/ensure_gitignore.sh, scripts/init.sh, scripts/mcp_claude.sh, scripts/mcp_codex.sh, scripts/session-lifecycle-hook.mjs, scripts/status.sh, scripts/stop-review-gate-hook.mjs, scripts/unbridge.sh]
+    disposition: K
+    target: F1.6
+    note: bridge scripts; §6 writes 'F1.x scripts', sentinels renamed vibe-*
+  - row: cc-suite:27
+    tree: cc-suite
+    paths: [scripts/bridge_commands.sh]
+    disposition: M
+    target: F9.6
+    note: orphan; the F9.6 basis
+  - row: cc-suite:28
+    tree: cc-suite
+    paths: [schemas/audit-output.schema.json, scripts/lib/render.mjs]
+    disposition: M
+    target: [F2.5, F9.1]
+    note: orphans
+  - row: cc-suite:29
+    tree: cc-suite
+    paths: [templates/agents/clarity_reviewer.md, templates/agents/deletion_advocate.md, templates/agents/documentation_critic.md, templates/agents/north_star_advisor.md, templates/agents/security_skeptic.md, templates/agents/simplicity_advocate.md]
+    disposition: K
+    target: F7.2
+    note: advisor templates x6
+  - row: cc-suite:30
+    tree: cc-suite
+    paths: [.claude-plugin/plugin.json, AGENTS.md, PRIVACY.md, README.md, nlpm-badge.json, package.json]
+    disposition: M
+    target: F9.1
+    note: DIVERGENCE: §6's cc-suite subsection has no manifests/top-level-docs row, though grill and nlpm both do and AC-1 allowlists these files. Recorded here rather than absorbed into a neighbouring row
+  # --- grill-for-claude ---
+  - row: grill-for-claude:01
+    tree: grill-for-claude
+    paths: [commands/roast.md]
+    disposition: K
+    target: F3.1
+    note: roast command
+  - row: grill-for-claude:02
+    tree: grill-for-claude
+    paths: [agents/architecture.md, agents/edge-cases.md, agents/error-handling.md, agents/recon.md, agents/security.md, agents/testing.md]
+    disposition: K
+    target: [F3.2, F3.3, F3.4, F3.5, F3.6, F3.7]
+    note: recon, architecture, error-handling, security, testing, edge-cases
+  - row: grill-for-claude:03
+    tree: grill-for-claude
+    paths: [skills/grill-core/SKILL.md]
+    disposition: M
+    target: [F9.1, F9.2]
+    note: grill-core: suite-wide finding contract
+  - row: grill-for-claude:04
+    tree: grill-for-claude
+    paths: [codex/AGENTS.md, codex/skills/grill-architecture/SKILL.md, codex/skills/grill-core/SKILL.md, codex/skills/grill-edge-cases/SKILL.md, codex/skills/grill-error-handling/SKILL.md, codex/skills/grill-recon/SKILL.md, codex/skills/grill-roast/SKILL.md, codex/skills/grill-roast/agents/openai.yaml, codex/skills/grill-security/SKILL.md, codex/skills/grill-testing/SKILL.md]
+    disposition: G
+    target: F9.6
+    note: codex mirror, 8 skills
+  - row: grill-for-claude:05
+    tree: grill-for-claude
+    paths: [scripts/validate-plugin.sh]
+    disposition: M
+    target: [F4.4, F1.2]
+    note: validate-plugin.sh
+  - row: grill-for-claude:06
+    tree: grill-for-claude
+    paths: [.claude-plugin/marketplace.json, .claude-plugin/plugin.json, .codex-plugin/plugin.json, nlpm-badge.json]
+    disposition: M
+    target: F8.3
+    note: single manifest pair + marketplace entry; badge via F8.3
+  - row: grill-for-claude:07
+    tree: grill-for-claude
+    paths: [CLAUDE.md, PRIVACY.md, README.md]
+    disposition: M
+    target: F10.3
+    note: one truthful doc set; doc-accuracy checks in the release gate
+  # --- nlpm ---
+  - row: nlpm:01
+    tree: nlpm
+    paths: [agents/scanner.md, commands/ls.md]
+    disposition: K
+    target: F4.1
+    note: ls + scanner
+  - row: nlpm:02
+    tree: nlpm
+    paths: [agents/scorer.md, agents/vague-scanner.md, commands/score.md]
+    disposition: K
+    target: F4.2
+    note: score + scorer + vague-scanner
+  - row: nlpm:03
+    tree: nlpm
+    paths: [commands/fix.md]
+    disposition: M
+    target: F3.8
+    note: fix
+  - row: nlpm:04
+    tree: nlpm
+    paths: [agents/checker.md, commands/check.md]
+    disposition: K
+    target: F4.3
+    note: check + checker
+  - row: nlpm:05
+    tree: nlpm
+    paths: [bin/nlpm-check, templates/pre-commit-nlpm.sh, templates/workflows/nlpm-check.yml]
+    disposition: K
+    target: F4.4
+    note: bin/nlpm-check + pre-commit/CI templates
+  - row: nlpm:06
+    tree: nlpm
+    paths: [.nlpm-test/checker.spec.md, .nlpm-test/scanner.spec.md, .nlpm-test/scorer.spec.md, .nlpm-test/tester.spec.md, .nlpm-test/vague-scanner.spec.md, agents/tester.md, commands/test.md]
+    disposition: K
+    target: F4.5
+    note: test + tester + .nlpm-test specs; legacy dir read-compat
+  - row: nlpm:07
+    tree: nlpm
+    paths: [agents/vocab-drift-scanner.md, commands/vocab-drift.md, commands/vocab-init.md, skills/nlpm/vocabulary/SKILL.md]
+    disposition: K
+    target: F4.6
+    note: vocab-init/vocab-drift + scanner + vocabulary skill
+  - row: nlpm:08
+    tree: nlpm
+    paths: [agents/security-scanner.md, commands/security-scan.md, skills/nlpm/security/SKILL.md]
+    disposition: K
+    target: F5.1
+    note: security-scan + scanner + skill
+  - row: nlpm:09
+    tree: nlpm
+    paths: [commands/trend.md]
+    disposition: K
+    target: F8.1
+    note: trend
+  - row: nlpm:10
+    tree: nlpm
+    paths: [bin/nlpm-report, commands/report.md, templates/report/assets/nlpm-dashboard.css, templates/report/assets/nlpm-dashboard.js, templates/report/assets/nlpm-docs.css, templates/report/assets/nlpm-report.css, templates/report/assets/nlpm-report.js, templates/report/dashboard.html, templates/report/docs/index.html, templates/report/single.html, templates/report/vendor/g6.min.js]
+    disposition: K
+    target: F8.2
+    note: report + bin/nlpm-report + its render templates
+  - row: nlpm:11
+    tree: nlpm
+    paths: [bin/nlpm-badge, nlpm-badge.json]
+    disposition: K
+    target: F8.3
+    note: bin/nlpm-badge
+  - row: nlpm:12
+    tree: nlpm
+    paths: [bin/nlpm-build-docs]
+    disposition: K
+    target: F10.3
+    note: also serves F8.2
+  - row: nlpm:13
+    tree: nlpm
+    paths: [bin/nlpm-build-case-studies-index, bin/nlpm-build-reference-md, bin/nlpm-build-site-report-pages, bin/nlpm-build-vocab-data]
+    disposition: K
+    target: F10.3
+    note: reference-md / vocab-data / site-report-pages / case-studies-index
+  - row: nlpm:14
+    tree: nlpm
+    paths: [commands/init.md]
+    disposition: M
+    target: F1.1
+    note: init
+  - row: nlpm:15
+    tree: nlpm
+    paths: [agents/spec-researcher.md, commands/spec-sync.md]
+    disposition: K
+    target: F4.7
+    note: spec-sync + spec-researcher
+  - row: nlpm:16
+    tree: nlpm
+    paths: [commands/shared/append-history.md, commands/shared/classify.md, commands/shared/discover.md]
+    disposition: K
+    target: [F9.3, F8.1, F4.2]
+    note: partials: discover, classify, append-history
+  - row: nlpm:17
+    tree: nlpm
+    paths: [skills/nlpm/conventions-antigravity/SKILL.md, skills/nlpm/conventions-claude/SKILL.md, skills/nlpm/conventions-codex/SKILL.md, skills/nlpm/conventions/SKILL.md, skills/nlpm/orchestration/SKILL.md, skills/nlpm/patterns/SKILL.md, skills/nlpm/rules/SKILL.md, skills/nlpm/scoring/SKILL.md, skills/nlpm/testing/SKILL.md, skills/nlpm/writing-agents/SKILL.md, skills/nlpm/writing-hooks/SKILL.md, skills/nlpm/writing-plugins/SKILL.md, skills/nlpm/writing-prompts/SKILL.md, skills/nlpm/writing-rules/SKILL.md, skills/nlpm/writing-skills/SKILL.md]
+    disposition: K/M
+    target: F4.8
+    note: knowledge skills x17 — kept, except conventions-claude which is merged with cc-suite's
+  - row: nlpm:18
+    tree: nlpm
+    paths: [hooks/hooks.json, scripts/check-artifact.sh]
+    disposition: K
+    target: F9.7
+    note: PostToolUse hook + check-artifact.sh
+  - row: nlpm:19
+    tree: nlpm
+    paths: [codex/AGENTS.md, codex/skills/conventions-antigravity/SKILL.md, codex/skills/conventions-claude/SKILL.md, codex/skills/conventions-claude/reference.md, codex/skills/conventions-codex/SKILL.md, codex/skills/conventions/SKILL.md, codex/skills/orchestration/SKILL.md, codex/skills/patterns/SKILL.md, codex/skills/rules/SKILL.md, codex/skills/scoring/SKILL.md, codex/skills/security/SKILL.md, codex/skills/testing/SKILL.md, codex/skills/vocabulary/SKILL.md, codex/skills/writing-agents/SKILL.md, codex/skills/writing-hooks/SKILL.md, codex/skills/writing-plugins/SKILL.md, codex/skills/writing-prompts/SKILL.md, codex/skills/writing-rules/SKILL.md, codex/skills/writing-skills/SKILL.md]
+    disposition: G
+    target: F9.6
+    note: codex skill mirror (17)
+  - row: nlpm:20
+    tree: nlpm
+    paths: [.github/workflows/auditor-audit.yml, .github/workflows/auditor-batch-processor.yml, .github/workflows/auditor-case-study.yml, .github/workflows/auditor-cite-exemplars.yml, .github/workflows/auditor-classify.yml, .github/workflows/auditor-contribute.yml, .github/workflows/auditor-daily-report.yml, .github/workflows/auditor-discover.yml, .github/workflows/auditor-docs-diff.yml, .github/workflows/auditor-exemplar.yml, .github/workflows/auditor-integration-test.yml, .github/workflows/auditor-refine-rules.yml, .github/workflows/auditor-render-dashboard.yml, .github/workflows/auditor-repo-report.yml, .github/workflows/auditor-rule-review.yml, .github/workflows/auditor-suppressions.yml, .github/workflows/auditor-track.yml, .github/workflows/auditor-vocab-drift.yml, auditor/SCHEMAS.md, auditor/prompts/polish-case-study.md, auditor/prompts/score-artifacts.md, auditor/prompts/write-exemplar.md, auditor/registry/repos.json]
+    disposition: K
+    target: [F10.1, F10.2]
+    note: auditor pipeline workflows + prompts + SCHEMAS.md + registry
+  - row: nlpm:21
+    tree: nlpm
+    paths: [auditor/scripts/atomic-registry-write.sh, auditor/scripts/backfill-findings.py, auditor/scripts/backfill-pr-fingerprints.py, auditor/scripts/batch-process.py, auditor/scripts/build-exemplar-gallery.py, auditor/scripts/cla-gate-messages/cla_author_missing.md, auditor/scripts/cla-gate-messages/cla_unsigned.md, auditor/scripts/commit-via-pr.sh, auditor/scripts/compute-fingerprint.sh, auditor/scripts/compute-vocab-fingerprint.sh, auditor/scripts/diff-findings.py, auditor/scripts/docs-diff.py, auditor/scripts/generate-daily-report.py, auditor/scripts/generate-rule-review-body.py, auditor/scripts/git-push-with-retry.sh, auditor/scripts/guard-protected-paths.sh, auditor/scripts/log-event.sh, auditor/scripts/parse-pr-metadata.py, auditor/scripts/parse-suppressions.py, auditor/scripts/prepare-refinement-input.py, auditor/scripts/propose-rule-citations.py, auditor/scripts/render-dashboard.py, auditor/scripts/render-repo-report.py, auditor/scripts/repair-stale-statuses.py, auditor/scripts/resolve-merge-conflicts.sh, auditor/scripts/rule-health.py, auditor/scripts/scan-suppressions.py, auditor/scripts/synthesize-sidecar.py, auditor/scripts/three-way-merge-registry.py, auditor/scripts/validate-feedback.sh, auditor/scripts/validate-rule-ids.py, auditor/scripts/vendor_default_filter.py]
+    disposition: K
+    target: F10.4
+    note: auditor helper scripts, called by F10.1-F10.3
+  - row: nlpm:22
+    tree: nlpm
+    paths: [analysis/scripts/extract-vocabulary.py, analysis/vocabulary-design-principles.md]
+    disposition: K
+    target: F4.6
+    note: extract-vocabulary.py + vocabulary-design principles
+  - row: nlpm:23
+    tree: nlpm
+    paths: [.github/workflows/deploy-site.yml, .github/workflows/nlpm-self-check.yml, .github/workflows/pre-release-quality-gate.yml, .github/workflows/site-preview-cleanup.yml, .github/workflows/site-preview.yml, .github/workflows/site-validate.yml, site/.vitepress/config.ts, site/.vitepress/shims.d.ts, site/.vitepress/theme/Layout.vue, site/.vitepress/theme/components/DashboardPanels.vue, site/.vitepress/theme/components/RepoReport.vue, site/.vitepress/theme/components/VocabMap.vue, site/.vitepress/theme/custom.css, site/.vitepress/theme/index.ts, site/build.sh, site/dashboard.md, site/featured-audits.md, site/how-it-evolves.md, site/how-it-works.md, site/how-to-use-it.md, site/index.md, site/install.md, site/package.json, site/pnpm-lock.yaml, site/why.md]
+    disposition: K
+    target: F10.3
+    note: site + release workflows; site rebranded to vibe-suite (D4)
+  - row: nlpm:24
+    tree: nlpm
+    corpus_roots: [auditor/reports, auditor/exemplars, auditor/audits, auditor/logs, case-studies]
+    disposition: D
+    note: accumulated ops data migrated to the auditor-data branch (§7A row 9); citations regenerated by F10.2
+  - row: nlpm:25
+    tree: nlpm
+    paths: [.claude-plugin/marketplace.json, .claude-plugin/plugin.json, .codex-plugin/plugin.json, AGENTS.md, CLAUDE.md, GEMINI.md, PRIVACY.md, README.md]
+    disposition: M
+    target: F9.1
+    note: manifests / marketplace and the doc set
+  # --- workspace ---
+  - row: workspace:01
+    tree: workspace
+    paths: [refine-proposal/SKILL.md]
+    disposition: K
+    target: F6.1
+    note: direct port incl. --second-language, --stop-severity, schema v6
+  - row: workspace:02
+    tree: workspace
+    paths: [refine-proposal/references/review-rubric.md]
+    disposition: K
+    target: F6.1
+    note: review-rubric incl. the translation-review contract
+  - row: workspace:03
+    tree: workspace
+    paths: [refine-proposal/scripts/codex_review.sh]
+    disposition: K
+    target: F6.1
+    note: dispatch wrapper, refactored to call F2.1
+  - row: workspace:04
+    tree: workspace
+    paths: [refine-proposal/scripts/render_final.sh]
+    disposition: K
+    target: F6.1
+    note: FINAL.html renderer
+  - row: workspace:05
+    tree: workspace
+    paths: [issue2pr/SKILL.md]
+    disposition: K
+    target: F6.2
+    note: standardized core per §11; both reviewer backends carried
+  - row: workspace:06
+    tree: workspace
+    paths: [issue2pr/manifest-schema.json]
+    disposition: K
+    target: F6.2
+    note: manifest-mode input schema
+  - row: workspace:07
+    tree: workspace
+    paths: [issue2pr/scripts/roamex-manifest.py]
+    disposition: K
+    target: F6.2
+    note: genericized to profile-manifest.py
+  - row: workspace:08
+    tree: workspace
+    paths: [issue2pr/scripts/watch-pr.sh]
+    disposition: K
+    target: F6.2
+    note: chain-mode PR watcher
+  - row: workspace:09
+    tree: workspace
+    paths: [issue2pr/profiles/roamex.md, issue2pr/profiles/vibe-suite.md]
+    disposition: K
+    target: examples/profiles/roamex.md
+    note: reference example only, not an active profile (D2)
+  - row: workspace:10
+    tree: workspace
+    paths: [issue2pr/templates/roamex-pr-body.md, issue2pr/templates/vibe-suite-pr-body.md]
+    disposition: K
+    target: templates/pr-body.md
+    note: genericized with per-profile override
+  - row: workspace:11
+    tree: workspace
+    paths: [issue2pr/examples/roamex/brief-A-3.md, issue2pr/examples/roamex/manifest-A-3.json]
+    disposition: K
+    target: F6.2
+    note: docs examples
+  - row: workspace:12
+    tree: workspace
+    paths: [issue2pr/ROAMEX.md]
+    disposition: M
+    target: examples/profiles/roamex.md
+    note: folded into the roamex reference example
+  - row: workspace:13
+    tree: workspace
+    paths: [runs-stats/SKILL.md]
+    disposition: K
+    target: F8.5
+    note: profile-aware genericization; vendored chart lib
+  - row: workspace:14
+    tree: workspace
+    paths: [runs-stats/scripts/generate_runs_stats.py]
+    disposition: K
+    target: F8.5
+    note: generator; reviewer labels from run metadata (P9)

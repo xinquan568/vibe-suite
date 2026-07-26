@@ -102,6 +102,10 @@ _TARGET = re.compile(r"F[0-9]+\.[0-9]+$")
 #: §6's "vibe-suite home" column is a function ID, several IDs, or — for three workspace rows — a
 #: repository path. Encoding only the first would have forced those rows to name a function that
 #: §6 does not give them.
+#: Only these rows have a §6 home that is a repository path rather than a function. Allowing a path
+#: anywhere else weakened the check everywhere to accommodate three rows.
+PATH_TARGET_ROWS = frozenset(("workspace:09", "workspace:10", "workspace:12"))
+
 #: A path target must actually look like a repository path — it needs a directory separator and a
 #: file extension. Accepting any bare word would have let `target: nonsense` through, which is the
 #: weakening that admitting path targets introduced.
@@ -322,6 +326,9 @@ def validate_schema(trees, mappings, function_ids):
                     if one not in function_ids:
                         errors.append(f"{where}: target {one!r} is well-formed but is not one of "
                                       f"the {len(function_ids)} function IDs")
+                elif row not in PATH_TARGET_ROWS:
+                    errors.append(f"{where}: target {one!r} is not a function ID, and only "
+                                  f"{', '.join(sorted(PATH_TARGET_ROWS))} may name a path")
                 elif not _TARGET_PATH.fullmatch(one):
                     errors.append(f"{where}: target {one!r} is neither a function ID nor a path")
         elif targets:

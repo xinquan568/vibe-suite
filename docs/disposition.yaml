@@ -155,9 +155,10 @@ mappings:
     note: SessionStart/SessionEnd/Stop gate; ships opt-in (D3)
   - row: cc-suite:25
     tree: cc-suite
-    paths: [scripts/codex-runner.mjs, scripts/lib/boot_test_claude_mcp.mjs, scripts/lib/claude-octopus-pin.txt, scripts/lib/job-control.mjs, scripts/lib/process.mjs, scripts/lib/render.mjs, scripts/lib/state.mjs, scripts/lib/workspace.mjs]
+    paths: [scripts/codex-runner.mjs, scripts/lib/boot_test_claude_mcp.mjs, scripts/lib/claude-octopus-pin.txt, scripts/lib/job-control.mjs, scripts/lib/process.mjs, scripts/lib/state.mjs, scripts/lib/workspace.mjs]
     disposition: K
     target: F2.1
+    note: render.mjs is §6 row 28, an orphan, not part of lib/*
   - row: cc-suite:26
     tree: cc-suite
     paths: [scripts/bridge_agents.py, scripts/bridge_hooks.py, scripts/bridge_mcp.sh, scripts/bridge_skills.sh, scripts/codex-preflight.sh, scripts/ensure_gitignore.sh, scripts/init.sh, scripts/mcp_claude.sh, scripts/mcp_codex.sh, scripts/session-lifecycle-hook.mjs, scripts/status.sh, scripts/stop-review-gate-hook.mjs, scripts/unbridge.sh]
@@ -172,7 +173,7 @@ mappings:
     note: orphan; the F9.6 basis
   - row: cc-suite:28
     tree: cc-suite
-    paths: [schemas/audit-output.schema.json]
+    paths: [schemas/audit-output.schema.json, scripts/lib/render.mjs]
     disposition: M
     target: [F2.5, F9.1]
     note: orphans

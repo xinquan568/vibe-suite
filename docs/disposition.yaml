@@ -185,7 +185,7 @@ mappings:
     note: advisor templates x6
   - row: cc-suite:30
     tree: cc-suite
-    paths: [.claude-plugin/plugin.json, AGENTS.md, PRIVACY.md, README.md, package.json]
+    paths: [.claude-plugin/plugin.json, AGENTS.md, PRIVACY.md, README.md, nlpm-badge.json, package.json]
     disposition: M
     target: F9.1
     note: DIVERGENCE: §6's cc-suite subsection has no manifests/top-level-docs row, though grill and nlpm both do and AC-1 allowlists these files. Recorded here rather than absorbed into a neighbouring row
@@ -222,7 +222,7 @@ mappings:
     note: validate-plugin.sh
   - row: grill-for-claude:06
     tree: grill-for-claude
-    paths: [.claude-plugin/marketplace.json, .claude-plugin/plugin.json, .codex-plugin/plugin.json]
+    paths: [.claude-plugin/marketplace.json, .claude-plugin/plugin.json, .codex-plugin/plugin.json, nlpm-badge.json]
     disposition: M
     target: F8.3
     note: single manifest pair + marketplace entry; badge via F8.3
@@ -295,7 +295,7 @@ mappings:
     note: report + bin/nlpm-report + its render templates
   - row: nlpm:11
     tree: nlpm
-    paths: [bin/nlpm-badge]
+    paths: [bin/nlpm-badge, nlpm-badge.json]
     disposition: K
     target: F8.3
     note: bin/nlpm-badge

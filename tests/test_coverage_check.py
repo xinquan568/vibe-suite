@@ -68,7 +68,7 @@ class TestBaseline(CLICase):
     def test_the_shipped_artifacts_pass(self):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("300 source artifacts", result.stdout)
+        self.assertIn("303 source artifacts", result.stdout)
         self.assertIn("76 disposition rows", result.stdout)
 
     def test_every_tree_contributes(self):
@@ -147,6 +147,19 @@ def expand_ids(cell):
     return frozenset(ids)
 
 
+def primary_id(home_cell):
+    """The first function ID in §6's home cell — the row's primary destination."""
+    match = re.search(r"F[0-9]+\.[0-9]+", home_cell)
+    return match.group(0) if match else None
+
+
+def universe_for(tree):
+    """Every path the tree actually has, so §6 names that do not exist there are not read as
+    omissions from the row."""
+    universe, _ = cc.build_universe(MANIFESTS)
+    return universe[tree]["all"]
+
+
 def read_six():
     """Parse §6's tables out of the shipped proposal.
 
@@ -168,7 +181,7 @@ def read_six():
             if len(cells) < 3 or cells[1] in ("Disp.",):
                 continue
             number += 1
-            out[f"{tree}:{number:02d}"] = (cells[1], expand_ids(cells[2]), cells[0])
+            out[f"{tree}:{number:02d}"] = (cells[1], expand_ids(cells[2]), cells[0], cells[2])
     return out
 
 
@@ -177,6 +190,7 @@ class TestDispositionsMatchSectionSix(CLICase):
 
     def setUp(self):
         self.six = read_six()
+        self.six_raw = {k: v[3] for k, v in self.six.items()}
         _, mappings = cc.parse_disposition(DISPOSITION.read_text(encoding="utf-8"))
         self.rows = {m["row"]: m for m in mappings}
 
@@ -188,21 +202,38 @@ class TestDispositionsMatchSectionSix(CLICase):
                 self.assertEqual(sum(1 for k in self.six if k.startswith(tree + ":")), expected)
 
     def test_every_row_carries_sixs_disposition(self):
-        for row, (disposition, _, _source) in self.six.items():
+        for row, (disposition, _, _source, _home) in self.six.items():
             with self.subTest(row=row):
                 self.assertEqual(self.rows[row]["disposition"], disposition,
                                  f"{row}: §6 says {disposition}")
 
     def test_every_function_target_is_one_six_names(self):
         """Where §6's home column names function IDs, the map must not invent different ones."""
-        for row, (_, ids, _source) in self.six.items():
-            if not ids:
-                continue
+        for row, (disposition, ids, _source, _home) in self.six.items():
+            if not ids or disposition == "D":
+                continue        # a D row's home cell is prose; it carries no function target
             with self.subTest(row=row):
                 target = self.rows[row].get("target", [])
                 mapped = frozenset(target if isinstance(target, list) else [target])
+                self.assertTrue(mapped, f"{row}: §6 names {sorted(ids)}; the map names none")
                 self.assertTrue(mapped <= ids,
-                                f"{row}: map has {sorted(mapped - ids)}, §6 names {sorted(ids)}")
+                                f"{row}: map invents {sorted(mapped - ids)}; §6 names {sorted(ids)}")
+                primary = primary_id(self.six_raw[row])
+                if primary is None:
+                    continue
+                self.assertIn(primary, mapped,
+                              f"{row}: the map drops §6's primary home {primary}")
+
+    def test_path_targets_match_the_path_six_names(self):
+        """§6 gives three workspace rows a repository path as their home. Allowing a path there is
+        not the same as checking it is the right one."""
+        text = PROPOSAL.read_text(encoding="utf-8")
+        for row in sorted(cc.PATH_TARGET_ROWS):
+            with self.subTest(row=row):
+                target = self.rows[row]["target"]
+                target = target[0] if isinstance(target, list) else target
+                self.assertIn(f"`{target}`", text,
+                              f"{row}: §6 does not name the path {target!r}")
 
     def test_the_only_row_without_a_six_source_is_the_recorded_divergence(self):
         self.assertEqual(set(self.rows) - set(self.six), DIVERGENCES)
@@ -214,17 +245,33 @@ class TestDispositionsMatchSectionSix(CLICase):
         share both. §6 names its artifacts in backticks; at least one of those names must appear in
         the paths the row claims."""
         checked = 0
-        for row, (_, _ids, source) in self.six.items():
-            names = [n for n in re.findall(r"`([^`]+)`", source)
-                     if not n.startswith("-") and "/" not in n.rstrip("/*")]
+        for row, (_, _ids, source, _home) in self.six.items():
+            names = [n for n in re.findall(r"`([^`]+)`", source) if not n.startswith("-")]
             if not names:
                 continue                      # prose-only source cells carry no checkable token
             mapping = self.rows[row]
             claimed = " ".join(mapping.get("paths", []) + mapping.get("corpus_roots", []))
             with self.subTest(row=row):
-                stems = [n.strip("*./$").split(".")[0] for n in names]
-                self.assertTrue(any(stem and stem in claimed for stem in stems),
-                                f"{row}: §6 names {names}, but the row claims {claimed[:120]!r}")
+                # §6 writes some sources as globs (`bridge_*`, `mcp_*`) and names a few artifacts
+                # that a given tree does not actually have (`doctor` alongside `diagnose`). A glob
+                # is matched by its prefix; a name absent from the tree cannot be claimed by anyone
+                # and is not evidence of an omission.
+                present = universe_for(row.split(":")[0])
+                stems = []
+                for name in names:
+                    stem = name.strip("*./$").split(".")[0]
+                    if not stem:
+                        continue
+                    if "*" in name:
+                        head = re.match(r"[A-Za-z0-9_-]*", name.lstrip("`")).group(0)
+                        if head:
+                            stems.append(("prefix", head))
+                    elif any(stem in path for path in present):
+                        stems.append(("exact", stem))
+                missing = [s for kind, s in stems
+                           if (s not in claimed if kind == "exact" else s not in claimed)]
+                self.assertEqual(missing, [],
+                                 f"{row}: §6 names {names}; the row does not claim {missing}")
             checked += 1
         self.assertGreater(checked, 40, "the source-cell check must cover most rows")
 
@@ -376,7 +423,12 @@ class TestExclusions(CLICase):
 
     def test_every_generated_report_artifact(self):
         self._rejects("auditor/reports/x.json")
-        self._rejects("nlpm-badge.json")
+
+    def test_nlpm_badge_is_not_treated_as_a_generated_report(self):
+        """§6 lists `nlpm-badge.json` as a source artifact with a disposition. Excluding it as a
+        "generated report" made the map unable to claim something §6 requires it to claim — the
+        strict source-cell oracle is what surfaced that."""
+        self.assertFalse(cc.is_excluded("nlpm-badge.json"))
 
     def test_every_row9_corpus_family(self):
         for path in ("auditor/reports/a.json", "auditor/exemplars/a.md", "auditor/audits/a.md",
@@ -493,9 +545,21 @@ class TestChecksAreWiredIntoTheCLI(CLICase):
     def test_the_exclusion_list_is_called(self):
         """An OS-junk file added to a manifest must not become a coverage obligation."""
         def add_junk(data):
-            data["files"] = sorted(data["files"] + ["commands/.DS_Store"])
+            # `scripts/**/*` matches any file, so this one IS allowlisted and only the exclusion
+            # list keeps it out. `commands/.DS_Store` would have proved nothing: the commands
+            # pattern is `commands/**/*.md`, so it was never in the universe to begin with.
+            data["files"] = sorted(data["files"] + ["scripts/.DS_Store", "scripts/__pycache__/x.py"])
         self.assertEqual(self.manifest_mutated("cc-suite", add_junk).returncode, 0,
-                         "an excluded file must not require a disposition row")
+                         "an allowlisted-but-excluded file must not require a disposition row")
+
+    def test_the_exclusion_list_is_load_bearing(self):
+        """The converse: the same path with a normal name DOES require a row. Without this, a
+        broken exclusion list and a broken allowlist look identical."""
+        def add_real(data):
+            data["files"] = sorted(data["files"] + ["scripts/genuinely-new.sh"])
+        result = self.manifest_mutated("cc-suite", add_real)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("scripts/genuinely-new.sh", result.stderr)
 
     def test_the_allowlist_is_called(self):
         """A newly allowlisted file with no row must fail — proving the walk reaches the manifest."""

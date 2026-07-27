@@ -80,6 +80,9 @@ function tokenize(source) {
     if (char === "/" && source[index + 1] === "*") {
       const end = source.indexOf("*/", index + 2);
       if (end < 0) throw new Refusal("unterminated block comment");
+      // A block comment spanning lines still contains a LineTerminator, and ASI cares. Dropping it
+      // silently preserved false adjacency: `async/*\n*/foo()\n{ await x(); }` read as a method.
+      if (source.slice(index, end).includes("\n")) push("newline", "\n", index);
       index = end + 2;
       continue;
     }
@@ -192,13 +195,19 @@ function opensFunctionBody(tokens, position) {
   const name = tokens[head];
   if (name.type === "word" && name.value === "function") return true;
   if (name.type === "word") {
-    // `async`, `get`, `set` and `static` are contextual keywords — also ordinary identifiers.
-    // `async\nfoo()\n{ await x(); }` is an expression statement, a call and a block, not an async
-    // method: a newline between keyword and name is a statement boundary. Adjacency is therefore
-    // required here, unlike `function`, which cannot stand alone as an expression statement.
-    const prior = head - 1;
-    if (prior >= 0 && tokens[prior].type === "word"
-        && ["function", "async", "get", "set", "static"].includes(tokens[prior].value)) return true;
+    // `function` may be separated from the name by a newline — `async function\nfoo() {}` is one
+    // declaration, and `function` cannot stand alone as an expression statement, so there is no
+    // ambiguity to resolve.
+    let scan = head - 1;
+    while (scan >= 0 && tokens[scan].type === "newline") scan -= 1;
+    if (scan >= 0 && tokens[scan].type === "word" && tokens[scan].value === "function") return true;
+
+    // `async`, `get`, `set` and `static` are contextual keywords AND ordinary identifiers, so a
+    // LineTerminator between one and the name is a statement boundary, not a method header.
+    // Adjacency is therefore required for them.
+    const adjacent = head - 1;
+    if (adjacent >= 0 && tokens[adjacent].type === "word"
+        && ["async", "get", "set", "static"].includes(tokens[adjacent].value)) return true;
   }
   return false;                                    // e.g. `foo()\n{ … }` — a call, then a block
 }

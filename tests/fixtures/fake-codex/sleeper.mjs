@@ -6,9 +6,10 @@
 // process alive. Only an escalation to SIGKILL reaps it, so this fixture is what makes the
 // escalation observable rather than merely coded.
 
-import { probeStdin, writeProbe } from "./record.mjs";
+import { announcePid, probeStdin, writeProbe } from "./record.mjs";
 
 async function main() {
+  announcePid();
   const stdin = await probeStdin();
   writeProbe({ stdin, fixture: "sleeper" });
 

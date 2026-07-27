@@ -155,21 +155,39 @@ async function rollForward(workspace, jobId, version) {
   await commit(workspace, jobId, version);
 }
 
-/** Commit a claimed slot. ENOENT means someone else already moved it — verify, do not assume failure. */
+/**
+ * Commit a claimed slot by publishing its content to the canonical path.
+ *
+ * **The slot is retained, never renamed away.** Renaming it would free the `v<N+1>` pathname, and a
+ * delayed writer still holding a stale read at `N` could then claim that same version again and
+ * publish its obsolete candidate over a newer record — including over a terminal one. Keeping the
+ * slot makes `link` fail `EEXIST` for that version forever, so a stale writer is always forced back
+ * through a fresh read. Slots are part of the "never deleted" rule for the same reason.
+ *
+ * Publication is temp + `rename`, which is atomic, and is idempotent by content: whoever performs it
+ * writes the same bytes, so a winner and a recoverer racing produces one outcome.
+ */
 async function commit(workspace, jobId, version) {
+  let content;
   try {
-    await rename(slotPath(workspace, jobId, version), recordPath(workspace, jobId));
-    return true;
+    content = await readFile(slotPath(workspace, jobId, version), "utf8");
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-    // `rename` removes its source, so a concurrent mover — the winner or another recoverer — may
-    // already have committed this exact version. Only a canonical still behind the target is a fault.
     const current = await readCanonical(workspace, jobId).catch(() => null);
-    if (current && current.version >= version) return true;
+    if (current && current.version >= version) return true;      // already published by someone
     throw new JobStoreError(
       `${jobId}: version ${version} slot vanished without being committed (canonical is ` +
       `${current ? current.version : "unreadable"})`);
   }
+
+  const current = await readCanonical(workspace, jobId).catch(() => null);
+  if (current && current.version >= version) return true;        // a newer record already stands
+
+  const staging = path.join(jobsDir(workspace),
+    `${jobId}.pub.${process.pid}.${randomBytes(6).toString("hex")}`);
+  await writeFile(staging, content, "utf8");
+  await rename(staging, recordPath(workspace, jobId));
+  return true;
 }
 
 /**
@@ -316,7 +334,7 @@ export async function reapOrphanTemps(workspace, { now = Date.now() } = {}) {
   }
   let reaped = 0;
   for (const name of names) {
-    if (!name.includes(".tmp.")) continue;                              // never a .vN slot
+    if (!name.includes(".tmp.") && !name.includes(".pub.")) continue;   // never a .vN slot
     const full = path.join(dir, name);
     try {
       const info = await stat(full);

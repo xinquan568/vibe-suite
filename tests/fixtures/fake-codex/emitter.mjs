@@ -7,11 +7,12 @@
 // while one that ignores parse errors entirely could swallow a terminal event. Both failure modes
 // are exercised here rather than described in a comment.
 
-import { probeStdin, writeProbe } from "./record.mjs";
+import { announcePid, probeStdin, writeProbe } from "./record.mjs";
 
 const THREAD_ID = "thread_fixture_0001";
 
 async function main() {
+  announcePid();
   const stdin = await probeStdin();
   writeProbe({ stdin, fixture: "emitter" });
 

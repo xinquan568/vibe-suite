@@ -48,7 +48,7 @@ import {
 } from "./lib/process.mjs";
 import {
   claimWith, createRecord, finaliseRecord, hashToken, newClaimToken, newJobId, newRecord,
-  readRecord, resultLine, updateRecord,
+  readRecord, resultLine, TERMINAL_STATUSES, updateRecord,
 } from "./lib/jobs.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -311,28 +311,49 @@ async function runBackground(workspace, options, timeoutMs) {
     // orphan it. Then reap before touching the record, so nothing outlives the verdict.
     signalGroup(child.pid, "SIGTERM");
     signalGroup(child.pid, "SIGKILL");
-    await new Promise((resolve) => {
+    // Confirm the reap rather than trusting a timer: poll until the group is gone. A timer that
+    // merely expires proves nothing, and the record decision below depends on the worker being dead.
+    const reaped = await new Promise((resolve) => {
       let done = false;
-      const finish = () => { if (!done) { done = true; resolve(); } };
-      child.on("exit", finish);
-      setTimeout(finish, 5000);
+      const finish = (value) => { if (!done) { done = true; resolve(value); } };
+      child.on("exit", () => finish(true));
+      const deadline = Date.now() + 15_000;
+      const poll = setInterval(() => {
+        if (!signalGroup(child.pid, 0)) { clearInterval(poll); finish(true); }
+        else if (Date.now() > deadline) { clearInterval(poll); finish(false); }
+      }, 50);
     });
 
     // **Always** attempt the guarded finalisation. A worker killed immediately after claiming would
     // otherwise leave the record `running` forever with nobody alive to finish it. The guard means a
     // job that genuinely completed before the kill keeps its verdict: the transition simply rejects.
+    let finaliseError = null;
     await finaliseRecord(workspace, record.jobId, {
-      status: "failed", error: "worker did not start, or was terminated before claiming",
-    }).catch(() => null);
+      status: "failed",
+      error: reaped
+        ? "worker did not start, or was terminated before claiming"
+        : "worker did not start and could not be confirmed reaped",
+    }).catch((error) => { finaliseError = error; });
 
     const after = await readRecord(workspace, record.jobId).catch(() => null);
-    // The consumed digest chooses only the *shape* of the acknowledgement: consumed ⇒ a claim
-    // happened, so D-B still owes a launch receipt. Still present ⇒ never claimed ⇒ terminal line.
-    if (after && after.claimDigest === null) {
+    const terminal = after && TERMINAL_STATUSES.has(after.status);
+
+    // A record we just killed must never be acknowledged as `running`. The consumed digest chooses
+    // the acknowledgement *shape* only once the record is settled; if finalisation failed and the
+    // record is still non-terminal, saying "running" would report a live job that is dead.
+    if (!terminal) {
+      process.stderr.write(
+        `codex-runner: could not finalise ${record.jobId}` +
+        `${finaliseError ? `: ${finaliseError.message}` : ""}\n`);
+      process.stdout.write(resultLine({ ...(after ?? record), status: "failed" }) + "\n");
+      return 1;
+    }
+    if (after.claimDigest === null) {
+      // A claim did happen, so D-B still owes a launch receipt for the acknowledgement shape.
       process.stdout.write(resultLine({ ...after, status: "running", threadId: null, rawOutput: null }) + "\n");
       return 0;
     }
-    process.stdout.write(resultLine(after ?? { ...record, status: "failed" }) + "\n");
+    process.stdout.write(resultLine(after) + "\n");
     return 1;
   }
 

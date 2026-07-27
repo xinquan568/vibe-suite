@@ -44,8 +44,29 @@ test("an uncommitted version slot is rolled forward, not deleted", async () => {
 
   const final = await readRecord(ws, "job_test");
   assert.ok(final.version >= 2, "the orphaned slot must have been committed");
-  assert.equal(readdirSync(jobsDir(ws)).some((n) => n === "job_test.v2.json"), false,
-    "the slot is consumed by the commit, not left behind");
+  // The slot is RETAINED, not consumed. Renaming it away would free the `v2` pathname, letting a
+  // delayed writer still holding a stale read at v1 claim that version again and publish its
+  // obsolete candidate over a newer — possibly terminal — record.
+  assert.ok(readdirSync(jobsDir(ws)).includes("job_test.v2.json"),
+    "a committed slot is retained so its version can never be re-claimed");
+});
+
+test("a committed version can never be re-claimed by a stale writer", async () => {
+  const ws = workspace();
+  await seed(ws);
+  await transact(ws, "job_test", (record) => ({ ...record, kind: "first" }));   // canonical -> v2
+  const canonical = await readRecord(ws, "job_test");
+  assert.equal(canonical.version, 2);
+
+  // A stale writer that still believes the canonical is at v1 must not be able to take v2 again.
+  await assert.rejects(async () => {
+    const { link, writeFile } = await import("node:fs/promises");
+    const temp = path.join(jobsDir(ws), "job_test.tmp.stale");
+    await writeFile(temp, JSON.stringify({ ...canonical, version: 2, kind: "STALE" }), "utf8");
+    await link(temp, path.join(jobsDir(ws), "job_test.v2.json"));
+  }, /EEXIST/, "the retained slot must block re-use of a committed version");
+
+  assert.equal((await readRecord(ws, "job_test")).kind, "first");
 });
 
 test("a malformed slot is reported, never deleted or committed", async () => {

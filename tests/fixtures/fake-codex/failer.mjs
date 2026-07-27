@@ -7,9 +7,10 @@
 // the exit code would record this job as `completed`. The whole point of the fixture is that it
 // exits 0.
 
-import { probeStdin, writeProbe } from "./record.mjs";
+import { announcePid, probeStdin, writeProbe } from "./record.mjs";
 
 async function main() {
+  announcePid();
   const stdin = await probeStdin();
   writeProbe({ stdin, fixture: "failer" });
 

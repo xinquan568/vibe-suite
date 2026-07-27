@@ -498,6 +498,7 @@ class LifecycleRaces(RunnerCase):
         env = dict(os.environ)
         env["VIBE_SUITE_CODEX_BIN"] = str(FIXTURES / fixture)
         env["VIBE_TEST_PROBE"] = str(self.probe)
+        env["VIBE_TEST_PID_FILE"] = str(self.ws / "grandchild.pid")
         env["VIBE_SUITE_TEST_LATCH_DIR"] = str(self.latch)
         return subprocess.Popen(
             ["node", str(RUNNER), *args], cwd=self.ws, env=env,
@@ -513,6 +514,24 @@ class LifecycleRaces(RunnerCase):
 
     def release(self, name):
         (self.latch / f"{name}.release").write_text("1")
+
+    def test_killed_worker_is_never_acknowledged_as_running(self):
+        """A record we killed must not be reported live, whatever the digest says."""
+        proc = self.run_latched(*self.base_args("--background"), fixture="sleeper.mjs")
+        self.wait_signal("pre-claim")
+        self.wait_signal("final-poll", timeout=40)
+        self.release("pre-claim")
+        self.wait_signal("post-claim")
+        self.release("pre-kill")
+        self.release("pre-ack")
+        stdout, _ = proc.communicate(timeout=60)
+
+        parsed = json.loads([l for l in stdout.splitlines() if l.strip()][0])
+        record = self.job_record(parsed["jobId"])
+        self.assertIn(record["status"], {"completed", "failed", "timed_out", "cancelled"})
+        if parsed["status"] == "running":
+            self.assertNotEqual(record["status"], "running",
+                                "a running receipt is only legitimate once the record is settled")
 
     def test_worker_blocks_at_pre_claim_until_released(self):
         """The pre-claim latch is what makes every other race in this class deterministic."""
@@ -561,24 +580,37 @@ class LifecycleRaces(RunnerCase):
         self.wait_signal("final-poll", timeout=40)
         self.release("pre-claim")
         self.wait_signal("post-claim")
-        self.wait_signal("post-child-spawn")   # a grandchild provably exists before the kill
+        self.wait_signal("post-child-spawn")
+        # `post-child-spawn` fires at spawn; the fixture needs a moment to boot and announce its pid.
+        # Waiting for that pid BEFORE releasing the kill is what makes "a grandchild provably existed
+        # before the kill" true rather than hoped for.
+        pid_file = self.ws / "grandchild.pid"
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not pid_file.exists():
+            time.sleep(0.02)
+        self.assertTrue(pid_file.exists(), "the fixture (grandchild) must have started")
+        grandchild = int(pid_file.read_text())
+
         self.release("pre-kill")
         self.release("pre-ack")
         proc.communicate(timeout=60)
 
-        # The probe file is deliberately not asserted here: the fixture writes it *after* the
-        # runner signals `post-child-spawn`, so requiring it would race the kill this test exists to
-        # force. The property under test is that nothing in the group survives.
         job = json.loads(next((self.ws / STATE_DIRNAME / "jobs").glob("job_*.json")).read_text())
         self.assertIsNotNone(job["workerPid"], "the worker must have claimed before the kill")
 
-        deadline = time.monotonic() + 10
-        alive = True
-        while time.monotonic() < deadline:
-            try:
-                os.kill(job["workerPid"], 0)
-                time.sleep(0.05)
-            except OSError:
-                alive = False
-                break
-        self.assertFalse(alive, "the worker and its process group must be reaped, not orphaned")
+        # Asserting only the worker would pass an implementation that kills the worker and leaves the
+        # Codex process orphaned — the exact defect. The fixture announces its own pid the moment it
+        # starts, so the grandchild is assertable independently.
+        def gone(pid):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.05)
+                except OSError:
+                    return True
+            return False
+
+        self.assertTrue(gone(job["workerPid"]), "the worker must be reaped")
+        self.assertTrue(gone(grandchild),
+                        "the Codex grandchild must die with its group, not outlive the failed record")

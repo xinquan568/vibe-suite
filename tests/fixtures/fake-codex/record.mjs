@@ -51,6 +51,12 @@ export function probeStdin(timeoutMs = 1000) {
   });
 }
 
+/** Announce this process immediately, before any awaiting, so a test can assert on the grandchild. */
+export function announcePid() {
+  const target = process.env.VIBE_TEST_PID_FILE;
+  if (target) writeFileSync(target, String(process.pid), "utf8");
+}
+
 export function writeProbe(extra = {}) {
   const argv = process.argv.slice(2);
   const target = process.env.VIBE_TEST_PROBE;

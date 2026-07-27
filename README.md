@@ -16,6 +16,15 @@ supported; **Windows is not**, including via cmd/PowerShell. WSL works because i
 deliberate v1 constraint inherited from all three projects this one references, stated explicitly
 rather than left to be discovered.
 
+**Node ≥ 18.** The shipped `.mjs` modules stay inside that floor and use **no top-level await**, so
+they load under any runtime meeting it. The floor is declared here rather than in
+`.claude-plugin/plugin.json`, whose schema has no `engines` field, and there is no `package.json` —
+the suite ships no Node dependencies. `tests/node/no-top-level-await.mjs` enforces the rule with
+Node's own parser; `node --check` does **not**, because it accepts top-level await in `.mjs`.
+
+Process control assumes POSIX signals: the job engine enforces deadlines by escalating
+SIGTERM→SIGKILL, and background jobs run detached in their own process group.
+
 ## Repository layout
 
 | Path | Holds |

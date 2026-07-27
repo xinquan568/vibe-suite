@@ -9,7 +9,11 @@ writes project configuration.
 
 **The on-disk layout is part of the contract**, not an implementation detail: settings live under a
 top-level `config` member of `<workspace>/.vibe-suite-state/state.json`, an unset key is *absent*
-rather than null, and a write preserves every sibling member so job records survive a toggle.
+rather than null, and a write preserves every sibling member of that file.
+
+Job records are **not** members of this file. The codex-runner engine (E1.1) writes one file per job
+at `<workspace>/.vibe-suite-state/jobs/<jobId>.json` — beside this store in the same state directory,
+never inside it — so a toggle write and a job write cannot contend for the same file.
 """
 
 import json

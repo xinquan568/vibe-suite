@@ -60,6 +60,8 @@ export const REJECT = Symbol("reject");
 
 export class JobStoreError extends Error {}
 
+const isTerminal = (record) => TERMINAL_STATUSES.has(record.status);
+
 export function newJobId() {
   return `job_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
 }
@@ -182,6 +184,10 @@ export async function transact(workspace, jobId, updater, { attempts = 50 } = {}
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const current = await readCanonical(workspace, jobId);
+    // The terminal rule is an invariant of the store, not a courtesy of its callers. Enforcing it
+    // only in the wrappers left `transact` itself able to reopen a finished job — which a test
+    // exercising roll-forward did, and passed, because it only checked the version.
+    if (isTerminal(current)) return null;
     const next = updater(current);
     if (next === REJECT) return null;
 
@@ -226,16 +232,14 @@ export async function createRecord(workspace, record) {
   return record;
 }
 
-const isTerminal = (record) => TERMINAL_STATUSES.has(record.status);
-
-/** Patch fields, refusing to leave or replace a terminal state. */
+/** Patch fields. `transact` already refuses to leave a terminal state. */
 export function updateRecord(workspace, jobId, patch) {
-  return transact(workspace, jobId, (record) => (isTerminal(record) ? REJECT : { ...record, ...patch }));
+  return transact(workspace, jobId, (record) => ({ ...record, ...patch }));
 }
 
-/** Finalise. Rejects if already terminal, so a late writer cannot replace a verdict. */
+/** Finalise. Returns null if already terminal, so a late writer cannot replace a verdict. */
 export function finaliseRecord(workspace, jobId, patch) {
-  return transact(workspace, jobId, (record) => (isTerminal(record) ? REJECT : {
+  return transact(workspace, jobId, (record) => ({
     ...record, ...patch, endedAt: patch.endedAt ?? new Date().toISOString(),
   }));
 }

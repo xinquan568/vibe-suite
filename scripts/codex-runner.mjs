@@ -311,19 +311,28 @@ async function runBackground(workspace, options, timeoutMs) {
     // orphan it. Then reap before touching the record, so nothing outlives the verdict.
     signalGroup(child.pid, "SIGTERM");
     signalGroup(child.pid, "SIGKILL");
-    await new Promise((resolve) => { child.on("exit", resolve); setTimeout(resolve, 2000); });
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      child.on("exit", finish);
+      setTimeout(finish, 5000);
+    });
+
+    // **Always** attempt the guarded finalisation. A worker killed immediately after claiming would
+    // otherwise leave the record `running` forever with nobody alive to finish it. The guard means a
+    // job that genuinely completed before the kill keeps its verdict: the transition simply rejects.
+    await finaliseRecord(workspace, record.jobId, {
+      status: "failed", error: "worker did not start, or was terminated before claiming",
+    }).catch(() => null);
 
     const after = await readRecord(workspace, record.jobId).catch(() => null);
-    // `claimDigest` consumed ⇒ a claim happened after our last poll ⇒ D-B still owes a running
-    // receipt. Still present ⇒ never claimed ⇒ the terminal line is honest.
+    // The consumed digest chooses only the *shape* of the acknowledgement: consumed ⇒ a claim
+    // happened, so D-B still owes a launch receipt. Still present ⇒ never claimed ⇒ terminal line.
     if (after && after.claimDigest === null) {
       process.stdout.write(resultLine({ ...after, status: "running", threadId: null, rawOutput: null }) + "\n");
       return 0;
     }
-    const failed = await finaliseRecord(workspace, record.jobId, {
-      status: "failed", error: "worker did not start",
-    }).catch(() => null);
-    process.stdout.write(resultLine(failed ?? { ...record, status: "failed" }) + "\n");
+    process.stdout.write(resultLine(after ?? { ...record, status: "failed" }) + "\n");
     return 1;
   }
 

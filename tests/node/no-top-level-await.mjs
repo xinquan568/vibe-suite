@@ -192,8 +192,11 @@ function opensFunctionBody(tokens, position) {
   const name = tokens[head];
   if (name.type === "word" && name.value === "function") return true;
   if (name.type === "word") {
-    let prior = head - 1;
-    while (prior >= 0 && tokens[prior].type === "newline") prior -= 1;
+    // `async`, `get`, `set` and `static` are contextual keywords — also ordinary identifiers.
+    // `async\nfoo()\n{ await x(); }` is an expression statement, a call and a block, not an async
+    // method: a newline between keyword and name is a statement boundary. Adjacency is therefore
+    // required here, unlike `function`, which cannot stand alone as an expression statement.
+    const prior = head - 1;
     if (prior >= 0 && tokens[prior].type === "word"
         && ["function", "async", "get", "set", "static"].includes(tokens[prior].value)) return true;
   }

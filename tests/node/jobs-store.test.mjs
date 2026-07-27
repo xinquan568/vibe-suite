@@ -128,3 +128,32 @@ test("isAbandoned reports a dead background worker and never a live one", () => 
   assert.equal(isAbandoned({ ...base, status: "completed", heartbeatAt: stale }), false,
     "a terminal job is finished, not abandoned");
 });
+
+test("transact itself refuses every terminal status — the guard is a store invariant", async () => {
+  for (const status of ["completed", "failed", "timed_out", "cancelled"]) {
+    const ws = workspace();
+    await seed(ws, { status });
+    const result = await transact(ws, "job_test", (record) => ({ ...record, status: "running", kind: "REOPENED" }));
+    assert.equal(result, null, `transact must refuse to reopen a ${status} record`);
+    const after = await readRecord(ws, "job_test");
+    assert.equal(after.status, status);
+    assert.notEqual(after.kind, "REOPENED");
+  }
+});
+
+test("a claim token cannot be replayed against a still-runnable record", async () => {
+  const { claimWith, hashToken, newClaimToken } = await import("../../scripts/lib/jobs.mjs");
+  const ws = workspace();
+  const token = newClaimToken();
+  await seed(ws, { claimDigest: hashToken(token) });
+
+  const first = await claimWith(ws, "job_test", token);
+  assert.ok(first, "the first claim with a valid token must succeed");
+  assert.equal(first.claimDigest, null, "the digest must be consumed");
+
+  // Re-open the claim slot but leave the digest consumed: a replay must still fail, which is the
+  // property. Merely observing a cleared field would pass an implementation that still allows replay.
+  await transact(ws, "job_test", (record) => ({ ...record, workerPid: null, pgid: null }));
+  const replay = await claimWith(ws, "job_test", token);
+  assert.equal(replay, null, "the same raw token must not claim twice");
+});

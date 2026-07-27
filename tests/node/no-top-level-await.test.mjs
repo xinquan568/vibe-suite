@@ -40,6 +40,10 @@ const DIRTY = {
   // fooled. Ambiguity resolves toward reporting.
   callThenBlock: 'foo()\n{ await work(); }\n',
   conciseArrowThenAwait: 'const f = x => x\nawait work();\n',
+  // A contextual keyword across a statement boundary is not a method header: `async` alone is an
+  // expression statement, then a call, then a block. The Step-8 review found this false negative.
+  contextualKeywordAcrossStatementBoundary:
+    'const async = 0, foo = () => {};\nasync\nfoo()\n{ await work(); }\n',
 };
 
 for (const [name, source] of Object.entries(DIRTY)) {

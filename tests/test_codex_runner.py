@@ -480,3 +480,105 @@ class Namespace(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LifecycleRaces(RunnerCase):
+    """Forced with file latches, not elapsed time (F-C / F-E).
+
+    Round 1's race coverage was hope-based. These tests release each phase explicitly, so the
+    interleaving under test is a fact rather than a scheduling accident.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.latch = self.ws / "latches"
+        self.latch.mkdir()
+
+    def run_latched(self, *args, fixture="emitter.mjs", timeout=60):
+        env = dict(os.environ)
+        env["VIBE_SUITE_CODEX_BIN"] = str(FIXTURES / fixture)
+        env["VIBE_TEST_PROBE"] = str(self.probe)
+        env["VIBE_SUITE_TEST_LATCH_DIR"] = str(self.latch)
+        return subprocess.Popen(
+            ["node", str(RUNNER), *args], cwd=self.ws, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def wait_signal(self, name, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if (self.latch / f"{name}.signal").exists():
+                return True
+            time.sleep(0.02)
+        raise AssertionError(f"latch '{name}' was never signalled")
+
+    def release(self, name):
+        (self.latch / f"{name}.release").write_text("1")
+
+    def test_worker_blocks_at_pre_claim_until_released(self):
+        """The pre-claim latch is what makes every other race in this class deterministic."""
+        proc = self.run_latched(*self.base_args("--background"))
+        self.wait_signal("pre-claim")
+        # The worker is parked before claiming; the record must still be unclaimed.
+        jobs = list((self.ws / STATE_DIRNAME / "jobs").glob("job_*.json"))
+        self.assertEqual(len(jobs), 1)
+        self.assertIsNone(json.loads(jobs[0].read_text())["workerPid"],
+                          "the worker must not claim before the latch is released")
+        self.release("pre-claim")
+        self.release("pre-kill")
+        self.release("pre-ack")
+        proc.communicate(timeout=60)
+
+    def test_contested_claim_never_leaves_the_record_running(self):
+        """Finding 1 of the round-4 review: a worker killed just after claiming must not strand it.
+
+        The ordering is the whole point. The worker is held at `pre-claim` until the launcher's
+        handshake has provably given up (`final-poll`), so the claim lands *inside* the contested
+        window — between the last unclaimed observation and the kill — rather than wherever the
+        scheduler happened to put it.
+        """
+        proc = self.run_latched(*self.base_args("--background"), fixture="sleeper.mjs")
+        self.wait_signal("pre-claim")
+        self.wait_signal("final-poll", timeout=40)   # the launcher gave up: record still unclaimed
+        self.release("pre-claim")                    # NOW let the claim land — the contested window
+        self.wait_signal("post-claim")               # rendezvous: the claim is provably committed
+        self.release("pre-kill")                     # only now may the launcher kill
+        self.release("pre-ack")
+        stdout, _ = proc.communicate(timeout=60)
+
+        lines = [line for line in stdout.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, "exactly one result line in every outcome")
+        parsed = json.loads(lines[0])
+        self.assertEqual(set(parsed), RESULT_KEYS)
+
+        record = self.job_record(parsed["jobId"])
+        self.assertIn(record["status"], {"completed", "failed", "timed_out", "cancelled"},
+                      "a killed worker must never leave the record running forever")
+
+    def test_grandchild_does_not_outlive_a_failed_handshake(self):
+        """The kill must reach the process group, or the spawned Codex process orphans."""
+        proc = self.run_latched(*self.base_args("--background"), fixture="sleeper.mjs")
+        self.wait_signal("pre-claim")
+        self.wait_signal("final-poll", timeout=40)
+        self.release("pre-claim")
+        self.wait_signal("post-claim")
+        self.wait_signal("post-child-spawn")   # a grandchild provably exists before the kill
+        self.release("pre-kill")
+        self.release("pre-ack")
+        proc.communicate(timeout=60)
+
+        # The probe file is deliberately not asserted here: the fixture writes it *after* the
+        # runner signals `post-child-spawn`, so requiring it would race the kill this test exists to
+        # force. The property under test is that nothing in the group survives.
+        job = json.loads(next((self.ws / STATE_DIRNAME / "jobs").glob("job_*.json")).read_text())
+        self.assertIsNotNone(job["workerPid"], "the worker must have claimed before the kill")
+
+        deadline = time.monotonic() + 10
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(job["workerPid"], 0)
+                time.sleep(0.05)
+            except OSError:
+                alive = False
+                break
+        self.assertFalse(alive, "the worker and its process group must be reaped, not orphaned")

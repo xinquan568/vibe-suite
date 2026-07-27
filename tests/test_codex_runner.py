@@ -146,7 +146,14 @@ class Invocation(RunnerCase):
         argv = self.read_probe()["argv"]
         self.assertIn("some-model-id", argv)
 
-    def test_resume_passes_thread_and_inherits_sandbox(self):
+    def test_resume_forwards_thread_and_omits_sandbox_flag(self):
+        """`codex exec resume` accepts no -s/--sandbox — verified against codex-cli 0.144.6.
+
+        Round 1 passed `-s` here and the test still passed, because the fixture accepted any argv.
+        Omitting the flag is also how "resume inherits the original sandbox" is genuinely achieved:
+        the resumed session already carries it. The recorded sandbox is policy metadata, which
+        `test_resume_into_danger_requires_confirmation` exercises.
+        """
         first = self.result_line(self.run_runner(
             "--kind", "review", "--effort", "low", "--sandbox", "workspace-write",
             "--timeout-ms", "10000", "--", "first"))
@@ -155,9 +162,20 @@ class Invocation(RunnerCase):
         self.run_runner("--kind", "review", "--effort", "low", "--timeout-ms", "10000",
                         "--resume", first["jobId"], "--", "follow-up")
         argv = self.read_probe()["argv"]
-        self.assertIn("thread_fixture_0001", argv, "resume must forward the captured thread id")
-        self.assertIn("workspace-write", argv, "resume must inherit the original sandbox")
-        self.assertNotIn("read-only", argv, "resume must not fall back to the default sandbox")
+        self.assertEqual(argv[:3], ["exec", "resume", "thread_fixture_0001"],
+                         "resume must be the subcommand, with the captured thread id")
+        self.assertNotIn("-s", argv, "codex exec resume rejects -s")
+        self.assertNotIn("--sandbox", argv)
+
+    def test_resume_records_the_inherited_sandbox(self):
+        """The sandbox still governs policy even though it is not a CLI argument."""
+        first = self.result_line(self.run_runner(
+            "--kind", "review", "--effort", "low", "--sandbox", "workspace-write",
+            "--timeout-ms", "10000", "--", "first"))
+        second = self.result_line(self.run_runner(
+            "--kind", "review", "--effort", "low", "--timeout-ms", "10000",
+            "--resume", first["jobId"], "--", "follow-up"))
+        self.assertEqual(self.job_record(second["jobId"])["sandbox"], "workspace-write")
 
 
 class Deadlines(RunnerCase):
@@ -279,11 +297,11 @@ class SourceConventions(unittest.TestCase):
                             f"{path.relative_to(REPO_ROOT)}: missing ISC SPDX header in first 3 lines")
 
     def test_no_top_level_await(self):
-        """`node --check` accepts top-level await in .mjs, so it is not an oracle. Node's parser is.
+        """`node --check` accepts top-level await in .mjs, so it is not an oracle.
 
-        The module is reduced to something `new Function` can parse — imports dropped, `export`
-        prefixes removed — and a top-level `await` then raises "await is only valid in async
-        functions", while awaits nested inside async functions parse cleanly.
+        The checker is sound in one direction: every ambiguity resolves to `top-level-await` or
+        `refused`, never to `clean`. Its own probe suite (tests/node/no-top-level-await.test.mjs)
+        pins both false negatives that round 1 shipped with.
         """
         checker = REPO_ROOT / "tests" / "node" / "no-top-level-await.mjs"
         result = subprocess.run(["node", str(checker), *[str(p) for p in SHIPPED_MJS]],
@@ -302,6 +320,162 @@ class SourceConventions(unittest.TestCase):
         result = subprocess.run([sys.executable, str(REPO_ROOT / "tools" / "model-pin-lint.py")],
                                 cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class SandboxGate(RunnerCase):
+    """The gate must read the EFFECTIVE sandbox, not the raw flag."""
+
+    def write_config(self, sandbox):
+        (self.ws / ".vibe-suite.md").write_text(f"---\nsandbox: {sandbox}\n---\n\n# config\n")
+
+    def test_config_default_danger_is_refused(self):
+        """Round-1 blocker: a config default reached the spawn without confirmation."""
+        self.write_config("danger-full-access")
+        completed = self.run_runner("--kind", "review", "--effort", "low",
+                                    "--timeout-ms", "5000", "--", "p", expect_ok=False)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse(self.probe.exists(), "nothing may be spawned when confirmation is missing")
+
+    def test_config_default_danger_proceeds_with_confirmation(self):
+        self.write_config("danger-full-access")
+        self.run_runner("--kind", "review", "--effort", "low", "--confirm-danger",
+                        "--timeout-ms", "5000", "--", "p")
+        self.assertIn("danger-full-access", self.read_probe()["argv"])
+
+    def test_confirm_danger_without_effective_danger_is_an_error(self):
+        completed = self.run_runner(*self.base_args("--confirm-danger"), expect_ok=False)
+        self.assertNotEqual(completed.returncode, 0)
+
+
+class ClaimToken(RunnerCase):
+    """Authorisation is a one-time capability, never a field of the record."""
+
+    def make_record(self, **overrides):
+        jobs = self.ws / STATE_DIRNAME / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        record = {
+            "jobId": "job_forged", "version": 1, "kind": "review", "status": "running",
+            "sandbox": "danger-full-access", "effort": "low", "model": None, "background": True,
+            "threadId": None, "workerPid": None, "pgid": None, "claimDigest": None,
+            "createdAt": "2026-01-01T00:00:00Z", "startedAt": None, "endedAt": None,
+            "updatedAt": "2026-01-01T00:00:00Z", "heartbeatAt": None, "timeoutMs": 5000,
+            "exitCode": None, "rawOutput": None, "error": None, "tokens": None,
+        }
+        record.update(overrides)
+        (jobs / f"{record['jobId']}.json").write_text(json.dumps(record))
+        return record
+
+    def test_worker_without_token_refuses_to_spawn(self):
+        self.make_record()
+        completed = self.run_runner("--__worker", "job_forged", "--", "p", expect_ok=False)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse(self.probe.exists(), "a worker without a valid token must spawn nothing")
+
+    def test_worker_with_wrong_token_refuses_to_spawn(self):
+        self.make_record(claimDigest="0" * 64)
+        completed = self.run_runner("--__worker", "job_forged", "--__claim", "not-the-token",
+                                    "--", "p", expect_ok=False)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse(self.probe.exists())
+
+    def test_claim_token_is_single_use(self):
+        """The digest is consumed at claim, so a replayed command line cannot re-claim."""
+        parsed = self.result_line(self.run_runner(*self.base_args("--background")))
+        record = self.wait_for_terminal(parsed["jobId"])
+        self.assertIsNone(record["claimDigest"], "the digest must be consumed by the claim")
+
+
+class ResumeGate(RunnerCase):
+
+    def test_resume_into_danger_requires_confirmation(self):
+        """Inheriting a confirmed sandbox is not inheriting the confirmation."""
+        (self.ws / ".vibe-suite.md").write_text("---\nsandbox: danger-full-access\n---\n")
+        first = self.result_line(self.run_runner(
+            "--kind", "review", "--effort", "low", "--confirm-danger",
+            "--timeout-ms", "10000", "--", "first"))
+        self.assertEqual(first["status"], "completed")
+
+        completed = self.run_runner("--kind", "review", "--effort", "low", "--timeout-ms", "10000",
+                                    "--resume", first["jobId"], "--", "follow-up", expect_ok=False)
+        self.assertNotEqual(completed.returncode, 0,
+                            "resuming into danger-full-access must re-require --confirm-danger")
+
+
+class Timeouts(RunnerCase):
+
+    def test_timeout_zero_and_negative_rejected(self):
+        for bad in ("0", "-1", "abc"):
+            completed = self.run_runner("--kind", "review", "--effort", "low",
+                                        "--sandbox", "read-only", "--timeout-ms", bad,
+                                        "--", "p", expect_ok=False)
+            self.assertNotEqual(completed.returncode, 0, f"--timeout-ms {bad} must be rejected")
+
+    def test_timeout_omitted_uses_documented_default(self):
+        parsed = self.result_line(self.run_runner(
+            "--kind", "review", "--effort", "low", "--sandbox", "read-only", "--", "p"))
+        self.assertEqual(self.job_record(parsed["jobId"])["timeoutMs"], 600000)
+
+
+class WaitFlag(RunnerCase):
+
+    def test_wait_flag_accepted(self):
+        parsed = self.result_line(self.run_runner(*self.base_args("--wait")))
+        self.assertEqual(parsed["status"], "completed")
+
+    def test_wait_with_background_rejected_with_conflict_diagnostic(self):
+        """Round-1 code already exited non-zero here as `unknown option` — that proved nothing."""
+        completed = self.run_runner(*self.base_args("--wait", "--background"), expect_ok=False)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("mutually exclusive", completed.stderr)
+
+
+class RecordSchema(RunnerCase):
+
+    def test_foreground_pgid_is_null(self):
+        """`pgid` non-null iff background: foreground would otherwise name the shell's group."""
+        parsed = self.result_line(self.run_runner(*self.base_args()))
+        self.assertIsNone(self.job_record(parsed["jobId"])["pgid"])
+
+    def test_record_declares_every_field(self):
+        parsed = self.result_line(self.run_runner(*self.base_args()))
+        record = self.job_record(parsed["jobId"])
+        for field in ("jobId", "version", "kind", "status", "sandbox", "effort", "model",
+                      "background", "threadId", "workerPid", "pgid", "claimDigest", "createdAt",
+                      "startedAt", "endedAt", "updatedAt", "heartbeatAt", "timeoutMs", "exitCode",
+                      "rawOutput", "error", "tokens"):
+            self.assertIn(field, record, f"record must always declare {field}")
+
+    def test_background_record_carries_worker_handle(self):
+        parsed = self.result_line(self.run_runner(*self.base_args("--background")))
+        record = self.wait_for_terminal(parsed["jobId"])
+        self.assertIsInstance(record["workerPid"], int)
+        self.assertIsInstance(record["pgid"], int)
+        self.assertIsNotNone(record["heartbeatAt"], "heartbeatAt is set at claim, not first beat")
+
+
+class ErrorBoundary(RunnerCase):
+
+    def test_foreground_spawn_failure_finalises_and_emits(self):
+        """A bad binary must still finalise the record AND print the four-key line."""
+        env = dict(os.environ)
+        env["VIBE_SUITE_CODEX_BIN"] = str(self.ws / "does-not-exist")
+        completed = subprocess.run(
+            ["node", str(RUNNER), *self.base_args()],
+            cwd=self.ws, env=env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(completed.returncode, 0)
+        parsed = self.result_line(completed)
+        self.assertEqual(set(parsed), RESULT_KEYS)
+        self.assertEqual(parsed["status"], "failed")
+        self.assertEqual(self.job_record(parsed["jobId"])["status"], "failed")
+
+
+class Namespace(unittest.TestCase):
+
+    def test_commands_are_fully_qualified(self):
+        source = (REPO_ROOT / "scripts" / "codex-runner.mjs").read_text(encoding="utf-8")
+        for bare in (" :jobs", " :continue", " :bug-analyze", " :delegate"):
+            self.assertNotIn(bare, source,
+                             f"command names must be fully qualified (/vibe-suite{bare.strip()})")
 
 
 if __name__ == "__main__":

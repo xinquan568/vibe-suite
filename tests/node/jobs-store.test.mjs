@@ -1,0 +1,130 @@
+// SPDX-License-Identifier: ISC
+// CAS record store: crash recovery and transition safety (E1.1 / vibe-11).
+//
+// These live in `node:test` because they construct filesystem states a subprocess test cannot reach
+// cleanly — notably an uncommitted version slot beside a canonical record, which is what a writer
+// that died between `link` and `rename` leaves behind.
+
+import { strict as assert } from "node:assert";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  createRecord, finaliseRecord, isAbandoned, jobsDir, newRecord, readRecord, reapOrphanTemps,
+  recordPath, transact, updateRecord, REJECT,
+} from "../../scripts/lib/jobs.mjs";
+
+function workspace() {
+  return mkdtempSync(path.join(tmpdir(), "jobs-store-"));
+}
+
+async function seed(ws, overrides = {}) {
+  const record = {
+    ...newRecord({
+      jobId: "job_test", kind: "review", sandbox: "read-only", effort: "low",
+      model: null, background: true, timeoutMs: 1000, claimDigest: null,
+    }),
+    ...overrides,
+  };
+  return createRecord(ws, record);
+}
+
+test("an uncommitted version slot is rolled forward, not deleted", async () => {
+  const ws = workspace();
+  await seed(ws);
+  // Simulate a writer that died between link and rename: the slot exists, canonical is still at 1.
+  const slot = path.join(jobsDir(ws), "job_test.v2.json");
+  const candidate = { ...(await readRecord(ws, "job_test")), version: 2, status: "completed" };
+  writeFileSync(slot, JSON.stringify(candidate, null, 2) + "\n", "utf8");
+
+  // The next writer must complete that commit rather than block on EEXIST forever.
+  await transact(ws, "job_test", (record) => ({ ...record, kind: "later" }));
+
+  const final = await readRecord(ws, "job_test");
+  assert.ok(final.version >= 2, "the orphaned slot must have been committed");
+  assert.equal(readdirSync(jobsDir(ws)).some((n) => n === "job_test.v2.json"), false,
+    "the slot is consumed by the commit, not left behind");
+});
+
+test("a malformed slot is reported, never deleted or committed", async () => {
+  const ws = workspace();
+  await seed(ws);
+  writeFileSync(path.join(jobsDir(ws), "job_test.v2.json"), "{ not json", "utf8");
+
+  await assert.rejects(
+    () => transact(ws, "job_test", (record) => ({ ...record, kind: "later" })),
+    /NOT deleted automatically/);
+  assert.ok(readdirSync(jobsDir(ws)).includes("job_test.v2.json"),
+    "a malformed slot must survive for administrative repair");
+});
+
+test("a terminal record is never reopened", async () => {
+  const ws = workspace();
+  await seed(ws);
+  await finaliseRecord(ws, "job_test", { status: "completed" });
+  const late = await updateRecord(ws, "job_test", { heartbeatAt: new Date().toISOString() });
+  assert.equal(late, null, "a late heartbeat must be rejected, not applied");
+  assert.equal((await readRecord(ws, "job_test")).status, "completed");
+});
+
+test("a terminal verdict is never replaced by another", async () => {
+  const ws = workspace();
+  await seed(ws);
+  await finaliseRecord(ws, "job_test", { status: "timed_out" });
+  const second = await finaliseRecord(ws, "job_test", { status: "completed" });
+  assert.equal(second, null);
+  assert.equal((await readRecord(ws, "job_test")).status, "timed_out");
+});
+
+test("the updater is re-run against the fresh record on contention", async () => {
+  const ws = workspace();
+  await seed(ws);
+  let seen = 0;
+  await transact(ws, "job_test", (record) => {
+    seen += 1;
+    if (seen === 1) {
+      // Change the canonical underneath ourselves, so the first attempt must lose and re-run.
+      const bumped = { ...record, version: record.version + 1, kind: "raced" };
+      writeFileSync(recordPath(ws, "job_test"), JSON.stringify(bumped, null, 2) + "\n", "utf8");
+      writeFileSync(path.join(jobsDir(ws), `job_test.v${record.version + 1}.json`),
+        JSON.stringify(bumped, null, 2) + "\n", "utf8");
+    }
+    return { ...record, effort: "high" };
+  });
+  assert.ok(seen >= 2, "the updater must be re-run, not applied from the stale read");
+  const final = await readRecord(ws, "job_test");
+  assert.equal(final.effort, "high");
+  assert.equal(final.kind, "raced", "the racing write must not have been clobbered");
+});
+
+test("REJECT declines without writing", async () => {
+  const ws = workspace();
+  await seed(ws);
+  const before = readFileSync(recordPath(ws, "job_test"), "utf8");
+  assert.equal(await transact(ws, "job_test", () => REJECT), null);
+  assert.equal(readFileSync(recordPath(ws, "job_test"), "utf8"), before);
+});
+
+test("orphan temps are reaped only past the age bound; version slots never", async () => {
+  const ws = workspace();
+  await seed(ws);
+  writeFileSync(path.join(jobsDir(ws), "job_test.tmp.999.abc"), "{}", "utf8");
+  writeFileSync(path.join(jobsDir(ws), "job_test.v9.json"), "{}", "utf8");
+
+  assert.equal(await reapOrphanTemps(ws), 0, "a fresh temp must not be reaped");
+  assert.equal(await reapOrphanTemps(ws, { now: Date.now() + 7 * 60 * 60 * 1000 }), 1);
+  assert.ok(readdirSync(jobsDir(ws)).includes("job_test.v9.json"),
+    "a version slot is never reaped, at any age");
+});
+
+test("isAbandoned reports a dead background worker and never a live one", () => {
+  const base = { background: true, status: "running", workerPid: process.pid };
+  const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  assert.equal(isAbandoned({ ...base, heartbeatAt: stale }), false, "our own pid is alive");
+  assert.equal(isAbandoned({ ...base, heartbeatAt: new Date().toISOString() }), false);
+  assert.equal(isAbandoned({ ...base, workerPid: 2 ** 22 - 1, heartbeatAt: stale }), true);
+  assert.equal(isAbandoned({ ...base, status: "completed", heartbeatAt: stale }), false,
+    "a terminal job is finished, not abandoned");
+});

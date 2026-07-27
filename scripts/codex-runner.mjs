@@ -313,29 +313,37 @@ async function runBackground(workspace, options, timeoutMs) {
     signalGroup(child.pid, "SIGKILL");
     // Confirm the reap rather than trusting a timer: poll until the group is gone. A timer that
     // merely expires proves nothing, and the record decision below depends on the worker being dead.
+    // Only the group actually disappearing counts as reaped. `child.on("exit")` fires when the
+    // direct child dies, which says nothing about the Codex process it spawned into the same group —
+    // and that grandchild is exactly what a group kill exists to catch.
     const reaped = await new Promise((resolve) => {
-      let done = false;
-      const finish = (value) => { if (!done) { done = true; resolve(value); } };
-      child.on("exit", () => finish(true));
       const deadline = Date.now() + 15_000;
       const poll = setInterval(() => {
-        if (!signalGroup(child.pid, 0)) { clearInterval(poll); finish(true); }
-        else if (Date.now() > deadline) { clearInterval(poll); finish(false); }
+        if (!signalGroup(child.pid, 0)) { clearInterval(poll); resolve(true); }
+        else if (Date.now() > deadline) { clearInterval(poll); resolve(false); }
       }, 50);
     });
 
     // **Always** attempt the guarded finalisation. A worker killed immediately after claiming would
     // otherwise leave the record `running` forever with nobody alive to finish it. The guard means a
     // job that genuinely completed before the kill keeps its verdict: the transition simply rejects.
+    // Retry finalisation: a transient store fault must not be the reason a killed job is left
+    // looking alive. Each attempt is guarded, so a job that genuinely finished keeps its verdict.
     let finaliseError = null;
-    await finaliseRecord(workspace, record.jobId, {
-      status: "failed",
-      error: reaped
-        ? "worker did not start, or was terminated before claiming"
-        : "worker did not start and could not be confirmed reaped",
-    }).catch((error) => { finaliseError = error; });
+    let after = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      finaliseError = null;
+      await finaliseRecord(workspace, record.jobId, {
+        status: "failed",
+        error: reaped
+          ? "worker did not start, or was terminated before claiming"
+          : "worker did not start and could not be confirmed reaped",
+      }).catch((error) => { finaliseError = error; });
 
-    const after = await readRecord(workspace, record.jobId).catch(() => null);
+      after = await readRecord(workspace, record.jobId).catch(() => null);
+      if (after && TERMINAL_STATUSES.has(after.status)) break;
+      await new Promise((resolve) => { setTimeout(resolve, 100); });
+    }
     const terminal = after && TERMINAL_STATUSES.has(after.status);
 
     // A record we just killed must never be acknowledged as `running`. The consumed digest chooses

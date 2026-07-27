@@ -115,13 +115,66 @@ export function newRecord({ jobId, kind, sandbox, effort, model, background, tim
   };
 }
 
-async function readCanonical(workspace, jobId) {
+async function readPublished(workspace, jobId) {
   const raw = await readFile(recordPath(workspace, jobId), "utf8");
   const parsed = JSON.parse(raw);
   if (typeof parsed?.version !== "number") {
     throw new JobStoreError(`${recordPath(workspace, jobId)}: record has no version`);
   }
   return parsed;
+}
+
+/** The highest committed version slot, or null. Slots are retained, so this is the true high-water mark. */
+async function highestSlot(workspace, jobId) {
+  const names = await readdir(jobsDir(workspace)).catch(() => []);
+  const pattern = new RegExp(`^${jobId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.v(\\d+)\\.json$`);
+  let best = null;
+  for (const name of names) {
+    const match = pattern.exec(name);
+    if (!match) continue;
+    const version = Number(match[1]);
+    if (best === null || version > best) best = version;
+  }
+  return best;
+}
+
+/**
+ * Read the record, resolving the **highest committed slot** rather than trusting the published file.
+ *
+ * Publication (`rename` onto the canonical path) cannot be made conditional, so two writers racing
+ * could in principle publish out of order and leave an older record at that path. Slots are retained
+ * and their versions only increase, so the highest slot is the authority; the canonical file is a
+ * convenience for external readers, and a stale one is corrected here on the next read rather than
+ * being able to lose a newer — possibly terminal — record.
+ */
+async function readCanonical(workspace, jobId) {
+  const published = await readPublished(workspace, jobId).catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  const top = await highestSlot(workspace, jobId);
+  if (top === null || (published && published.version >= top)) {
+    if (published) return published;
+    throw new JobStoreError(`${jobId}: no record and no committed slot`);
+  }
+  let slot;
+  try {
+    slot = JSON.parse(await readFile(slotPath(workspace, jobId, top), "utf8"));
+  } catch (error) {
+    // Same posture as rollForward: an unreadable slot blocks visibly and is never deleted, because
+    // turning a stall into a silent integrity error is the worse trade.
+    throw new JobStoreError(
+      `${slotPath(workspace, jobId, top)}: committed slot is unreadable (${error.message}). ` +
+      `It is NOT deleted automatically. Repair: quiesce writers for this job, then move it aside.`);
+  }
+  if (slot?.version !== top || slot?.jobId !== jobId) {
+    throw new JobStoreError(
+      `${slotPath(workspace, jobId, top)}: committed slot is malformed (version/jobId mismatch). ` +
+      `It is NOT deleted automatically. Repair: quiesce writers for this job, then move it aside.`);
+  }
+  // Self-heal: republish so external readers of the canonical path converge too.
+  await commit(workspace, jobId, top).catch(() => {});
+  return slot;
 }
 
 export async function readRecord(workspace, jobId) {
@@ -173,15 +226,15 @@ async function commit(workspace, jobId, version) {
     content = await readFile(slotPath(workspace, jobId, version), "utf8");
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-    const current = await readCanonical(workspace, jobId).catch(() => null);
+    const current = await readPublished(workspace, jobId).catch(() => null);
     if (current && current.version >= version) return true;      // already published by someone
     throw new JobStoreError(
       `${jobId}: version ${version} slot vanished without being committed (canonical is ` +
       `${current ? current.version : "unreadable"})`);
   }
 
-  const current = await readCanonical(workspace, jobId).catch(() => null);
-  if (current && current.version >= version) return true;        // a newer record already stands
+  const current = await readPublished(workspace, jobId).catch(() => null);
+  if (current && current.version >= version) return true;        // already published at or past this
 
   const staging = path.join(jobsDir(workspace),
     `${jobId}.pub.${process.pid}.${randomBytes(6).toString("hex")}`);

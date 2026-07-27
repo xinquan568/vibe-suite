@@ -178,3 +178,23 @@ test("a claim token cannot be replayed against a still-runnable record", async (
   const replay = await claimWith(ws, "job_test", token);
   assert.equal(replay, null, "the same raw token must not claim twice");
 });
+
+test("a stale publication cannot lose a newer record — reads resolve the highest slot", async () => {
+  const ws = workspace();
+  await seed(ws);
+  await transact(ws, "job_test", (record) => ({ ...record, kind: "second" }));   // v2
+  await transact(ws, "job_test", (record) => ({ ...record, status: "completed" })); // v3, terminal
+
+  // Simulate a delayed writer publishing an older version over the canonical path. `rename` cannot
+  // be made conditional, so this is the race the highest-slot read exists to absorb.
+  const stale = JSON.parse(readFileSync(path.join(jobsDir(ws), "job_test.v2.json"), "utf8"));
+  writeFileSync(recordPath(ws, "job_test"), JSON.stringify(stale, null, 2) + "\n", "utf8");
+
+  const seen = await readRecord(ws, "job_test");
+  assert.equal(seen.version, 3, "the highest committed slot is the authority");
+  assert.equal(seen.status, "completed", "a terminal record must not be lost to a stale publish");
+
+  // And it self-heals: the canonical path converges on the next read.
+  const republished = JSON.parse(readFileSync(recordPath(ws, "job_test"), "utf8"));
+  assert.equal(republished.version, 3);
+});

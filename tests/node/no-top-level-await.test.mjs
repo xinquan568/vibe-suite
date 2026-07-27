@@ -44,6 +44,12 @@ const DIRTY = {
   // expression statement, then a call, then a block. The Step-8 review found this false negative.
   contextualKeywordAcrossStatementBoundary:
     'const async = 0, foo = () => {};\nasync\nfoo()\n{ await work(); }\n',
+  // A bare CR is a LineTerminator too; treating it as ordinary whitespace preserved false adjacency.
+  contextualKeywordAcrossCarriageReturn:
+    'const async = 0, foo = () => {};\rasync/*\r*/foo()\r{ await work(); }\r',
+  // A multi-line block comment between a contextual keyword and the name is still a statement break.
+  contextualKeywordAcrossBlockComment:
+    'const async = 0, foo = () => {};\nasync/*\n*/foo()\n{ await work(); }\n',
 };
 
 for (const [name, source] of Object.entries(DIRTY)) {
@@ -70,6 +76,10 @@ const CLEAN = {
   awaitInStringAndComment: '// await work()\nconst s = "await work()";\nexport default s;\n',
   templateNoAwait: 'const s = `a${1 + 2}b`;\nexport default s;\n',
   mainInvocation: 'async function main() { await work(); }\nmain();\n',
+  // `function` cannot stand alone as an expression statement, so a newline before the name is
+  // unambiguous — unlike the contextual keywords above.
+  asyncFunctionNewlineName: 'async function\nfoo() { await work(); }\nfoo();\n',
+  crlfLineEndings: 'import { a } from "node:fs";\r\nasync function go() { await a(); }\r\ngo();\r\n',
 };
 
 for (const [name, source] of Object.entries(CLEAN)) {

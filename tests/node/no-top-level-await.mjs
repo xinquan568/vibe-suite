@@ -70,11 +70,17 @@ function tokenize(source) {
   while (index < source.length) {
     const char = source[index];
 
-    if (char === "\n") { push("newline", "\n", index); index += 1; continue; }
-    if (char === " " || char === "\t" || char === "\r") { index += 1; continue; }
+    // \n, \r and \u2028/\u2029 are all LineTerminators, and ASI cares about every one of them.
+    // Treating a bare \r as ordinary whitespace preserved false adjacency across a statement break.
+    if (char === "\n" || char === "\r" || char === "\u2028" || char === "\u2029") {
+      push("newline", char, index);
+      index += 1;
+      continue;
+    }
+    if (char === " " || char === "\t") { index += 1; continue; }
 
     if (char === "/" && source[index + 1] === "/") {
-      while (index < source.length && source[index] !== "\n") index += 1;
+      while (index < source.length && !"\n\r\u2028\u2029".includes(source[index])) index += 1;
       continue;
     }
     if (char === "/" && source[index + 1] === "*") {
@@ -82,7 +88,7 @@ function tokenize(source) {
       if (end < 0) throw new Refusal("unterminated block comment");
       // A block comment spanning lines still contains a LineTerminator, and ASI cares. Dropping it
       // silently preserved false adjacency: `async/*\n*/foo()\n{ await x(); }` read as a method.
-      if (source.slice(index, end).includes("\n")) push("newline", "\n", index);
+      if (/[\n\r\u2028\u2029]/.test(source.slice(index, end))) push("newline", "\n", index);
       index = end + 2;
       continue;
     }
@@ -142,7 +148,7 @@ function tokenize(source) {
         if (c === "[") inClass = true;
         else if (c === "]") inClass = false;
         else if (c === "/" && !inClass) break;
-        else if (c === "\n") throw new Refusal("unterminated regex literal");
+        else if ("\n\r\u2028\u2029".includes(c)) throw new Refusal("unterminated regex literal");
         index += 1;
       }
       if (index >= source.length) throw new Refusal("unterminated regex literal");

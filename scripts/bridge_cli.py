@@ -45,21 +45,32 @@ def _secret_values(spec):
         elif isinstance(node, (list, tuple)):
             for v in node:
                 walk(v)
+        elif node is None or isinstance(node, bool):
+            return
+        elif isinstance(node, (int, float)):
+            out.add(str(node))          # a numeric token is still a token
         elif isinstance(node, str) and node:
             out.add(node)
 
     walk(spec.get("env") or {})
-    return out
+    # Short values are excluded: a two-character env value would poison half the document and the
+    # mirror would render nothing useful. Anything that short is not a credential.
+    return {v for v in out if len(v) >= 8}
+
+
+def _carries(text, secrets):
+    """True if any secret appears *anywhere* in this string. Equality is not enough — a credential
+    embedded in `--key=sk-...` is the same leak as one standing alone."""
+    return any(s in text for s in secrets)
 
 
 def _toml_key(name):
-    """A quoted TOML key. Bare keys are ASCII alphanumerics, `-` and `_` — anything else is quoted,
-    and quoting escapes, because an unescaped quote lets a crafted name close the sentinel block and
-    write outside our ownership."""
+    """A TOML key. Bare only for ASCII alphanumerics, `-` and `_`; anything else is a quoted basic
+    string, escaped by `json.dumps` — whose escaping is a superset of TOML's, so a quote, backslash,
+    newline or control character cannot close the key and inject content outside our block."""
     if name and all(c.isascii() and (c.isalnum() or c in "-_") for c in name):
         return name
-    escaped = name.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-    return f'"{escaped}"'
+    return json.dumps(name)
 
 
 def _toml_scalar(value):
@@ -81,10 +92,17 @@ def mirror_mcp(ws, report):
         if spec.get("command") == "vibe-suite":
             continue                      # mirroring our own registration would recurse
         secrets = _secret_values(spec)
+        if _carries(name, secrets):
+            # The server *name* repeats a credential. Mirroring it would leak through the one field
+            # that cannot be omitted, so the whole server is skipped.
+            lines.append(f"# a server was not mirrored: its name repeats a value from env")
+            lines.append("")
+            withheld += 1
+            continue
         lines.append(f"[mcp_servers.{_toml_key(name)}]")
         command = spec.get("command")
         if isinstance(command, str) and command:
-            if command in secrets:
+            if _carries(command, secrets):
                 lines.append("# command withheld — it repeats a value from env")
                 withheld += 1
             else:
@@ -96,7 +114,7 @@ def mirror_mcp(ws, report):
                 if not isinstance(arg, (str, int, float, bool)):
                     dropped = True          # a dict or list is not a TOML array member
                     continue
-                if isinstance(arg, str) and arg in secrets:
+                if isinstance(arg, str) and _carries(arg, secrets):
                     dropped = True
                     withheld += 1
                     continue
@@ -105,7 +123,9 @@ def mirror_mcp(ws, report):
             if dropped:
                 lines.append("# some args were withheld — they repeated an env value or were not "
                              "scalars")
-        for var in sorted(k for k in (spec.get("env") or {}) if isinstance(k, str)):
+        env = spec.get("env")
+        names = sorted(k for k in env if isinstance(k, str)) if isinstance(env, dict) else []
+        for var in (n for n in names if not _carries(n, secrets)):
             # The name crosses; no value ever does, in this field or any other.
             lines.append(f"# env: {var} (value not mirrored — set it in your own environment)")
         lines.append("")
@@ -145,11 +165,18 @@ def mirror_hooks(ws, report):
               for e, v in shared.items()}
     if user_content:
         # The target is the user's. A side file mirrors without touching what they wrote.
-        bridge.write_atomic(ws, ws / SIDE_FILE,
-                            json.dumps({"hooks": marked}, indent=2, sort_keys=True) + "\n")
+        payload = json.dumps({"hooks": marked}, indent=2, sort_keys=True) + "\n"
+        side = ws / SIDE_FILE
+        if not side.is_file() or side.read_text(encoding="utf-8") != payload:
+            bridge.write_atomic(ws, side, payload)
         report.append(f"hooks: {len(shared)} event(s) mirrored to {SIDE_FILE} "
                       "(the target holds your own entries)")
     else:
+        if (ws / SIDE_FILE).is_file():
+            # The fallback existed because the target was the user's; it no longer is. Leaving it
+            # behind would let two mirrors drift apart with nothing saying which one is live.
+            (ws / SIDE_FILE).unlink()
+            report.append(f"hooks: removed {SIDE_FILE} — the target is no longer user-owned")
         merged = dict(marked)
         for entries in hooks.values():
             for entry in entries or []:
@@ -167,32 +194,73 @@ def mirror_hooks(ws, report):
         report.append(f"hooks: skipped Claude-only event(s): {', '.join(skipped)}")
 
 
+def _open_parent(ws, rel):
+    """Open `rel`'s parent by walking one component at a time, each with `O_NOFOLLOW`.
+
+    Checking a path and then using it validates a different moment than the one that matters. Every
+    step here is relative to a descriptor already proven to be a real directory, so a symlink
+    anywhere along the way fails the step that would have followed it.
+    """
+    for flag in ("O_DIRECTORY", "O_NOFOLLOW"):
+        if not hasattr(os, flag):
+            raise bridge.BridgeError(f"this platform lacks os.{flag}")
+    fd = os.open(ws, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in Path(rel).parent.parts:
+            if part in ("", "."):
+                continue
+            if part == "..":
+                raise bridge.BridgeError("'..' in a bridge target path")
+            try:
+                os.mkdir(part, 0o777, dir_fd=fd)
+            except FileExistsError:
+                pass
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    except OSError as exc:
+        os.close(fd)
+        raise bridge.BridgeError(f"{ws}/{rel}: parent could not be opened safely ({exc})")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def link_skills(ws, report, plugin_root):
     """Two links. The plugin link leaves the project by design; `.agents/skills` does not."""
     for rel, target in ((".claude/skills/vibe-suite", Path(plugin_root) / "skills"),
                         (".agents/skills", Path("../.claude/skills"))):
         path = ws / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            bridge.assert_inside(ws, path.parent)
+            # Opened, not merely checked: a path validated and then used is validated at a different
+            # moment than it is used. The descriptor is what the symlink is created against.
+            parent_fd = _open_parent(ws, rel)
         except bridge.BridgeError as exc:
             report.append(f"skills: {rel} refused — {exc}")
             continue
         if path.is_symlink():
             if os.readlink(path) == str(target):
                 report.append(f"skills: {rel} already correct")
+                os.close(parent_fd)
                 continue
             # A link pointing somewhere else is the user's decision, not ours to overwrite.
             report.append(f"skills: {rel} points at {os.readlink(path)} — refused, not replaced")
+            os.close(parent_fd)
             continue
         elif path.exists():
             report.append(f"skills: {rel} is a real path — left alone")
+            os.close(parent_fd)
             continue
         try:
-            path.symlink_to(target)
+            os.symlink(str(target), Path(rel).name, dir_fd=parent_fd)
             report.append(f"skills: {rel} → {target}")
+        except FileExistsError:
+            report.append(f"skills: {rel} appeared concurrently — left as it is")
         except OSError as exc:
             report.append(f"skills: {rel} could not be linked ({exc})")
+        finally:
+            os.close(parent_fd)
 
 
 def main(argv=None):

@@ -42,7 +42,10 @@ class BridgeCase(unittest.TestCase):
     def seed_mcp(self):
         (self.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {
             "billing": {"command": "node", "args": ["s.js"],
-                        "env": {"BILLING_API_KEY": SECRET, "bearer_token_env_var": "BILLING_API_KEY"}},
+                        # `bearer_token_env_var` names a *different* variable. Naming BILLING_API_KEY
+                        # here would make it a value as well as a key, and values are poisoned — the
+                        # fixture would then be asserting two incompatible things at once.
+                        "env": {"BILLING_API_KEY": SECRET, "bearer_token_env_var": "OTHER_VAR"}},
         }}, indent=2) + "\n", encoding="utf-8")
 
 

@@ -36,12 +36,16 @@ location (a file, a stack frame, a failing test) and re-run recon from there.
 
 ## 2. One dispatch — per-file analysis inside it
 
-Compose the prompt with the Write tool: the bug description first, then one section per
-shortlisted file — `FILE: <path>` followed by the recon evidence lines. One job, bounded by the
-shortlist cap; analysis never writes, so the sandbox is a constant:
+Compose the prompt with the Write tool **outside the workspace** (a temp path — a prompt file
+inside the repo would match its own recon terms and contaminate any later sweep), and **save the
+shortlist beside it** at dispatch time: the shortlist that built this prompt is part of the job's
+inputs, not something to re-derive later. One section per shortlisted file — `FILE: <path>`
+followed by the recon evidence lines. One job, bounded by the shortlist cap; analysis never
+writes, so the sandbox is a constant:
 
 <!-- canonical-dispatch -->
 ```bash
+set -euo pipefail
 node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --kind bug-analyze --sandbox read-only ${BUGA_BACKGROUND:+--background} -- "$(cat "$BUGA_PROMPT_FILE")"
 ```
 
@@ -49,8 +53,9 @@ Branch on the four-key result's `status` — analysis output is used **only for 
 `failed` and `timed_out` route to §4; `cancelled` is the operator's own stop — report
 it and stop. With `BUGA_BACKGROUND=1` the line above returns a `running` **launch receipt** (a
 receipt, not an outcome): manage the job with `/vibe-suite:jobs`, and assemble the report at
-retrieval time — after `/vibe-suite:jobs result <id>`, apply the same status branching; the
-shortlist is re-derivable from the description by re-running §1.
+retrieval time — after `/vibe-suite:jobs result <id>`, apply the same status branching and
+assemble with the **shortlist saved at dispatch time**. Only if that file is lost re-run §1, and
+then exclude generated artifacts (the prompt file, prior reports) from the sweep.
 
 ## 3. The report — findings are recon-supported or they are not findings
 
@@ -70,10 +75,15 @@ while IFS= read -r f; do
 done < "$REPORT_SHORTLIST_FILE"
 echo
 echo "## Engine analysis (external text, shown as data)"
-echo '~~~'
-head -c 4000 "$REPORT_RESULT_FILE"
+# The fence must be strictly longer than every tilde run in the content (an embedded ~~~ would
+# close a fixed fence), and terminal controls are stripped — external text renders, never acts.
+run=$({ grep -o '~~~*' "$REPORT_RESULT_FILE" || true; } | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')
+[ "$run" -lt 3 ] && run=3
+fence=$(printf '~%.0s' $(seq 1 $((run + 1))))
+echo "$fence"
+head -c 4000 "$REPORT_RESULT_FILE" | LC_ALL=C tr -d '\000-\010\013-\037\177'
 echo
-echo '~~~'
+echo "$fence"
 ```
 
 Around that skeleton, state the root cause, quote the recon evidence, and suggest a fix direction

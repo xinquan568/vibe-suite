@@ -156,6 +156,7 @@ class TestBugAnalyzeContentContract(unittest.TestCase):
         self.assertIn("grep -rIlF", recon, "recon is fixed-string, never regex")
         self.assertIn(" -- ", recon, "option termination keeps leading dashes inert")
         dispatch = self.text.split("<!-- canonical-dispatch -->", 1)[1].split("```", 2)[1]
+        self.assertIn("set -euo pipefail", dispatch)
         self.assertIn("--kind bug-analyze", dispatch)
         self.assertIn("--sandbox read-only", dispatch, "analysis never writes — fixed, no ladder")
         self.assertIn("${BUGA_BACKGROUND:+--background}", dispatch)
@@ -196,6 +197,7 @@ class TestContinueContentContract(unittest.TestCase):
     def test_canonical_dispatch_inherits_everything(self):
         self.assertIn("<!-- canonical-dispatch -->", self.text)
         dispatch = self.text.split("<!-- canonical-dispatch -->", 1)[1].split("```", 2)[1]
+        self.assertIn("set -euo pipefail", dispatch)
         self.assertIn('--resume "$CONTINUE_JOB_ID"', dispatch)
         self.assertIn("${CONTINUE_CONFIRM_DANGER:+--confirm-danger}", dispatch)
         self.assertIn('"$(cat', dispatch)

@@ -119,36 +119,77 @@ test("wait mode: one read-only dispatch; the assembled report promotes only reco
     "...but it stays visible inside the fenced engine text");
 });
 
-test("background mode: running receipt, then retrieval-time assembly matches wait mode", async () => {
+test("background mode: running receipt, real jobs-result retrieval, findings identical to wait mode", async () => {
   const repo = seededRepo();
-  const promptFile = path.join(mkdtempSync(path.join(tmpdir(), "rca-bg-")), "prompt.md");
+  const side = mkdtempSync(path.join(tmpdir(), "rca-bg-"));            // outside the workspace,
+  const promptFile = path.join(side, "prompt.md");                     // as the artifact mandates
+  const shortlistFile = path.join(side, "shortlist.txt");              // saved at dispatch time
   writeFileSync(promptFile, "Bug: addTwo.\nFILE: src/adder.js\nevidence: return n + 2\n");
+  writeFileSync(shortlistFile, "src/adder.js\n");
 
   const dispatch = extractBlock(BUG_ANALYZE, "<!-- canonical-dispatch -->");
-  const result = run(dispatch, {
-    cwd: repo,
-    env: {
-      VIBE_SUITE_CODEX_BIN: path.join(FIXTURES, "rca-analyst.mjs"),
-      BUGA_PROMPT_FILE: promptFile, BUGA_BACKGROUND: "1",
-    },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  const receipt = JSON.parse(result.stdout.trim().split("\n").at(-1));
+  const env = {
+    VIBE_SUITE_CODEX_BIN: path.join(FIXTURES, "rca-analyst.mjs"),
+    BUGA_PROMPT_FILE: promptFile,
+  };
+  const findingsOf = (resultFilePath) => {
+    const report = run(extractBlock(BUG_ANALYZE, "<!-- canonical-report -->"), {
+      cwd: repo,
+      env: { REPORT_SHORTLIST_FILE: shortlistFile, REPORT_RESULT_FILE: resultFilePath },
+    });
+    assert.equal(report.status, 0, report.stderr);
+    return report.stdout.split("## Engine analysis")[0];
+  };
+
+  // Wait mode: the baseline findings.
+  const wait = run(dispatch, { cwd: repo, env });
+  assert.equal(wait.status, 0, wait.stderr);
+  const waitReceipt = JSON.parse(wait.stdout.trim().split("\n").at(-1));
+  const waitResultFile = path.join(side, "wait-engine.txt");
+  writeFileSync(waitResultFile, waitReceipt.rawOutput);
+  const waitFindings = findingsOf(waitResultFile);
+  assert.ok(waitFindings.includes("src/adder.js"));
+
+  // Background: receipt, then retrieval through the REAL /vibe-suite:jobs result path.
+  const bg = run(dispatch, { cwd: repo, env: { ...env, BUGA_BACKGROUND: "1" } });
+  assert.equal(bg.status, 0, bg.stderr);
+  const receipt = JSON.parse(bg.stdout.trim().split("\n").at(-1));
   assert.equal(receipt.status, "running", "background returns a launch receipt");
   assert.deepEqual(Object.keys(receipt), ["jobId", "status", "threadId", "rawOutput"]);
+  await waitTerminal(repo, receipt.jobId);
 
-  const record = await waitTerminal(repo, receipt.jobId);
-  assert.equal(record.status, "completed");
-  const shortlistFile = path.join(repo, "shortlist.txt");
-  const resultFile = path.join(repo, "engine.txt");
+  const retrieved = spawnSync("node", [path.join(REPO_ROOT, "scripts", "jobs-cli.mjs"),
+    "result", receipt.jobId], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+  assert.equal(retrieved.status, 0, retrieved.stderr);
+  const line = JSON.parse(retrieved.stdout.trim());
+  assert.equal(line.status, "completed");
+
+  const bgResultFile = path.join(side, "bg-engine.txt");
+  writeFileSync(bgResultFile, line.rawOutput);
+  assert.equal(findingsOf(bgResultFile), waitFindings,
+    "retrieval-time assembly must produce EXACTLY the wait-mode findings");
+});
+
+test("report fence outgrows tilde runs in engine text and strips terminal controls", () => {
+  const repo = seededRepo();
+  const side = mkdtempSync(path.join(tmpdir(), "rca-fence-"));
+  const shortlistFile = path.join(side, "short.txt");
+  const resultFile = path.join(side, "hostile.txt");
   writeFileSync(shortlistFile, "src/adder.js\n");
-  writeFileSync(resultFile, record.rawOutput);
+  writeFileSync(resultFile, "src/adder.js ok\n~~~~\nESCAPE-ATTEMPT\n~~~~\n\x1b[31mansi\r junk\n");
+
   const report = run(extractBlock(BUG_ANALYZE, "<!-- canonical-report -->"), {
     cwd: repo, env: { REPORT_SHORTLIST_FILE: shortlistFile, REPORT_RESULT_FILE: resultFile },
   });
   assert.equal(report.status, 0, report.stderr);
-  assert.ok(report.stdout.split("## Engine analysis")[0].includes("src/adder.js"),
-    "retrieval-time assembly must reach the same findings as wait mode");
+  const fence = "~".repeat(5);
+  const parts = report.stdout.split(fence);
+  assert.equal(parts.length, 3, `expected one opening and one closing 5-tilde fence:\n${report.stdout}`);
+  assert.ok(parts[1].includes("ESCAPE-ATTEMPT") && parts[1].includes("~~~~"),
+    "the hostile runs stay INSIDE the longer fence");
+  assert.equal(parts[2].trim(), "", "nothing renders after the closing fence");
+  assert.ok(!report.stdout.includes("\x1b") && !report.stdout.includes("\r"),
+    "terminal controls are stripped, not displayed");
 });
 
 test("continue: resumes the prior thread with full inheritance and no re-specified flags", async () => {
@@ -156,6 +197,7 @@ test("continue: resumes the prior thread with full inheritance and no re-specifi
   // Prior job: a real runner dispatch against the emitter, whose record captures the thread id.
   const first = spawnSync("node", [path.join(REPO_ROOT, "scripts", "codex-runner.mjs"),
     "--kind", "review", "--effort", "low", "--sandbox", "read-only",
+    "--model", "sentinel-model-for-tests",
     "--timeout-ms", "30000", "--", "first question"], {
     cwd: ws, encoding: "utf8", timeout: 30_000,
     env: { ...process.env, VIBE_SUITE_CODEX_BIN: path.join(FIXTURES, "emitter.mjs") },
@@ -190,6 +232,8 @@ test("continue: resumes the prior thread with full inheritance and no re-specifi
   assert.deepEqual(argv.slice(0, 3), ["exec", "resume", "thread_fixture_0001"],
     "the resume must target the prior record's thread");
   assert.ok(!argv.includes("-s"), "codex exec resume takes no sandbox flag — inherited state only");
+  assert.ok(argv.includes("-m") && argv[argv.indexOf("-m") + 1] === "sentinel-model-for-tests",
+    "a non-null prior model must reach the resumed engine call — null==null would hide a break");
 
   const priorRecord = await readRecord(ws, prior.jobId);
   const newRecord2 = await readRecord(ws, resumed.jobId);

@@ -30,6 +30,7 @@ Compose the follow-up with the Write tool (`CONTINUE_PROMPT_FILE`); values trave
 
 <!-- canonical-dispatch -->
 ```bash
+set -euo pipefail
 node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --resume "$CONTINUE_JOB_ID" ${CONTINUE_CONFIRM_DANGER:+--confirm-danger} -- "$(cat "$CONTINUE_PROMPT_FILE")"
 ```
 

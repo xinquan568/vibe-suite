@@ -38,6 +38,11 @@ def _read(path):
     return path.read_text(encoding="utf-8")
 
 
+def _normalized(text):
+    """Phrase-assertion view: markdown bold stripped, all whitespace collapsed to single spaces."""
+    return re.sub(r"\s+", " ", text.replace("**", ""))
+
+
 class TestDelegateContentContract(unittest.TestCase):
     def setUp(self):
         self.assertTrue(DELEGATE.is_file(),
@@ -124,6 +129,96 @@ class TestDelegateContentContract(unittest.TestCase):
         self.assertIn("unreachable", self.text.lower())
         self.assertIn("/vibe-suite:preflight", self.text)
         self.assertIn("manual fallback", self.text.lower())
+
+
+BUG_ANALYZE = REPO_ROOT / "commands" / "bug-analyze.md"
+CONTINUE = REPO_ROOT / "commands" / "continue.md"
+
+
+class TestBugAnalyzeContentContract(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(BUG_ANALYZE.is_file(),
+                        "commands/bug-analyze.md does not exist — a vibe-15 deliverable is missing")
+        self.text = _read(BUG_ANALYZE)
+
+    def test_frontmatter_and_surface(self):
+        self.assertTrue(self.text.startswith("---\n"))
+        head = self.text[4:self.text.find("\n---", 4)]
+        self.assertIn("description:", head)
+        for token in ("<bug description>", "--background", "--wait"):
+            self.assertIn(token, head)
+
+    def test_canonical_blocks(self):
+        for tag in ("<!-- canonical-recon -->", "<!-- canonical-dispatch -->",
+                    "<!-- canonical-report -->"):
+            self.assertIn(tag, self.text, f"missing tagged block: {tag}")
+        recon = self.text.split("<!-- canonical-recon -->", 1)[1].split("```", 2)[1]
+        self.assertIn("grep -rIlF", recon, "recon is fixed-string, never regex")
+        self.assertIn(" -- ", recon, "option termination keeps leading dashes inert")
+        dispatch = self.text.split("<!-- canonical-dispatch -->", 1)[1].split("```", 2)[1]
+        self.assertIn("--kind bug-analyze", dispatch)
+        self.assertIn("--sandbox read-only", dispatch, "analysis never writes — fixed, no ladder")
+        self.assertIn("${BUGA_BACKGROUND:+--background}", dispatch)
+        self.assertIn('"$(cat', dispatch)
+
+    def test_verification_split_and_recovery(self):
+        norm = _normalized(self.text)
+        self.assertIn("Root-cause findings", norm)
+        self.assertIn("not promoted", norm,
+                      "engine claims without recon support never enter the findings")
+        self.assertIn("When recon comes up empty", norm)
+        self.assertIn("widen", norm.lower())
+        self.assertIn("symptom location", norm)
+        self.assertIn("Never dispatch an empty shortlist", norm)
+
+    def test_status_branching_and_fallback(self):
+        norm = _normalized(self.text)
+        self.assertIn("only for `completed`", norm)
+        self.assertIn("report it and stop", norm)
+        self.assertIn("running", norm.lower())
+        self.assertIn("manual fallback", norm.lower())
+        self.assertIn("/vibe-suite:preflight", norm)
+
+
+class TestContinueContentContract(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(CONTINUE.is_file(),
+                        "commands/continue.md does not exist — a vibe-15 deliverable is missing")
+        self.text = _read(CONTINUE)
+
+    def test_frontmatter_and_surface(self):
+        self.assertTrue(self.text.startswith("---\n"))
+        head = self.text[4:self.text.find("\n---", 4)]
+        self.assertIn("description:", head)
+        self.assertIn("<job-id>", head)
+        self.assertIn("<follow-up>", head)
+
+    def test_canonical_dispatch_inherits_everything(self):
+        self.assertIn("<!-- canonical-dispatch -->", self.text)
+        dispatch = self.text.split("<!-- canonical-dispatch -->", 1)[1].split("```", 2)[1]
+        self.assertIn('--resume "$CONTINUE_JOB_ID"', dispatch)
+        self.assertIn("${CONTINUE_CONFIRM_DANGER:+--confirm-danger}", dispatch)
+        self.assertIn('"$(cat', dispatch)
+        for flag in ("--sandbox", "--effort", "--model", "--kind"):
+            self.assertNotIn(flag, dispatch,
+                             f"continue must not re-specify {flag}: inheritance is the contract")
+        self.assertIn("inherit", self.text.lower())
+
+    def test_usage_errors_are_not_fallback(self):
+        self.assertIn("/vibe-suite:jobs status", self.text,
+                      "the invalid-id remedy points at the store")
+        self.assertIn("no thread id", self.text)
+        self.assertIn("fresh dispatch", self.text, "a thread-less job is not resumable")
+        ask = self.text.find("AskUserQuestion")
+        confirm = self.text.find("CONTINUE_CONFIRM_DANGER=1")
+        self.assertTrue(-1 < ask < confirm,
+                        "confirmation must be described before the variable that authorises it")
+        self.assertIn("only true engine unavailability", _normalized(self.text).lower())
+
+    def test_fallback_discloses_the_gap(self):
+        self.assertIn("not recoverable", self.text,
+                      "the manual fallback must disclose that thread history lives in the engine")
+        self.assertIn("rawOutput", self.text)
 
 
 class TestRetiredCommandNames(unittest.TestCase):

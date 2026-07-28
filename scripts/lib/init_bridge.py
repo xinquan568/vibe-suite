@@ -200,6 +200,38 @@ def _upsert_json(ws, rel, mutate):
         bridge.write_atomic(ws, dest, after + "\n")
 
 
+def repair_step(ws, step, values):
+    """One bridge step, by name, from stored settings.
+
+    `install()` runs the whole sequence and stops at the first raise. Repair needs them one at a
+    time — F1.3 requires collecting failures and continuing — so the bodies live here and both
+    callers use them rather than each keeping its own copy.
+    """
+    ws = Path(ws)
+    effort, sandbox = values["effort"], values["sandbox"]
+    depth, threshold = values["depth"], values["threshold"]
+    if step == "memory":
+        memory = ("Project memory for vibe-suite. Commands ship under the `/vibe-suite:` namespace.\n"
+                  f"Codex effort: {effort}. Sandbox: {sandbox}. Audit depth: {depth}.")
+        _upsert_text(ws, "AGENTS.md", "memory", memory, markdown=True)
+        for name in ("CLAUDE.md", "GEMINI.md"):
+            _upsert_text(ws, name, "import", "@AGENTS.md", markdown=True)
+    elif step == "codex":
+        _upsert_text(ws, ".codex/config.toml", "server:vibe-mcp",
+                     '[mcp_servers.vibe-mcp]\ncommand = "vibe-suite"')
+    elif step == "mcp":
+        _upsert_json(ws, ".mcp.json", lambda d: bridge.json_server_upsert(
+            d, "vibe-mcp", {"command": "vibe-suite", "args": []}))
+        _upsert_json(ws, ".codex/hooks.json", lambda d: bridge.json_hook_entry_upsert(
+            d, "Stop", {"type": "command", "command": "vibe-suite stop-gate"}))
+    elif step == "gitignore":
+        _upsert_text(ws, ".gitignore", "ignore", ".vibe-suite-state/\n.claude/vibe-reports/")
+    elif step == "history":
+        _history_baseline(ws, threshold if threshold is not None else 70)
+    else:
+        raise bridge.BridgeError(f"unknown repair step: {step}")
+
+
 def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
     ws = Path(ws)
 
@@ -259,6 +291,12 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
 
     # history-baseline — the append recognises its own marker rather than counting, which is how
     # `migrate-history.sh:60` makes a non-idempotent append safe to repeat.
+    _history_baseline(ws, STRICTNESS[strictness])
+    checkpoint("history-baseline")
+
+
+def _history_baseline(ws, threshold):
+    ws = Path(ws)
     dest = ws / ".claude" / "vibe-history.json"
     # Row 3 copies the legacy history verbatim, and nlpm's canonical shape is a **top-level list**
     # (`tests/test_migrate.py:214`) — not the mapping an earlier revision assumed. Both shapes are
@@ -282,9 +320,8 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
         raise bridge.BridgeError(
             f"{dest} holds a JSON {type(history).__name__}, not a history; refusing to replace it")
     if not any(isinstance(s, dict) and s.get("baseline") for s in snapshots):
-        snapshots.append({"baseline": True, "threshold": STRICTNESS[strictness]})
+        snapshots.append({"baseline": True, "threshold": threshold})
         bridge.write_atomic(ws, dest, json.dumps(container, indent=2, sort_keys=True) + "\n")
-    checkpoint("history-baseline")
 
 
 def main(argv):

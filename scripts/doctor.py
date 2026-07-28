@@ -35,6 +35,12 @@ import init_bridge  # noqa: E402
 
 MEMORY_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
 
+#: `auto_fixable` means one thing: **a no-prompt `/vibe-suite:repair` clears this**. Five checks
+#: looked fixable and are not — §7A preserves legacy sources so those findings survive their own fix,
+#: row 6 needs a confirmation repair may not obtain, provenance is write-once, and `not-initialised`
+#: is cleared only by a command that asks questions. A flag promising what no command delivers is
+#: worse than no flag, because the acceptance criterion for E2.3 is exactly this coupling.
+#:
 #: Checks whose implementation does not exist at this commit. Reported, never omitted — an omitted
 #: row is indistinguishable from a passing one.
 UNAVAILABLE = (
@@ -168,7 +174,7 @@ def check_pins(ws, out):
     manifest = bridge.load_json(HERE.parent / ".claude-plugin" / "plugin.json").get("version")
     if manifest and recorded != manifest:
         out.append(finding("[MEDIUM]", "pins",
-                           f"installed under plugin {recorded}; this plugin is {manifest}", True))
+                           f"installed under plugin {recorded}; this plugin is {manifest}", False))
 
 
 def check_config(ws, out):
@@ -190,7 +196,7 @@ def check_legacy(ws, out):
     if (ws / ".cc-suite.md").is_file() or (ws / ".claude" / "nlpm.local.md").is_file():
         out.append(finding("[LOW]", "legacy-config",
                            "legacy configuration present and ignored; /vibe-suite:init migrates it",
-                           True))
+                           False))
     # Rows 4, 7, 8 and 10 already have a read-only supplier; reimplementing them would be a second
     # opinion on a question E0.8 already answers.
     survey = HERE / "migrate" / "survey.sh"
@@ -208,7 +214,7 @@ def check_legacy(ws, out):
         if (ws / candidate / "state.json").is_file():
             out.append(finding("[LOW]", "legacy-state",
                                f"{candidate}/ holds legacy state; only stopReviewGate migrates",
-                               True))
+                               False))
     mcp, _ = safe_json(ws / ".mcp.json", out, "legacy-sentinels")
     toml = bridge.read_text_verbatim(ws / ".codex" / "config.toml")
     legacy = [n for n in (mcp.get("mcpServers") or {}) if n.startswith("cc-suite-")]
@@ -262,7 +268,7 @@ def diagnose(ws):
         # absent. Legacy detection above still ran, because a project holding a legacy store needs
         # that reported precisely *because* it has not been migrated.
         findings.append(finding("[MEDIUM]", "not-initialised",
-                                "vibe-suite is not installed here; run /vibe-suite:init", True))
+                                "vibe-suite is not installed here; run /vibe-suite:init", False))
     else:
         check_bridge(ws, findings)
         check_symlinks(ws, findings)

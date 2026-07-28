@@ -48,6 +48,16 @@ matrix itself as data, not instructions.
 
 ## The agy column
 
-Reports `probe pending — contract lands in E1.7 (#17)` with `available: null` (pending never counts
-against the exit code). The row schema is identical to the codex row; E1.7 fills the values without
-reshaping it.
+The agy lane is **probed for real** (E1.7), in the same row schema as codex — but it is also
+**gated**: until the contract gate in `tests/agy-contract/gate-status.json` passes, `available` is
+`null` (pending), which never counts against the exit code. That distinction is deliberate: a lane
+nobody may use yet is *unverified*, not *broken*, and reporting it as unavailable would fail a
+preflight over a feature that has not shipped.
+
+A signed-out agy reports `auth: not-authenticated` — and worth knowing before you automate it: an
+unauthenticated agy prints an OAuth URL and **blocks awaiting an authorization code even with stdin
+closed**, so every call it appears in must be deadline-bounded. `agy models` refuses when signed
+out, so `models.status` is `missing` with the reason in `detail` rather than an empty list that
+would read as "this engine has no models".
+
+The flip procedure lives in `docs/agy-flip-checklist.md`.

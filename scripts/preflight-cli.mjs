@@ -12,7 +12,8 @@
 //
 // **Node floor: 18.** No top-level await — `main()` is invoked, not awaited at module scope.
 
-import { agyRow, buildMatrix, probeCodex } from "./lib/preflight.mjs";
+import { buildMatrix, probeAgy, probeCodex } from "./lib/preflight.mjs";
+import { agyGate } from "./lib/agy-gate.mjs";
 
 class UsageError extends Error {}
 
@@ -46,10 +47,11 @@ function renderText(rows) {
   const pad = (text, width) => text + " ".repeat(Math.max(0, width - text.length));
   lines.push(header.map((h, i) => pad(h, widths[i])).join("  "));
   for (const row of table) lines.push(row.map((c, i) => pad(c, widths[i])).join("  "));
-  const discovered = rows.find((row) => row.engine === "codex")?.models;
-  if (discovered && discovered.slugs.length > 0) {
-    lines.push("");
-    lines.push(`discovered models (${discovered.status}): ${discovered.slugs.join(", ")}`);
+  for (const row of rows) {
+    if (row.models.slugs.length > 0) {
+      lines.push("");
+      lines.push(`${row.engine} models (${row.models.status}): ${row.models.slugs.join(", ")}`);
+    }
   }
   return lines.join("\n");
 }
@@ -73,7 +75,10 @@ async function main() {
     return 2;
   }
 
-  const rows = buildMatrix([await probeCodex(), agyRow()]);
+  // Both lanes are probed for real now (E1.7 closed E1.3's deferred agy assertion). The gate is
+  // passed in so the agy row can distinguish "unverified" (pending) from "unavailable" (broken).
+  const gate = agyGate();
+  const rows = buildMatrix([await probeCodex(), await probeAgy({ gate })]);
   if (options.json) {
     process.stdout.write(JSON.stringify({ engines: rows }, null, 2) + "\n");
   } else {

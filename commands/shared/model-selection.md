@@ -77,6 +77,14 @@ a changed assertion reads it as the plan executing rather than as a regression.
 The flip is a coordinated change owned elsewhere — a config-default change, a doctor notice, and a
 checklist — not something that happens on its own.
 
+**Gate status, as recorded (E1.7 / vibe-17):** `not_passed`. The agy CLI's invocation surface is
+confirmed (`--print`, `--sandbox`, `--print-timeout`), but read-only enforcement and the
+failure/quota signatures are **not verified** — the binary is unauthenticated wherever the probe has
+run, and an unauthenticated agy blocks on an OAuth prompt rather than failing. The machine-readable
+record is `tests/agy-contract/gate-status.json`; the single consumer is
+`scripts/lib/agy-gate.mjs`; the flip procedure is `docs/agy-flip-checklist.md`. Until every check
+passes, `--engine agy` errors with the gate status and this default stays `codex`.
+
 ## `.vibe-suite.md` keys
 
 The keys these rules read. Types and domains are fixed here so the config reader and this partial

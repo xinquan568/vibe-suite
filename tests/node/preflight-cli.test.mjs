@@ -69,7 +69,7 @@ test("PRESENT via PATH: an executable named codex on a controlled PATH yields th
   const result = cli({ pathVar: controlledPath({ codexFixture: path.join(FIXTURES, "preflight-ok.mjs") }) });
   assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
   for (const expected of ["codex", "available", "chatgpt", "codex-cli 0.0.7", "discovered-model-a",
-    "agy", "probe pending"]) {
+    "agy", "contract gate not passed"]) {
     assert.ok(result.stdout.includes(expected), `missing '${expected}' in:\n${result.stdout}`);
   }
 });
@@ -78,7 +78,8 @@ test("ABSENT via PATH: a controlled PATH with no codex yields the absent matrix,
   const result = cli({ pathVar: controlledPath() });
   assert.equal(result.status, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
   assert.ok(result.stdout.includes("not found"), result.stdout);
-  assert.ok(result.stdout.includes("probe pending"), "the agy column must render regardless");
+  assert.ok(result.stdout.includes("contract gate not passed"),
+    "the agy column must render regardless, and say why it is pending");
 });
 
 test("--json is one parseable document with both rows in the exact schema", () => {

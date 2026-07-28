@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: ISC
+// The agy → codex → manual fallback chain (E1.7 / vibe-17, implements F9.5 for the audit lane).
+//
+// The states are explicit because "it falls back" is not a contract — a caller needs to know which
+// result is theirs, where the diagnostic went, and what the exit code means.
+//
+// | outcome            | when                                             | caller sees                    | exit |
+// |--------------------|--------------------------------------------------|--------------------------------|------|
+// | `agy`              | agy reachable and completed                      | agy's result line, no header   | 0    |
+// | `codex`            | agy UNREACHABLE (missing / unauthenticated /     | header on stderr, then codex's | 0    |
+// |                    | timed out / quota) — an unreachable class         | result line                    |      |
+// | `codex-no-header`  | agy completed but its output is unusable          | codex's result line, NO header | 0    |
+// | `manual`           | codex unreachable too                            | header + a stable JSON signal  | 3    |
+//
+// The header/no-header split is `fallback.md`'s: a header discloses that an engine could not be
+// reached. An engine that answered uselessly was reached, so announcing unreachability would be a
+// lie — the work still moves to the next lane, quietly.
+//
+// **This chain is only legal after the contract gate passes.** Before that, `--engine agy` is
+// refused outright (`fallback.md` requires refusal, not hand-off, pre-graduation), which is why
+// the gate resolver — not PATH — decides whether this module is reachable at all.
+
+export const UNREACHABLE_REASONS = new Set(["agy-not-found", "unauthenticated", "quota", "deadline exceeded"]);
+
+export const EXIT = { ok: 0, manual: 3 };
+
+/** Is this agy outcome an "unreachable" class (hand off) or a usable/unusable answer? */
+export function isUnreachable(outcome) {
+  if (!outcome) return true;
+  if (outcome.status === "timed_out") return true;
+  if (outcome.status !== "completed") {
+    return UNREACHABLE_REASONS.has(outcome.error) || outcome.error === null;
+  }
+  return false;
+}
+
+const usable = (outcome) => outcome?.status === "completed" && String(outcome.rawOutput ?? "").trim() !== "";
+
+/**
+ * Run the chain. `deps.runAgy` / `deps.runCodex` each resolve to a job outcome (the four-key shape)
+ * or null when the engine is not installed at all; `deps.emitHeader` receives the diagnostic.
+ */
+export async function runWithFallback(deps) {
+  const { runAgy, runCodex, emitHeader } = deps;
+
+  const agy = await runAgy();
+  if (usable(agy)) return { outcome: "agy", result: agy, header: false, exitCode: EXIT.ok };
+
+  const unreachable = isUnreachable(agy);
+  if (unreachable) {
+    emitHeader(`agy is unreachable (${agy?.error ?? "not installed"}) — handing off to codex. `
+      + `Check the lane with /vibe-suite:preflight.`);
+  }
+
+  const codex = await runCodex();
+  if (usable(codex)) {
+    return {
+      outcome: unreachable ? "codex" : "codex-no-header",
+      result: codex, header: unreachable, exitCode: EXIT.ok,
+    };
+  }
+
+  emitHeader(`codex is unreachable too (${codex?.error ?? "not installed"}) — no engine could run `
+    + `this analysis. Install or authenticate one, or run the analysis in-session.`);
+  return {
+    outcome: "manual",
+    result: null,
+    header: true,
+    exitCode: EXIT.manual,
+    signal: { fallback: "manual", reason: codex?.error ?? "no engine available" },
+  };
+}

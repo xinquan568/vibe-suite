@@ -14,8 +14,8 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  agyRow, buildMatrix, AUTH_MODES, MODELS_CACHE_TTL_MS, probeCodex, readModelsCache, ROW_KEYS,
-  SMOKE_RESULTS,
+  agyRow, buildMatrix, AUTH_MODES, MODELS_CACHE_TTL_MS, probeAgy, probeCodex, readModelsCache,
+  ROW_KEYS, SMOKE_RESULTS,
 } from "../../scripts/lib/preflight.mjs";
 
 function tempHome() {
@@ -249,8 +249,107 @@ test("the agy slot and the codex row share ONE exact schema, down to nested keys
     "the slot claims nothing it has not probed");
   assert.equal(agy.models.status, "pending");
   assert.deepEqual(agy.models.slugs, []);
-  assert.ok(agy.detail.includes("probe pending"), "the acceptance's exact column wording");
+  assert.ok(agy.detail.includes("probe pending"),
+    "agyRow() remains the pre-probe slot; probeAgy() is what E1.7 wired in");
 
   const matrix = buildMatrix([codex, agy]);
   assert.deepEqual(matrix.map((r) => r.engine), ["codex", "agy"]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The agy matrix (E1.7 / vibe-17 closes the assertion E1.3 deferred). The row keeps the frozen
+// schema and the frozen enums — a signed-out CLI is `not-authenticated`, not a new word — and the
+// gate decides `pending` versus `unavailable`, because an unverified lane is not a broken one.
+
+const GATE_OPEN = { passed: true };
+const GATE_SHUT = { passed: false, reason: "checks not verified" };
+
+function agyRun(answers) {
+  return async (args) => {
+    const key = args[0] === "models" ? "models" : args[0] === "--version" ? "--version" : "print";
+    return {
+      exitCode: 0, stdout: "", stderr: "", timedOut: false, spawnFailed: false, groupReaped: true,
+      ...(answers[key] ?? {}),
+    };
+  };
+}
+
+test("agy: a MISSING reap confirmation is not a confirmation, and it outranks other reasons", async () => {
+  const missing = await probeAgy({
+    run: agyRun({ ...HEALTHY, print: { stdout: "ok\n", groupReaped: undefined } }),
+    gate: GATE_OPEN, env: {},
+  });
+  assert.equal(missing.smoke, "reap-failed");
+  assert.equal(missing.available, false);
+
+  const masked = await probeAgy({
+    run: agyRun({ ...HEALTHY, print: { stdout: "Authentication required\n", groupReaped: false } }),
+    gate: GATE_OPEN, env: {},
+  });
+  assert.equal(masked.smoke, "reap-failed",
+    "an unreaped group must not hide behind a signed-out reading");
+});
+
+const HEALTHY = {
+  "--version": { stdout: "1.1.2\n" },
+  print: { stdout: "ok\n" },
+  models: { stdout: "gemini-a\ngemini-b\n" },
+};
+
+test("agy healthy under an OPEN gate: available, models discovered, frozen row shape", async () => {
+  const row = await probeAgy({ run: agyRun(HEALTHY), gate: GATE_OPEN, env: {} });
+  assert.deepEqual(Object.keys(row), ROW_KEYS);
+  assert.equal(row.available, true);
+  assert.equal(row.version, "1.1.2");
+  assert.ok(AUTH_MODES.has(row.auth), `auth outside the frozen enum: ${row.auth}`);
+  assert.equal(row.smoke, "ok");
+  assert.deepEqual(row.models, { status: "fresh", slugs: ["gemini-a", "gemini-b"] });
+});
+
+test("agy healthy but the gate is SHUT: pending, never counted against the exit code", async () => {
+  const row = await probeAgy({ run: agyRun(HEALTHY), gate: GATE_SHUT, env: {} });
+  assert.equal(row.available, null, "an unverified lane is pending, not unavailable");
+  assert.match(row.detail, /contract gate not passed/);
+  assert.match(row.detail, /agy-flip-checklist/);
+});
+
+test("agy signed out: the FROZEN not-authenticated enum, with the explanation in detail", async () => {
+  const row = await probeAgy({
+    run: agyRun({
+      ...HEALTHY,
+      print: { stdout: "Authentication required. Please visit the URL to log in:\n" },
+    }),
+    gate: GATE_OPEN, env: {},
+  });
+  assert.equal(row.auth, "not-authenticated", "the frozen enum, not a new vocabulary");
+  assert.ok(AUTH_MODES.has(row.auth));
+  assert.equal(row.available, false);
+  assert.equal(row.models.status, "missing", "`agy models` refuses when signed out");
+  assert.deepEqual(row.models.slugs, [], "an empty list must not read as 'no models exist'");
+  assert.match(row.detail, /blocks even with stdin closed/,
+    "the OAuth block is the fact a caller most needs");
+});
+
+test("agy absent: unavailable under an open gate, pending under a shut one", async () => {
+  const missing = agyRun({ "--version": { spawnFailed: true } });
+  const open = await probeAgy({ run: missing, gate: GATE_OPEN, env: {} });
+  assert.equal(open.available, false);
+  assert.match(open.detail, /not found on PATH/);
+
+  const shut = await probeAgy({ run: missing, gate: GATE_SHUT, env: {} });
+  assert.equal(shut.available, null);
+  assert.deepEqual(Object.keys(shut), ROW_KEYS, "the frozen shape holds on every path");
+});
+
+test("agy: an unconfirmed reap is not a healthy lane, and auth is never invented", async () => {
+  const reapFailed = await probeAgy({
+    run: agyRun({ ...HEALTHY, print: { stdout: "ok\n", groupReaped: false } }),
+    gate: GATE_OPEN, env: {},
+  });
+  assert.equal(reapFailed.smoke, "reap-failed");
+  assert.equal(reapFailed.available, false);
+
+  const healthy = await probeAgy({ run: agyRun(HEALTHY), gate: GATE_OPEN, env: {} });
+  assert.equal(healthy.auth, "unknown",
+    "agy exposes no auth mode — reporting `api-key` would be inventing an observation");
 });

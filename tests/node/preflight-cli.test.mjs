@@ -55,11 +55,15 @@ function controlledPath({ codexFixture = null, includeNode = codexFixture !== nu
   return entries.join(path.delimiter);
 }
 
-function cli({ pathVar, seam = null, home = freshHome(), args = [] }) {
+function cli({ pathVar, seam = null, home = freshHome(), args = [], agy = null, gate = null }) {
   const env = {
     HOME: home, CODEX_HOME: home, PATH: pathVar,
+    // ALWAYS pinned: "no test invokes the real agy" must be enforced, not true by accident of this
+    // machine's PATH layout. A guaranteed-missing path is the default.
+    VIBE_SUITE_AGY_BIN: agy ?? "/nonexistent/definitely-not-installed-agy",
   };
   if (seam) env.VIBE_SUITE_CODEX_BIN = seam;
+  if (gate) env.VIBE_SUITE_AGY_GATE_FILE = gate;
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd: tempDir("preflight-cwd-"), env, encoding: "utf8", timeout: 60_000,
   });
@@ -69,7 +73,7 @@ test("PRESENT via PATH: an executable named codex on a controlled PATH yields th
   const result = cli({ pathVar: controlledPath({ codexFixture: path.join(FIXTURES, "preflight-ok.mjs") }) });
   assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
   for (const expected of ["codex", "available", "chatgpt", "codex-cli 0.0.7", "discovered-model-a",
-    "agy", "probe pending"]) {
+    "agy", "contract gate not passed"]) {
     assert.ok(result.stdout.includes(expected), `missing '${expected}' in:\n${result.stdout}`);
   }
 });
@@ -78,7 +82,8 @@ test("ABSENT via PATH: a controlled PATH with no codex yields the absent matrix,
   const result = cli({ pathVar: controlledPath() });
   assert.equal(result.status, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
   assert.ok(result.stdout.includes("not found"), result.stdout);
-  assert.ok(result.stdout.includes("probe pending"), "the agy column must render regardless");
+  assert.ok(result.stdout.includes("contract gate not passed"),
+    "the agy column must render regardless, and say why it is pending");
 });
 
 test("--json is one parseable document with both rows in the exact schema", () => {
@@ -132,4 +137,71 @@ test("hostile lane: matrix still prints in both modes, all fields bounded, no ho
 test("usage errors exit 2", () => {
   const result = cli({ pathVar: controlledPath(), args: ["--frobnicate"] });
   assert.equal(result.status, 2, result.stdout + result.stderr);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The agy column, end to end (E1.7 closes E1.3's deferred assertion). Both dimensions matter: what
+// the row says, and whether it may influence the exit code — which only a passed gate permits.
+
+function openGateFile() {
+  const dir = mkdtempSync(path.join(tmpdir(), "preflight-gate-"));
+  const file = path.join(dir, "gate-status.json");
+  const names = ["headless_invocation", "read_only_write_denied", "timeout_kill",
+    "failure_signature", "quota_signature"];
+  writeFileSync(file, JSON.stringify({
+    schema: 1, status: "passed", agy_version: "1.1.2", recorded_at: "2026-07-28T00:00:00Z",
+    checks: Object.fromEntries(names.map((n) => [n, { state: "passed", note: "simulated" }])),
+  }));
+  return file;
+}
+
+const AGY_FIXTURES = path.join(REPO_ROOT, "tests", "fixtures", "fake-agy");
+const codexOk = () => path.join(FIXTURES, "preflight-ok.mjs");
+
+test("agy matrix: healthy, signed-out and absent — under a SHUT gate, all stay pending", () => {
+  for (const [label, agy] of [
+    ["healthy", path.join(AGY_FIXTURES, "responder.mjs")],
+    ["signed out", path.join(AGY_FIXTURES, "auth-error.mjs")],
+    ["absent", "/nonexistent/definitely-not-installed-agy"],
+  ]) {
+    const result = cli({ pathVar: controlledPath({ includeNode: true }), seam: codexOk(), agy });
+    assert.equal(result.status, 0, `${label}: a shut gate must never fail the exit code
+${result.stdout}`);
+    assert.match(result.stdout, /agy\s+pending/, `${label}: ${result.stdout}`);
+    assert.match(result.stdout, /contract gate not passed/, label);
+  }
+});
+
+test("agy matrix under an OPEN gate: the row reports truthfully and contributes to the exit code", () => {
+  const gate = openGateFile();
+
+  const healthy = cli({
+    pathVar: controlledPath({ includeNode: true }), seam: codexOk(),
+    agy: path.join(AGY_FIXTURES, "responder.mjs"), gate, args: ["--json"],
+  });
+  const healthyRows = JSON.parse(healthy.stdout).engines;
+  const healthyAgy = healthyRows.find((row) => row.engine === "agy");
+  assert.equal(healthyAgy.available, true, healthy.stdout);
+  assert.equal(healthyAgy.auth, "unknown", "agy exposes no auth mode");
+  assert.deepEqual(healthyAgy.models.slugs, ["gemini-a", "gemini-b"]);
+  assert.equal(healthy.status, 0);
+
+  const signedOut = cli({
+    pathVar: controlledPath({ includeNode: true }), seam: codexOk(),
+    agy: path.join(AGY_FIXTURES, "auth-error.mjs"), gate, args: ["--json"],
+  });
+  const signedOutAgy = JSON.parse(signedOut.stdout).engines.find((row) => row.engine === "agy");
+  assert.equal(signedOutAgy.auth, "not-authenticated", "the frozen enum, not a new word");
+  assert.equal(signedOutAgy.models.status, "missing");
+  assert.equal(signedOut.status, 1, "an open gate lets an unavailable agy fail the exit code");
+
+  // The third leg of the matrix: absent under an OPEN gate is a genuine failure, not pending.
+  const absent = cli({
+    pathVar: controlledPath({ includeNode: true }), seam: codexOk(),
+    agy: "/nonexistent/definitely-not-installed-agy", gate, args: ["--json"],
+  });
+  const absentAgy = JSON.parse(absent.stdout).engines.find((row) => row.engine === "agy");
+  assert.equal(absentAgy.available, false, absent.stdout);
+  assert.match(absentAgy.detail, /not found on PATH/);
+  assert.equal(absent.status, 1, "under an open gate, a missing agy fails the preflight");
 });

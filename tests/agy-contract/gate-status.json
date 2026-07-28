@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "status": "not_passed",
+  "agy_version": null,
+  "recorded_at": "2026-07-28T07:37:38.550Z",
+  "checks": {
+    "headless_invocation": {
+      "state": "failed",
+      "note": "unauthenticated: agy printed an OAuth prompt and did not answer"
+    },
+    "read_only_write_denied": {
+      "state": "not_verified",
+      "note": "unauthenticated: no model turn ran, so nothing was denied"
+    },
+    "timeout_kill": {
+      "state": "passed",
+      "note": "an over-deadline invocation was killed and its process group confirmed gone"
+    },
+    "failure_signature": {
+      "state": "not_verified",
+      "note": "no failed-class response was provoked"
+    },
+    "quota_signature": {
+      "state": "not_verified",
+      "note": "no quota-class response was provoked"
+    }
+  }
+}

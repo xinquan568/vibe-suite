@@ -77,12 +77,13 @@ estimate should be read as covering that.
 emitting conforming JSON, `--report <path>` validates documents that are written by hand or by a
 future component. The gate ladder's rung 3 does not exist yet either.
 
-**Nothing mechanically binds a future `bin/vibe-check` to this decision.**
-[`tests/test_adr.py`](../../tests/test_adr.py) checks that this record is well-formed, indexed, and
-referenced — not that any implementation honours it. `tests/test_audit_output_schema.py` compares the
-schema's keywords against the checker's implemented set and is silent on ownership. So the obligation
-this ADR creates for #30 is carried in writing, and a reviewer of #30 has to check it by reading.
-That residue is stated rather than papered over.
+**Nothing mechanically binds a future `bin/vibe-check` to this decision**, and nothing checks this
+record either. `tests/test_audit_output_schema.py` compares the schema's keywords against the
+checker's implemented set and is silent on ownership. A structural guard over this ADR series was
+written alongside this record and withdrawn from the same pull request as disproportionate to a
+documentation change; it is not in the tree. So both obligations — that `bin/vibe-check` honours this
+decision, and that this ADR stays well-formed and correctly referenced — are carried in writing, and
+a reviewer has to check them by reading. That residue is stated rather than papered over.
 
 **The two planning documents are not edited.** `docs/discussion/` holds frozen historical records;
 each carries a banner where later divergence is noted, and both banners now state this decision

@@ -9,7 +9,10 @@ that settles it. **An ADR is live: it is the current answer, not a record of a p
 
 - **Filename** — `NNNN-kebab-slug.md`, four digits, allocated in order and never reused.
 - **Reference** — `ADR-NNNN` anywhere in the repository. Every such string must resolve to a file in
-  this directory; `tests/test_adr.py` enforces that, along with the index below.
+  this directory, and every index row below must link to the file it names. **Nothing enforces this
+  mechanically yet** — a checker was written for #71 and withdrawn from that PR as disproportionate to
+  a documentation change, after review found it passing a tree where an ADR had been renamed and the
+  index link left stale. Until it lands, the conventions here are maintained by reading.
 - **Sections** — `## Status`, `## Context`, `## Decision`, `## Consequences`, in that order.
 - **Status** — one of `Accepted`, `Proposed`, `Rejected`, `Deprecated`. A superseded decision is
   marked `Deprecated` **and its body is left standing**, with a line naming the ADR that replaced it.

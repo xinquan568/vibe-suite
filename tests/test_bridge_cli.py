@@ -258,3 +258,73 @@ class TestBlockerRegressions(BridgeCase):
         self.run_bridge("hooks")
         after = json.loads((self.ws / ".codex" / "hooks.json").read_text())
         self.assertEqual(after.get("somethingElse"), {"keep": True})
+
+
+class TestIteration2(BridgeCase):
+    """The deeper instances iteration 1 named. Each fails against `fd6402b`."""
+
+    def _mcp(self, spec):
+        (self.ws / ".mcp.json").write_text(
+            json.dumps({"mcpServers": spec}, indent=2) + "\n", encoding="utf-8")
+
+    def test_a_secret_embedded_in_a_larger_arg_does_not_cross(self):
+        """Equality is not enough: `--key=sk-...` is not equal to `sk-...` but is the same leak."""
+        self._mcp({"x": {"command": "run", "args": ["--key=" + SECRET], "env": {"K": SECRET}}})
+        self.run_bridge("mcp")
+        self.assertNotIn(SECRET, self.toml())
+
+    def test_a_numeric_env_value_is_poisoned_too(self):
+        token = "9182736455647382"
+        self._mcp({"x": {"command": "run", "args": [token], "env": {"PIN": int(token)}}})
+        self.run_bridge("mcp")
+        self.assertNotIn(token, self.toml())
+
+    def test_a_server_whose_name_repeats_a_secret_is_skipped_entirely(self):
+        """The name is the one field that cannot be omitted, so the server must be."""
+        self._mcp({"srv-" + SECRET: {"command": "run", "env": {"K": SECRET}}})
+        self.run_bridge("mcp")
+        self.assertNotIn(SECRET, self.toml())
+
+    def test_a_list_shaped_env_does_not_crash_and_does_not_leak(self):
+        self._mcp({"x": {"command": "run", "args": [SECRET], "env": [SECRET]}})
+        self.assertEqual(self.run_bridge("mcp").returncode, 0)
+        self.assertNotIn(SECRET, self.toml())
+
+    def test_a_short_env_value_does_not_poison_the_document(self):
+        """A two-character value would withhold half the mirror; anything that short is not a
+        credential."""
+        self._mcp({"x": {"command": "run", "args": ["--flag"], "env": {"N": "on"}}})
+        self.run_bridge("mcp")
+        self.assertIn("--flag", self.toml(), "a short env value poisoned an unrelated arg")
+
+    def test_an_env_name_still_crosses(self):
+        """F1.6 specifies it: the user has to know what to set."""
+        self._mcp({"x": {"command": "run", "env": {"BILLING_API_KEY": SECRET}}})
+        self.run_bridge("mcp")
+        self.assertIn("BILLING_API_KEY", self.toml())
+        self.assertNotIn(SECRET, self.toml())
+
+    def test_the_side_file_is_removed_when_the_fallback_ends(self):
+        (self.ws / ".codex").mkdir(exist_ok=True)
+        (self.ws / ".claude").mkdir(exist_ok=True)
+        (self.ws / ".claude" / "settings.json").write_text(
+            json.dumps({"hooks": {"Stop": [{"cmd": "a"}]}}, indent=2) + "\n", encoding="utf-8")
+        (self.ws / ".codex" / "hooks.json").write_text(
+            json.dumps({"hooks": {"Stop": [{"cmd": "mine"}]}}, indent=2) + "\n", encoding="utf-8")
+        self.run_bridge("hooks")
+        side = self.ws / ".codex" / "hooks.vibe-suite.json"
+        self.assertTrue(side.is_file(), "no side file was written for a user-owned target")
+        (self.ws / ".codex" / "hooks.json").write_text('{"hooks": {}}\n', encoding="utf-8")
+        self.run_bridge("hooks")
+        self.assertFalse(side.exists(),
+                         "a stale side file was left beside a live mirror, with nothing saying "
+                         "which one is authoritative")
+
+    def test_a_symlinked_ancestor_refuses_the_skills_link(self):
+        outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (self.ws / ".claude").symlink_to(outside, target_is_directory=True)
+        result = self.run_bridge("skills")
+        self.assertFalse((outside / "skills").exists(),
+                         "a link was created through a symlinked ancestor")
+        self.assertIn("refused", result.stdout)

@@ -37,6 +37,7 @@
 // can set it already controls the process environment.
 
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -90,7 +91,8 @@ async function awaitLatch(name, { timeoutMs = 30_000 } = {}) {
 function parseArgs(argv) {
   const options = {
     kind: null, model: null, effort: null, sandbox: null, timeoutMs: null,
-    background: false, wait: false, resume: null, confirmDanger: false,
+    background: false, wait: false, resume: null, confirmDanger: false, noModel: false,
+    promptFile: null,
     worker: null, claim: null, prompt: null,
   };
   const rest = [];
@@ -115,6 +117,15 @@ function parseArgs(argv) {
       case "--background": options.background = true; break;
       case "--wait": options.wait = true; break;
       case "--confirm-danger": options.confirmDanger = true; break;
+      // E1.6 / vibe-16: "run the backend's own default model", which an OMITTED --model cannot
+      // express — resolveDefaults falls back to the project's model_overrides.codex. The stop
+      // gate needs the difference: `gate.model` unset must mean the backend default, not whatever
+      // the project configured for ordinary dispatches.
+      case "--no-model": options.noModel = true; break;
+      // E1.6 / vibe-16: a large prompt cannot travel in argv — a multi-hundred-KB review prompt
+      // hits the OS limit (observed as spawnSync E2BIG on Linux CI while passing on macOS, which
+      // is exactly the kind of platform-dependent break a file removes).
+      case "--prompt-file": options.promptFile = next(); break;
       case WORKER_FLAG: options.worker = next(); break;
       case CLAIM_FLAG: options.claim = next(); break;
       default:
@@ -138,6 +149,17 @@ function resolveTimeout(raw) {
 }
 
 function validateShape(options) {
+  if (options.noModel && options.model) {
+    throw new UsageError("--no-model and --model are mutually exclusive");
+  }
+  if (options.promptFile !== null) {
+    if (options.prompt) throw new UsageError("--prompt-file and an inline prompt are mutually exclusive");
+    try {
+      options.prompt = readFileSync(options.promptFile, "utf8");
+    } catch (error) {
+      throw new UsageError(`--prompt-file ${options.promptFile}: ${error.message}`);
+    }
+  }
   if (options.worker) return;
   if (!options.prompt) throw new UsageError("a prompt is required after `--`");
   if (options.sandbox !== null && !SANDBOXES.has(options.sandbox)) {
@@ -242,6 +264,7 @@ async function prepareRecord(workspace, options, timeoutMs, claimDigest) {
     const defaults = resolveDefaults(loadConfig(workspace), {
       sandbox: options.sandbox, effort: options.effort, model: options.model,
     });
+    if (options.noModel) defaults.model = null;      // past the config fallback, deliberately
     assertSandboxAllowed(defaults.sandbox, { confirmDanger: options.confirmDanger });
     return createRecord(workspace, newRecord({
       jobId: newJobId(), kind: options.kind ?? "exec", background: options.background,

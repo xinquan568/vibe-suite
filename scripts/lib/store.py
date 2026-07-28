@@ -17,6 +17,7 @@ never inside it — so a toggle write and a job write cannot contend for the sam
 """
 
 import json
+import sys
 from pathlib import Path
 
 STATE_DIRNAME = ".vibe-suite-state"
@@ -147,3 +148,26 @@ def effective_config(workspace):
         gate.setdefault(key.partition(".")[2], value)
     resolved["gate"] = gate
     return resolved
+
+
+def _cli(argv):
+    """Read-only CLI so non-Python consumers reach the ONE resolver (E1.6 / vibe-16).
+
+    `effective-config <workspace>` prints the resolved configuration as one JSON object. There is
+    deliberately **no write subcommand**: runtime writes belong to `/vibe-suite:config` (E1.8), and
+    a hook that could flip its own toggle would be a gate that disables itself. Exits: 0 success,
+    1 a state file too damaged to read (never a silent `{}` — see `_read`), 2 usage.
+    """
+    if len(argv) != 2 or argv[0] != "effective-config":
+        print("usage: store.py effective-config <workspace>", file=sys.stderr)
+        return 2
+    try:
+        print(json.dumps(effective_config(argv[1]), indent=2, sort_keys=True))
+    except (StoreFormatError, StoreKeyError, StoreValueError) as error:
+        print(f"store: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_cli(sys.argv[1:]))

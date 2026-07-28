@@ -71,11 +71,14 @@ def classify(path):
     return "other"
 
 
-def write_atomic(root, dest, content):
-    """Same-directory temp file, fsync, rename, directory fsync.
+def write_atomic(root, dest, content, mode=None):
+    """Replace a file atomically, without ever resolving its parent path twice.
 
-    Full-file replacement only — no truncating in-place edit, so an interrupted write leaves either
-    the old file or the new one.
+    `O_NOFOLLOW` on the temp file guards only its final component. The parent is still resolved by
+    the kernel on every path-based call, so a directory swapped for a symlink between the
+    containment check and the write escapes anyway. Opening the parent **once** with
+    `O_DIRECTORY|O_NOFOLLOW` and then working relative to that descriptor removes the window: every
+    subsequent operation names the directory by handle, not by path.
     """
     assert_inside(root, dest)
     dest = Path(dest)
@@ -85,38 +88,48 @@ def write_atomic(root, dest, content):
                           "restorable from the provenance record, so the install refuses")
     if kind == "other":
         raise BridgeError(f"{dest} is neither a file nor a symlink; the install refuses")
+
+    # A file's existing mode is the user's, not ours. An earlier revision created the temp at 0600
+    # and never restored it, so every rewritten file silently became owner-only.
+    if mode is None:
+        mode = (dest.lstat().st_mode & 0o7777) if kind == "file" else 0o644
+
     dest.parent.mkdir(parents=True, exist_ok=True)
-    data = content if isinstance(content, bytes) else content.encode("utf-8")
-    # The temp path is an attack surface in its own right. It is predictable, so a pre-planted
-    # symlink there would be followed by an ordinary open() and the write would land wherever it
-    # pointed — outside the workspace, past a destination check that only looked at `dest`.
-    # O_EXCL refuses an existing node of any kind; O_NOFOLLOW refuses a symlink specifically.
-    tmp = dest.parent / f".{dest.name}.vibe-tmp"
-    assert_inside(root, tmp)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    assert_inside(root, dest.parent)
     try:
-        fd = os.open(tmp, flags, 0o600)
-    except FileExistsError as exc:
-        raise BridgeError(f"{tmp} already exists; refusing to write through it") from exc
+        dir_fd = os.open(dest.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                         | getattr(os, "O_NOFOLLOW", 0))
     except OSError as exc:
-        raise BridgeError(f"{tmp} could not be created safely ({exc})") from exc
+        raise BridgeError(f"{dest.parent} could not be opened safely ({exc})") from exc
+
+    data = content if isinstance(content, bytes) else content.encode("utf-8")
+    tmp_name = f".{dest.name}.vibe-tmp"
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, dest)
-    except BaseException:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    fd = os.open(dest.parent, os.O_RDONLY)
-    try:
-        os.fsync(fd)
+            fd = os.open(tmp_name, flags, mode, dir_fd=dir_fd)
+        except FileExistsError as exc:
+            raise BridgeError(f"{dest.parent / tmp_name} already exists; refusing to write "
+                              "through it") from exc
+        except OSError as exc:
+            raise BridgeError(f"{dest.parent / tmp_name} could not be created safely "
+                              f"({exc})") from exc
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp_name, mode, dir_fd=dir_fd, follow_symlinks=False)
+            os.replace(tmp_name, dest.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+        os.fsync(dir_fd)
     finally:
-        os.close(fd)
+        os.close(dir_fd)
 
 
 # --------------------------------------------------------------------------------------------
@@ -241,10 +254,21 @@ def toml_owned_names(text):
     to a JSON-only sweep, and #21's teardown iterates whatever this returns.
     """
     found = set()
-    for header in re.findall(r"^\s*\[mcp_servers\.([^\]]+)\]", text, re.M):
-        name = header.strip().strip('"').strip("'")
-        if "." in name and not name.startswith(SENTINEL_PREFIX):
-            name = name.split(".")[0].strip('"').strip("'")
+    for header in re.findall(r"^\s*\[mcp_servers\.(.+?)\]\s*$", text, re.M):
+        rest = header.strip()
+        # Split on the first dot *outside* quotes: `"vibe-agent:auditor".env` is a subtable of
+        # `vibe-agent:auditor`, and a name may itself contain dots only when quoted.
+        if rest.startswith(('"', "'")):
+            quote = rest[0]
+            end = rest.find(quote, 1)
+            if end == -1:
+                continue
+            name, trailer = rest[1:end], rest[end + 1:]
+        else:
+            name, _, trailer = rest.partition(".")
+            trailer = "." + trailer if trailer else ""
+        if trailer.strip():
+            continue          # a subtable is not a registration
         if name in SENTINEL_LITERALS or name.startswith(SENTINEL_PREFIX):
             found.add(name)
     return sorted(found)
@@ -292,6 +316,15 @@ def owned_names(doc):
     servers = doc.get("mcpServers", {}) if isinstance(doc, dict) else {}
     found = [n for n in servers if n in SENTINEL_LITERALS or n.startswith(SENTINEL_PREFIX)]
     return sorted(found)
+
+
+def read_text_verbatim(path):
+    """Text with its line endings intact. `Path.read_text()` normalises CRLF to LF, so a
+    read-modify-write silently rewrites every line of a CRLF file."""
+    p = Path(path)
+    if not p.is_file():
+        return ""
+    return p.read_bytes().decode("utf-8", errors="surrogateescape")
 
 
 def load_json(path):

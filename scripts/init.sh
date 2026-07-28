@@ -21,7 +21,7 @@
 # helper's own idempotence, so the accumulating decision flags are the whole resume state and nothing
 # about a decision is persisted between runs.
 #
-# Usage: init.sh [--workspace DIR] --tier T --audit-depth D --strictness S [--skip PAT]
+# Usage: init.sh [--workspace DIR] --effort low|medium|high [--sandbox S] --audit-depth D --strictness S [--skip PAT]
 #                [--resolve-config JSON | --decline-config]
 #                [--resolve-state true|false | --decline-state]
 #                [--confirm-sentinels yes|no] [--non-interactive]
@@ -32,7 +32,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR source=migrate/common.sh disable=SC1091
 . "$here/migrate/common.sh"
 
-workspace="." tier="" depth="" strictness="" skip=""
+workspace="." effort="" sandbox="read-only" depth="" strictness="" skip=""
 resolve_config="" decline_config=0 resolve_state="" decline_state=0
 confirm_sentinels="" non_interactive=0 list_owned=0 list_checkpoints=0
 
@@ -44,7 +44,8 @@ config-fill memory codex mcp gitignore history-baseline"
 while [ $# -gt 0 ]; do
     case "$1" in
         --workspace)         workspace="$2"; shift 2 ;;
-        --tier)              tier="$2"; shift 2 ;;
+        --effort)            effort="$2"; shift 2 ;;
+        --sandbox)           sandbox="$2"; shift 2 ;;
         --audit-depth)       depth="$2"; shift 2 ;;
         --strictness)        strictness="$2"; shift 2 ;;
         --skip)              skip="$2"; shift 2 ;;
@@ -75,7 +76,7 @@ if [ "$list_owned" = 1 ]; then python3 "$here/lib/bridge.py" list-owned "$worksp
 [ -n "$resolve_state" ] && [ "$decline_state" = 1 ] && \
     vibe_die "--resolve-state and --decline-state are mutually exclusive"
 
-[ -n "$tier" ] || vibe_die "--tier is required (a trust tier: haiku|sonnet|opus-class — never a versioned id, per P9/D6)"
+[ -n "$effort" ] || vibe_die "--effort is required (low|medium|high — Codex effort, per F1.1; never a model id, per P9/D6)"
 [ -n "$depth" ] || vibe_die "--audit-depth is required (full|mini)"
 [ -n "$strictness" ] || vibe_die "--strictness is required (relaxed|standard|strict)"
 
@@ -154,7 +155,7 @@ esac
 checkpoint migrate-sentinels
 
 # ---- phase 3: bridge steps, each exactly once ---------------------------------------------------
-python3 "$here/lib/init_bridge.py" install "$workspace" "$tier" "$depth" "$strictness" "$skip" \
-    "${fail_after:-}"
+python3 "$here/lib/init_bridge.py" install "$workspace" "$effort" "$sandbox" "$depth" \
+    "$strictness" "$skip" "${fail_after:-}"
 
 vibe_log "vibe-suite initialised in $workspace"

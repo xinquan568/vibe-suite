@@ -42,6 +42,9 @@ def provenance_open(ws):
     """
     ws = Path(ws)
     out = ws / PROVENANCE
+    bridge.assert_inside(ws, out)
+    if bridge.classify(out) == "symlink":
+        raise bridge.BridgeError(f"{out} is a symlink; refusing to treat it as a restore source")
     if out.is_file():
         # Write once. A second run's "pre-image" is the installed state, so rewriting would discard
         # the only record of what the workspace looked like before the suite touched it. An existing
@@ -49,7 +52,10 @@ def provenance_open(ws):
         # trusted as a restore source it cannot serve.
         existing = bridge.load_json(out)
         if (not isinstance(existing, dict) or existing.get("schema") != bridge.SCHEMA
-                or not isinstance(existing.get("targets"), list)):
+                or not isinstance(existing.get("targets"), list)
+                or not isinstance(existing.get("parents_created"), list)
+                or {t.get("path") for t in existing["targets"] if isinstance(t, dict)}
+                   != {str(ws / rel) for rel in TARGETS}):
             raise bridge.BridgeError(
                 f"{out} exists but is not a v{bridge.SCHEMA} provenance record; refusing to "
                 "continue, because unbridge would treat it as one")
@@ -84,21 +90,36 @@ def set_gate(ws, value):
     store.set("gate.stop_review_gate", wanted)
 
 
-def _verify_config(text):
-    """Parse what we are about to write with the canonical reader.
+def _split_front(text):
+    """(unused, frontmatter lines, trailing body). A config with no frontmatter yields empty lines."""
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 3)
+        if end != -1:
+            return "", text[4:end].splitlines(), text[end + 5:]
+    return "", [], text
 
-    `config.py` owns the schema and its grammar. Writing a config it would reject — or one whose keys
-    it silently ignores — is how a setup command produces a project nothing downstream can read.
+
+def _verify_config(ws, text):
+    """Validate with the canonical *validating* load, not a bare parse.
+
+    `parse_frontmatter` only checks the grammar: it accepts `effort: sonnet` happily, while
+    `config.py`'s value checks reject it because the enum is `low|medium|high`. Parsing alone would
+    have shipped exactly the invalid config this check exists to prevent, so the candidate is written
+    to a scratch workspace and loaded the way every downstream consumer loads it.
     """
-    try:
-        config_mod.parse_frontmatter(text)
-    except Exception as exc:  # the module raises several distinct types; all mean "do not ship it"
-        raise bridge.BridgeError(f"refusing to write a config the canonical reader rejects: {exc}")
+    import tempfile
+    with tempfile.TemporaryDirectory() as probe:
+        Path(probe, config_mod.CONFIG_FILENAME).write_text(text, encoding="utf-8")
+        try:
+            config_mod.load(probe)
+        except Exception as exc:
+            raise bridge.BridgeError(
+                f"refusing to write a config the canonical loader rejects: {exc}") from exc
 
 
 def _upsert_text(ws, rel, name, body, markdown=False):
     dest = Path(ws) / rel
-    existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
+    existing = bridge.read_text_verbatim(dest)
     updated = (bridge.md_block_upsert(existing, name, body) if markdown
                else bridge.text_block_upsert(existing, name, body))
     if updated != existing:
@@ -115,7 +136,7 @@ def _upsert_json(ws, rel, mutate):
         bridge.write_atomic(ws, dest, after + "\n")
 
 
-def install(ws, tier, depth, strictness, skip, fail_after=""):
+def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
     ws = Path(ws)
 
     def checkpoint(step):
@@ -125,35 +146,31 @@ def install(ws, tier, depth, strictness, skip, fail_after=""):
     if strictness not in STRICTNESS:
         raise bridge.BridgeError(f"--strictness expects {'|'.join(STRICTNESS)}, got '{strictness}'")
 
-    # config-fill — merge into whatever migration produced; never a fresh overwrite. The keys and
-    # their shapes come from `config.py`'s SCHEMA, not from this module's imagination: an unknown key
-    # is silently ignored on load, and `skip_patterns` is a **sequence**, so a scalar would produce a
-    # file the canonical reader rejects. The result is parsed back before it is kept.
+    # config-fill — merge into whatever migration produced; never a fresh overwrite. The keys are
+    # `config.py`'s, not this module's: F1.1 asks for Codex **effort** and **sandbox**, and both are
+    # schema enums. An earlier revision invented `model_tier` and wrote `effort: sonnet`, which the
+    # canonical validator rejects — so every advertised answer produced an unreadable config.
     dest = ws / ".vibe-suite.md"
-    existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
-    lines = [f"effort: {tier}", f"audit_depth: {depth}",
-             f"score_threshold: {STRICTNESS[strictness]}"]
-    if skip:
-        lines.append("skip_patterns:")
-        lines.extend(f"  - {pattern.strip()}" for pattern in skip.split(",") if pattern.strip())
-    if existing.strip():
-        body = existing.rstrip("\n") + "\n"
-        for line in lines:
-            key = line.split(":")[0]
-            if f"\n{key}:" not in body:
-                body = body.replace("\n---\n", f"\n{line}\n---\n", 1) if body.count("---") >= 2 \
-                    else body + line + "\n"
-        if body != existing:
-            _verify_config(body)
-            bridge.write_atomic(ws, dest, body)
-    else:
-        fresh = "---\n" + "\n".join(lines) + "\n---\n"
-        _verify_config(fresh)
-        bridge.write_atomic(ws, dest, fresh)
+    existing = bridge.read_text_verbatim(dest)
+    values = {"effort": effort, "sandbox": sandbox, "audit_depth": depth,
+              "score_threshold": str(STRICTNESS[strictness])}
+    patterns = [s.strip() for s in skip.split(",") if s.strip()] if skip else []
+
+    body, front, rest = _split_front(existing)
+    for key, value in values.items():
+        if not any(line.strip().startswith(f"{key}:") for line in front):
+            front.append(f"{key}: {value}")
+    if patterns and not any(line.strip().startswith("skip_patterns:") for line in front):
+        front.append("skip_patterns:")
+        front.extend(f"  - {pattern}" for pattern in patterns)
+    rendered = "---\n" + "\n".join(front) + "\n---\n" + rest
+    if rendered != existing:
+        _verify_config(ws, rendered)
+        bridge.write_atomic(ws, dest, rendered)
     checkpoint("config-fill")
 
     memory = ("Project memory for vibe-suite. Commands ship under the `/vibe-suite:` namespace.\n"
-              f"Model tier: {tier}. Audit depth: {depth}.")
+              f"Codex effort: {effort}. Sandbox: {sandbox}. Audit depth: {depth}.")
     _upsert_text(ws, "AGENTS.md", "memory", memory, markdown=True)
     for name in ("CLAUDE.md", "GEMINI.md"):
         _upsert_text(ws, name, "import", "@AGENTS.md", markdown=True)
@@ -184,10 +201,18 @@ def install(ws, tier, depth, strictness, skip, fail_after=""):
         snapshots, container = history, history
     elif isinstance(history, dict):
         snapshots = history.setdefault("snapshots", [])
+        if not isinstance(snapshots, list):
+            raise bridge.BridgeError(
+                f"{dest}: 'snapshots' is {type(snapshots).__name__}, not a list; refusing to append")
         container = history
-    else:
+    elif history is None:
         snapshots = []
         container = {"snapshots": snapshots}
+    else:
+        # Valid JSON of an unexpected shape. Replacing it would discard a file the user may care
+        # about, and this command has no mandate to decide that.
+        raise bridge.BridgeError(
+            f"{dest} holds a JSON {type(history).__name__}, not a history; refusing to replace it")
     if not any(isinstance(s, dict) and s.get("baseline") for s in snapshots):
         snapshots.append({"baseline": True, "threshold": STRICTNESS[strictness]})
         bridge.write_atomic(ws, dest, json.dumps(container, indent=2, sort_keys=True) + "\n")
@@ -201,7 +226,8 @@ def main(argv):
         elif argv[1] == "set-gate":
             set_gate(argv[2], argv[3])
         elif argv[1] == "install":
-            install(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7] if len(argv) > 7 else "")
+            install(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7],
+                    argv[8] if len(argv) > 8 else "")
         else:
             print(f"unknown subcommand: {argv[1]}", file=sys.stderr)
             return 2

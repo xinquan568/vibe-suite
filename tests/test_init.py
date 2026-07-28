@@ -99,7 +99,7 @@ class InitCase(unittest.TestCase):
             encoding="utf-8")
 
     def answers(self):
-        return ["--tier", "sonnet", "--audit-depth", "mini", "--strictness", "standard"]
+        return ["--effort", "medium", "--audit-depth", "mini", "--strictness", "standard"]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -289,14 +289,14 @@ class TestCrashConvergence(InitCase):
             with self.subTest(step=step):
                 ws = Path(tempfile.mkdtemp(prefix="vibe-crash-"))
                 self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
-                crashed = run_init(ws, "--tier", "sonnet", "--audit-depth", "mini",
+                crashed = run_init(ws, "--effort", "medium", "--audit-depth", "mini",
                                    "--strictness", "standard", env={"VIBE_FAIL_AFTER": step})
                 self.assertNotEqual(crashed.returncode, 0)
-                healed = run_init(ws, "--tier", "sonnet", "--audit-depth", "mini",
+                healed = run_init(ws, "--effort", "medium", "--audit-depth", "mini",
                                   "--strictness", "standard")
                 self.assertEqual(healed.returncode, 0,
                                  f"re-run after a crash at {step} did not converge: {healed.stderr}")
-                again = run_init(ws, "--tier", "sonnet", "--audit-depth", "mini",
+                again = run_init(ws, "--effort", "medium", "--audit-depth", "mini",
                                  "--strictness", "standard")
                 self.assertEqual(again.returncode, 0)
 
@@ -420,3 +420,81 @@ class TestRegressions(InitCase):
         agents = [t for t in record["targets"] if t["path"].endswith("AGENTS.md")][0]
         self.assertIn("sha256", agents)
         self.assertEqual(len(record["parents_created"]), len(set(record["parents_created"])))
+
+
+class TestRound5Regressions(InitCase):
+    """Defects introduced or left open by the first fix pass. Each fails against `b2165fa`."""
+
+    def _bridge(self):
+        import sys
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import bridge
+        return bridge
+
+    def test_a_rewritten_user_file_keeps_its_mode(self):
+        """The temp file was created 0600 and its mode never restored, so every rewritten user file
+        silently became owner-only."""
+        target = self.ws / "CLAUDE.md"
+        target.write_text("mine\n", encoding="utf-8")
+        target.chmod(0o644)
+        run_init(self.ws, *self.answers())
+        self.assertEqual(target.stat().st_mode & 0o777, 0o644,
+                         "init changed the file's permissions")
+
+    def test_crlf_line_endings_survive(self):
+        """`Path.read_text()` normalises CRLF, so a read-modify-write rewrote every line."""
+        target = self.ws / "CLAUDE.md"
+        target.write_bytes(b"# Mine\r\n\r\nA CRLF file.\r\n")
+        run_init(self.ws, *self.answers())
+        self.assertIn(b"A CRLF file.\r\n", target.read_bytes(),
+                      "the user's CRLF line endings were normalised to LF")
+
+    def test_a_toml_subtable_is_not_a_registration(self):
+        bridge = self._bridge()
+        text = ('[mcp_servers."vibe-agent:auditor".env]\nA = "1"\n'
+                '[mcp_servers.vibe-mcp.env]\nB = "2"\n')
+        self.assertEqual(bridge.toml_owned_names(text), [],
+                         "a subtable was read as evidence the server is registered")
+        text += '[mcp_servers.vibe-mcp]\ncommand = "x"\n'
+        self.assertEqual(bridge.toml_owned_names(text), ["vibe-mcp"])
+
+    def test_an_invalid_effort_value_is_refused_not_written(self):
+        """`parse_frontmatter` accepts any scalar; only the validating load rejects an off-enum
+        value. An earlier revision wrote `effort: sonnet`, which nothing downstream could read."""
+        result = run_init(self.ws, "--effort", "sonnet", "--audit-depth", "mini",
+                          "--strictness", "standard")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.ws / ".vibe-suite.md").is_file(),
+                         "an invalid config was written to disk")
+
+    def test_an_existing_skip_list_is_not_duplicated_on_rerun(self):
+        run_init(self.ws, *self.answers(), "--skip", "vendor/**,build/**")
+        first = (self.ws / ".vibe-suite.md").read_text(encoding="utf-8")
+        run_init(self.ws, *self.answers(), "--skip", "vendor/**,build/**")
+        self.assertEqual((self.ws / ".vibe-suite.md").read_text(encoding="utf-8"), first)
+        self.assertEqual(first.count("vendor/**"), 1, "the pattern was appended twice")
+
+    def test_a_json_document_of_the_wrong_shape_is_not_silently_replaced(self):
+        (self.ws / ".claude").mkdir()
+        (self.ws / ".claude" / "vibe-history.json").write_text('"a string"\n', encoding="utf-8")
+        result = run_init(self.ws, *self.answers())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.ws / ".claude" / "vibe-history.json").read_text(), '"a string"\n')
+
+    def test_a_symlinked_provenance_path_is_refused(self):
+        outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (outside / "p.json").write_text('{"schema": 1, "targets": [], "parents_created": []}\n',
+                                        encoding="utf-8")
+        (self.ws / ".vibe-suite-state").mkdir()
+        (self.ws / ".vibe-suite-state" / "install-provenance.json").symlink_to(outside / "p.json")
+        result = run_init(self.ws, *self.answers())
+        self.assertNotEqual(result.returncode, 0,
+                            "a symlinked provenance path was trusted as a restore source")
+
+    def test_a_provenance_record_missing_targets_is_refused(self):
+        (self.ws / ".vibe-suite-state").mkdir()
+        (self.ws / ".vibe-suite-state" / "install-provenance.json").write_text(
+            '{"schema": 1, "targets": [], "parents_created": []}\n', encoding="utf-8")
+        result = run_init(self.ws, *self.answers())
+        self.assertNotEqual(result.returncode, 0)

@@ -11,26 +11,29 @@ original untouched, and where both stores exist the new one wins. Rollback is de
 
 ## What to do
 
-### 1. Ask the four questions
+### 1. Ask the five questions
 
-Use **AskUserQuestion**, one call, four questions:
+Use **AskUserQuestion**, one call, five questions:
 
 | Question | Options | Becomes |
 |---|---|---|
-| Which model tier should the suite trust by default? | `haiku` · `sonnet` · `opus-class` | `--tier` |
+| What Codex effort should commands default to? | `low` · `medium` · `high` | `--effort` |
+| What sandbox should Codex run under? | `read-only` · `workspace-write` · `danger-full-access` | `--sandbox` |
 | How deep should audits run by default? | `mini` (fast) · `full` | `--audit-depth` |
 | How strict is the score gate? | `relaxed` (60) · `standard` (70) · `strict` (80) | `--strictness` |
 | Any paths to skip? | free text, optional | `--skip` |
 
-**The tier question is about trust, not versions.** Per P9/D6 it never offers a versioned model id —
-each tier alias tracks that tier's current model, so a pick-list of ids would be stale the week after
-it shipped and would violate the no-pinned-ids rule the whole suite is linted against.
+**No question here names a model.** F1.1 asks for Codex *effort* and *sandbox*, and both are enums in
+`.vibe-suite.md`'s schema. Per P9/D6 a model question would ask which **tier** to trust and never
+offer a versioned id — but the suite stores no model key at all, so the honest thing is not to ask.
+The engines run on their own configured defaults.
 
 ### 2. Run it
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/init.sh" \
-  --tier <tier> --audit-depth <depth> --strictness <strictness> [--skip <patterns>]
+  --effort <low|medium|high> [--sandbox <sandbox>] \
+  --audit-depth <mini|full> --strictness <relaxed|standard|strict> [--skip "a/**,b/**"]
 ```
 
 ### 3. If it exits 3, a decision is required

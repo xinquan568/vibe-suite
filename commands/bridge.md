@@ -14,11 +14,18 @@ Forward the user's argument; `all` is the default. Report the per-step lines as 
 ## `mcp` — what crosses, and what never does
 
 Servers in `.mcp.json` are mirrored into a `config.toml` sentinel block so Codex sees the same tools.
-**No `env` value is ever copied.** The variable's *name* crosses as a comment, so you know what to
-set; its value stays in the one file you put it in.
 
-That is an allowlist, not a redaction. A masked value would still put the secret's shape somewhere
-you did not choose to put it.
+**A server that declares `env` contributes only names** — its own, and its variables'. Its `command`
+and `args` are not mirrored, and the block says where to find them.
+
+That rule is structural rather than a judgement about which values look secret. Trying to recognise
+a secret does not work: withholding every value means a two-character entry like `on` blanks out
+every occurrence of those characters, while any length threshold lets a genuinely short credential
+through — and nothing in the file distinguishes a short credential from a short flag. Declaring
+`env` is the one signal `.mcp.json` actually gives about which servers handle secrets, so that is
+what the rule keys on.
+
+A server with no `env` is mirrored in full.
 
 The suite's own registration is skipped — mirroring it would register the bridge into itself.
 

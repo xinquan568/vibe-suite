@@ -29,44 +29,9 @@ SHARED_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"
 SIDE_FILE = ".codex/hooks.vibe-suite.json"
 
 
-def _secret_values(spec):
-    """Every leaf under `env`, at any depth.
-
-    Withholding `env` was not enough: the same value routinely appears in `args` too (`--key
-    sk-...`), and a leak through a second field is the same leak. So the values are collected first
-    and then treated as poison wherever they appear.
-    """
-    out = set()
-
-    def walk(node):
-        if isinstance(node, dict):
-            for v in node.values():
-                walk(v)
-        elif isinstance(node, (list, tuple)):
-            for v in node:
-                walk(v)
-        elif node is None or isinstance(node, bool):
-            return
-        elif isinstance(node, (int, float)):
-            out.add(str(node))          # a numeric token is still a token
-        elif isinstance(node, str) and node:
-            out.add(node)
-
-    walk(spec.get("env") or {})
-    # Short values are excluded: a two-character env value would poison half the document and the
-    # mirror would render nothing useful. Anything that short is not a credential.
-    return {v for v in out if len(v) >= 8}
-
-
-def _carries(text, secrets):
-    """True if any secret appears *anywhere* in this string. Equality is not enough — a credential
-    embedded in `--key=sk-...` is the same leak as one standing alone."""
-    return any(s in text for s in secrets)
-
-
 def _toml_key(name):
     """A TOML key. Bare only for ASCII alphanumerics, `-` and `_`; anything else is a quoted basic
-    string, escaped by `json.dumps` — whose escaping is a superset of TOML's, so a quote, backslash,
+    string escaped by `json.dumps`, whose escaping is a superset of TOML's — so a quote, backslash,
     newline or control character cannot close the key and inject content outside our block."""
     if name and all(c.isascii() and (c.isalnum() or c in "-_") for c in name):
         return name
@@ -76,57 +41,83 @@ def _toml_key(name):
 def _toml_scalar(value):
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return json.dumps(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        # TOML has no nan/inf literal; such a value is not mirrored as a number.
+        return json.dumps(str(value))
     return json.dumps(str(value))
 
 
+def _name_repeats_a_value(name, env):
+    """Whether a server's name carries one of its own env values.
+
+    The name is the one field that must cross for the mirror to mean anything, so it is the one place
+    a value comparison is still needed. It is bounded to that server's own env — a small closed set —
+    rather than poisoning the whole document, which is what made the general rule unworkable.
+    """
+    def leaves(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                yield from leaves(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                yield from leaves(v)
+        elif node is not None and not isinstance(node, bool):
+            yield str(node)
+
+    return any(v and v in name for v in leaves(env))
+
+
 def mirror_mcp(ws, report):
-    """`.mcp.json` → a `config.toml` sentinel block. Values from `env` never cross."""
+    """`.mcp.json` → a `config.toml` sentinel block.
+
+    **A server that declares `env` contributes only names.** Its own name and its variable names
+    cross; `command` and `args` do not.
+
+    That rule is structural, and it replaces three iterations of trying to *recognise* a secret.
+    Recognition cannot work: poisoning every value means a two-character `env` entry like `on`
+    withholds every occurrence of those characters and the mirror renders nothing, while any length
+    floor lets a genuinely short credential through. Nothing in the input distinguishes a short
+    credential from a short flag, so no threshold satisfies both — and case folding, Unicode
+    normalisation and encoding variants each add an unbounded space to compare against.
+
+    Declaring `env` is the one signal the file actually gives about which servers handle secrets. A
+    server without it is mirrored in full; a server with it is named, and the user is told where the
+    rest lives. The guarantee then holds without anyone having to identify a credential.
+    """
     doc = bridge.load_json(ws / ".mcp.json")
     servers = doc.get("mcpServers") or {}
-    lines, withheld = [], 0
+    lines, reduced = [], 0
     for name, spec in sorted(servers.items()):
         if name.startswith("cc-suite-") or not isinstance(spec, dict):
             continue
         if spec.get("command") == "vibe-suite":
             continue                      # mirroring our own registration would recurse
-        secrets = _secret_values(spec)
-        if _carries(name, secrets):
-            # The server *name* repeats a credential. Mirroring it would leak through the one field
-            # that cannot be omitted, so the whole server is skipped.
-            lines.append(f"# a server was not mirrored: its name repeats a value from env")
+        env = spec.get("env")
+        declares_env = bool(env)
+        if declares_env and _name_repeats_a_value(name, env):
+            lines.append("# a server was not mirrored: its name repeats one of its own env values")
             lines.append("")
-            withheld += 1
+            reduced += 1
             continue
         lines.append(f"[mcp_servers.{_toml_key(name)}]")
-        command = spec.get("command")
-        if isinstance(command, str) and command:
-            if _carries(command, secrets):
-                lines.append("# command withheld — it repeats a value from env")
-                withheld += 1
-            else:
+        if declares_env:
+            reduced += 1
+            lines.append("# this server declares env, so only names are mirrored — see .mcp.json")
+        else:
+            command = spec.get("command")
+            if isinstance(command, str) and command:
                 lines.append(f"command = {_toml_scalar(command)}")
-        args = spec.get("args")
-        if isinstance(args, list):
-            rendered, dropped = [], False
-            for arg in args:
-                if not isinstance(arg, (str, int, float, bool)):
-                    dropped = True          # a dict or list is not a TOML array member
-                    continue
-                if isinstance(arg, str) and _carries(arg, secrets):
-                    dropped = True
-                    withheld += 1
-                    continue
-                rendered.append(_toml_scalar(arg))
-            lines.append("args = [" + ", ".join(rendered) + "]")
-            if dropped:
-                lines.append("# some args were withheld — they repeated an env value or were not "
-                             "scalars")
-        env = spec.get("env")
+            args = spec.get("args")
+            if isinstance(args, list):
+                scalars = [a for a in args if isinstance(a, (str, int, float, bool))]
+                lines.append("args = [" + ", ".join(_toml_scalar(a) for a in scalars) + "]")
+                if len(scalars) != len(args):
+                    lines.append("# some args were not scalars and were not mirrored")
         names = sorted(k for k in env if isinstance(k, str)) if isinstance(env, dict) else []
-        for var in (n for n in names if not _carries(n, secrets)):
-            # The name crosses; no value ever does, in this field or any other.
+        for var in names:
+            # The variable's name crosses so the user knows what to set. Its value never does.
             lines.append(f"# env: {var} (value not mirrored — set it in your own environment)")
         lines.append("")
     body = "\n".join(lines).rstrip() or "# no project MCP servers to mirror"
@@ -135,8 +126,8 @@ def mirror_mcp(ws, report):
     updated = bridge.text_block_upsert(existing, "mcp-mirror", body)
     if updated != existing:
         bridge.write_atomic(ws, dest, updated)
-    report.append(f"mcp: mirrored {len(servers)} server(s), no env values copied"
-                  + (f" ({withheld} field(s) withheld for repeating one)" if withheld else ""))
+    report.append(f"mcp: mirrored {len(servers)} server(s)"
+                  + (f"; {reduced} declare env, so only names crossed" if reduced else ""))
 
 
 def mirror_hooks(ws, report):

@@ -290,12 +290,26 @@ class TestIteration2(BridgeCase):
         self.assertEqual(self.run_bridge("mcp").returncode, 0)
         self.assertNotIn(SECRET, self.toml())
 
-    def test_a_short_env_value_does_not_poison_the_document(self):
-        """A two-character value would withhold half the mirror; anything that short is not a
-        credential."""
+    def test_declaring_env_reduces_a_server_to_names(self):
+        """The structural rule that replaced value recognition: a server declaring env contributes
+        its name and its variable names, and nothing else. No length threshold is involved, so a
+        two-character credential is as safe as a long one."""
         self._mcp({"x": {"command": "run", "args": ["--flag"], "env": {"N": "on"}}})
         self.run_bridge("mcp")
-        self.assertIn("--flag", self.toml(), "a short env value poisoned an unrelated arg")
+        text = self.toml()
+        self.assertIn("mcp_servers.x", text)
+        self.assertIn("# env: N", text)
+        self.assertNotIn("--flag", text, "a value crossed from a server that declares env")
+        self.assertNotIn("command =", text)
+
+    def test_a_server_without_env_is_mirrored_in_full(self):
+        """The rule keys on declaring env, not on guessing — so a server with no secrets to hold is
+        mirrored completely."""
+        self._mcp({"plain": {"command": "node", "args": ["server.js"]}})
+        self.run_bridge("mcp")
+        text = self.toml()
+        self.assertIn('command = "node"', text)
+        self.assertIn("server.js", text)
 
     def test_an_env_name_still_crosses(self):
         """F1.6 specifies it: the user has to know what to set."""

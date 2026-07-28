@@ -88,7 +88,12 @@ def provenance_open(ws):
                 f"{out} exists but is not a v{bridge.SCHEMA} provenance record; refusing to "
                 "continue, because unbridge would treat it as one")
         return
-    record = {"schema": bridge.SCHEMA, "targets": [], "parents_created": []}
+    # The plugin version at install time, so a later doctor can tell an upgrade from a fresh
+    # install. Recorded here because provenance is the only artefact written once, before anything.
+    manifest = bridge.load_json(Path(__file__).resolve().parent.parent.parent
+                                / ".claude-plugin" / "plugin.json")
+    record = {"schema": bridge.SCHEMA, "targets": [], "parents_created": [],
+              "plugin_version": manifest.get("version")}
     parents = []
     for rel in TARGETS + (PROVENANCE,):
         dest = ws / rel

@@ -198,7 +198,14 @@ the schema belongs to the project file, which a user edits deliberately.
 Where both name a setting, **runtime state wins for the session**. The `gate` block in
 `.vibe-suite.md` supplies defaults and display only — the store owns live values, and setting one
 leaves the project file byte-identical. An unset key is *absent* from the JSON rather than null, and
-a write preserves every sibling member, so job records survive a toggle.
+a write preserves every sibling member of `state.json`.
+
+**Job records are not in `state.json`.** They are one file per job at
+`<workspace>/.vibe-suite-state/jobs/<jobId>.json`, written by the codex-runner engine (E1.1) and read
+by `/vibe-suite:jobs`. They sit beside the toggle store in the same state directory, never inside it,
+so a toggle write and a job write cannot contend. Unlike the settings above, a job record carries
+**every key always**, with unavailable values as `null` — it has no defaults to fall back on, so
+`threadId: null` means "no thread id exists yet" rather than "unset".
 
 ## Further detail
 

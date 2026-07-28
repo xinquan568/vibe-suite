@@ -149,6 +149,10 @@ jobs:
         with:
           python-version: '3.x'
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
       - name: Run the suite
         run: |
           set -euo pipefail
@@ -162,6 +166,27 @@ jobs:
           fi
           printf 'discovered %d test module(s)\n' "${#files[@]}"
           python3 -m unittest discover -s tests -v
+
+      - name: Run the Node suite
+        # A step inside this job rather than a job of its own: the three job names are required
+        # status contexts on main, so a fourth job could fail without blocking a merge — a gate that
+        # exists and does not gate. As a step it inherits `test`'s required status.
+        #
+        # The glob is explicit because `--test <dir>` resolves the directory as a module on some Node
+        # versions, and because `tests/node/` also holds `no-top-level-await.mjs`, which is a checker
+        # invoked with file arguments rather than a test.
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp)
+          if ! find tests/node -name '*.test.mjs' -print0 > "$tmp"; then
+            echo "node test discovery failed"; rm -f "$tmp"; exit 1
+          fi
+          mapfile -d '' -t files < "$tmp"; rm -f "$tmp"
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no Node tests found under tests/node/"; exit 0
+          fi
+          printf 'discovered %d Node test file(s)\n' "${#files[@]}"
+          node --test "${files[@]}"
 
   coverage:
     name: coverage (AC-1)

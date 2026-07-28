@@ -61,9 +61,14 @@ def finding(severity, check, text, fixable=False):
 
 
 def detect_state(ws):
-    """uninitialised | partial | installed."""
+    """uninitialised | partial | installed. Never raises: a file this cannot parse is a *finding*,
+    and a diagnosis that dies before classifying reports nothing at all."""
     provenance = ws / init_bridge.PROVENANCE
-    owned = bool(bridge.inventory_enumerate(ws))
+    try:
+        owned = bool(bridge.inventory_enumerate(ws))
+    except Exception:
+        owned = True          # unreadable registrations mean something is installed, badly
+        return "partial"
     configured = (ws / config_mod.CONFIG_FILENAME).is_file()
     memory = any(bridge.md_block_has(bridge.read_text_verbatim(ws / n), "memory")
                  or bridge.md_block_has(bridge.read_text_verbatim(ws / n), "import")
@@ -72,7 +77,10 @@ def detect_state(ws):
         return "uninitialised"
     if not provenance.is_file():
         return "partial"
-    record = bridge.load_json(provenance)
+    try:
+        record = bridge.load_json(provenance)
+    except Exception:
+        return "partial"
     # `all()` over an empty list is vacuously true, so the target *set* is checked as well as each
     # entry — a record naming nothing would otherwise read as a complete restore source.
     # Compared by *name*, not absolute path: the record was written under the path init was given,
@@ -97,7 +105,11 @@ def detect_state(ws):
 
 
 def check_bridge(ws, out):
-    names = bridge.inventory_enumerate(ws)
+    try:
+        names = bridge.inventory_enumerate(ws)
+    except Exception as exc:
+        out.append(finding("[HIGH]", "sentinels", f"registrations are unreadable: {exc}", False))
+        names = []
     mcp, _ = safe_json(ws / ".mcp.json", out, "sentinels")
     toml = bridge.read_text_verbatim(ws / ".codex" / "config.toml")
     if "vibe-mcp" not in names:
@@ -145,9 +157,9 @@ def check_symlinks(ws, out):
 
 
 def check_pins(ws, out):
-    record, ok = safe_json(ws / init_bridge.PROVENANCE, out, "provenance")
+    record, ok = safe_json(ws / init_bridge.PROVENANCE, out, "pins")
     if not ok:
-        return
+        return None
     recorded = record.get("plugin_version") if isinstance(record, dict) else None
     if recorded is None:
         # An install predating this field is not a defect in the project. Reported as a capability
@@ -228,7 +240,10 @@ def knowledge_capability(out):
     two projects disagree about one shared skill. E6.5 (#48) writes it."""
     root = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", HERE.parent))
     for candidate in (root / "skills").glob("*/refreshed.json"):
-        record = bridge.load_json(candidate)
+        try:
+            record = bridge.load_json(candidate)
+        except Exception:
+            record = None
         if isinstance(record, dict) and record.get("refreshed"):
             return None
         return finding("[LOW]", "knowledge-freshness",

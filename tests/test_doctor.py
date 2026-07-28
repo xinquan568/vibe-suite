@@ -239,3 +239,38 @@ class TestCommandWiring(DoctorCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMalformedInput(DoctorCase):
+    """A diagnosis that dies on the input it exists to diagnose reports nothing about the rest."""
+
+    def _corrupt(self, rel):
+        self.install()
+        (self.ws / rel).write_text("{not json\n", encoding="utf-8")
+        result = self.doctor()
+        self.assertNotIn("Traceback", result.stderr, f"{rel} produced a traceback")
+        return json.loads(result.stdout)
+
+    def test_malformed_provenance_is_a_finding(self):
+        report = self._corrupt(".vibe-suite-state/install-provenance.json")
+        self.assertEqual(report["state"], "partial")
+
+    def test_malformed_mcp_json_is_a_finding(self):
+        self.assertIn("sentinels", self.checks(self._corrupt(".mcp.json")))
+
+    def test_malformed_hooks_json_is_a_finding(self):
+        self.assertIn("hooks", self.checks(self._corrupt(".codex/hooks.json")))
+
+
+class TestReadOnlyStrict(DoctorCase):
+    def test_read_only_holds_and_the_run_succeeds(self):
+        """The earlier read-only tests passed even if doctor crashed before touching anything."""
+        self.install()
+        before = {p: (Path(p).stat().st_mode & 0o777) for p in
+                  (str(x) for x in self.ws.rglob("*") if x.is_file())}
+        result = self.doctor()
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        after = {p: (Path(p).stat().st_mode & 0o777) for p in
+                 (str(x) for x in self.ws.rglob("*") if x.is_file())}
+        self.assertEqual(after, before, "doctor changed a file mode")

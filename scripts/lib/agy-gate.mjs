@@ -23,21 +23,37 @@ import { fileURLToPath } from "node:url";
 
 export const GATE_SCHEMA = 1;
 
-/** Every check that must be `passed` before the lane may be reached. */
-export const MANDATORY_CHECKS = [
+// The canonical definitions are PRIVATE and immutable, and the resolver reads only these. Exporting
+// the arrays the predicate consumes let a reviewer delete `read_only_write_denied` from the
+// mandatory set in-process and open the gate — the same defect as the mutable signature registry,
+// one layer further out. `Object.freeze` on a Set is not protection either: `.add()` still works,
+// so the states are a frozen array checked by `includes`.
+const CANONICAL_CHECKS = Object.freeze([
   "headless_invocation",
   "read_only_write_denied",
   "timeout_kill",
   "failure_signature",
   "quota_signature",
-];
+]);
+const CANONICAL_STATES = Object.freeze(["passed", "failed", "not_verified"]);
+const CANONICAL_RECORD_KEYS = Object.freeze([
+  "schema", "status", "agy_version", "recorded_at", "checks",
+]);
 
-export const CHECK_STATES = new Set(["passed", "failed", "not_verified"]);
+/** Frozen copies for callers that need to enumerate; mutating them cannot reach the predicate. */
+export const MANDATORY_CHECKS = CANONICAL_CHECKS;
+export const CHECK_STATES = Object.freeze(new Set(CANONICAL_STATES));
+export const RECORD_KEYS = CANONICAL_RECORD_KEYS;
 
-/** The record's exact top-level key set. Extra keys are a different schema wearing this one's number. */
-export const RECORD_KEYS = ["schema", "status", "agy_version", "recorded_at", "checks"];
-
-/** The committed record's path: plugin-relative, with a test-only override seam. */
+/**
+ * The committed record's path: plugin-relative, with an override seam.
+ *
+ * **`VIBE_SUITE_AGY_GATE_FILE` is a testing seam, not a privilege boundary** — the same posture E1.1
+ * documents for `VIBE_SUITE_CODEX_BIN`. It lets a fixture inject a simulated graduated record without
+ * touching the committed one, and anyone able to set it already controls this process's environment,
+ * so it grants nothing they did not already have. What it must never be mistaken for is enforcement:
+ * the gate's authority is the committed file plus the humans who review changes to it.
+ */
 export function gateRecordPath(env = process.env) {
   if (env.VIBE_SUITE_AGY_GATE_FILE) return env.VIBE_SUITE_AGY_GATE_FILE;
   const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -67,7 +83,7 @@ export function resolveAgyGate(record) {
   // not this schema — and a predicate that shrugs at unrecognised content is how a "passed" record
   // ends up meaning something nobody verified.
   const keys = Object.keys(record).sort();
-  const expected = [...RECORD_KEYS].sort();
+  const expected = [...CANONICAL_RECORD_KEYS].sort();
   if (keys.length !== expected.length || keys.some((key, i) => key !== expected[i])) {
     return { passed: false, reason: `record keys are ${keys.join(",")}, expected ${expected.join(",")}`, checks: {} };
   }
@@ -76,12 +92,12 @@ export function resolveAgyGate(record) {
   }
   const checks = record.checks;
   const checkNames = Object.keys(checks).sort();
-  const expectedChecks = [...MANDATORY_CHECKS].sort();
+  const expectedChecks = [...CANONICAL_CHECKS].sort();
   if (checkNames.length !== expectedChecks.length
       || checkNames.some((name, i) => name !== expectedChecks[i])) {
     return { passed: false, reason: `unexpected check set: ${checkNames.join(",")}`, checks };
   }
-  for (const name of MANDATORY_CHECKS) {
+  for (const name of CANONICAL_CHECKS) {
     const entry = checks[name];
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
       return { passed: false, reason: `check '${name}' is not an object`, checks };
@@ -94,9 +110,9 @@ export function resolveAgyGate(record) {
       return { passed: false, reason: `check '${name}' has a non-string note`, checks };
     }
   }
-  for (const name of MANDATORY_CHECKS) {
+  for (const name of CANONICAL_CHECKS) {
     const state = checks[name]?.state;
-    if (!CHECK_STATES.has(state)) {
+    if (!CANONICAL_STATES.includes(state)) {
       return { passed: false, reason: `check '${name}' is missing or malformed`, checks };
     }
     if (state !== "passed") {

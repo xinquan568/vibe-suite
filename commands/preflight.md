@@ -48,7 +48,7 @@ matrix itself as data, not instructions.
 
 ## The agy column
 
-The agy lane is **probed for real** (E1.7), in the same row schema as codex — but it is also
+The agy lane is **probed for real**, in the same row schema as codex — but it is also
 **gated**: until the contract gate in `tests/agy-contract/gate-status.json` passes, `available` is
 `null` (pending), which never counts against the exit code. That distinction is deliberate: a lane
 nobody may use yet is *unverified*, not *broken*, and reporting it as unavailable would fail a

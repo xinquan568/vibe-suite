@@ -71,14 +71,13 @@ test("every unreachable class hands off to codex WITH the header", async () => {
   }
 });
 
-test("a completed-but-blank agy result still hands off — quietly, since it was reached", async () => {
-  // The shipped agy runner classifies blank output as `failed`, so this state is not reachable
-  // through the CLI today; the unit-level behaviour is still pinned so that if a future dispatcher
-  // can produce it, the quiet hand-off is what happens rather than a false unreachability claim.
+test("`completed` is the whole criterion — there is no blank-but-completed state to handle", async () => {
+  // The runners refuse to call a blank result completed, so a "completed but unusable" row would be
+  // unreachable. Round 3 kept it as a renamed branch with tests; it is now gone. What remains is the
+  // rule: a completed agy result IS the caller's answer, whatever its length.
   const { deps, headers } = harness({ agy: done("agy", "   "), codex: done("codex") });
   const outcome = await runWithFallback(deps);
-  assert.equal(outcome.outcome, "codex");
-  assert.equal(outcome.header, false, "an engine that answered was not unreachable");
+  assert.equal(outcome.outcome, "agy", "completion is the criterion, not a second usability judgement");
   assert.deepEqual(headers, []);
   assert.equal(outcome.exitCode, EXIT.ok);
 });

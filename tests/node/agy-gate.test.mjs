@@ -12,9 +12,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import {
-  agyGate, gateRecordPath, MANDATORY_CHECKS, readGateRecord, resolveAgyGate,
-} from "../../scripts/lib/agy-gate.mjs";
+import * as gateModule from "../../scripts/lib/agy-gate.mjs";
+const { agyGate, gateRecordPath, MANDATORY_CHECKS, readGateRecord, resolveAgyGate } = gateModule;
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -127,4 +126,45 @@ test("extra and malformed fields fail closed — an unrecognised record is not t
   const missingTopLevel = allPassed();
   delete missingTopLevel.agy_version;
   assert.equal(resolveAgyGate(missingTopLevel).passed, false, "a missing key is also a shape change");
+});
+
+test("no exported surface of the gate module can weaken the mandatory predicate", () => {
+  // A reviewer opened the gate by deleting `read_only_write_denied` from the exported
+  // MANDATORY_CHECKS and building a record from what remained. The canonical definitions are now
+  // private; these mutations must therefore change nothing about what the predicate demands.
+  for (const value of Object.values(gateModule)) {
+    if (Array.isArray(value)) {
+      try { value.length = 0; value.push("only_this_one"); } catch { /* frozen is the point */ }
+    } else if (value instanceof Set) {
+      try { value.add("sideways"); value.delete("passed"); } catch { /* ok */ }
+    } else if (value && typeof value === "object") {
+      try { Object.assign(value, { schema: 999 }); } catch { /* ok */ }
+    }
+  }
+
+  const CANONICAL = ["headless_invocation", "read_only_write_denied", "timeout_kill",
+    "failure_signature", "quota_signature"];
+
+  // A record built from a WEAKENED check set must still fail: the missing checks are still demanded.
+  const weakened = {
+    schema: 1, status: "passed", agy_version: "x", recorded_at: "2026-07-28T00:00:00Z",
+    checks: { only_this_one: { state: "passed", note: "" } },
+  };
+  assert.equal(resolveAgyGate(weakened).passed, false,
+    "the predicate must not follow a mutated export");
+
+  // And the genuine all-passed record still opens, so the test proves immutability, not breakage.
+  const genuine = {
+    schema: 1, status: "passed", agy_version: "x", recorded_at: "2026-07-28T00:00:00Z",
+    checks: Object.fromEntries(CANONICAL.map((n) => [n, { state: "passed", note: "" }])),
+  };
+  assert.equal(resolveAgyGate(genuine).passed, true);
+
+  // A record missing exactly the check someone tried to delete must fail.
+  const withoutWriteCheck = {
+    ...genuine,
+    checks: Object.fromEntries(CANONICAL.filter((n) => n !== "read_only_write_denied")
+      .map((n) => [n, { state: "passed", note: "" }])),
+  };
+  assert.equal(resolveAgyGate(withoutWriteCheck).passed, false);
 });

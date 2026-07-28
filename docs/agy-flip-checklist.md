@@ -36,8 +36,9 @@ arrives on the same stdout the model writes to. Any phrase we agreed to accept a
 the model can simply emit; the probe's adversarial test exercises exactly that. And the sentinel
 file's absence cannot substitute, because a model that never tried to write also leaves no file.
 
-So the probe's denial-signature set is **deliberately empty** and this check returns `not_verified`
-for every input. `classifyWriteProbe` therefore has **no passing branch at all** — not an unreached one. (An earlier
+So the probe has **no passing branch for this check at all** — not an empty registry, no branch. Its
+outcomes are `failed` (a landed sentinel: positive evidence the sandbox did NOT prevent the write) and
+`not_verified` (everything else). `classifyWriteProbe` therefore has **no passing branch at all** — not an unreached one. (An earlier
 draft kept the branch behind an empty registry and called the property "can never pass"; a reviewer
 opened the gate by pushing one phrase into that registry. A promised absence must be absent from the
 code.) Two honest routes to `passed` exist, and both are deliberate changes someone reviews:
@@ -60,14 +61,25 @@ graduating the lane means editing a code-reviewed file in a pull request.** That
 a social one — reviewers reading a diff — not a cryptographic one. Anyone who wants a stronger
 guarantee should add signed attestations deliberately, not assume the resolver already provides them.
 
+Two consequences worth stating rather than discovering:
+
+- **`VIBE_SUITE_AGY_GATE_FILE` overrides the record** for any process that sets it. That is a testing
+  seam with the same posture as `VIBE_SUITE_CODEX_BIN`: whoever can set it already controls the
+  process environment, so it confers nothing new — but it is emphatically **not** a boundary, and no
+  claim here should be read as if it were.
+- **This checklist and the doctor notice are coordination, not enforcement.** The resolver never reads
+  them. They exist so that a graduation is done deliberately and visibly, by someone who has followed
+  the steps — not because the code would stop them otherwise.
+
 ## Before the flip — every item, in order
 
 1. **Authenticate** the agy CLI in the environment where the probe will run.
 2. **Run the probe**: `node scripts/agy-contract-probe.mjs --write-record`. It records what it
    observes; it cannot be argued with.
-3. **`read_only_write_denied` must be `passed`** — the probe asks for a sentinel file in a
-   disposable workspace and then verifies **the file does not exist**. A refusal message is not
-   evidence.
+3. **`read_only_write_denied` must be `passed` — which today it cannot be.** Passing requires
+   provenance-bearing evidence from the tooling that an attempted write was refused. The sentinel
+   file's absence only **corroborates** such evidence; it can never supply it, because a model that
+   never tried also leaves no file. See the section above.
 4. **`failure_signature` and `quota_signature` must be `passed`** — provoke each and confirm the
    runner classifies it. An unprovoked signature stays `not_verified`; the gate stays shut.
 5. **Commit the record** with `status: "passed"`. `resolveAgyGate` requires the status *and* every

@@ -12,35 +12,35 @@
 // | `codex-no-header`  | agy completed but its output is unusable          | codex's result line, NO header | 0    |
 // | `manual`           | codex unreachable too                            | header + a stable JSON signal  | 3    |
 //
-// `fallback.md` also describes a quiet hand-off for an engine that answered *uselessly* — reached,
-// so announcing unreachability would be a lie. That row is deliberately **absent** here: the only
-// executable agy dispatcher already classifies empty output as `failed`, so no `completed` result
-// can be unusable, and a branch no shipped path can reach is documentation of a fiction. It returns
-// the day an engine can produce a completed-but-unusable result.
+// `fallback.md` also describes a quiet hand-off for an engine that answered *uselessly*. That state
+// is **not implemented here at all**, because it cannot occur: the agy runner classifies blank output
+// as `failed`, so `completed` already implies usable output. Round 3 renamed the branch instead of
+// deleting it, which left a state the table described, the tests exercised, and no shipped path could
+// reach — a fiction with test coverage. If a future dispatcher can return a completed-but-unusable
+// result, add a usability validator and a subprocess fixture together, in one deliberate change.
 //
 // **This chain is only legal after the contract gate passes.** Before that, `--engine agy` is
 // refused outright (`fallback.md` requires refusal, not hand-off, pre-graduation), which is why
 // the gate resolver — not PATH — decides whether this module is reachable at all.
 
-export const UNREACHABLE_REASONS = new Set(["agy-not-found", "unauthenticated", "quota", "deadline exceeded"]);
-
 export const EXIT = { ok: 0, refused: 2, manual: 3 };
 
 /**
- * Is this agy outcome an "unreachable" class (hand off, with the header) or an answer that was
- * simply unusable (hand off, quietly)?
+ * Any non-completion is a hand-off with disclosure.
  *
- * **Any non-completion counts as unreachable.** The four-key result line the runners emit carries no
- * `error` field, so a caller reading only that line cannot know *why* a job failed — and guessing
- * "it probably answered badly" would suppress the disclosure a failed engine deserves. Failing
- * toward disclosure is the safe direction: the worst case is a header the operator did not need.
+ * The four-key result line carries no `error` field, so a caller reading only that line cannot know
+ * *why* a job failed — and guessing "it probably just answered badly" would suppress the disclosure a
+ * failed engine deserves. Failing toward disclosure is the safe direction: the worst case is a header
+ * the operator did not need.
  */
 export function isUnreachable(outcome) {
   if (!outcome) return true;
   return outcome.status !== "completed";
 }
 
-const usable = (outcome) => outcome?.status === "completed" && String(outcome.rawOutput ?? "").trim() !== "";
+// `completed` is the whole criterion: the runners already refuse to call a blank result completed, so
+// re-checking the text here would only create a state nothing can produce.
+const completed = (outcome) => outcome?.status === "completed";
 
 /**
  * Run the chain. `deps.runAgy` / `deps.runCodex` each resolve to a job outcome (the four-key shape)
@@ -60,7 +60,7 @@ export async function runWithFallback(deps) {
   }
 
   const agy = await runAgy();
-  if (usable(agy)) return { outcome: "agy", result: agy, header: false, exitCode: EXIT.ok };
+  if (completed(agy)) return { outcome: "agy", result: agy, header: false, exitCode: EXIT.ok };
 
   const unreachable = isUnreachable(agy);
   if (unreachable) {
@@ -69,7 +69,7 @@ export async function runWithFallback(deps) {
   }
 
   const codex = await runCodex();
-  if (usable(codex)) {
+  if (completed(codex)) {
     return { outcome: "codex", result: codex, header: unreachable, exitCode: EXIT.ok };
   }
 

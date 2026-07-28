@@ -17,6 +17,7 @@ marker. A single comment-delimited block cannot express either.
 """
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -85,13 +86,32 @@ def write_atomic(root, dest, content):
     if kind == "other":
         raise BridgeError(f"{dest} is neither a file nor a symlink; the install refuses")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.parent / f".{dest.name}.vibe-tmp"
     data = content if isinstance(content, bytes) else content.encode("utf-8")
-    with open(tmp, "wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, dest)
+    # The temp path is an attack surface in its own right. It is predictable, so a pre-planted
+    # symlink there would be followed by an ordinary open() and the write would land wherever it
+    # pointed — outside the workspace, past a destination check that only looked at `dest`.
+    # O_EXCL refuses an existing node of any kind; O_NOFOLLOW refuses a symlink specifically.
+    tmp = dest.parent / f".{dest.name}.vibe-tmp"
+    assert_inside(root, tmp)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(tmp, flags, 0o600)
+    except FileExistsError as exc:
+        raise BridgeError(f"{tmp} already exists; refusing to write through it") from exc
+    except OSError as exc:
+        raise BridgeError(f"{tmp} could not be created safely ({exc})") from exc
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     fd = os.open(dest.parent, os.O_RDONLY)
     try:
         os.fsync(fd)
@@ -115,8 +135,10 @@ def record_pre_image(path):
     if kind == "symlink":
         entry["link_target"] = os.readlink(p)
     elif kind == "file":
+        raw = p.read_bytes()
         entry["mode"] = oct(p.lstat().st_mode & 0o7777)
-        entry["content_b64"] = base64.b64encode(p.read_bytes()).decode("ascii")
+        entry["sha256"] = hashlib.sha256(raw).hexdigest()
+        entry["content_b64"] = base64.b64encode(raw).decode("ascii")
     elif kind in ("dir", "other"):
         raise BridgeError(f"{p} is a {kind} where a file belongs; the install refuses")
     return entry
@@ -154,10 +176,22 @@ def _block_re(name, open_delim, close_delim):
 
 
 def text_block_upsert(existing, name, body, open_delim="#", close_delim=""):
-    """Replace between markers, or append. Idempotent: identical input yields identical output."""
+    """Replace between markers, or append. Idempotent: identical input yields identical output.
+
+    A second marker pair for the same name is refused rather than silently half-replaced: two owned
+    regions means an earlier run or a hand edit left the file in a state this function cannot
+    reconcile, and picking the first would strand the other forever.
+    """
     block = _block(name, body, open_delim, close_delim)
     pattern = _block_re(name, open_delim, close_delim)
-    if pattern.search(existing):
+    found = pattern.findall(existing)
+    opens = existing.count(f"{open_delim} >>> {MARKER}:{name} ")
+    closes = existing.count(f"{open_delim} <<< {MARKER}:{name} ")
+    if len(found) > 1 or opens != closes or opens > len(found):
+        raise BridgeError(
+            f"{name}: found {opens} opening and {closes} closing markers for "
+            f"{len(found)} well-formed block(s); refusing to guess which region is owned")
+    if found:
         return pattern.sub(lambda _: block, existing, count=1)
     prefix = existing if existing.endswith("\n") or not existing else existing + "\n"
     return (prefix + "\n" if prefix else "") + block
@@ -185,6 +219,73 @@ def json_hook_entry_upsert(doc, event, entry):
     return doc
 
 
+def toml_server_upsert(existing, name, body):
+    """`[mcp_servers.<name>]` plus its subtables. A subtable alone is not a registration —
+    `migrate-sentinels.sh:151-160` already encodes that distinction, and a codec that ignored it
+    would treat `[mcp_servers.x.env]` as evidence that `x` is registered."""
+    return text_block_upsert(existing, f"server:{name}", body)
+
+
+def toml_server_remove(existing, name):
+    return _block_re(f"server:{name}", "#", "").sub("", existing)
+
+
+def toml_server_has(existing, name):
+    return bool(_block_re(f"server:{name}", "#", "").search(existing))
+
+
+def toml_owned_names(text):
+    """Concrete owned servers declared in a TOML document, including `vibe-agent:` members.
+
+    Enumeration has to span every codec: an agent registered only in `.codex/config.toml` is invisible
+    to a JSON-only sweep, and #21's teardown iterates whatever this returns.
+    """
+    found = set()
+    for header in re.findall(r"^\s*\[mcp_servers\.([^\]]+)\]", text, re.M):
+        name = header.strip().strip('"').strip("'")
+        if "." in name and not name.startswith(SENTINEL_PREFIX):
+            name = name.split(".")[0].strip('"').strip("'")
+        if name in SENTINEL_LITERALS or name.startswith(SENTINEL_PREFIX):
+            found.add(name)
+    return sorted(found)
+
+
+def json_server_has(doc, name):
+    return name in (doc.get("mcpServers") or {})
+
+
+def json_server_remove(doc, name):
+    (doc.get("mcpServers") or {}).pop(name, None)
+    return doc
+
+
+def json_hook_entry_remove(doc, event):
+    events = (doc.get("hooks") or {}).get(event) or []
+    (doc.get("hooks") or {})[event] = [
+        e for e in events
+        if not (isinstance(e, dict) and e.get(f"_{MARKER}_owned") is not None)]
+    return doc
+
+
+def json_hook_entry_has(doc, event):
+    return any(isinstance(e, dict) and e.get(f"_{MARKER}_owned") is not None
+               for e in (doc.get("hooks") or {}).get(event) or [])
+
+
+def inventory_enumerate(root):
+    """Every suite-owned sentinel in a workspace, across every store that can hold one.
+
+    This is the single source F1.4 requires teardown to iterate. Two independently-maintained lists
+    is the cc-suite W4 defect itself.
+    """
+    root = Path(root)
+    names = set(owned_names(load_json(root / ".mcp.json")))
+    toml = root / ".codex" / "config.toml"
+    if toml.is_file():
+        names |= set(toml_owned_names(toml.read_text(encoding="utf-8", errors="replace")))
+    return sorted(names)
+
+
 def owned_names(doc):
     """Every suite-owned server name in a parsed `.mcp.json`: the literals plus every concrete
     member of the `vibe-agent:` family."""
@@ -206,7 +307,7 @@ def load_json(path):
 
 def main(argv):
     if len(argv) >= 3 and argv[1] == "list-owned":
-        for name in owned_names(load_json(Path(argv[2]) / ".mcp.json")):
+        for name in inventory_enumerate(argv[2]):
             print(name)
         return 0
     print("usage: bridge.py list-owned <workspace>", file=sys.stderr)

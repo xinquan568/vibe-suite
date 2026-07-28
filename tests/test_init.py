@@ -310,3 +310,113 @@ class TestCrashConvergence(InitCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------------------------
+# Regressions. Every case here is a defect review found in a diff whose 19 tests were green, so
+# each names what it guards rather than what it exercises.
+# ---------------------------------------------------------------------------------------------
+
+class TestRegressions(InitCase):
+    def test_a_symlink_at_the_temp_path_cannot_redirect_a_write(self):
+        """The destination check was not enough: the temp path is predictable, so a symlink planted
+        there was followed and the write landed outside the workspace."""
+        import sys
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import bridge
+
+        outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (self.ws / ".codex").mkdir()
+        (self.ws / ".codex" / ".config.toml.vibe-tmp").symlink_to(outside / "pwned")
+        with self.assertRaises(bridge.BridgeError):
+            bridge.write_atomic(self.ws, self.ws / ".codex" / "config.toml", "owned")
+        self.assertFalse((outside / "pwned").exists(), "the write escaped the workspace")
+
+    def test_a_list_shaped_history_is_the_canonical_one(self):
+        """nlpm's history is a top-level list (`tests/test_migrate.py:214`); an earlier revision
+        assumed a mapping and raised on the exact fixture AC-5 row 3 specifies."""
+        (self.ws / ".claude").mkdir()
+        (self.ws / ".claude" / "vibe-history.json").write_text(
+            json.dumps([{"run": 1, "score": 80}], indent=2) + "\n", encoding="utf-8")
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        history = json.loads((self.ws / ".claude" / "vibe-history.json").read_text())
+        self.assertIsInstance(history, list, "the existing shape was replaced, not appended to")
+        self.assertEqual(len([s for s in history if s.get("baseline")]), 1)
+        self.assertIn({"run": 1, "score": 80}, history, "existing entries were discarded")
+
+    def test_an_empty_list_history_is_not_discarded(self):
+        (self.ws / ".claude").mkdir()
+        (self.ws / ".claude" / "vibe-history.json").write_text("[]\n", encoding="utf-8")
+        run_init(self.ws, *self.answers())
+        self.assertIsInstance(
+            json.loads((self.ws / ".claude" / "vibe-history.json").read_text()), list)
+
+    def test_the_written_config_parses_with_the_canonical_reader(self):
+        """`--skip` produced a scalar where the schema wants a sequence, so the advertised answer
+        yielded a config `config.py` rejects."""
+        import sys
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import config as config_mod
+
+        result = run_init(self.ws, *self.answers(), "--skip", "vendor/**, build/**")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        parsed = config_mod.parse_frontmatter(
+            (self.ws / ".vibe-suite.md").read_text(encoding="utf-8"))
+        self.assertIsInstance(parsed.get("skip_patterns"), list)
+        self.assertIn("vendor/**", parsed["skip_patterns"])
+
+    def test_a_resumed_run_carrying_decision_flags_is_also_a_no_op(self):
+        """AC-2 was proven only on the conflict-free path. A resumed run rewrote its resolution file
+        and re-set the store, changing mtimes both times."""
+        self.legacy_state(True, "codex-toolkit")
+        self.legacy_state(False, "cc-suite-state")
+        flags = (*self.answers(), "--resolve-state", "false")
+        run_init(self.ws, *flags)
+        before, before_mtimes = tree(self.ws), mtimes(self.ws)
+        result = run_init(self.ws, *flags)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(tree(self.ws), before)
+        self.assertEqual(mtimes(self.ws), before_mtimes,
+                         "a resumed run rewrote identical bytes")
+
+    def test_duplicate_ownership_markers_are_refused_not_half_replaced(self):
+        import sys
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import bridge
+
+        doubled = (bridge.md_block_upsert("", "memory", "one")
+                   + bridge.md_block_upsert("", "memory", "two"))
+        with self.assertRaises(bridge.BridgeError):
+            bridge.md_block_upsert(doubled, "memory", "three")
+
+    def test_an_agent_registered_only_in_toml_is_still_enumerated(self):
+        """`list-owned` read `.mcp.json` alone, so an agent living only in TOML was invisible to the
+        inventory #21's teardown iterates."""
+        (self.ws / ".codex").mkdir()
+        (self.ws / ".codex" / "config.toml").write_text(
+            '[mcp_servers."vibe-agent:auditor"]\ncommand = "x"\n'
+            '[mcp_servers."vibe-agent:auditor".env]\nA = "1"\n'
+            '[mcp_servers.unrelated]\ncommand = "y"\n', encoding="utf-8")
+        result = run_init(self.ws, *self.answers(), "--list-owned")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("vibe-agent:auditor", result.stdout)
+        self.assertNotIn("unrelated", result.stdout)
+
+    def test_a_foreign_file_at_the_provenance_path_is_refused(self):
+        (self.ws / ".vibe-suite-state").mkdir()
+        (self.ws / ".vibe-suite-state" / "install-provenance.json").write_text(
+            '{"schema": 99}\n', encoding="utf-8")
+        result = run_init(self.ws, *self.answers())
+        self.assertNotEqual(result.returncode, 0,
+                            "a non-provenance file at that path was trusted as a restore source")
+
+    def test_provenance_records_a_hash_and_deduplicated_parents(self):
+        (self.ws / "AGENTS.md").write_text("mine\n", encoding="utf-8")
+        run_init(self.ws, *self.answers())
+        record = json.loads(
+            (self.ws / ".vibe-suite-state" / "install-provenance.json").read_text())
+        agents = [t for t in record["targets"] if t["path"].endswith("AGENTS.md")][0]
+        self.assertIn("sha256", agents)
+        self.assertEqual(len(record["parents_created"]), len(set(record["parents_created"])))

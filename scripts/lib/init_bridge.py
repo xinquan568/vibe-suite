@@ -21,6 +21,7 @@ sys.path.insert(0, str(HERE))
 
 import bridge  # noqa: E402
 import store as store_mod  # noqa: E402
+import config as config_mod  # noqa: E402
 
 STRICTNESS = {"relaxed": 60, "standard": 70, "strict": 80}
 
@@ -43,14 +44,27 @@ def provenance_open(ws):
     out = ws / PROVENANCE
     if out.is_file():
         # Write once. A second run's "pre-image" is the installed state, so rewriting would discard
-        # the only record of what the workspace looked like before the suite touched it.
+        # the only record of what the workspace looked like before the suite touched it. An existing
+        # record is still checked: a truncated or foreign file at this path would otherwise be
+        # trusted as a restore source it cannot serve.
+        existing = bridge.load_json(out)
+        if (not isinstance(existing, dict) or existing.get("schema") != bridge.SCHEMA
+                or not isinstance(existing.get("targets"), list)):
+            raise bridge.BridgeError(
+                f"{out} exists but is not a v{bridge.SCHEMA} provenance record; refusing to "
+                "continue, because unbridge would treat it as one")
         return
     record = {"schema": bridge.SCHEMA, "targets": [], "parents_created": []}
-    for rel in TARGETS:
+    parents = []
+    for rel in TARGETS + (PROVENANCE,):
         dest = ws / rel
         bridge.assert_inside(ws, dest)
-        record["targets"].append(bridge.record_pre_image(dest))
-        record["parents_created"].extend(bridge.parents_created(ws, dest))
+        if rel != PROVENANCE:
+            record["targets"].append(bridge.record_pre_image(dest))
+        for parent in bridge.parents_created(ws, dest):
+            if parent not in parents:
+                parents.append(parent)
+    record["parents_created"] = parents
     out.parent.mkdir(parents=True, exist_ok=True)
     bridge.write_atomic(ws, out, json.dumps(record, indent=2, sort_keys=True) + "\n")
 
@@ -60,7 +74,26 @@ def set_gate(ws, value):
     re-run with the value already in the new store, and `overrides()` reads the nested leaf."""
     if value not in ("true", "false"):
         raise bridge.BridgeError(f"--resolve-state expects true|false, got '{value}'")
-    store_mod.Store(ws).set("gate.stop_review_gate", value == "true")
+    wanted = value == "true"
+    store = store_mod.Store(ws)
+    # `Store.set` replaces the file unconditionally, so a resumed run carrying the same flag would
+    # change state.json's mtime and break AC-2. `overrides()` reports what is genuinely stored —
+    # `get()` masks absence behind the fresh default.
+    if store.overrides().get("gate", {}).get("stop_review_gate") == wanted:
+        return
+    store.set("gate.stop_review_gate", wanted)
+
+
+def _verify_config(text):
+    """Parse what we are about to write with the canonical reader.
+
+    `config.py` owns the schema and its grammar. Writing a config it would reject — or one whose keys
+    it silently ignores — is how a setup command produces a project nothing downstream can read.
+    """
+    try:
+        config_mod.parse_frontmatter(text)
+    except Exception as exc:  # the module raises several distinct types; all mean "do not ship it"
+        raise bridge.BridgeError(f"refusing to write a config the canonical reader rejects: {exc}")
 
 
 def _upsert_text(ws, rel, name, body, markdown=False):
@@ -92,13 +125,17 @@ def install(ws, tier, depth, strictness, skip, fail_after=""):
     if strictness not in STRICTNESS:
         raise bridge.BridgeError(f"--strictness expects {'|'.join(STRICTNESS)}, got '{strictness}'")
 
-    # config-fill — merge into whatever migration produced; never a fresh overwrite.
+    # config-fill — merge into whatever migration produced; never a fresh overwrite. The keys and
+    # their shapes come from `config.py`'s SCHEMA, not from this module's imagination: an unknown key
+    # is silently ignored on load, and `skip_patterns` is a **sequence**, so a scalar would produce a
+    # file the canonical reader rejects. The result is parsed back before it is kept.
     dest = ws / ".vibe-suite.md"
     existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
-    lines = [f"model_tier: {tier}", f"audit_depth: {depth}",
+    lines = [f"effort: {tier}", f"audit_depth: {depth}",
              f"score_threshold: {STRICTNESS[strictness]}"]
     if skip:
-        lines.append(f"skip_patterns: {skip}")
+        lines.append("skip_patterns:")
+        lines.extend(f"  - {pattern.strip()}" for pattern in skip.split(",") if pattern.strip())
     if existing.strip():
         body = existing.rstrip("\n") + "\n"
         for line in lines:
@@ -107,9 +144,12 @@ def install(ws, tier, depth, strictness, skip, fail_after=""):
                 body = body.replace("\n---\n", f"\n{line}\n---\n", 1) if body.count("---") >= 2 \
                     else body + line + "\n"
         if body != existing:
+            _verify_config(body)
             bridge.write_atomic(ws, dest, body)
     else:
-        bridge.write_atomic(ws, dest, "---\n" + "\n".join(lines) + "\n---\n")
+        fresh = "---\n" + "\n".join(lines) + "\n---\n"
+        _verify_config(fresh)
+        bridge.write_atomic(ws, dest, fresh)
     checkpoint("config-fill")
 
     memory = ("Project memory for vibe-suite. Commands ship under the `/vibe-suite:` namespace.\n"
@@ -135,11 +175,22 @@ def install(ws, tier, depth, strictness, skip, fail_after=""):
     # history-baseline — the append recognises its own marker rather than counting, which is how
     # `migrate-history.sh:60` makes a non-idempotent append safe to repeat.
     dest = ws / ".claude" / "vibe-history.json"
-    history = bridge.load_json(dest) or {"snapshots": []}
-    snapshots = history.setdefault("snapshots", [])
+    # Row 3 copies the legacy history verbatim, and nlpm's canonical shape is a **top-level list**
+    # (`tests/test_migrate.py:214`) — not the mapping an earlier revision assumed. Both shapes are
+    # live, so the baseline is appended into whichever one is there. `is None` rather than `or`,
+    # because an existing empty list is a history, and `[] or {...}` would discard it.
+    history = bridge.load_json(dest) if dest.is_file() else None
+    if isinstance(history, list):
+        snapshots, container = history, history
+    elif isinstance(history, dict):
+        snapshots = history.setdefault("snapshots", [])
+        container = history
+    else:
+        snapshots = []
+        container = {"snapshots": snapshots}
     if not any(isinstance(s, dict) and s.get("baseline") for s in snapshots):
         snapshots.append({"baseline": True, "threshold": STRICTNESS[strictness]})
-        bridge.write_atomic(ws, dest, json.dumps(history, indent=2, sort_keys=True) + "\n")
+        bridge.write_atomic(ws, dest, json.dumps(container, indent=2, sort_keys=True) + "\n")
     checkpoint("history-baseline")
 
 

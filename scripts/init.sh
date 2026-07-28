@@ -118,7 +118,12 @@ elif [ -n "$resolve_config" ]; then
     # The helper takes a file, not inline JSON — a per-key mapping can exceed a comfortable argv.
     mkdir -p "$workspace/.vibe-suite-state"
     resolution_file="$workspace/.vibe-suite-state/config-resolution.json"
-    printf '%s\n' "$resolve_config" > "$resolution_file"
+    # Written only when it would differ. A resumed run carries the same flags as the run before it,
+    # and rewriting identical bytes changes mtimes — which is exactly the non-idempotence AC-2's
+    # second-run comparison exists to catch.
+    if [ ! -f "$resolution_file" ] || [ "$(cat "$resolution_file")" != "$resolve_config" ]; then
+        printf '%s\n' "$resolve_config" > "$resolution_file"
+    fi
     run_helper migrate-config.sh --resolution "$resolution_file"
 else
     run_helper migrate-config.sh

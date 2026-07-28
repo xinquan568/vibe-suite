@@ -67,12 +67,31 @@ class TestGateRoundTrip(ConfigCase):
         harness's `hook_event_name`; without those it fails the same way with the gate on or off.
         """
         payload = json.dumps({"cwd": str(self.ws), "hook_event_name": "Stop"})
+        env = dict(os.environ, VIBE_SUITE_CODEX_BIN=str(self._reviewer()))
         r = subprocess.run(["node", str(HOOK)], input=payload, capture_output=True, text=True,
-                           cwd=str(self.ws))
+                           cwd=str(self.ws), env=env)
         try:
             return json.loads(r.stdout).get("decision", "allow")
         except (json.JSONDecodeError, AttributeError):
             return "allow"
+
+    def _reviewer(self):
+        """A reviewer that always blocks, so the comparison is about the *toggle*.
+
+        Without one the test is environment-dependent: where codex exists the gate reaches a verdict
+        and blocks; where it does not the gate fails open and both runs allow — which is why this
+        passed locally and failed in CI. `VIBE_SUITE_CODEX_BIN` is the seam `tests/node/` already
+        uses for exactly this.
+        """
+        fake = self.ws / "fake-reviewer"
+        fake.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\","
+            "\"text\":\"BLOCK: seeded defect\"}}'\n"
+            "printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{}}'\n",
+            encoding="utf-8")
+        fake.chmod(0o755)
+        return fake
 
     def _seed_repo(self):
         subprocess.run(["git", "init", "-q"], cwd=self.ws, check=True)

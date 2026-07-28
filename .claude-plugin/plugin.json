@@ -22,7 +22,8 @@
     "./commands/doctor.md",
     "./commands/init.md",
     "./commands/jobs.md",
-    "./commands/preflight.md"
+    "./commands/preflight.md",
+    "./commands/repair.md"
   ],
   "hooks": "./hooks/hooks.json",
   "agents": [],

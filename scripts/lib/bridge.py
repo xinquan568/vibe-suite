@@ -272,9 +272,22 @@ def text_block_has(existing, name, open_delim="#", close_delim=""):
 
 
 def text_block_remove(existing, name, open_delim="#", close_delim=""):
-    """Remove the owned region and the blank line that separated it, leaving user text untouched."""
-    without = _block_re(name, open_delim, close_delim).sub("", existing)
-    return without.replace("\n\n\n", "\n\n")
+    """The exact inverse of `text_block_upsert`, so a clean install→remove round trip is
+    byte-identical.
+
+    Upsert appends `"\n" + block` to a non-empty file. Removal takes that one separator back and
+    nothing else. An earlier revision normalised `\n\n\n` to `\n\n` anywhere in the file, which
+    silently rewrote blank lines a user had put between their *own* paragraphs.
+    """
+    pattern = _block_re(name, open_delim, close_delim)
+    match = pattern.search(existing)
+    if not match:
+        return existing
+    start, end = match.span()
+    # Reclaim the single separator newline upsert inserted before the block, if it is there.
+    if start >= 1 and existing[start - 1] == "\n" and (start == 1 or existing[start - 2] == "\n"):
+        start -= 1
+    return existing[:start] + existing[end:]
 
 
 def md_block_has(existing, name):

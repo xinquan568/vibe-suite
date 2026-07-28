@@ -23,7 +23,8 @@
     "./commands/init.md",
     "./commands/jobs.md",
     "./commands/preflight.md",
-    "./commands/repair.md"
+    "./commands/repair.md",
+    "./commands/unbridge.md"
   ],
   "hooks": "./hooks/hooks.json",
   "agents": [],

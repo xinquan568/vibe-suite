@@ -224,8 +224,9 @@ def check_legacy(ws, out):
                if h.strip().strip('"').strip("'").startswith("cc-suite-")]
     if legacy:
         out.append(finding("[MEDIUM]", "legacy-sentinels",
-                           f"legacy sentinels still registered: {', '.join(sorted(set(legacy)))}",
-                           True))
+                           f"legacy sentinels still registered: "
+                           f"{', '.join(sorted(set(legacy)))}; §7A row 6 needs explicit "
+                           f"confirmation, so /vibe-suite:init migrates them", False))
 
 
 def check_provenance(ws, state, out):

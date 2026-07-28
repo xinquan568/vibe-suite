@@ -139,12 +139,38 @@ class TestTheContract(RepairCase):
         (self.ws / ".cc-suite.md").write_text("- **Default effort**: high\n", encoding="utf-8")
         (self.ws / ".cc-suite-state").mkdir()
         (self.ws / ".cc-suite-state" / "state.json").write_text('{"config":{}}\n', encoding="utf-8")
+        doc = json.loads((self.ws / ".mcp.json").read_text())
+        doc["mcpServers"]["cc-suite-mcp"] = {"command": "x"}
+        (self.ws / ".mcp.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        record = json.loads((self.ws / ".vibe-suite-state" / "install-provenance.json").read_text())
+        record["plugin_version"] = "0.0.0-stale"
+        (self.ws / ".vibe-suite-state" / "install-provenance.json").write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8")
         report = self.diagnose()
-        for check in ("legacy-config", "legacy-state"):
+        for check in ("legacy-config", "legacy-state", "legacy-sentinels", "pins"):
             entry = [f for f in report["findings"] if f["check"] == check]
             self.assertTrue(entry, f"{check} was not detected")
             self.assertFalse(entry[0]["auto_fixable"],
                              f"{check} claims repair can clear it; §7A preserves its source")
+
+    def test_malformed_mcp_json_does_not_suppress_the_report(self):
+        """`installed()` parsed .mcp.json outside step isolation, so a malformed file aborted with a
+        traceback and no per-step outcome survived."""
+        self.install()
+        (self.ws / ".mcp.json").write_text("{not json\n", encoding="utf-8")
+        result = self.repair()
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue(json.loads(result.stdout)["steps"])
+
+    def test_an_unreadable_config_never_guesses_a_threshold(self):
+        """The fallback leaked forward: once set for `codex`, `history` ran with a guessed 70."""
+        self.install()
+        (self.ws / ".claude" / "vibe-history.json").unlink()
+        (self.ws / ".vibe-suite.md").write_text("---\neffort: sonnet\n---\n", encoding="utf-8")
+        report = json.loads(self.repair().stdout)
+        outcomes = {s["step"]: s["outcome"] for s in report["steps"]}
+        self.assertTrue(outcomes["history"].startswith("skipped"),
+                        "history ran with a guessed threshold")
 
     def test_uninitialised_is_not_flagged_fixable(self):
         entry = [f for f in self.diagnose()["findings"] if f["check"] == "not-initialised"]

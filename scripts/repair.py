@@ -33,7 +33,13 @@ STEPS = ("config", "memory", "codex", "mcp", "gitignore", "history")
 def installed(ws):
     """Repair restores a bridge; it does not create one. Installing into a project nobody set up
     would make it a silent, answer-less `init`."""
-    return (bool(bridge.inventory_enumerate(ws))
+    try:
+        registered = bool(bridge.inventory_enumerate(ws))
+    except Exception:
+        # Unreadable registrations mean something *is* installed, badly — which is exactly when
+        # repair should run. Raising here would suppress every per-step outcome.
+        registered = True
+    return (registered
             or (ws / config_mod.CONFIG_FILENAME).is_file()
             or (ws / init_bridge.PROVENANCE).is_file())
 
@@ -65,14 +71,17 @@ def repair(ws):
                 record(name, "ok")
                 continue
             if values is None:
-                # The config could not be read, so the steps that need its values cannot run — but
-                # the ones that do not still must, which is the whole point of continuing.
+                # Steps that depend on config values are skipped — never run with guesses, because
+                # a silently guessed threshold is a wrong install that looks like a right one. The
+                # fallback is per-step, so it cannot leak forward to a later step.
                 if name in ("memory", "history"):
                     record(name, "skipped: configuration is unreadable")
                     continue
-                values = {"effort": "medium", "sandbox": "read-only", "depth": "mini",
-                          "threshold": None, "skip": []}
-            init_bridge.repair_step(ws, name, values)
+                step_values = {"effort": None, "sandbox": None, "depth": None,
+                               "threshold": None, "skip": []}
+            else:
+                step_values = values
+            init_bridge.repair_step(ws, name, step_values)
             record(name, "ok")
         except Exception as exc:
             record(name, f"failed: {exc}")

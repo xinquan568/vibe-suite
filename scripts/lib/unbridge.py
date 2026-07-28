@@ -13,7 +13,6 @@ only shape-validated by the writer. Every one is re-contained, `lstat`-classifie
 is not what the record claims, before anything is deleted.
 """
 
-import base64
 import json
 import os
 import stat
@@ -48,73 +47,57 @@ def recorded_path(ws, raw):
     return anchored
 
 
-def strip_owned(ws, rel, name, codec):
-    path = ws / rel
-    if not path.is_file():
-        return None
-    text = bridge.read_text_verbatim(path)
-    stripped = (bridge.md_block_remove(text, name) if codec == "md"
-                else bridge.text_block_remove(text, name))
-    return text, stripped
-
-
-def _json_without_ours(ws, rel, path):
-    """The file with our registrations dropped, or None if it is not a JSON target we own."""
-    if rel not in (".mcp.json", ".codex/hooks.json"):
-        return None
-    doc = bridge.load_json(path)
-    if rel == ".mcp.json":
-        for name in list((doc.get("mcpServers") or {})):
-            if name in bridge.SENTINEL_LITERALS or name.startswith(bridge.SENTINEL_PREFIX):
-                bridge.json_server_remove(doc, name)
-    else:
-        bridge.json_hook_entry_remove(doc, "Stop")
-    return (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode("utf-8")
-
-
 def restore(ws, entry, report):
-    """One target, from its recorded pre-image. Refuses anything the record misdescribes."""
+    """Remove what we own. Never write a pre-image back.
+
+    **Init only ever *adds* owned regions** — a block between markers, a named key, a file it
+    created. It never rewrites content outside them. So removing those regions *is* the restore, and
+    for a project nobody edited the result is byte-identical to pre-init by construction.
+
+    Writing the recorded pre-image back was the source of every user-content-loss defect in this
+    file: it cannot tell an untouched file from an edited one without a comparison that keeps getting
+    the corner cases wrong, and when it guesses wrong it overwrites work. A teardown that only
+    *removes* cannot lose content that way — the guarantee is weaker on paper and one I can actually
+    hold.
+
+    The record is still consulted, for one thing only: whether a file existed before init, which is
+    what decides remove-the-block versus remove-the-file.
+    """
     path = recorded_path(ws, entry["path"])
     if path is None:
         raise bridge.BridgeError(
             f"provenance names a path outside the workspace: {entry['path']}")
-
-    # Classified through the descriptor chain, so a symlinked *parent* cannot make a foreign node
-    # look like ours. `bridge.classify` resolves by path and is unsafe for this decision.
-    rel_probe = str(path.relative_to(ws)) if path.is_relative_to(ws) else None
-    st = bridge.lstat_at(ws, rel_probe) if rel_probe else None
-    if st is None:
-        actual = "absent"
-    elif stat.S_ISLNK(st.st_mode):
-        actual = "symlink"
-    elif stat.S_ISDIR(st.st_mode):
-        actual = "dir"
-    elif stat.S_ISREG(st.st_mode):
-        actual = "file"
-    else:
-        actual = "other"
-    kind = entry["kind"]
-    if actual == "symlink" and kind != "symlink":
-        # The record says this was a regular file or absent; it is a link now. Acting on it would
-        # write or delete through the link, so it is left exactly as it is.
-        report.append(f"{path.name}: now a symlink, not what provenance recorded — left alone")
-        return
-    if actual == "absent":
-        report.append(f"{path.name}: already gone")
-        return
-
     rel = str(path.relative_to(ws))
-    owned = next(((r, n, c) for r, n, c in BLOCKS if r == rel), None)
-    stripped = None
-    if owned:
-        pair = strip_owned(ws, rel, owned[1], owned[2])
-        if pair:
-            _, stripped = pair
 
-    if kind == "absent":
-        # init created it. Deleting is correct only when nothing but ours was ever in it — and for
-        # a JSON target that question is about its *contents*, not about a text block, so an
-        # unrelated server or hook left behind keeps the file alive.
+    st = bridge.lstat_at(ws, rel)
+    if st is None:
+        report.append(f"{rel}: already gone")
+        return
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        report.append(f"{rel}: not a regular file — left alone")
+        return
+
+    owned = next(((r, n, c) for r, n, c in BLOCKS if r == rel), None)
+    if owned:
+        text = bridge.read_text_verbatim(path)
+        stripped = (bridge.md_block_remove(text, owned[1]) if owned[2] == "md"
+                    else bridge.text_block_remove(text, owned[1]))
+        if entry["kind"] == "absent" and not stripped.strip():
+            # init created it and nothing of the user's is in it. Empty either because this call
+            # stripped the block or because an earlier phase already did — the file's state is what
+            # decides, not whether this particular call changed it.
+            bridge.unlink_at(ws, rel)
+            report.append(f"{rel}: removed")
+        elif stripped != text:
+            bridge.write_atomic(ws, path, stripped)
+            report.append(f"{rel}: owned block removed")
+        else:
+            report.append(f"{rel}: nothing of ours remains — left alone")
+        return
+
+    # Not a block target: JSON handled by json_targets(), everything else is ours only if init
+    # created it and nothing has been added since.
+    if entry["kind"] == "absent":
         if rel in (".mcp.json", ".codex/hooks.json"):
             doc = bridge.load_json(path)
             leftover = (doc.get("mcpServers") if rel == ".mcp.json"
@@ -122,46 +105,11 @@ def restore(ws, entry, report):
             if leftover:
                 report.append(f"{rel}: kept — it still holds entries that are not ours")
                 return
-            bridge.unlink_at(ws, rel)
-            report.append(f"{rel}: removed")
-            return
-        if stripped is not None and stripped.strip():
-            bridge.write_atomic(ws, path, stripped)
-            report.append(f"{rel}: kept — it holds content beyond the owned block")
-        else:
-            bridge.unlink_at(ws, rel)
-            report.append(f"{rel}: removed")
+        bridge.unlink_at(ws, rel)
+        report.append(f"{rel}: removed")
         return
 
-    if kind == "file":
-        pre = base64.b64decode(entry["content_b64"], validate=True)
-        if stripped is not None:
-            if stripped.encode("utf-8", "surrogateescape") == pre:
-                bridge.write_atomic(ws, path, pre, mode=int(entry["mode"], 8))
-                report.append(f"{rel}: restored")
-            else:
-                # The user edited outside our region. Their version, minus our block, is what
-                # honours "nothing user-owned touched" — the pre-image would overwrite their work.
-                bridge.write_atomic(ws, path, stripped)
-                report.append(f"{rel}: owned block removed; your later edits kept")
-        else:
-            # No text block here: JSON, config and history. The pre-image is only safe to write back
-            # when nothing of the user's has arrived since — otherwise restoring it discards their
-            # edit, which is the same mistake the strip-then-compare rule exists to avoid.
-            current = path.read_bytes()
-            ours_removed = _json_without_ours(ws, rel, path)
-            if ours_removed is not None and ours_removed != pre:
-                bridge.write_atomic(ws, path, ours_removed)
-                report.append(f"{rel}: our entries removed; your later changes kept")
-            elif ours_removed is None and current != pre and rel not in (
-                    ".vibe-suite.md", ".claude/vibe-history.json"):
-                report.append(f"{rel}: changed since install — left as it is")
-            else:
-                bridge.write_atomic(ws, path, pre, mode=int(entry["mode"], 8))
-                report.append(f"{rel}: restored")
-        return
-
-    report.append(f"{rel}: left as it is ({kind})")
+    report.append(f"{rel}: existed before install — left as it is")
 
 
 def json_targets(ws, report, dry):

@@ -300,3 +300,54 @@ class TestDescriptorRelativeDeletion(UnbridgeCase):
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         import bridge
         self.assertFalse(bridge.unlink_at(self.ws, "never-existed"))
+
+
+class TestRemoveOnly(UnbridgeCase):
+    """Teardown removes what it owns and never writes a pre-image back.
+
+    Init only ever *adds* owned regions, so removing them is the restore. Writing the recorded
+    pre-image was the source of every user-content-loss defect here: it cannot tell an untouched
+    file from an edited one without a comparison that kept getting corner cases wrong, and a wrong
+    guess overwrites work. Removing cannot lose content that way.
+    """
+
+    def test_a_file_rewritten_entirely_after_init_keeps_the_users_version(self):
+        (self.ws / "CLAUDE.md").write_text("# original\n", encoding="utf-8")
+        self.install()
+        (self.ws / "CLAUDE.md").write_text("# completely different now\n", encoding="utf-8")
+        self.unbridge("--confirm")
+        after = (self.ws / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertEqual(after, "# completely different now\n",
+                         "the pre-image was written back over the user's rewrite")
+
+    def test_the_suites_own_files_are_removed_not_reverted(self):
+        """`.vibe-suite.md` and the history are the *suite's* artefacts, so a teardown removes them —
+        that is what byte-identity to pre-init means. The distinction that matters is between the
+        suite's files and the user's: an edit to the suite's own config does not make it the user's.
+        What must never happen is a **pre-image being written back**, which is what would silently
+        revert an edit in a file the user does own."""
+        self.install()
+        path = self.ws / ".vibe-suite.md"
+        path.write_text(path.read_text(encoding="utf-8").replace("effort: medium", "effort: high"),
+                        encoding="utf-8")
+        self.unbridge("--confirm")
+        self.assertFalse(path.exists(), "the suite's own config survived teardown")
+        self.assertFalse((self.ws / ".claude" / "vibe-history.json").exists())
+
+    def test_a_pre_image_is_never_written_back(self):
+        """The property that replaces restore. No file ends a teardown holding bytes it did not hold
+        when the teardown began, unless those bytes are a strict subset (our region removed)."""
+        (self.ws / "CLAUDE.md").write_text("# original\n", encoding="utf-8")
+        self.install()
+        (self.ws / "CLAUDE.md").write_text("# rewritten\n", encoding="utf-8")
+        before = (self.ws / "CLAUDE.md").read_text(encoding="utf-8")
+        self.unbridge("--confirm")
+        self.assertEqual((self.ws / "CLAUDE.md").read_text(encoding="utf-8"), before,
+                         "content reappeared that was not there when teardown started")
+
+    def test_a_file_that_existed_before_init_is_never_deleted(self):
+        (self.ws / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+        self.install()
+        self.unbridge("--confirm")
+        self.assertTrue((self.ws / ".gitignore").is_file())
+        self.assertEqual((self.ws / ".gitignore").read_text(encoding="utf-8"), "node_modules/\n")

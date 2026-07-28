@@ -30,22 +30,29 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/unbridge.sh" --workspace . --confirm
 
 Report the per-artefact outcome as returned.
 
-## How restore decides
+## It removes; it does not restore
 
-Provenance holds each target's **pre-init** bytes. But that hash cannot detect a later user edit —
-init changed the file, so it always differs. The order that works:
+**Init only ever *adds* owned regions** — a block between markers, a named key, a file it created. It
+never rewrites content outside them. So removing those regions **is** the restore, and for a project
+nobody edited the result is byte-identical to pre-init by construction.
 
-1. Remove the owned region.
-2. Compare what remains to the pre-image.
+Nothing is ever written back from the provenance record. That was the design this command started
+with, and it was the source of every way it could lose your work: a pre-image cannot tell an
+untouched file from an edited one, and a wrong guess overwrites what you wrote. A teardown that only
+removes cannot fail that way.
 
-| Result | Action |
+| Situation | What happens |
 |---|---|
-| identical | the file is byte-identical to pre-init — nothing else to do |
-| different | **keep what remains.** The user edited outside our block, and restoring the pre-image would overwrite their work |
+| a file you owned, with our block in it | the block goes; every other byte stays exactly as it is |
+| a file init created, now holding only our block | removed |
+| a file init created, now holding something of yours | **kept**, and reported |
+| a file that existed before install | never deleted |
 
-A file init *created* is deleted — unless something other than the owned block is now in it, in which
-case it is kept and reported. `kind: absent` means delete, and that is where user content is most at
-risk.
+The record is still read, for one thing: whether a file existed before install. That is what decides
+remove-the-block from remove-the-file.
+
+The suite's own artefacts — `.vibe-suite.md`, the baseline history, `.vibe-suite-state/` — are
+removed. Editing the suite's config does not make it yours.
 
 ## What it will not do
 

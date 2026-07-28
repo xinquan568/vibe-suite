@@ -498,3 +498,69 @@ class TestRound5Regressions(InitCase):
             '{"schema": 1, "targets": [], "parents_created": []}\n', encoding="utf-8")
         result = run_init(self.ws, *self.answers())
         self.assertNotEqual(result.returncode, 0)
+
+
+class TestRound6Regressions(InitCase):
+    """The ancestor race and the CRLF data-loss path. Each fails against `417f5e2`."""
+
+    def _bridge(self):
+        import sys
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import bridge
+        return bridge
+
+    def test_a_symlinked_ancestor_cannot_redirect_a_write(self):
+        """`O_NOFOLLOW` on the final component left every ancestor resolved by path. The descent is
+        now component-by-component, so a symlink anywhere along the way fails its own step."""
+        bridge = self._bridge()
+        outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (outside / "codex").mkdir()
+        # `.config` is a symlink; `.config/codex/config.toml` would land outside.
+        (self.ws / ".config").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.write_atomic(self.ws, self.ws / ".config" / "codex" / "config.toml", "owned")
+        self.assertFalse((outside / "codex" / "config.toml").exists(),
+                         "the write escaped through a symlinked ancestor")
+
+    def test_a_crlf_config_keeps_its_settings(self):
+        """`_split_front` recognised only LF, so a CRLF config's frontmatter was read as body and a
+        second block was written above it — hiding every existing setting."""
+        (self.ws / ".vibe-suite.md").write_bytes(
+            b"---\r\nengine: codex\r\nscore_threshold: 90\r\n---\r\n")
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        raw = (self.ws / ".vibe-suite.md").read_bytes()
+        self.assertEqual(raw.count(b"---"), 2, "a second frontmatter block was written")
+        import sys
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import config as config_mod
+        parsed = config_mod.load(str(self.ws))
+        self.assertEqual(parsed["engine"], "codex", "the existing setting was hidden")
+        self.assertEqual(parsed["score_threshold"], 90, "an existing value was overwritten")
+
+    def test_a_json_null_history_is_not_treated_as_absent(self):
+        (self.ws / ".claude").mkdir()
+        (self.ws / ".claude" / "vibe-history.json").write_text("null\n", encoding="utf-8")
+        result = run_init(self.ws, *self.answers())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.ws / ".claude" / "vibe-history.json").read_text(), "null\n")
+
+    def test_a_provenance_record_with_duplicate_entries_is_refused(self):
+        (self.ws / ".vibe-suite-state").mkdir()
+        one = str(self.ws / ".gitignore")
+        (self.ws / ".vibe-suite-state" / "install-provenance.json").write_text(
+            json.dumps({"schema": 1, "parents_created": [],
+                        "targets": [{"path": one, "kind": "absent"}] * 9}) + "\n",
+            encoding="utf-8")
+        result = run_init(self.ws, *self.answers())
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_a_new_file_respects_the_umask(self):
+        """A blanket chmod overrode the user's umask policy for files we create ourselves."""
+        import subprocess
+        script = (f'umask 077; bash {REPO_ROOT / "scripts" / "init.sh"} --workspace {self.ws} '
+                  '--effort medium --audit-depth mini --strictness standard')
+        subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        mode = (self.ws / ".gitignore").stat().st_mode & 0o777
+        self.assertEqual(mode & 0o077, 0, f"umask 077 was overridden: got {oct(mode)}")

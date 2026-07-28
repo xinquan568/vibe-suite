@@ -71,6 +71,43 @@ def classify(path):
     return "other"
 
 
+def _open_dir_chain(root, relative):
+    """Open `root/relative` by walking one component at a time, each with `O_NOFOLLOW`.
+
+    Opening the parent by path resolves every *ancestor* through the kernel, so containment checked
+    beforehand says nothing about what those components are at the moment of the call — a swapped
+    grandparent redirects the whole subtree. Descending component by component removes the ambiguity:
+    each step is relative to a descriptor already proven to be a real directory, and a symlink
+    anywhere along the way fails the step that would have followed it.
+    """
+    for flag in ("O_DIRECTORY", "O_NOFOLLOW"):
+        if not hasattr(os, flag):
+            raise BridgeError(
+                f"this platform lacks os.{flag}; the install refuses rather than write through a "
+                "path it cannot resolve safely")
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in relative:
+            if part in ("", "."):
+                continue
+            if part == "..":
+                raise BridgeError("'..' in a bridge target path; refusing")
+            try:
+                os.mkdir(part, 0o777, dir_fd=fd)
+            except FileExistsError:
+                pass
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    except OSError as exc:
+        os.close(fd)
+        raise BridgeError(f"{root}/{'/'.join(relative)} could not be opened safely ({exc})") from exc
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def write_atomic(root, dest, content, mode=None):
     """Replace a file atomically, without ever resolving its parent path twice.
 
@@ -94,13 +131,8 @@ def write_atomic(root, dest, content, mode=None):
     if mode is None:
         mode = (dest.lstat().st_mode & 0o7777) if kind == "file" else 0o644
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    assert_inside(root, dest.parent)
-    try:
-        dir_fd = os.open(dest.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-                         | getattr(os, "O_NOFOLLOW", 0))
-    except OSError as exc:
-        raise BridgeError(f"{dest.parent} could not be opened safely ({exc})") from exc
+    relative = Path(dest).parent.relative_to(Path(root)).parts
+    dir_fd = _open_dir_chain(root, relative)
 
     data = content if isinstance(content, bytes) else content.encode("utf-8")
     tmp_name = f".{dest.name}.vibe-tmp"
@@ -119,7 +151,10 @@ def write_atomic(root, dest, content, mode=None):
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.chmod(tmp_name, mode, dir_fd=dir_fd, follow_symlinks=False)
+            if kind == "file":
+                # Restore the user's mode exactly. For a *new* file the open() mode already went
+                # through umask, and re-chmod'ing would override the user's umask policy.
+                os.chmod(tmp_name, mode, dir_fd=dir_fd, follow_symlinks=False)
             os.replace(tmp_name, dest.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except BaseException:
             try:

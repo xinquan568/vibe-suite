@@ -54,8 +54,10 @@ def provenance_open(ws):
         if (not isinstance(existing, dict) or existing.get("schema") != bridge.SCHEMA
                 or not isinstance(existing.get("targets"), list)
                 or not isinstance(existing.get("parents_created"), list)
-                or {t.get("path") for t in existing["targets"] if isinstance(t, dict)}
-                   != {str(ws / rel) for rel in TARGETS}):
+                or not all(isinstance(t, dict) and isinstance(t.get("kind"), str)
+                           for t in existing["targets"])
+                or len(existing["targets"]) != len(TARGETS)
+                or {t["path"] for t in existing["targets"]} != {str(ws / rel) for rel in TARGETS}):
             raise bridge.BridgeError(
                 f"{out} exists but is not a v{bridge.SCHEMA} provenance record; refusing to "
                 "continue, because unbridge would treat it as one")
@@ -91,12 +93,23 @@ def set_gate(ws, value):
 
 
 def _split_front(text):
-    """(unused, frontmatter lines, trailing body). A config with no frontmatter yields empty lines."""
-    if text.startswith("---\n"):
-        end = text.find("\n---\n", 3)
-        if end != -1:
-            return "", text[4:end].splitlines(), text[end + 5:]
-    return "", [], text
+    """(newline, frontmatter lines, trailing body), line-ending agnostic.
+
+    An LF-only reader treats a CRLF config's frontmatter as body and writes a *second* block above
+    it — which does not fail, and silently hides every setting the file already carried. Line endings
+    are a property of the user's file, not an assumption this module gets to make.
+    """
+    newline = "\r\n" if "\r\n" in text.split("\n", 1)[0] + "\n" else "\n"
+    stripped = text.lstrip("\ufeff")
+    first = stripped.split("\n", 1)[0].strip()
+    if first == "---":
+        head_len = stripped.index("\n") + 1
+        rest = stripped[head_len:]
+        for candidate in ("\r\n---\r\n", "\n---\n"):
+            end = rest.find(candidate)
+            if end != -1:
+                return newline, rest[:end].splitlines(), rest[end + len(candidate):]
+    return newline, [], text
 
 
 def _verify_config(ws, text):
@@ -156,14 +169,14 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
               "score_threshold": str(STRICTNESS[strictness])}
     patterns = [s.strip() for s in skip.split(",") if s.strip()] if skip else []
 
-    body, front, rest = _split_front(existing)
+    newline, front, rest = _split_front(existing)
     for key, value in values.items():
         if not any(line.strip().startswith(f"{key}:") for line in front):
             front.append(f"{key}: {value}")
     if patterns and not any(line.strip().startswith("skip_patterns:") for line in front):
         front.append("skip_patterns:")
         front.extend(f"  - {pattern}" for pattern in patterns)
-    rendered = "---\n" + "\n".join(front) + "\n---\n" + rest
+    rendered = newline.join(["---", *front, "---", ""]) + rest
     if rendered != existing:
         _verify_config(ws, rendered)
         bridge.write_atomic(ws, dest, rendered)
@@ -205,7 +218,7 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
             raise bridge.BridgeError(
                 f"{dest}: 'snapshots' is {type(snapshots).__name__}, not a list; refusing to append")
         container = history
-    elif history is None:
+    elif history is None and not dest.is_file():
         snapshots = []
         container = {"snapshots": snapshots}
     else:

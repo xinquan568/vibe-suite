@@ -219,3 +219,91 @@ test("a damaged runtime store is an infra failure, not a verdict", () => {
   assert.ok(!existsSync(path.join(dir, ".vibe-suite-state", "state.json.tmp")),
     "a damaged store must never be rewritten");
 });
+
+test("a LARGE tracked diff is read, not dropped — and its cap is disclosed rather than silent", () => {
+  const dir = repo({ enabled: true });
+  // Bigger than Node's default 1 MiB spawnSync buffer. The marker leads the change: what this
+  // test proves is that the collection READ a multi-megabyte diff (an ENOBUFS would have produced
+  // an indeterminate result and an ALLOW), and that the prompt cap announces itself.
+  writeFileSync(path.join(dir, "tracked.txt"),
+    `// ${MARKER}\n` + "P".repeat(2 * 1024 * 1024) + "\n");
+  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const result = runHook(dir, { fixture: "gate-marker.mjs", probe });
+  const decision = decisionOf(result);
+  assert.ok(decision, `a large tracked diff must still be reviewed, got: ${result.stderr}`);
+  assert.equal(decision.decision, "block");
+  const sent = JSON.parse(readFileSync(probe, "utf8")).argv.at(-1);
+  assert.ok(sent.includes("[prompt truncated at the review cap]"),
+    "a capped prompt must say so — a truncated review that looks complete is the worse failure");
+  assert.ok(Buffer.byteLength(sent, "utf8") < 500_000, "the prompt stays bounded in BYTES");
+});
+
+test("a collection failure is indeterminate, never a silent ALLOW", () => {
+  // Not a git repository at all: `git status` fails, so the gate does not know the tree is clean.
+  const dir = mkdtempSync(path.join(tmpdir(), "stop-gate-nogit-"));
+  const enable = `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(STORE))}); ` +
+    `import store; store.Store(${JSON.stringify(dir)}).set("gate.stop_review_gate", True)`;
+  spawnSync("python3", ["-c", enable], { encoding: "utf8" });
+  const open = runHook(dir, { fixture: "gate-allower.mjs" });
+  assert.equal(decisionOf(open), null);
+  assert.ok(open.stderr.includes("could not be collected"), open.stderr);
+
+  const closedDir = mkdtempSync(path.join(tmpdir(), "stop-gate-nogit-closed-"));
+  for (const [key, value] of [["gate.stop_review_gate", "True"], ["gate.fail_policy", '"closed"']]) {
+    spawnSync("python3", ["-c",
+      `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(STORE))}); ` +
+      `import store; store.Store(${JSON.stringify(closedDir)}).set(${JSON.stringify(key)}, ${value})`,
+    ], { encoding: "utf8" });
+  }
+  const closed = runHook(closedDir, { fixture: "gate-allower.mjs" });
+  const decision = decisionOf(closed);
+  assert.ok(decision, "fail-closed must block on a collection failure");
+  assert.ok(decision.reason.includes("could not be collected"), decision.reason);
+});
+
+test("an unborn repository is reviewable: every file is new, and its content is sent", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "stop-gate-unborn-"));
+  spawnSync("git", ["-C", dir, "init", "-q"], { encoding: "utf8" });
+  spawnSync("python3", ["-c",
+    `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(STORE))}); ` +
+    `import store; store.Store(${JSON.stringify(dir)}).set("gate.stop_review_gate", True)`,
+  ], { encoding: "utf8" });
+  seedDefect(dir);
+  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const result = runHook(dir, { fixture: "gate-marker.mjs", probe });
+  const decision = decisionOf(result);
+  assert.ok(decision, `an unborn repo must still be reviewed, got: ${result.stderr}`);
+  assert.ok(JSON.parse(readFileSync(probe, "utf8")).argv.at(-1).includes(MARKER));
+});
+
+test("a hostile textconv driver cannot execute or inject outside content", () => {
+  const dir = repo({ enabled: true });
+  const outside = mkdtempSync(path.join(tmpdir(), "gate-textconv-"));
+  writeFileSync(path.join(outside, "secret.txt"), "TEXTCONV-LEAKED-SECRET\n");
+  // A repository configuring a converter that would dump an outside file into the diff.
+  writeFileSync(path.join(dir, ".gitattributes"), "*.bin diff=evil\n");
+  spawnSync("git", ["-C", dir, "config", "diff.evil.textconv",
+    `cat ${path.join(outside, "secret.txt")} #`], { encoding: "utf8" });
+  writeFileSync(path.join(dir, "payload.bin"), "binary-ish\n");
+  spawnSync("git", ["-C", dir, "add", "-A"], { encoding: "utf8" });
+  spawnSync("git", ["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t",
+    "commit", "-q", "-m", "add payload"], { encoding: "utf8" });
+  writeFileSync(path.join(dir, "payload.bin"), "binary-ish changed\n");
+
+  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  runHook(dir, { fixture: "gate-allower.mjs", probe });
+  const sent = JSON.parse(readFileSync(probe, "utf8")).argv.at(-1);
+  assert.ok(!sent.includes("TEXTCONV-LEAKED-SECRET"),
+    "a repository-configured textconv driver must never run for the gate's diff");
+});
+
+test("the total untracked cap is disclosed when many files exhaust it", () => {
+  const dir = repo({ enabled: true });
+  for (let i = 0; i < 12; i += 1) {
+    writeFileSync(path.join(dir, `bulk-${i}.txt`), "B".repeat(15_000));
+  }
+  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  runHook(dir, { fixture: "gate-allower.mjs", probe });
+  const sent = JSON.parse(readFileSync(probe, "utf8")).argv.at(-1);
+  assert.ok(sent.includes("total cap reached"), "exhausting the total cap must be disclosed");
+});

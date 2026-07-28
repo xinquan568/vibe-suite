@@ -29,24 +29,28 @@ function abandonedRecord(jobId) {
   };
 }
 
-test("start and end reap orphan temps and report abandoned jobs WITHOUT rewriting them", async () => {
-  const ws = mkdtempSync(path.join(tmpdir(), "lifecycle-"));
-  await createRecord(ws, abandonedRecord("job_aaaaaaaaaaaaaaaaaaaa"));
-  const before = await readRecord(ws, "job_aaaaaaaaaaaaaaaaaaaa");
+test("BOTH events reap orphan temps and report abandoned jobs WITHOUT rewriting them", async () => {
+  // Run the identical assertions for start and end: the frozen plan promises both directions, and
+  // a shared implementation is exactly the kind of thing that grows an event-specific branch later.
+  for (const event of ["start", "end"]) {
+    const ws = mkdtempSync(path.join(tmpdir(), `lifecycle-${event}-`));
+    await createRecord(ws, abandonedRecord("job_aaaaaaaaaaaaaaaaaaaa"));
+    const before = await readRecord(ws, "job_aaaaaaaaaaaaaaaaaaaa");
 
-  const orphan = path.join(jobsDir(ws), "job_bbbbbbbbbbbbbbbbbbbb.tmp.123.deadbeef");
-  writeFileSync(orphan, "{}");
-  const old = (Date.now() - TEMP_REAP_MIN_AGE_MS - 60_000) / 1000;
-  utimesSync(orphan, old, old);
+    const orphan = path.join(jobsDir(ws), "job_bbbbbbbbbbbbbbbbbbbb.tmp.123.deadbeef");
+    writeFileSync(orphan, "{}");
+    const old = (Date.now() - TEMP_REAP_MIN_AGE_MS - 60_000) / 1000;
+    utimesSync(orphan, old, old);
 
-  const start = runHook(ws, "start");
-  assert.equal(start.status, 0, start.stderr);
-  assert.ok(start.stderr.includes("reaped 1 orphan temp"), start.stderr);
-  assert.ok(start.stderr.includes("looks abandoned"), start.stderr);
+    const result = runHook(ws, event);
+    assert.equal(result.status, 0, `${event}: ${result.stderr}`);
+    assert.ok(result.stderr.includes("reaped 1 orphan temp"), `${event}: ${result.stderr}`);
+    assert.ok(result.stderr.includes("looks abandoned"), `${event}: ${result.stderr}`);
 
-  const after = await readRecord(ws, "job_aaaaaaaaaaaaaaaaaaaa");
-  assert.equal(after.version, before.version, "reporting must not bump the record version");
-  assert.equal(after.status, "running", "the hook must never settle a job it does not own");
+    const after = await readRecord(ws, "job_aaaaaaaaaaaaaaaaaaaa");
+    assert.equal(after.version, before.version, `${event}: reporting must not bump the version`);
+    assert.equal(after.status, "running", `${event}: never settle a job the hook does not own`);
+  }
 });
 
 test("end additionally reports still-running jobs; start does not", async () => {

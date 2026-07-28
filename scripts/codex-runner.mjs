@@ -90,7 +90,7 @@ async function awaitLatch(name, { timeoutMs = 30_000 } = {}) {
 function parseArgs(argv) {
   const options = {
     kind: null, model: null, effort: null, sandbox: null, timeoutMs: null,
-    background: false, wait: false, resume: null, confirmDanger: false,
+    background: false, wait: false, resume: null, confirmDanger: false, noModel: false,
     worker: null, claim: null, prompt: null,
   };
   const rest = [];
@@ -115,6 +115,11 @@ function parseArgs(argv) {
       case "--background": options.background = true; break;
       case "--wait": options.wait = true; break;
       case "--confirm-danger": options.confirmDanger = true; break;
+      // E1.6 / vibe-16: "run the backend's own default model", which an OMITTED --model cannot
+      // express — resolveDefaults falls back to the project's model_overrides.codex. The stop
+      // gate needs the difference: `gate.model` unset must mean the backend default, not whatever
+      // the project configured for ordinary dispatches.
+      case "--no-model": options.noModel = true; break;
       case WORKER_FLAG: options.worker = next(); break;
       case CLAIM_FLAG: options.claim = next(); break;
       default:
@@ -138,6 +143,9 @@ function resolveTimeout(raw) {
 }
 
 function validateShape(options) {
+  if (options.noModel && options.model) {
+    throw new UsageError("--no-model and --model are mutually exclusive");
+  }
   if (options.worker) return;
   if (!options.prompt) throw new UsageError("a prompt is required after `--`");
   if (options.sandbox !== null && !SANDBOXES.has(options.sandbox)) {
@@ -242,6 +250,7 @@ async function prepareRecord(workspace, options, timeoutMs, claimDigest) {
     const defaults = resolveDefaults(loadConfig(workspace), {
       sandbox: options.sandbox, effort: options.effort, model: options.model,
     });
+    if (options.noModel) defaults.model = null;      // past the config fallback, deliberately
     assertSandboxAllowed(defaults.sandbox, { confirmDanger: options.confirmDanger });
     return createRecord(workspace, newRecord({
       jobId: newJobId(), kind: options.kind ?? "exec", background: options.background,

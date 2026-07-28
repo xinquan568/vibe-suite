@@ -15,7 +15,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createRecord, newRecord, readRecord } from "../../scripts/lib/jobs.mjs";
+import { createRecord, jobsDir, newRecord, readRecord } from "../../scripts/lib/jobs.mjs";
+import { mkdirSync, writeFileSync } from "node:fs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const CLI = path.join(REPO_ROOT, "scripts", "jobs-cli.mjs");
@@ -146,6 +147,37 @@ test("usage errors exit 2", () => {
   assert.equal(worse.status, 2, worse.stdout + worse.stderr);
 });
 
+test("status-only flags are refused outside status, not silently ignored", () => {
+  const ws = workspace();
+  for (const args of [
+    ["cancel", "--settle-abandoned", "job_aaaaaaaaaaaaaaaaaaaa"],
+    ["cancel", "--all"],
+    ["result", "--json", "job_aaaaaaaaaaaaaaaaaaaa"],
+    ["result", "--all", "job_aaaaaaaaaaaaaaaaaaaa"],
+  ]) {
+    const out = cli(ws, ...args);
+    assert.equal(out.status, 2, `${args.join(" ")}: ${out.stdout}${out.stderr}`);
+    assert.ok(out.stderr.includes("applies to status only"), out.stderr);
+  }
+});
+
+test("an invalid record in scope is rendered AND exits 1, in table and json modes", async () => {
+  const ws = workspace();
+  mkdirSync(jobsDir(ws), { recursive: true });
+  writeFileSync(path.join(jobsDir(ws), "job_deadbeefdeadbeefdead.json"),
+    JSON.stringify({ jobId: "job_deadbeefdeadbeefdead", version: 1, status: "zombie" }));
+
+  const table = cli(ws, "status");
+  assert.equal(table.status, 1, table.stdout + table.stderr);
+  assert.ok(table.stdout.includes("invalid record"), table.stdout);
+
+  const json = cli(ws, "status", "--json");
+  assert.equal(json.status, 1, json.stdout + json.stderr);
+  const payload = JSON.parse(json.stdout);
+  assert.equal(payload.invalid.length, 1);
+  assert.equal(payload.invalid[0].jobId, "job_deadbeefdeadbeefdead");
+});
+
 test("status --settle-abandoned finalises a dead-worker record to failed; plain status only reports", async () => {
   const ws = workspace();
   // A worker that died without finalising: stale heartbeat, dead pid. The pid comes from a child we
@@ -169,8 +201,13 @@ test("status --settle-abandoned finalises a dead-worker record to failed; plain 
   assert.equal((await readRecord(ws, "job_abababababababababab")).status, "running",
     "plain status must never mutate");
 
-  const settle = cli(ws, "status", "--settle-abandoned");
+  // --settle-abandoned --json: stdout must stay ONE parseable JSON document — settle notices go to
+  // stderr, and the settled ids ride inside the payload (Step-8 review, finding 3).
+  const settle = cli(ws, "status", "--settle-abandoned", "--json", "--all");
   assert.equal(settle.status, 0, settle.stderr);
+  const payload = JSON.parse(settle.stdout);
+  assert.deepEqual(payload.settled, ["job_abababababababababab"]);
+  assert.ok(settle.stderr.includes("settled abandoned job"), settle.stderr);
   const settled = await readRecord(ws, "job_abababababababababab");
   assert.equal(settled.status, "failed");
   assert.ok(settled.error.includes("abandoned"));

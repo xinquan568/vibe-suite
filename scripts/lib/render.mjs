@@ -11,13 +11,29 @@
  * "that was all of it". */
 export const RAW_TRUNCATE = 400;
 
+/**
+ * Terminal-control sequences are removed, not displayed: ANSI escapes in external text can
+ * restyle, overwrite, or spoof the operator's terminal. Newlines and tabs survive; every other
+ * control character goes.
+ */
+function stripControls(text) {
+  return text
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")                  // CSI sequences
+    .replace(/\x1b[@-_]/g, "")                                  // remaining two-byte escapes
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");          // C0 controls except \n and \t
+}
+
 function fenceExternal(label, text) {
   if (text === null || text === undefined) return [];
-  const body = String(text);
+  const body = stripControls(String(text));
   const shown = body.length > RAW_TRUNCATE
     ? `${body.slice(0, RAW_TRUNCATE)}\n… [truncated: ${body.length - RAW_TRUNCATE} more characters]`
     : body;
-  return [`${label} (external text, shown as data):`, "```", shown, "```"];
+  // A fixed ``` fence is escapable by content containing one (Step-8 review, finding 2): the fence
+  // must be strictly longer than every backtick run in what it encloses.
+  const longestRun = Math.max(0, ...(shown.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return [`${label} (external text, shown as data):`, fence, shown, fence];
 }
 
 function age(iso, now) {

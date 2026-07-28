@@ -57,15 +57,26 @@ function parseArgs(argv) {
   if (options.subcommand === "result" && options.jobId === null) {
     throw new UsageError("result requires a job id (see: status --all)");
   }
+  if (options.subcommand !== "status") {
+    // Status-only flags are refused, not ignored: `cancel --settle-abandoned <id>` silently
+    // cancelling would be an answer to a question nobody asked (Step-8 review, finding 4).
+    for (const [flag, set] of [["--all", options.all], ["--json", options.json],
+      ["--settle-abandoned", options.settle]]) {
+      if (set) throw new UsageError(`${flag} applies to status only`);
+    }
+  }
   return options;
 }
 
 async function runStatus(workspace, options) {
+  let settledIds = [];
   if (options.settle) {
     const scope = await resolveStatusJobs(workspace, { jobId: options.jobId, all: options.all });
     const settled = await settleAbandoned(workspace, scope.records);
+    settledIds = settled.map((record) => record.jobId);
     for (const record of settled) {
-      process.stdout.write(`settled abandoned job ${record.jobId} -> failed\n`);
+      // stderr: stdout must stay one parseable document under --json (Step-8 review, finding 3).
+      process.stderr.write(`settled abandoned job ${record.jobId} -> failed\n`);
     }
   }
   const { records, invalid } = await resolveStatusJobs(workspace, {
@@ -73,13 +84,16 @@ async function runStatus(workspace, options) {
   });
   const abandoned = abandonedIds(records);
   if (options.json) {
-    process.stdout.write(renderJson({ records, invalid, abandoned: [...abandoned] }) + "\n");
+    process.stdout.write(
+      renderJson({ records, invalid, abandoned: [...abandoned], settled: settledIds }) + "\n");
   } else if (options.jobId !== null) {
     process.stdout.write(renderDetail(records[0], { abandoned }) + "\n");
   } else {
     process.stdout.write(renderStatusTable(records, { invalid, abandoned }) + "\n");
   }
-  return 0;
+  // Invalid records are rendered AND surfaced in the exit code — a scope containing a record the
+  // store cannot vouch for is a true answer that is not success (Step-8 review, finding 5).
+  return invalid.length > 0 ? 1 : 0;
 }
 
 async function runResult(workspace, options) {

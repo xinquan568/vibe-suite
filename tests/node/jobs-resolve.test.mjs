@@ -15,7 +15,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  createRecord, finaliseRecord, newRecord, readRecord, STATE_DIRNAME,
+  createRecord, finaliseRecord, newRecord, readRecord, updateRecord, STATE_DIRNAME,
 } from "../../scripts/lib/jobs.mjs";
 import {
   cancelJob, resolveCancelableJob, resolveResultJob, resolveStatusJobs, ResolveError,
@@ -129,6 +129,32 @@ test("claim rejected: completion committed between resolve and claim wins; no si
   assert.equal(outcome.outcome, "already-terminal");
   assert.equal(outcome.record.status, "completed", "the real verdict is reported, not overwritten");
   assert.deepEqual(calls, [], "a lost claim must send no signal at all");
+});
+
+test("a record corrupted AFTER resolve never reaches signalGroup — the claim itself validates", async () => {
+  // transact re-reads under contention, so the version the claim commits against can differ from
+  // the resolved one (Step-8 review, finding 1). Every corruption lands via the store's own CAS in
+  // the onResolved window; the claim updater must refuse each, and the recorder must stay empty.
+  const corruptions = [
+    ["forged pgid without a worker", { pgid: 666 }],
+    ["pgid !== workerPid", { workerPid: 424242, pgid: 424243 }],
+    ["unknown status", { status: "zombie" }],
+    ["background flag corrupted", { background: "yes" }],
+  ];
+  for (const [label, patch] of corruptions) {
+    const ws = workspace();
+    await createRecord(ws, record(ID_A, BG));
+    const { fn, calls } = stubSignal([true]);
+    await assert.rejects(
+      () => cancelJob(ws, ID_A, {
+        signalGroup: fn, sleep: instantSleep,
+        onResolved: async () => { await updateRecord(ws, ID_A, patch); },
+      }),
+      (error) => error instanceof ResolveError && error.code === "invalid",
+      `corruption not refused: ${label}`,
+    );
+    assert.deepEqual(calls, [], `signal sent despite corruption: ${label}`);
+  }
 });
 
 test("claim won: a late worker finalise rejects and the cancelled verdict stands", async () => {

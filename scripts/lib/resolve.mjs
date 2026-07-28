@@ -22,8 +22,8 @@
 
 import { signalGroup as realSignalGroup } from "./process.mjs";
 import {
-  finaliseRecord, isAbandoned, isValidJobId, listRecords, readRecord, validateRecord,
-  TERMINAL_STATUSES,
+  finaliseRecord, isAbandoned, isValidJobId, listRecords, readRecord, transact, validateRecord,
+  REJECT, TERMINAL_STATUSES,
 } from "./jobs.mjs";
 
 export const CANCEL_GRACE_MS = 2000;
@@ -138,15 +138,26 @@ export async function cancelJob(workspace, jobId = null, deps = {}) {
     return { outcome: "already-terminal", record };
   }
 
-  // The claim. Winning this CAS — not any later check — is what authorises a signal.
-  const claimed = await finaliseRecord(workspace, record.jobId, {
-    status: "cancelled", error: "cancelled by operator",
+  // The claim. Winning this CAS — not any later check — is what authorises a signal. The updater
+  // re-validates the FRESH record it is handed: `transact` re-reads under contention, so the
+  // version this claim actually commits against may differ from the one resolved above, and a
+  // concurrent malformed write must never hand an unvalidated handle to the signal path (Step-8
+  // review, finding 1). REJECT on invalid — refusing to touch a corrupted record beats guessing.
+  const claimed = await transact(workspace, record.jobId, (fresh) => {
+    if (!validateRecord(fresh, record.jobId).ok) return REJECT;
+    return {
+      ...fresh, status: "cancelled", error: "cancelled by operator",
+      endedAt: new Date().toISOString(),
+    };
   });
   if (claimed === null) {
-    return { outcome: "already-terminal", record: await readRecord(workspace, record.jobId) };
+    // Terminal (the job finished first — report its verdict) or invalid (loadValidated throws the
+    // diagnosis). Either way: no claim, therefore no signal.
+    return { outcome: "already-terminal", record: await loadValidated(workspace, record.jobId) };
   }
 
-  const pgid = claimed.pgid;
+  // Defense in depth: the committed claim is re-validated before its handle can reach a probe.
+  const pgid = validateRecord(claimed, record.jobId).ok ? claimed.pgid : null;
   if (pgid === null || !signalGroup(pgid, 0)) {
     // Foreground record, never-claimed worker, or a group already gone (e.g. abandoned): the
     // verdict alone is the whole cancel.

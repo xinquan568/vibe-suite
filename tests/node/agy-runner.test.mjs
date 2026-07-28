@@ -162,6 +162,15 @@ test("an unconfirmed process-group reap is terminal, not a completed job", async
   assert.deepEqual(classifyOutput({ stdout: "analysis\n", groupReaped: false }),
     { status: "failed", reason: "reap-failed" });
   assert.equal(classifyOutput({ stdout: "analysis\n", groupReaped: true }).status, "completed");
-  assert.equal(classifyOutput({ stdout: "analysis\n" }).status, "completed",
-    "callers that report no reap state at all (unit paths) are unaffected");
+  // A MISSING confirmation is not a confirmation. Round 2 blessed this case as completed, which let
+  // any caller that forgot to report a reap look successful.
+  assert.deepEqual(classifyOutput({ stdout: "analysis\n" }),
+    { status: "failed", reason: "reap-failed" });
+  assert.deepEqual(classifyOutput({ stdout: "analysis\n", groupReaped: null }),
+    { status: "failed", reason: "reap-failed" });
+  // And confirmation is checked BEFORE the more specific-sounding reasons, which would mask it.
+  assert.deepEqual(classifyOutput({ timedOut: true, groupReaped: false }),
+    { status: "failed", reason: "reap-failed" });
+  assert.deepEqual(classifyOutput({ stdout: "Please sign in\n", groupReaped: false }),
+    { status: "failed", reason: "reap-failed" });
 });

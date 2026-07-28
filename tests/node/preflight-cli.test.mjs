@@ -194,4 +194,14 @@ test("agy matrix under an OPEN gate: the row reports truthfully and contributes 
   assert.equal(signedOutAgy.auth, "not-authenticated", "the frozen enum, not a new word");
   assert.equal(signedOutAgy.models.status, "missing");
   assert.equal(signedOut.status, 1, "an open gate lets an unavailable agy fail the exit code");
+
+  // The third leg of the matrix: absent under an OPEN gate is a genuine failure, not pending.
+  const absent = cli({
+    pathVar: controlledPath({ includeNode: true }), seam: codexOk(),
+    agy: "/nonexistent/definitely-not-installed-agy", gate, args: ["--json"],
+  });
+  const absentAgy = JSON.parse(absent.stdout).engines.find((row) => row.engine === "agy");
+  assert.equal(absentAgy.available, false, absent.stdout);
+  assert.match(absentAgy.detail, /not found on PATH/);
+  assert.equal(absent.status, 1, "under an open gate, a missing agy fails the preflight");
 });

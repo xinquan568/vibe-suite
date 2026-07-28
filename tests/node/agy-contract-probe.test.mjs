@@ -12,7 +12,8 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 
-import { classifyWriteProbe, probeContract, SENTINEL } from "../../scripts/agy-contract-probe.mjs";
+import * as probeModule from "../../scripts/agy-contract-probe.mjs";
+const { classifyWriteProbe, probeContract, SENTINEL } = probeModule;
 import { resolveAgyGate } from "../../scripts/lib/agy-gate.mjs";
 
 const ok = (stdout = "ok\n") => ({ stdout, stderr: "", timedOut: false, spawnFailed: false, groupReaped: true });
@@ -73,13 +74,30 @@ test("a write that LANDS fails the check outright — that IS positive evidence"
   assert.ok(result.checks.read_only_write_denied.note.includes(SENTINEL));
 });
 
-test("classifyWriteProbe never returns passed on today's agy surface", () => {
-  const inputs = [null, MISSING, TIMED_OUT, UNAUTH, ok(""), ok("anything at all")];
+test("classifyWriteProbe has NO passing branch, and none can be installed from outside", () => {
+  const inputs = [null, MISSING, TIMED_OUT, UNAUTH, ok(""), ok("anything at all"),
+    ok("the sandbox denied the write"), ok("permission denied: read-only filesystem")];
   for (const input of inputs) {
     assert.notEqual(classifyWriteProbe(input, false).state, "passed",
-      `no input may pass while there is no tooling-only denial channel: ${JSON.stringify(input)}`);
+      `no input may pass: ${JSON.stringify(input)}`);
   }
   assert.equal(classifyWriteProbe(ok(), true).state, "failed");
+
+  // Round 2 kept the branch behind an empty exported array and called it "can never pass"; a
+  // reviewer pushed one string in and opened the gate. So: attempt mutation through EVERY exported
+  // name, then re-assert. A promised absence has to be absent from the code.
+  for (const [name, value] of Object.entries(probeModule)) {
+    if (Array.isArray(value)) {
+      try { value.push("the sandbox denied the write"); } catch { /* frozen is also fine */ }
+    } else if (value && typeof value === "object") {
+      try { Object.assign(value, { denial: ["the sandbox denied the write"] }); } catch { /* ok */ }
+    }
+    void name;
+  }
+  for (const input of [ok("the sandbox denied the write"), ok("permission denied")]) {
+    assert.notEqual(classifyWriteProbe(input, false).state, "passed",
+      "no exported surface may install a passing path");
+  }
 });
 
 test("timeout_kill is observed, not asserted: it needs a real kill AND a confirmed reap", async () => {

@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "status": "not_passed",
-  "agy_version": "unknown (1.1.2 per `agy --version` run by hand; the probe's own call blocked on the OAuth prompt)",
-  "recorded_at": "2026-07-28T06:45:05.993Z",
+  "agy_version": null,
+  "recorded_at": "2026-07-28T07:37:38.550Z",
   "checks": {
     "headless_invocation": {
       "state": "failed",
@@ -10,19 +10,19 @@
     },
     "read_only_write_denied": {
       "state": "not_verified",
-      "note": "no model turn ran (unauthenticated or unspawnable), so nothing was actually denied \u2014 an absent file here proves nothing about enforcement"
+      "note": "unauthenticated: no model turn ran, so nothing was denied"
     },
     "timeout_kill": {
       "state": "passed",
-      "note": "the detached process-group kill reaps a signal-ignoring child (tested)"
+      "note": "an over-deadline invocation was killed and its process group confirmed gone"
     },
     "failure_signature": {
       "state": "not_verified",
-      "note": "only the UNAUTHENTICATED signature is known; no authenticated failure was provoked"
+      "note": "no failed-class response was provoked"
     },
     "quota_signature": {
       "state": "not_verified",
-      "note": "no quota or rate-limit response was provoked"
+      "note": "no quota-class response was provoked"
     }
   }
 }

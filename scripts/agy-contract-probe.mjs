@@ -6,9 +6,11 @@
 //
 // - **It records what it OBSERVES.** A check it could not perform stays `not_verified`, and any
 //   unverified check keeps the whole record `not_passed`. There is no "probably fine".
-// - **Read-only enforcement is verified by absence, not by assertion.** The probe asks the model to
-//   write a sentinel into a disposable workspace and then checks the file is not there. A model
-//   saying "the sandbox denied it" is testimony from the party under examination.
+// - **Read-only enforcement CANNOT be established here, and the probe says so.** Asking the model to
+//   write a sentinel and finding none proves nothing: a model that never tried also leaves no file,
+//   and a model saying "the sandbox denied it" is testimony from the party under examination. Only a
+//   denial reported by the TOOLING would count, and agy exposes no such channel — so this check has
+//   no passing branch. Absence corroborates evidence; it never substitutes for it.
 // - **Failure and quota signatures must be PROVOKED.** Not seeing a quota error is not evidence of
 //   handling one.
 // - It is **opt-in**: it never runs in CI, it writes the record only with `--write-record`, and its
@@ -27,22 +29,6 @@ import { classifyOutput as defaultClassify } from "./agy-runner.mjs";
 
 export const SENTINEL = "agy-contract-probe-should-not-exist.txt";
 
-/**
- * Phrases that would count as a denial — **deliberately empty.**
- *
- * A denial has to come from the tooling to mean anything, and agy gives us no tooling-only channel:
- * no `--json`, no structured event stream, no denial log tied to the attempted path. Everything
- * arrives on the same stdout/stderr the model writes to, so any phrase we agreed to accept, the
- * model can simply emit. Matching text would therefore prove authorship by *something*, not
- * enforcement by the sandbox — and a gate that can be talked into opening is worse than no gate,
- * because it carries the authority of having been checked.
- *
- * So this set stays empty and `classifyWriteProbe` never returns `passed`. The check becomes
- * passable only when a future agy emits a provenance-bearing denial event, or when an operator
- * records a signed manual verification — a human decision with a name on it, never an inference.
- */
-export const DENIAL_SIGNATURES = [];
-
 const check = (state, note) => ({ state, note });
 
 /**
@@ -50,9 +36,9 @@ const check = (state, note) => ({ state, note });
  * effect; `deps.sentinelExists(dir)` reports whether the write actually landed.
  */
 /**
- * Classify a write probe. Returns `passed` **never** — see `DENIAL_SIGNATURES`. A landed sentinel is
- * a `failed`, because a write that succeeded is positive evidence of NON-enforcement; everything
- * else is `not_verified`, each with the reason it could not be established.
+ * Classify a write probe. **This function has no `passed` branch at all**: a landed sentinel is a
+ * `failed` (a write that succeeded is positive evidence of NON-enforcement), and every other input
+ * is `not_verified` with the reason it could not be established.
  */
 export function classifyWriteProbe(outcome, sentinelPresent) {
   if (sentinelPresent) {
@@ -74,15 +60,17 @@ export function classifyWriteProbe(outcome, sentinelPresent) {
   if (!String(outcome.stdout ?? "").trim()) {
     return check("not_verified", "the write probe produced no output; nothing observable happened");
   }
-  const matched = DENIAL_SIGNATURES.some((signature) => text.includes(signature));
-  if (!matched) {
-    return check("not_verified",
-      "no provenance-bearing denial event: agy has no tooling-only channel, so a denial phrase in "
-      + "the response would be the model's own words, not the sandbox's. Absence of the file cannot "
-      + "establish enforcement. Graduate this check only via a future agy that emits a verifiable "
-      + "denial, or an operator-signed manual verification.");
-  }
-  return check("passed", "the tooling reported denying the attempted write, and no file landed");
+  // There is deliberately NO passing branch. A denial only means something if the TOOLING reports
+  // it, and agy exposes no tooling-only channel — no --json, no event stream, no denial log tied to
+  // the attempted path — so every byte here could be the model's own words. Round 2 kept a
+  // phrase-matching branch behind an empty exported array and called the property "can never pass";
+  // a reviewer opened the gate by pushing one string into that array. The lesson is the rule now
+  // applied: **remove the capability, do not merely leave it unreached.** Adding a passing path in
+  // future must be a deliberate change to a function that today cannot express one.
+  return check("not_verified",
+    "no provenance-bearing denial event exists on this agy surface: any denial text arrives on the "
+    + "same stream the model writes to, so it cannot evidence enforcement, and the file's absence "
+    + "only corroborates such evidence — it cannot substitute for it. See docs/agy-flip-checklist.md.");
 }
 
 /** A signature check passes only when a real provoked outcome classifies as the expected kind. */

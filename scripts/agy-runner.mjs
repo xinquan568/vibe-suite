@@ -93,13 +93,12 @@ function resolveTimeout(raw) {
 export function classifyOutput(outcome) {
   const { stdout = "", stderr = "", timedOut = false, spawnFailed = false, groupReaped } = outcome ?? {};
   if (spawnFailed) return { status: "failed", reason: "agy-not-found" };
+  // A CONFIRMED reap gates every interpretation that follows, and it must be `=== true`: "the field
+  // was absent" is not confirmation, and checking it only when present-and-false let a missing
+  // confirmation read as success. It also has to come BEFORE the timeout and auth branches, which
+  // would otherwise mask an unreaped group behind a more specific-sounding reason.
+  if (groupReaped !== true) return { status: "failed", reason: "reap-failed" };
   if (timedOut) return { status: "timed_out", reason: "deadline exceeded" };
-  // Only a CONFIRMED reap counts (the vibe-16 rule, applied here too): a job whose process group
-  // survived escalation may have left an OAuth helper or a model turn running, and calling that
-  // "completed" would report success over an unbounded process.
-  if (groupReaped !== undefined && groupReaped !== true) {
-    return { status: "failed", reason: "reap-failed" };
-  }
   const text = `${stdout}\n${stderr}`.toLowerCase();
   if (text.includes("authentication required") || text.includes("please sign in")) {
     return { status: "failed", reason: "unauthenticated" };

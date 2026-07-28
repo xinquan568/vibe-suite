@@ -246,21 +246,23 @@ export async function probeAgy(deps = {}) {
 
   let auth = "unknown";
   let smoke = "turn-failed";
-  if (signedOut) {
+  if (smokeOutcome.spawnFailed) {
+    smoke = "spawn-failed";
+  } else if (smokeOutcome.groupReaped !== true) {
+    // Confirmation first, and `=== true` only: an unreaped group is not a healthy lane whatever the
+    // output said, and a missing confirmation is not a confirmation.
+    smoke = "reap-failed";
+  } else if (signedOut) {
     auth = "not-authenticated";
+    smoke = "turn-failed";                // set here, not in a trailing override that masked the reap
   } else if (smokeOutcome.timedOut) {
     smoke = "timeout";
-  } else if (smokeOutcome.spawnFailed) {
-    smoke = "spawn-failed";
-  } else if (smokeOutcome.groupReaped !== undefined && smokeOutcome.groupReaped !== true) {
-    smoke = "reap-failed";                // the group survived escalation: not a healthy lane
   } else if ((smokeOutcome.stdout ?? "").trim()) {
     // The service answered, but agy exposes no auth MODE. Reporting `api-key` would be inventing an
     // observation; `unknown` is the true one.
     auth = "unknown";
     smoke = "ok";
   }
-  if (signedOut) smoke = "turn-failed";
 
   // `agy models` refuses when signed out. An empty list would read as "this engine has no models".
   let models = { status: "missing", slugs: [] };

@@ -101,7 +101,12 @@ test("both unreachable: the manual signal on stdout and exit 3", () => {
 
 test("a malformed invocation is a usage error, distinct from the manual path", () => {
   const cwd = mkdtempSync(path.join(tmpdir(), "audit-usage-"));
-  const result = spawnSync(process.execPath, [CLI], { cwd, encoding: "utf8", timeout: 30_000 });
+  // Both engines pinned even here: "no test invokes a real CLI" should hold by construction in every
+  // subprocess, not just the ones that would have dispatched.
+  const result = spawnSync(process.execPath, [CLI], {
+    cwd, encoding: "utf8", timeout: 30_000,
+    env: { ...process.env, VIBE_SUITE_AGY_BIN: MISSING, VIBE_SUITE_CODEX_BIN: MISSING },
+  });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /prompt is required/);
 });

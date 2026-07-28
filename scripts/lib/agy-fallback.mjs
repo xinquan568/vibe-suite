@@ -12,9 +12,11 @@
 // | `codex-no-header`  | agy completed but its output is unusable          | codex's result line, NO header | 0    |
 // | `manual`           | codex unreachable too                            | header + a stable JSON signal  | 3    |
 //
-// The header/no-header split is `fallback.md`'s: a header discloses that an engine could not be
-// reached. An engine that answered uselessly was reached, so announcing unreachability would be a
-// lie — the work still moves to the next lane, quietly.
+// `fallback.md` also describes a quiet hand-off for an engine that answered *uselessly* — reached,
+// so announcing unreachability would be a lie. That row is deliberately **absent** here: the only
+// executable agy dispatcher already classifies empty output as `failed`, so no `completed` result
+// can be unusable, and a branch no shipped path can reach is documentation of a fiction. It returns
+// the day an engine can produce a completed-but-unusable result.
 //
 // **This chain is only legal after the contract gate passes.** Before that, `--engine agy` is
 // refused outright (`fallback.md` requires refusal, not hand-off, pre-graduation), which is why
@@ -68,10 +70,7 @@ export async function runWithFallback(deps) {
 
   const codex = await runCodex();
   if (usable(codex)) {
-    return {
-      outcome: unreachable ? "codex" : "codex-no-header",
-      result: codex, header: unreachable, exitCode: EXIT.ok,
-    };
+    return { outcome: "codex", result: codex, header: unreachable, exitCode: EXIT.ok };
   }
 
   emitHeader(`codex is unreachable too (${codex?.error ?? codex?.status ?? "not installed"}) — no `

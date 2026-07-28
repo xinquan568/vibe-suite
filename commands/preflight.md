@@ -31,7 +31,7 @@ probed lane available and no probe degraded; `1` — a probed lane unavailable o
 | version | `codex --version`, deadline-bounded | validated short token, or `unknown` |
 | auth | `codex login status`, deadline-bounded | enum: `chatgpt` · `api-key` · `not-authenticated` · `unknown` |
 | smoke | tiny read-only `codex exec --json`, judged by the **event stream**, never the exit code | enum: `ok` · `turn-failed` · `timeout` · `spawn-failed` |
-| models | reads `$CODEX_HOME/models_cache.json` (default `~/.codex/`), 24 h TTL on `fetched_at` | status `fresh` · `stale` · `missing` · `malformed` + discovered slugs |
+| models | codex: `$CODEX_HOME/models_cache.json` (default `~/.codex/`), 24 h TTL on `fetched_at`; agy: `agy models` | status `fresh` · `stale` · `missing` · `malformed` + discovered slugs |
 
 `available` means the smoke proved the lane end-to-end. The smoke performs one tiny real dispatch —
 that is the point of a preflight; the test suite never does (fixtures only). Model discovery is

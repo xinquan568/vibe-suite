@@ -23,10 +23,10 @@ The states below are what the **committed record actually holds** after running
 | Check | State | Why |
 |---|---|---|
 | `headless_invocation` | **failed** | the probe's own call was answered with an OAuth prompt, not a response. (`agy --print` *is* the documented one-shot form; that is a fact about the surface, not an observation of it working here.) |
-| `timeout_kill` | passed | an over-deadline invocation was killed and its process group confirmed gone |
-| `read_only_write_denied` | not_verified | **and it cannot currently pass at all — see below** |
-| `failure_signature` | not_verified | only the unauthenticated signature is known; no authenticated failure could be provoked |
-| `quota_signature` | not_verified | no authenticated session, so no quota response was observed |
+| `timeout_kill` | passed | `an over-deadline invocation was killed and its process group confirmed gone` |
+| `read_only_write_denied` | not_verified | `unauthenticated: no model turn ran, so nothing was denied` — **and it cannot pass at all on this surface; see below** |
+| `failure_signature` | not_verified | `no failed-class response was provoked` |
+| `quota_signature` | not_verified | `no quota-class response was provoked` |
 
 ### `read_only_write_denied` cannot be passed on today's agy
 
@@ -37,11 +37,28 @@ the model can simply emit; the probe's adversarial test exercises exactly that. 
 file's absence cannot substitute, because a model that never tried to write also leaves no file.
 
 So the probe's denial-signature set is **deliberately empty** and this check returns `not_verified`
-for every input. Two honest routes to `passed` exist, and neither is an inference:
+for every input. `classifyWriteProbe` therefore has **no passing branch at all** — not an unreached one. (An earlier
+draft kept the branch behind an empty registry and called the property "can never pass"; a reviewer
+opened the gate by pushing one phrase into that registry. A promised absence must be absent from the
+code.) Two honest routes to `passed` exist, and both are deliberate changes someone reviews:
 
-1. A future agy that emits a **provenance-bearing denial event** tied to the attempted path.
-2. An **operator-signed manual verification** — a named human recording that they watched a write be
-   refused, with the evidence. A decision someone owns, never something the probe concludes.
+1. A future agy that emits a **provenance-bearing denial event** tied to the attempted path — which
+   would mean adding a passing branch that consumes that typed event.
+2. A **manual verification** recorded by a named maintainer who watched a write be refused, with the
+   evidence attached to the PR.
+
+### What the gate actually enforces — and what it does not
+
+Be clear-eyed about the trust model, because overstating it is the same defect as an unverified
+sandbox one level up. `resolveAgyGate` validates the record's **shape**: schema, exact keys, exact
+check set, and that every check plus the top-level status says `passed`. It **cannot** validate that
+a human observed anything — there is no signature scheme here, and this issue is not where one
+belongs.
+
+So the honest statement is: **the committed `gate-status.json` is the trusted authority, and
+graduating the lane means editing a code-reviewed file in a pull request.** That is a human gate, but
+a social one — reviewers reading a diff — not a cryptographic one. Anyone who wants a stronger
+guarantee should add signed attestations deliberately, not assume the resolver already provides them.
 
 ## Before the flip — every item, in order
 

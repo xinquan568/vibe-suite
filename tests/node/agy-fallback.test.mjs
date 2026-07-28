@@ -71,13 +71,15 @@ test("every unreachable class hands off to codex WITH the header", async () => {
   }
 });
 
-test("agy answered uselessly: hand off WITHOUT a header — it was reached", async () => {
+test("a completed-but-blank agy result still hands off — quietly, since it was reached", async () => {
+  // The shipped agy runner classifies blank output as `failed`, so this state is not reachable
+  // through the CLI today; the unit-level behaviour is still pinned so that if a future dispatcher
+  // can produce it, the quiet hand-off is what happens rather than a false unreachability claim.
   const { deps, headers } = harness({ agy: done("agy", "   "), codex: done("codex") });
   const outcome = await runWithFallback(deps);
-  assert.equal(outcome.outcome, "codex-no-header");
-  assert.equal(outcome.header, false);
-  assert.deepEqual(headers, [],
-    "announcing unreachability for an engine that answered would be a lie");
+  assert.equal(outcome.outcome, "codex");
+  assert.equal(outcome.header, false, "an engine that answered was not unreachable");
+  assert.deepEqual(headers, []);
   assert.equal(outcome.exitCode, EXIT.ok);
 });
 

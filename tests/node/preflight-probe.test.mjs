@@ -274,6 +274,22 @@ function agyRun(answers) {
   };
 }
 
+test("agy: a MISSING reap confirmation is not a confirmation, and it outranks other reasons", async () => {
+  const missing = await probeAgy({
+    run: agyRun({ ...HEALTHY, print: { stdout: "ok\n", groupReaped: undefined } }),
+    gate: GATE_OPEN, env: {},
+  });
+  assert.equal(missing.smoke, "reap-failed");
+  assert.equal(missing.available, false);
+
+  const masked = await probeAgy({
+    run: agyRun({ ...HEALTHY, print: { stdout: "Authentication required\n", groupReaped: false } }),
+    gate: GATE_OPEN, env: {},
+  });
+  assert.equal(masked.smoke, "reap-failed",
+    "an unreaped group must not hide behind a signed-out reading");
+});
+
 const HEALTHY = {
   "--version": { stdout: "1.1.2\n" },
   print: { stdout: "ok\n" },

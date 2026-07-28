@@ -32,9 +32,25 @@ WORDS = {"on": True, "true": True, "yes": True, "1": True,
          "off": False, "false": False, "no": False, "0": False}
 
 
+#: Keys whose *values* are never printed. A viewer's output lands in a transcript, so a credential
+#: pasted into an open string field would be copied somewhere the user did not choose — the same
+#: reasoning that makes the .mcp.json→TOML mirror withhold env values rather than redact them.
+SENSITIVE_HINTS = ("token", "key", "secret", "password", "credential", "auth")
+
+
+def _safe(key, value):
+    if isinstance(value, dict):
+        return {k: _safe(f"{key}.{k}", v) for k, v in value.items()}
+    if isinstance(value, str) and any(h in key.lower() for h in SENSITIVE_HINTS):
+        return "(hidden — this key's name suggests a credential)"
+    return value
+
+
 def view(ws):
     resolved, warnings = config_mod.load_with_warnings(str(ws))
     gate = store_mod.effective_config(ws).get("gate", {})
+    resolved = {k: _safe(k, v) for k, v in resolved.items()}
+    gate = {k: _safe(f"gate.{k}", v) for k, v in gate.items()}
     return {"config": resolved, "gate": gate, "warnings": list(warnings)}
 
 

@@ -10,10 +10,16 @@ in the job state. `--show` merges them; `--set` writes only the toggles.
 
 ## What to do
 
+**Forward the user's arguments; do not choose the operation yourself.** `$ARGUMENTS` is either
+`--show` (or empty, which means `--show`) or `--set key=value`:
+
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace . --show
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace . --set stop_review_gate=on
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace . ${ARGUMENTS:---show}
 ```
+
+So `/vibe-suite:config` and `/vibe-suite:config --show` both view; `/vibe-suite:config --set
+stop_review_gate=on` sets that one toggle and nothing else. Running a `--set` the user did not ask
+for would change their project on a read.
 
 Add `--json` when you need the structured form.
 

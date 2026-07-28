@@ -60,9 +60,28 @@ class TestGateRoundTrip(ConfigCase):
     """E2.7's own acceptance clause: the toggle must change what the hook does."""
 
     def _hook_decision(self):
-        r = subprocess.run(["node", str(HOOK)], input=json.dumps({"cwd": str(self.ws)}),
-                           capture_output=True, text=True, cwd=str(self.ws))
-        return r.stdout + r.stderr
+        """The hook's **decision**, parsed from its stdout — not its combined output.
+
+        Comparing stdout+stderr passed on unrelated diagnostic variation. The hook is a Stop hook
+        over a git worktree, so the fixture supplies a real repository, a seeded change, and the
+        harness's `hook_event_name`; without those it fails the same way with the gate on or off.
+        """
+        payload = json.dumps({"cwd": str(self.ws), "hook_event_name": "Stop"})
+        r = subprocess.run(["node", str(HOOK)], input=payload, capture_output=True, text=True,
+                           cwd=str(self.ws))
+        try:
+            return json.loads(r.stdout).get("decision", "allow")
+        except (json.JSONDecodeError, AttributeError):
+            return "allow"
+
+    def _seed_repo(self):
+        subprocess.run(["git", "init", "-q"], cwd=self.ws, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=self.ws, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=self.ws, check=True)
+        (self.ws / "seed.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=self.ws, check=True)
+        subprocess.run(["git", "commit", "-qm", "seed"], cwd=self.ws, check=True)
+        (self.ws / "seed.py").write_text("x = 2\n", encoding="utf-8")
 
     def test_the_gate_ships_off(self):
         self.assertIs(self.show()["gate"]["stop_review_gate"], False)
@@ -70,13 +89,16 @@ class TestGateRoundTrip(ConfigCase):
                          "shipping OFF must be a default, not a stored value")
 
     def test_setting_the_toggle_reaches_the_hook(self):
+        self._seed_repo()
         before = self._hook_decision()
+        self.assertEqual(before, "allow", "the gate should allow while it is off")
         r = self.run_cli("--set", "stop_review_gate=on")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIs(self.stored().get("stop_review_gate"), True)
         self.assertIs(self.show()["gate"]["stop_review_gate"], True)
-        self.assertNotEqual(self._hook_decision(), before,
-                            "the hook behaves identically with the gate on and off")
+        after = self._hook_decision()
+        self.assertNotEqual(after, before,
+                            f"the hook decided {after!r} both with the gate off and on")
 
     def test_the_fail_policy_defaults_open(self):
         self.assertEqual(self.show()["gate"]["fail_policy"], "open")
@@ -87,6 +109,8 @@ class TestP9(ConfigCase):
     def test_no_gate_model_ships(self):
         self.assertIsNone(self.show()["gate"].get("model"),
                           "a shipped model default would violate P9")
+        self.assertNotIn("model", self.stored(),
+                         "P9 is about what ships: the key must be absent, not merely falsy")
 
     def test_a_user_may_set_a_gate_model(self):
         r = self.run_cli("--set", "gate.model=some-model")

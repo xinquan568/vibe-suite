@@ -34,6 +34,9 @@ export const MANDATORY_CHECKS = [
 
 export const CHECK_STATES = new Set(["passed", "failed", "not_verified"]);
 
+/** The record's exact top-level key set. Extra keys are a different schema wearing this one's number. */
+export const RECORD_KEYS = ["schema", "status", "agy_version", "recorded_at", "checks"];
+
 /** The committed record's path: plugin-relative, with a test-only override seam. */
 export function gateRecordPath(env = process.env) {
   if (env.VIBE_SUITE_AGY_GATE_FILE) return env.VIBE_SUITE_AGY_GATE_FILE;
@@ -60,7 +63,37 @@ export function resolveAgyGate(record) {
   if (record.schema !== GATE_SCHEMA) {
     return { passed: false, reason: `unknown gate schema: ${record.schema}`, checks: {} };
   }
-  const checks = typeof record.checks === "object" && record.checks !== null ? record.checks : {};
+  // Exact shape, both levels. A record carrying unknown keys, or a check carrying unknown fields, is
+  // not this schema — and a predicate that shrugs at unrecognised content is how a "passed" record
+  // ends up meaning something nobody verified.
+  const keys = Object.keys(record).sort();
+  const expected = [...RECORD_KEYS].sort();
+  if (keys.length !== expected.length || keys.some((key, i) => key !== expected[i])) {
+    return { passed: false, reason: `record keys are ${keys.join(",")}, expected ${expected.join(",")}`, checks: {} };
+  }
+  if (typeof record.checks !== "object" || record.checks === null || Array.isArray(record.checks)) {
+    return { passed: false, reason: "checks is not an object", checks: {} };
+  }
+  const checks = record.checks;
+  const checkNames = Object.keys(checks).sort();
+  const expectedChecks = [...MANDATORY_CHECKS].sort();
+  if (checkNames.length !== expectedChecks.length
+      || checkNames.some((name, i) => name !== expectedChecks[i])) {
+    return { passed: false, reason: `unexpected check set: ${checkNames.join(",")}`, checks };
+  }
+  for (const name of MANDATORY_CHECKS) {
+    const entry = checks[name];
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return { passed: false, reason: `check '${name}' is not an object`, checks };
+    }
+    const fields = Object.keys(entry).sort();
+    if (fields.length !== 2 || fields[0] !== "note" || fields[1] !== "state") {
+      return { passed: false, reason: `check '${name}' has fields ${fields.join(",")}, expected note,state`, checks };
+    }
+    if (typeof entry.note !== "string") {
+      return { passed: false, reason: `check '${name}' has a non-string note`, checks };
+    }
+  }
   for (const name of MANDATORY_CHECKS) {
     const state = checks[name]?.state;
     if (!CHECK_STATES.has(state)) {

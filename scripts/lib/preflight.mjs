@@ -252,8 +252,12 @@ export async function probeAgy(deps = {}) {
     smoke = "timeout";
   } else if (smokeOutcome.spawnFailed) {
     smoke = "spawn-failed";
+  } else if (smokeOutcome.groupReaped !== undefined && smokeOutcome.groupReaped !== true) {
+    smoke = "reap-failed";                // the group survived escalation: not a healthy lane
   } else if ((smokeOutcome.stdout ?? "").trim()) {
-    auth = "api-key";                     // reached the service and answered; the mode is not exposed
+    // The service answered, but agy exposes no auth MODE. Reporting `api-key` would be inventing an
+    // observation; `unknown` is the true one.
+    auth = "unknown";
     smoke = "ok";
   }
   if (signedOut) smoke = "turn-failed";

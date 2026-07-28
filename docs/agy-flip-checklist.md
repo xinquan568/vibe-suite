@@ -17,13 +17,31 @@ model that says "I did not write the file" is not evidence that it could not.
 **`not_passed`** — agy 1.1.2 is installed in the authoring environment but **unauthenticated**.
 The invocation surface is confirmed; enforcement and failure semantics are not:
 
+The states below are what the **committed record actually holds** after running
+`scripts/agy-contract-probe.mjs` against the real binary — not what the draft of this file predicted:
+
 | Check | State | Why |
 |---|---|---|
-| `headless_invocation` | passed | `agy --print <prompt>` is the documented non-interactive one-shot |
-| `timeout_kill` | passed | our detached process-group kill, proven against a signal-ignoring fixture |
-| `read_only_write_denied` | not_verified | needs an authenticated turn that *attempts* a write |
-| `failure_signature` | not_verified | only the unauthenticated signature is known |
-| `quota_signature` | not_verified | no authenticated session, so no quota response observed |
+| `headless_invocation` | **failed** | the probe's own call was answered with an OAuth prompt, not a response. (`agy --print` *is* the documented one-shot form; that is a fact about the surface, not an observation of it working here.) |
+| `timeout_kill` | passed | an over-deadline invocation was killed and its process group confirmed gone |
+| `read_only_write_denied` | not_verified | **and it cannot currently pass at all — see below** |
+| `failure_signature` | not_verified | only the unauthenticated signature is known; no authenticated failure could be provoked |
+| `quota_signature` | not_verified | no authenticated session, so no quota response was observed |
+
+### `read_only_write_denied` cannot be passed on today's agy
+
+A denial only means something if the **tooling** reports it. agy offers no tooling-only channel —
+no `--json`, no structured event stream, no denial log tied to the attempted path — so everything
+arrives on the same stdout the model writes to. Any phrase we agreed to accept as proof of a denial,
+the model can simply emit; the probe's adversarial test exercises exactly that. And the sentinel
+file's absence cannot substitute, because a model that never tried to write also leaves no file.
+
+So the probe's denial-signature set is **deliberately empty** and this check returns `not_verified`
+for every input. Two honest routes to `passed` exist, and neither is an inference:
+
+1. A future agy that emits a **provenance-bearing denial event** tied to the attempted path.
+2. An **operator-signed manual verification** — a named human recording that they watched a write be
+   refused, with the evidence. A decision someone owns, never something the probe concludes.
 
 ## Before the flip — every item, in order
 

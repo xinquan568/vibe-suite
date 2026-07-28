@@ -107,3 +107,24 @@ test("the shipped cross-model audit default is still codex", () => {
   assert.ok(/pre-gate default\s*\|\s*`?codex`?/.test(partial),
     "the staged default must read codex while the gate is shut");
 });
+
+test("extra and malformed fields fail closed — an unrecognised record is not this schema", () => {
+  const withExtraTopLevel = { ...allPassed(), unexpected: true };
+  assert.equal(resolveAgyGate(withExtraTopLevel).passed, false, "extra top-level key must not pass");
+
+  const withExtraCheck = allPassed();
+  withExtraCheck.checks.invented_check = { state: "passed", note: "" };
+  assert.equal(resolveAgyGate(withExtraCheck).passed, false, "extra check must not pass");
+
+  const withExtraField = allPassed();
+  withExtraField.checks.timeout_kill = { state: "passed", note: "", forced: true };
+  assert.equal(resolveAgyGate(withExtraField).passed, false, "extra check field must not pass");
+
+  const nonStringNote = allPassed();
+  nonStringNote.checks.timeout_kill = { state: "passed", note: 42 };
+  assert.equal(resolveAgyGate(nonStringNote).passed, false);
+
+  const missingTopLevel = allPassed();
+  delete missingTopLevel.agy_version;
+  assert.equal(resolveAgyGate(missingTopLevel).passed, false, "a missing key is also a shape change");
+});

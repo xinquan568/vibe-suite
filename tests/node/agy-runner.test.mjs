@@ -154,3 +154,14 @@ test("an oversized prompt fails CLOSED — no truncation, no dispatch, no record
   assert.match(result.stderr, /silently change the scope/);
   assert.equal(jobCount(dir), 0, "a refused prompt must leave no record");
 });
+
+test("an unconfirmed process-group reap is terminal, not a completed job", async () => {
+  // The classifier is unit-reachable, and this is the one property a fixture cannot fake: the
+  // runner must refuse to call a job completed when its group may still be alive.
+  const { classifyOutput } = await import("../../scripts/agy-runner.mjs");
+  assert.deepEqual(classifyOutput({ stdout: "analysis\n", groupReaped: false }),
+    { status: "failed", reason: "reap-failed" });
+  assert.equal(classifyOutput({ stdout: "analysis\n", groupReaped: true }).status, "completed");
+  assert.equal(classifyOutput({ stdout: "analysis\n" }).status, "completed",
+    "callers that report no reap state at all (unit paths) are unaffected");
+});

@@ -1,5 +1,5 @@
 ---
-description: "Probe external-engine readiness: codex version, auth mode, exec smoke, and model discovery (dynamic, never hardcoded); agy column pending until E1.7. No arguments."
+description: "Probe external-engine readiness for both lanes: version, auth mode, exec smoke, and dynamic model discovery (never hardcoded). The agy lane reports as pending while its contract gate is shut. No arguments."
 argument-hint: "[--json]"
 ---
 

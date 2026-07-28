@@ -25,6 +25,7 @@
 // **Node floor: 18.** No top-level await.
 
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { agyGate } from "./lib/agy-gate.mjs";
 import { loadConfig } from "./lib/config-bridge.mjs";
 import { runWithDeadline } from "./lib/process.mjs";
@@ -89,9 +90,16 @@ function resolveTimeout(raw) {
 }
 
 /** Classify agy's plain-text output. The exit code is deliberately not consulted. */
-export function classifyOutput({ stdout = "", stderr = "", timedOut = false, spawnFailed = false }) {
+export function classifyOutput(outcome) {
+  const { stdout = "", stderr = "", timedOut = false, spawnFailed = false, groupReaped } = outcome ?? {};
   if (spawnFailed) return { status: "failed", reason: "agy-not-found" };
   if (timedOut) return { status: "timed_out", reason: "deadline exceeded" };
+  // Only a CONFIRMED reap counts (the vibe-16 rule, applied here too): a job whose process group
+  // survived escalation may have left an OAuth helper or a model turn running, and calling that
+  // "completed" would report success over an unbounded process.
+  if (groupReaped !== undefined && groupReaped !== true) {
+    return { status: "failed", reason: "reap-failed" };
+  }
   const text = `${stdout}\n${stderr}`.toLowerCase();
   if (text.includes("authentication required") || text.includes("please sign in")) {
     return { status: "failed", reason: "unauthenticated" };
@@ -174,9 +182,13 @@ async function main() {
   return final.status === "completed" ? 0 : 1;
 }
 
-main()
-  .then((code) => { process.exitCode = code; })
-  .catch((error) => {
-    process.stderr.write(`agy-runner: ${error?.stack ?? error}\n`);
-    process.exitCode = 1;
-  });
+// Run ONLY as a script. The contract probe imports `classifyOutput` from here, and an import that
+// executes main() makes every importing test file fail on a usage error it never asked for.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main()
+    .then((code) => { process.exitCode = code; })
+    .catch((error) => {
+      process.stderr.write(`agy-runner: ${error?.stack ?? error}\n`);
+      process.exitCode = 1;
+    });
+}

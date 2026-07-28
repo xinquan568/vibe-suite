@@ -60,7 +60,12 @@ function exitCodeFor(rows) {
   for (const row of rows) {
     if (row.available === null) continue;              // pending never counts against
     if (row.available !== true) return 1;
-    if (row.auth === "unknown" || row.version === "unknown") return 1;   // degraded probe
+    // A degraded probe is one that FAILED TO LEARN something knowable. `auth: "unknown"` means that
+    // for codex, which exposes its auth mode — but agy exposes none, so `unknown` there is the
+    // truthful terminal answer, not a failure to look. Treating them alike would fail a preflight
+    // over a fact that cannot be discovered.
+    if (row.version === "unknown") return 1;
+    if (row.engine !== "agy" && row.auth === "unknown") return 1;
   }
   return 0;
 }

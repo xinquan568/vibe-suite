@@ -22,16 +22,20 @@
 
 export const UNREACHABLE_REASONS = new Set(["agy-not-found", "unauthenticated", "quota", "deadline exceeded"]);
 
-export const EXIT = { ok: 0, manual: 3 };
+export const EXIT = { ok: 0, refused: 2, manual: 3 };
 
-/** Is this agy outcome an "unreachable" class (hand off) or a usable/unusable answer? */
+/**
+ * Is this agy outcome an "unreachable" class (hand off, with the header) or an answer that was
+ * simply unusable (hand off, quietly)?
+ *
+ * **Any non-completion counts as unreachable.** The four-key result line the runners emit carries no
+ * `error` field, so a caller reading only that line cannot know *why* a job failed — and guessing
+ * "it probably answered badly" would suppress the disclosure a failed engine deserves. Failing
+ * toward disclosure is the safe direction: the worst case is a header the operator did not need.
+ */
 export function isUnreachable(outcome) {
   if (!outcome) return true;
-  if (outcome.status === "timed_out") return true;
-  if (outcome.status !== "completed") {
-    return UNREACHABLE_REASONS.has(outcome.error) || outcome.error === null;
-  }
-  return false;
+  return outcome.status !== "completed";
 }
 
 const usable = (outcome) => outcome?.status === "completed" && String(outcome.rawOutput ?? "").trim() !== "";
@@ -41,15 +45,25 @@ const usable = (outcome) => outcome?.status === "completed" && String(outcome.ra
  * or null when the engine is not installed at all; `deps.emitHeader` receives the diagnostic.
  */
 export async function runWithFallback(deps) {
-  const { runAgy, runCodex, emitHeader } = deps;
+  const { runAgy, runCodex, emitHeader, gate } = deps;
+
+  // The gate is a REQUIRED dependency, checked before anything is dispatched. Documenting that this
+  // chain is post-graduation-only and then calling runAgy unconditionally is how the round-1 code
+  // claimed a rule it did not enforce.
+  if (gate?.passed !== true) {
+    return {
+      outcome: "refused", result: null, header: false, exitCode: EXIT.refused,
+      reason: `the agy lane is gated shut — ${gate?.reason ?? "no gate verdict supplied"}`,
+    };
+  }
 
   const agy = await runAgy();
   if (usable(agy)) return { outcome: "agy", result: agy, header: false, exitCode: EXIT.ok };
 
   const unreachable = isUnreachable(agy);
   if (unreachable) {
-    emitHeader(`agy is unreachable (${agy?.error ?? "not installed"}) — handing off to codex. `
-      + `Check the lane with /vibe-suite:preflight.`);
+    emitHeader(`agy is unreachable (${agy?.error ?? agy?.status ?? "not installed"}) — handing off `
+      + `to codex. Check the lane with /vibe-suite:preflight.`);
   }
 
   const codex = await runCodex();
@@ -60,13 +74,13 @@ export async function runWithFallback(deps) {
     };
   }
 
-  emitHeader(`codex is unreachable too (${codex?.error ?? "not installed"}) — no engine could run `
-    + `this analysis. Install or authenticate one, or run the analysis in-session.`);
+  emitHeader(`codex is unreachable too (${codex?.error ?? codex?.status ?? "not installed"}) — no `
+    + `engine could run this analysis. Install or authenticate one, or run it in-session.`);
   return {
     outcome: "manual",
     result: null,
     header: true,
     exitCode: EXIT.manual,
-    signal: { fallback: "manual", reason: codex?.error ?? "no engine available" },
+    signal: { fallback: "manual", reason: codex?.error ?? codex?.status ?? "no engine available" },
   };
 }

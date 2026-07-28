@@ -324,3 +324,16 @@ test("agy absent: unavailable under an open gate, pending under a shut one", asy
   assert.equal(shut.available, null);
   assert.deepEqual(Object.keys(shut), ROW_KEYS, "the frozen shape holds on every path");
 });
+
+test("agy: an unconfirmed reap is not a healthy lane, and auth is never invented", async () => {
+  const reapFailed = await probeAgy({
+    run: agyRun({ ...HEALTHY, print: { stdout: "ok\n", groupReaped: false } }),
+    gate: GATE_OPEN, env: {},
+  });
+  assert.equal(reapFailed.smoke, "reap-failed");
+  assert.equal(reapFailed.available, false);
+
+  const healthy = await probeAgy({ run: agyRun(HEALTHY), gate: GATE_OPEN, env: {} });
+  assert.equal(healthy.auth, "unknown",
+    "agy exposes no auth mode — reporting `api-key` would be inventing an observation");
+});

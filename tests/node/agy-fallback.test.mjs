@@ -13,17 +13,41 @@ const done = (engine, output = "analysis") =>
 const failed = (error) => ({ jobId: "job_x", status: "failed", threadId: null, rawOutput: "", error });
 const timedOut = () => ({ jobId: "job_t", status: "timed_out", threadId: null, rawOutput: "", error: "deadline exceeded" });
 
-function harness({ agy, codex }) {
+const GATE_OPEN = { passed: true };
+
+function harness({ agy, codex, gate = GATE_OPEN }) {
   const headers = [];
+  const calls = [];
   return {
-    headers,
+    headers, calls,
     deps: {
-      runAgy: async () => agy,
-      runCodex: async () => codex,
+      gate,
+      runAgy: async () => { calls.push("agy"); return agy; },
+      runCodex: async () => { calls.push("codex"); return codex; },
       emitHeader: (text) => headers.push(text),
     },
   };
 }
+
+test("PRE-GATE: the chain refuses before dispatching anything at all", async () => {
+  const { deps, calls, headers } = harness({
+    agy: done("agy"), codex: done("codex"),
+    gate: { passed: false, reason: "check 'read_only_write_denied' is not_verified" },
+  });
+  const outcome = await runWithFallback(deps);
+  assert.equal(outcome.outcome, "refused");
+  assert.equal(outcome.exitCode, 2);
+  assert.match(outcome.reason, /gated shut/);
+  assert.deepEqual(calls, [], "a gated lane must not dispatch to any engine");
+  assert.deepEqual(headers, [], "refusal is not an unreachability disclosure");
+});
+
+test("the gate is a REQUIRED dependency: a missing verdict refuses", async () => {
+  const { deps, calls } = harness({ agy: done("agy"), codex: done("codex"), gate: null });
+  const outcome = await runWithFallback(deps);
+  assert.equal(outcome.outcome, "refused");
+  assert.deepEqual(calls, [], "no verdict means no permission");
+});
 
 test("agy answers: its result is the caller's, and no header is emitted", async () => {
   const { deps, headers } = harness({ agy: done("agy"), codex: done("codex") });
@@ -69,10 +93,12 @@ test("both unreachable: a stable manual signal and a distinct exit code", async 
   assert.equal(headers.length, 2, "both hand-offs are disclosed");
 });
 
-test("the unreachable classification is explicit, not incidental", () => {
+test("any non-completion is unreachable — the result line cannot tell us why", () => {
   assert.equal(isUnreachable(null), true);
   assert.equal(isUnreachable(timedOut()), true);
   assert.equal(isUnreachable(failed("quota")), true);
+  assert.equal(isUnreachable({ status: "failed" }), true,
+    "the four-key line carries no `error`, so a bare failure must still disclose");
   assert.equal(isUnreachable(done("agy")), false);
   assert.equal(isUnreachable({ status: "completed", rawOutput: "" }), false,
     "an empty answer is unusable, not unreachable — a different row of the table");

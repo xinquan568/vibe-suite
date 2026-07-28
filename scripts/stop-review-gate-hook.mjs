@@ -32,7 +32,8 @@
 // **Node floor: 18.** No top-level await.
 
 import { spawnSync } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -84,7 +85,7 @@ function readStdin() {
  * non-zero exit is information rather than a fault: an unborn repository has no HEAD to diff, which
  * simply means everything is untracked.
  */
-function git(cwd, args, { allowFailure = false } = {}) {
+function git(cwd, args, { allowFailureStatus = null } = {}) {
   const timeout = Math.min(GIT_TIMEOUT_MS, Math.max(1_000, remainingMs()));
   const result = spawnSync("git", args, {
     cwd, encoding: "utf8", timeout, maxBuffer: GIT_MAX_BUFFER,
@@ -97,7 +98,10 @@ function git(cwd, args, { allowFailure = false } = {}) {
   if (result.error) throw new Indeterminate(`git ${args[0]} failed: ${result.error.message}`);
   if (result.signal) throw new Indeterminate(`git ${args[0]} timed out`);
   if (result.status !== 0) {
-    if (allowFailure) return null;
+    // Only the ONE anticipated non-zero is information; every other status is a fault. `git
+    // rev-parse --verify --quiet HEAD` exits 1 in an unborn repository and 128 outside a
+    // repository — collapsing both would turn "this is not a git repo" into "no commits yet".
+    if (allowFailureStatus !== null && result.status === allowFailureStatus) return null;
     throw new Indeterminate(`git ${args[0]} exited ${result.status}`);
   }
   return result.stdout;
@@ -117,9 +121,13 @@ function collectDiff(cwd) {
   if (status.trim()) parts.push(`## git status --porcelain\n${status}`);
 
   // An unborn repository (no commits yet) has no HEAD: not a failure, just nothing tracked.
-  const head = git(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"], { allowFailure: true });
+  const head = git(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"], { allowFailureStatus: 1 });
   if (head === null) {
-    parts.push("## git diff HEAD\n(no commits yet — every file listed below is new)");
+    // No commits yet. Staged files are already TRACKED, so `ls-files --others` below will not show
+    // them — their content lives in the index and only `--cached` reaches it.
+    const staged = git(cwd, ["diff", "--cached", "--no-textconv", "--no-ext-diff"]);
+    parts.push("## git diff (no commits yet — every file is new)"
+      + (staged.trim() ? `\n${staged}` : "\n(nothing staged)"));
   } else {
     const tracked = git(cwd, ["diff", "--no-textconv", "--no-ext-diff", "HEAD"]);
     if (tracked.trim()) parts.push(`## git diff HEAD\n${tracked}`);
@@ -238,15 +246,25 @@ function main() {
   const left = remainingMs();
   if (left <= 5_000) return applyFailPolicy(gate, "no time left in the hook budget to review");
 
+  // The prompt goes in a FILE. As argv it is one ~400 KB argument, which exceeds the OS limit on
+  // Linux (spawnSync E2BIG) while passing on macOS — a platform-dependent gate failure.
+  const scratch = mkdtempSync(path.join(tmpdir(), "vibe-stop-gate-"));
+  const promptFile = path.join(scratch, "prompt.md");
+  writeFileSync(promptFile, prompt, "utf8");
+
   const args = [RUNNER, "--kind", "stop-gate", "--sandbox", "read-only",
-    "--timeout-ms", String(Math.max(5_000, left - 10_000))];
+    "--timeout-ms", String(Math.max(5_000, left - 10_000)), "--prompt-file", promptFile];
   if (gate.model) args.push("--model", gate.model);
   else args.push("--no-model");                                        // backend default (P9)
-  args.push("--", prompt);
 
-  const dispatched = spawnSync(process.execPath, args, {
-    cwd, encoding: "utf8", timeout: Math.max(5_000, remainingMs()), maxBuffer: OUTPUT_MAX_BUFFER,
-  });
+  let dispatched;
+  try {
+    dispatched = spawnSync(process.execPath, args, {
+      cwd, encoding: "utf8", timeout: Math.max(5_000, remainingMs()), maxBuffer: OUTPUT_MAX_BUFFER,
+    });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
   if (dispatched.error) {
     return applyFailPolicy(gate, `the review job could not run (${dispatched.error.message})`);
   }

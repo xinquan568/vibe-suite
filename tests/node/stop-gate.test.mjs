@@ -68,6 +68,9 @@ function runHook(dir, { fixture = null, input = {}, probe = null, env = {} } = {
 }
 
 const decisionOf = (result) => (result.stdout.trim() ? JSON.parse(result.stdout.trim()) : null);
+/** The prompt the engine actually received. It travels in a file, so argv's tail is what the
+ *  runner passed on — the fixtures record their own argv, whose last token is the prompt text. */
+const promptSentTo = (probe) => JSON.parse(readFileSync(probe, "utf8")).argv.at(-1);
 const jobCount = (dir) => {
   try {
     return readdirSync(jobsDir(dir)).filter((n) => /^job_[0-9a-f]{20}\.json$/.test(n)).length;
@@ -96,7 +99,7 @@ test("enabled: a seeded defect in an UNTRACKED file blocks — and only because 
   assert.equal(decision.decision, "block");
   assert.ok(decision.reason.includes("seeded defect"), decision.reason);
   // The fixture allows unless the marker reached it: blocking IS the content-delivery proof.
-  const sent = JSON.parse(readFileSync(probe, "utf8")).argv.at(-1);
+  const sent = promptSentTo(probe);
   assert.ok(sent.includes(MARKER), "the untracked file's content must reach the reviewer");
   assert.ok(sent.includes("new-defect.js"));
 });
@@ -112,7 +115,7 @@ test("untracked collection: spaced names included, symlinks and outside targets 
   const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
   const result = runHook(dir, { fixture: "gate-allower.mjs", probe });
   assert.equal(result.status, 0);
-  const sent = JSON.parse(readFileSync(probe, "utf8")).argv.at(-1);
+  const sent = promptSentTo(probe);
   assert.ok(sent.includes("SPACED-CONTENT-PRESENT"), "spaced filenames must be collected");
   assert.ok(!sent.includes("OUTSIDE-SECRET-MUST-NOT-LEAK"),
     "a symlink must never smuggle outside content into the prompt");
@@ -232,7 +235,7 @@ test("a LARGE tracked diff is read, not dropped — and its cap is disclosed rat
   const decision = decisionOf(result);
   assert.ok(decision, `a large tracked diff must still be reviewed, got: ${result.stderr}`);
   assert.equal(decision.decision, "block");
-  const sent = JSON.parse(readFileSync(probe, "utf8")).argv.at(-1);
+  const sent = promptSentTo(probe);
   assert.ok(sent.includes("[prompt truncated at the review cap]"),
     "a capped prompt must say so — a truncated review that looks complete is the worse failure");
   assert.ok(Buffer.byteLength(sent, "utf8") < 500_000, "the prompt stays bounded in BYTES");
@@ -292,7 +295,7 @@ test("a hostile textconv driver cannot execute or inject outside content", () =>
 
   const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
   runHook(dir, { fixture: "gate-allower.mjs", probe });
-  const sent = JSON.parse(readFileSync(probe, "utf8")).argv.at(-1);
+  const sent = promptSentTo(probe);
   assert.ok(!sent.includes("TEXTCONV-LEAKED-SECRET"),
     "a repository-configured textconv driver must never run for the gate's diff");
 });
@@ -304,6 +307,37 @@ test("the total untracked cap is disclosed when many files exhaust it", () => {
   }
   const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
   runHook(dir, { fixture: "gate-allower.mjs", probe });
-  const sent = JSON.parse(readFileSync(probe, "utf8")).argv.at(-1);
+  const sent = promptSentTo(probe);
   assert.ok(sent.includes("total cap reached"), "exhausting the total cap must be disclosed");
+});
+
+test("unborn repository: STAGED content is reviewed too (ls-files --others cannot see it)", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "stop-gate-staged-"));
+  spawnSync("git", ["-C", dir, "init", "-q"], { encoding: "utf8" });
+  spawnSync("python3", ["-c",
+    `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(STORE))}); ` +
+    `import store; store.Store(${JSON.stringify(dir)}).set("gate.stop_review_gate", True)`,
+  ], { encoding: "utf8" });
+  seedDefect(dir, "staged-defect.js");
+  spawnSync("git", ["-C", dir, "add", "-A"], { encoding: "utf8" });   // now TRACKED, not "other"
+
+  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const result = runHook(dir, { fixture: "gate-marker.mjs", probe });
+  const decision = decisionOf(result);
+  assert.ok(decision, `staged content in an unborn repo must be reviewed, got: ${result.stderr}`);
+  assert.ok(promptSentTo(probe).includes(MARKER),
+    "staged files are tracked — only `git diff --cached` reaches their content");
+});
+
+test("outside a git repository, rev-parse's 128 is a fault, not 'no commits yet'", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "stop-gate-notrepo-"));
+  spawnSync("python3", ["-c",
+    `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(STORE))}); ` +
+    `import store; store.Store(${JSON.stringify(dir)}).set("gate.stop_review_gate", True)`,
+  ], { encoding: "utf8" });
+  seedDefect(dir);
+  const result = runHook(dir, { fixture: "gate-marker.mjs" });
+  assert.equal(decisionOf(result), null);
+  assert.ok(result.stderr.includes("could not be collected"),
+    `a non-repository must be indeterminate, not an unborn repo: ${result.stderr}`);
 });

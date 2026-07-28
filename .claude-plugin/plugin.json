@@ -16,7 +16,8 @@
     "codex"
   ],
   "commands": [
-    "./commands/jobs.md"
+    "./commands/jobs.md",
+    "./commands/preflight.md"
   ],
   "agents": [],
   "skills": [

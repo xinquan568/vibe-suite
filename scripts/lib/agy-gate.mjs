@@ -40,10 +40,13 @@ const CANONICAL_RECORD_KEYS = Object.freeze([
   "schema", "status", "agy_version", "recorded_at", "checks",
 ]);
 
-/** Frozen copies for callers that need to enumerate; mutating them cannot reach the predicate. */
-export const MANDATORY_CHECKS = CANONICAL_CHECKS;
-export const CHECK_STATES = Object.freeze(new Set(CANONICAL_STATES));
-export const RECORD_KEYS = CANONICAL_RECORD_KEYS;
+// Frozen COPIES for callers that enumerate — not aliases of the canonical arrays, so even a
+// successful mutation of an export cannot reach the predicate. `CHECK_STATES` is an array rather
+// than a Set on purpose: `Object.freeze` does not stop `Set.prototype.add`, so a frozen Set is a
+// false reassurance.
+export const MANDATORY_CHECKS = Object.freeze([...CANONICAL_CHECKS]);
+export const CHECK_STATES = Object.freeze([...CANONICAL_STATES]);
+export const RECORD_KEYS = Object.freeze([...CANONICAL_RECORD_KEYS]);
 
 /**
  * The committed record's path: plugin-relative, with an override seam.

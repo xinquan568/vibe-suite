@@ -89,15 +89,18 @@ test("unreadable, malformed and wrong-schema records are closed gates, never thr
   assert.equal(resolveAgyGate(bad).passed, false, "an unknown check state is malformed");
 });
 
-test("the flip needs more than a record: the checklist and the doctor notice must exist", () => {
-  // A single edited file must not be able to graduate the lane.
-  const checklist = path.join(REPO_ROOT, "docs", "agy-flip-checklist.md");
-  const text = readFileSync(checklist, "utf8");
-  assert.ok(text, "docs/agy-flip-checklist.md must exist before any flip is possible");
+test("the flip PROCEDURE is documented — coordination the resolver does not enforce", () => {
+  // Deliberately not claiming enforcement: `resolveAgyGate` never reads this file, so a single
+  // edited record WOULD graduate the lane. What this asserts is that the procedure a human is
+  // expected to follow exists and is complete — and the checklist itself says it is social, not
+  // mechanical, because an earlier version of this test implied otherwise.
+  const text = readFileSync(path.join(REPO_ROOT, "docs", "agy-flip-checklist.md"), "utf8");
   assert.ok(text.includes("doctor notice"), "the checklist must specify the doctor notice");
   for (const name of MANDATORY_CHECKS) {
     assert.ok(text.includes(name), `the checklist must enumerate ${name}`);
   }
+  assert.ok(text.includes("coordination, not enforcement"),
+    "the checklist must say plainly that it is not enforced by the resolver");
 });
 
 test("the shipped cross-model audit default is still codex", () => {

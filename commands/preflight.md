@@ -7,7 +7,7 @@ argument-hint: "[--json]"
 
 Answers, before any command trusts an external engine: **is the lane usable from here**, and
 **what models does it offer**. Codex is probed live; the agy column is a pending slot until the agy
-contract lands (E1.7, #17).
+contract gate passes — see `docs/agy-flip-checklist.md`.
 
 ## What to do
 

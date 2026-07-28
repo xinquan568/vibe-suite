@@ -9,7 +9,6 @@
 // | `agy`              | agy reachable and completed                      | agy's result line, no header   | 0    |
 // | `codex`            | agy UNREACHABLE (missing / unauthenticated /     | header on stderr, then codex's | 0    |
 // |                    | timed out / quota) — an unreachable class         | result line                    |      |
-// | `codex-no-header`  | agy completed but its output is unusable          | codex's result line, NO header | 0    |
 // | `manual`           | codex unreachable too                            | header + a stable JSON signal  | 3    |
 //
 // `fallback.md` also describes a quiet hand-off for an engine that answered *uselessly*. That state

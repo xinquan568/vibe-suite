@@ -102,5 +102,5 @@ test("any non-completion is unreachable — the result line cannot tell us why",
     "the four-key line carries no `error`, so a bare failure must still disclose");
   assert.equal(isUnreachable(done("agy")), false);
   assert.equal(isUnreachable({ status: "completed", rawOutput: "" }), false,
-    "an empty answer is unusable, not unreachable — a different row of the table");
+    "completion is the criterion: there is no separate usability judgement to make here");
 });

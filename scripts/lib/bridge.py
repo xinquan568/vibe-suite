@@ -267,6 +267,24 @@ def json_hook_entry_upsert(doc, event, entry):
     return doc
 
 
+def text_block_has(existing, name, open_delim="#", close_delim=""):
+    return bool(_block_re(name, open_delim, close_delim).search(existing))
+
+
+def text_block_remove(existing, name, open_delim="#", close_delim=""):
+    """Remove the owned region and the blank line that separated it, leaving user text untouched."""
+    without = _block_re(name, open_delim, close_delim).sub("", existing)
+    return without.replace("\n\n\n", "\n\n")
+
+
+def md_block_has(existing, name):
+    return text_block_has(existing, name, "<!--", " -->")
+
+
+def md_block_remove(existing, name):
+    return text_block_remove(existing, name, "<!--", " -->")
+
+
 def toml_server_upsert(existing, name, body):
     """`[mcp_servers.<name>]` plus its subtables. A subtable alone is not a registration —
     `migrate-sentinels.sh:151-160` already encodes that distinction, and a codec that ignored it

@@ -146,6 +146,22 @@ class TestComposition(InitCase):
         self.assertIn("row 4", result.stderr)
         self.assertIn("row 7", result.stderr)
 
+    def test_rows_eight_and_ten_are_reported_and_change_nothing(self):
+        """Row 8's paths are already identical and row 10 is a recommendation, so the only evidence
+        either ran is init's output — and the only correct behaviour is to touch nothing."""
+        (self.ws / "runs").mkdir()
+        (self.ws / "runs" / "keep.json").write_text("{}\n", encoding="utf-8")
+        (self.ws / ".claude").mkdir(exist_ok=True)
+        (self.ws / ".claude" / "plugins").mkdir(parents=True)
+        (self.ws / ".claude" / "plugins" / "nlpm").mkdir()
+        before = tree(self.ws)
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for rel, value in before.items():
+            self.assertEqual(tree(self.ws)[rel], value, f"{rel} changed; rows 8/10 copy nothing")
+        rows = {f["row"] for f in json.loads(result.stdout)["findings"]}
+        self.assertIn(8, rows, "row 8's finding did not reach init's caller")
+
     def test_pre_existing_new_store_wins_over_legacy(self):
         self.legacy_config()
         (self.ws / ".vibe-suite.md").write_text("---\nengine: claude\n---\n", encoding="utf-8")
@@ -283,7 +299,19 @@ class TestCrashConvergence(InitCase):
         probe = run_init(self.ws, *self.answers(), "--list-checkpoints")
         self.assertEqual(probe.returncode, 0, probe.stderr)
         steps = [s for s in probe.stdout.split() if s]
-        self.assertGreater(len(steps), 3, "no checkpoints to interrupt")
+        self.assertGreaterEqual(len(steps), 12, "checkpoint list shrank")
+
+        # The shape an uninterrupted install produces, to compare every healed run against.
+        clean = Path(tempfile.mkdtemp(prefix="vibe-clean-"))
+        self.addCleanup(shutil.rmtree, clean, ignore_errors=True)
+        self.assertEqual(run_init(clean, *self.answers()).returncode, 0)
+        def normalise(root, snapshot):
+            marker = str(root).encode()
+            return {k: (kind, mode,
+                        blob.replace(marker, b"<WS>") if isinstance(blob, bytes) else blob)
+                    for k, (kind, mode, blob) in snapshot.items()}
+
+        reference = normalise(clean, tree(clean))
 
         for step in steps:
             with self.subTest(step=step):
@@ -296,9 +324,15 @@ class TestCrashConvergence(InitCase):
                                   "--strictness", "standard")
                 self.assertEqual(healed.returncode, 0,
                                  f"re-run after a crash at {step} did not converge: {healed.stderr}")
+                # Converging is not enough: the healed workspace must be the workspace an
+                # uninterrupted run produces, or a crash silently changes what gets installed.
+                self.assertEqual(normalise(ws, tree(ws)), reference,
+                                 f"a crash at {step} healed into a different workspace")
                 again = run_init(ws, "--effort", "medium", "--audit-depth", "mini",
                                  "--strictness", "standard")
                 self.assertEqual(again.returncode, 0)
+                self.assertEqual(normalise(ws, tree(ws)), reference,
+                                 f"the third run after {step} diverged")
 
     def test_history_baseline_is_appended_once_across_runs(self):
         run_init(self.ws, *self.answers())

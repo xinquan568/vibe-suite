@@ -11,17 +11,19 @@ original untouched, and where both stores exist the new one wins. Rollback is de
 
 ## What to do
 
-### 1. Ask the five questions
+### 1. Ask the four questions
 
-Use **AskUserQuestion**, one call, five questions:
+Use **AskUserQuestion**, one call, **four** questions — that is the tool's limit, so the
+sandbox default rides with the effort question rather than taking a slot of its own:
 
 | Question | Options | Becomes |
 |---|---|---|
-| What Codex effort should commands default to? | `low` · `medium` · `high` | `--effort` |
-| What sandbox should Codex run under? | `read-only` · `workspace-write` · `danger-full-access` | `--sandbox` |
+| How much should Codex be trusted by default? | `low` effort, `read-only` · `medium` effort, `read-only` · `high` effort, `workspace-write` | `--effort` + `--sandbox` |
 | How deep should audits run by default? | `mini` (fast) · `full` | `--audit-depth` |
 | How strict is the score gate? | `relaxed` (60) · `standard` (70) · `strict` (80) | `--strictness` |
 | Any paths to skip? | free text, optional | `--skip` |
+
+Pass `--sandbox` explicitly when the operator wants a combination the presets do not offer.
 
 **No question here names a model.** F1.1 asks for Codex *effort* and *sandbox*, and both are enums in
 `.vibe-suite.md`'s schema. Per P9/D6 a model question would ask which **tier** to trust and never

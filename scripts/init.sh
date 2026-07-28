@@ -106,6 +106,8 @@ run_helper() {
 }
 
 # ---- phase 1: survey (read-only) and provenance -------------------------------------------------
+# Survey's findings are its whole product — rows 4, 7, 8 and 10 copy nothing, so an unforwarded
+# report is the same as not having run it. Its JSON goes to init's stdout unchanged.
 run_helper survey.sh
 checkpoint survey
 
@@ -122,7 +124,11 @@ elif [ -n "$resolve_config" ]; then
     # Written only when it would differ. A resumed run carries the same flags as the run before it,
     # and rewriting identical bytes changes mtimes — which is exactly the non-idempotence AC-2's
     # second-run comparison exists to catch.
-    if [ ! -f "$resolution_file" ] || [ "$(cat "$resolution_file")" != "$resolve_config" ]; then
+    # Compared through the same command substitution that reads it, so trailing newlines on either
+    # side cannot make an identical answer look different and rewrite the file on every resume.
+    existing_resolution=""
+    [ -f "$resolution_file" ] && existing_resolution="$(cat "$resolution_file")"
+    if [ "$existing_resolution" != "$(printf '%s' "$resolve_config")" ]; then
         printf '%s\n' "$resolve_config" > "$resolution_file"
     fi
     run_helper migrate-config.sh --resolution "$resolution_file"

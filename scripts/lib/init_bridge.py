@@ -12,7 +12,10 @@ fsync. Two writers stay outside that guarantee and the exclusion is a fact about
 owns its writes.
 """
 
+import base64
+import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -31,6 +34,30 @@ TARGETS = (".gitignore", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".codex/config.t
            ".mcp.json", ".codex/hooks.json", ".vibe-suite.md", ".claude/vibe-history.json")
 
 PROVENANCE = ".vibe-suite-state/install-provenance.json"
+
+
+def _valid_target(entry):
+    """A restore entry must carry what its kind needs, or it is not a restore source.
+
+    An entry naming an expected path is not evidence it can restore that path: a `file` without its
+    bytes or digest, or a `symlink` without a target, would silently restore nothing.
+    """
+    if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+        return False
+    kind = entry.get("kind")
+    if kind == "absent":
+        return True
+    if kind == "symlink":
+        return isinstance(entry.get("link_target"), str)
+    if kind == "file":
+        if not all(isinstance(entry.get(k), str) for k in ("mode", "sha256", "content_b64")):
+            return False
+        try:
+            raw = base64.b64decode(entry["content_b64"], validate=True)
+        except Exception:
+            return False
+        return hashlib.sha256(raw).hexdigest() == entry["sha256"]
+    return False
 
 
 def provenance_open(ws):
@@ -54,8 +81,7 @@ def provenance_open(ws):
         if (not isinstance(existing, dict) or existing.get("schema") != bridge.SCHEMA
                 or not isinstance(existing.get("targets"), list)
                 or not isinstance(existing.get("parents_created"), list)
-                or not all(isinstance(t, dict) and isinstance(t.get("kind"), str)
-                           for t in existing["targets"])
+                or not all(_valid_target(t) for t in existing["targets"])
                 or len(existing["targets"]) != len(TARGETS)
                 or {t["path"] for t in existing["targets"]} != {str(ws / rel) for rel in TARGETS}):
             raise bridge.BridgeError(
@@ -100,19 +126,27 @@ def _split_front(text):
     are a property of the user's file, not an assumption this module gets to make.
     """
     newline = "\r\n" if "\r\n" in text.split("\n", 1)[0] + "\n" else "\n"
-    stripped = text.lstrip("\ufeff")
+    bom = "\ufeff" if text.startswith("\ufeff") else ""
+    stripped = text[len(bom):]
     first = stripped.split("\n", 1)[0].strip()
     if first == "---":
         head_len = stripped.index("\n") + 1
         rest = stripped[head_len:]
+        # Mixed endings are real: a file edited on two platforms can open CRLF and close LF. Both
+        # closers are searched and the *earliest* wins, so a later match cannot swallow the body.
+        best = None
         for candidate in ("\r\n---\r\n", "\n---\n"):
             end = rest.find(candidate)
-            if end != -1:
-                return newline, rest[:end].splitlines(), rest[end + len(candidate):]
-    return newline, [], text
+            if end != -1 and (best is None or end < best[0]):
+                best = (end, candidate)
+        if best:
+            end, candidate = best
+            return bom + newline if bom else newline, rest[:end].splitlines(), \
+                rest[end + len(candidate):]
+    return (bom + newline) if bom else newline, [], text
 
 
-def _verify_config(ws, text):
+def _verify_config(ws, text):  # noqa: D401
     """Validate with the canonical *validating* load, not a bare parse.
 
     `parse_frontmatter` only checks the grammar: it accepts `effort: sonnet` happily, while
@@ -120,14 +154,26 @@ def _verify_config(ws, text):
     have shipped exactly the invalid config this check exists to prevent, so the candidate is written
     to a scratch workspace and loaded the way every downstream consumer loads it.
     """
-    import tempfile
-    with tempfile.TemporaryDirectory() as probe:
-        Path(probe, config_mod.CONFIG_FILENAME).write_text(text, encoding="utf-8")
-        try:
-            config_mod.load(probe)
-        except Exception as exc:
-            raise bridge.BridgeError(
-                f"refusing to write a config the canonical loader rejects: {exc}") from exc
+    # Validated against the **real** workspace: `config.py` resolves path-valued keys against the
+    # root and refuses ones that escape it, so a scratch directory would clear a config the actual
+    # project rejects. The candidate is staged beside the target and removed either way.
+    ws = Path(ws)
+    staged = ws / f".{config_mod.CONFIG_FILENAME}.vibe-candidate"
+    real = ws / config_mod.CONFIG_FILENAME
+    keep = real.read_bytes() if real.is_file() else None
+    try:
+        bridge.write_atomic(ws, staged, text)
+        os.replace(staged, real)
+        config_mod.load(str(ws))
+    except Exception as exc:
+        raise bridge.BridgeError(
+            f"refusing to write a config the canonical loader rejects: {exc}") from exc
+    finally:
+        if keep is None:
+            real.unlink(missing_ok=True)
+        else:
+            real.write_bytes(keep)
+        staged.unlink(missing_ok=True)
 
 
 def _upsert_text(ws, rel, name, body, markdown=False):
@@ -176,7 +222,8 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
     if patterns and not any(line.strip().startswith("skip_patterns:") for line in front):
         front.append("skip_patterns:")
         front.extend(f"  - {pattern}" for pattern in patterns)
-    rendered = newline.join(["---", *front, "---", ""]) + rest
+    bom, sep = (newline[:1], newline[1:]) if newline.startswith("\ufeff") else ("", newline)
+    rendered = bom + sep.join(["---", *front, "---", ""]) + rest
     if rendered != existing:
         _verify_config(ws, rendered)
         bridge.write_atomic(ws, dest, rendered)
@@ -189,8 +236,11 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
         _upsert_text(ws, name, "import", "@AGENTS.md", markdown=True)
     checkpoint("memory")
 
-    _upsert_text(ws, ".codex/config.toml", "codex",
-                 "[mcp_servers.vibe-mcp]\ncommand = \"vibe-suite\"")
+    # Marked `server:vibe-mcp`, the same name `toml_server_has`/`_remove` use. An earlier revision
+    # wrote it under a generic `codex` marker, so the codec that is supposed to manage it could not
+    # find it — the inventory would have been complete and the teardown still incomplete.
+    _upsert_text(ws, ".codex/config.toml", "server:vibe-mcp",
+                 '[mcp_servers.vibe-mcp]\ncommand = "vibe-suite"')
     checkpoint("codex")
 
     _upsert_json(ws, ".mcp.json", lambda d: bridge.json_server_upsert(

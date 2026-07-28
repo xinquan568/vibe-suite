@@ -16,6 +16,7 @@
     "codex"
   ],
   "commands": [
+    "./commands/delegate.md",
     "./commands/jobs.md",
     "./commands/preflight.md"
   ],

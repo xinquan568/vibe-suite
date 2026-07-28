@@ -30,6 +30,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNNER = REPO_ROOT / "scripts" / "codex-runner.mjs"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "fake-codex"
 SHIPPED_MJS = sorted((REPO_ROOT / "scripts").rglob("*.mjs"))
+# The ISC-header rule covers test and fixture .mjs too (E1.2 / vibe-12, round-1 review finding 5) —
+# a rule checked only where it was first applied is a rule that stops being followed.
+CHECKED_MJS = SHIPPED_MJS + sorted((REPO_ROOT / "tests" / "node").glob("*.mjs")) \
+    + sorted((REPO_ROOT / "tests" / "fixtures").rglob("*.mjs"))
 
 STATE_DIRNAME = ".vibe-suite-state"
 RESULT_KEYS = {"jobId", "status", "threadId", "rawOutput"}
@@ -291,7 +295,7 @@ class SourceConventions(unittest.TestCase):
         self.assertTrue(SHIPPED_MJS, "no shipped .mjs found — the other checks would pass vacuously")
 
     def test_isc_headers(self):
-        for path in SHIPPED_MJS:
+        for path in CHECKED_MJS:
             head = path.read_text(encoding="utf-8").splitlines()[:3]
             self.assertTrue(any("SPDX-License-Identifier: ISC" in line for line in head),
                             f"{path.relative_to(REPO_ROOT)}: missing ISC SPDX header in first 3 lines")

@@ -15,7 +15,9 @@
     "workflow",
     "codex"
   ],
-  "commands": [],
+  "commands": [
+    "./commands/jobs.md"
+  ],
   "agents": [],
   "skills": [
     "./skills/vibe-core"

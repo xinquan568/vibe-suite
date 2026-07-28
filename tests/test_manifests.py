@@ -101,27 +101,65 @@ class TestMarketplaceManifest(unittest.TestCase):
         self.assertEqual(source.get("repo"), REPO_SLUG)
 
 
-class TestComponentDirectoryMarkers(unittest.TestCase):
-    """`commands/` and `agents/` are scanned for flat component files, so any `.md` placed
-    directly in them is parsed as a command or agent and must carry frontmatter. Inert markers
-    are used there instead; their explanation lives in the root README's layout table.
-    Regression guard for `claude plugin validate .claude-plugin/plugin.json --strict`.
+class TestComponentRegistration(unittest.TestCase):
+    """`commands/` and `agents/` are scanned for flat component files. Through E1.1 the scaffold
+    asserted these directories held NO bare `.md` at all; E1.2 (vibe-12) ships the first real
+    command, so the guard becomes a consistency contract: every flat `.md` carries frontmatter
+    (`--strict` validation fails without it) and manifest and disk agree in both directions.
+    Subdirectories (`commands/shared/`) are not component-scanned and stay exempt.
     """
 
     SCANNED_DIRS = ("commands", "agents")
 
-    def test_no_bare_markdown_in_scanned_component_dirs(self):
+    def setUp(self):
+        self.manifest = _load(PLUGIN_MANIFEST)
+
+    @staticmethod
+    def _frontmatter(path):
+        text = path.read_text(encoding="utf-8")
+        if not text.startswith("---\n"):
+            return None
+        end = text.find("\n---", 4)
+        return text[4:end] if end != -1 else None
+
+    def test_flat_component_markdown_carries_frontmatter(self):
         for name in self.SCANNED_DIRS:
             directory = REPO_ROOT / name
             if not directory.is_dir():
                 continue
-            stray = sorted(p.name for p in directory.glob("*.md"))
+            for md in sorted(directory.glob("*.md")):
+                with self.subTest(component=f"{name}/{md.name}"):
+                    frontmatter = self._frontmatter(md)
+                    self.assertIsNotNone(
+                        frontmatter,
+                        f"{name}/{md.name} is component-scanned and fails --strict validation "
+                        f"without a frontmatter block")
+                    self.assertIn("description:", frontmatter,
+                                  f"{name}/{md.name}: frontmatter must carry a description")
+
+    def test_manifest_entries_exist_on_disk(self):
+        for key in ("commands", "agents"):
+            for entry in self.manifest.get(key, []):
+                with self.subTest(entry=entry):
+                    self.assertTrue(entry.startswith("./"), f"{key} entry must be repo-relative: {entry}")
+                    self.assertTrue((REPO_ROOT / entry).is_file(), f"{key} entry missing on disk: {entry}")
+
+    def test_flat_component_files_are_registered(self):
+        for name, key in (("commands", "commands"), ("agents", "agents")):
+            directory = REPO_ROOT / name
+            on_disk = {f"./{name}/{p.name}" for p in directory.glob("*.md")} if directory.is_dir() else set()
+            registered = set(self.manifest.get(key, []))
             with self.subTest(directory=name):
                 self.assertEqual(
-                    stray, [],
-                    f"{name}/ is component-scanned: a bare .md there is parsed as a component "
-                    f"and fails --strict validation without frontmatter. Found: {stray}",
-                )
+                    on_disk, registered,
+                    f"{name}/ and plugin.json:{key} disagree — an unregistered command does not "
+                    f"exist to Claude Code, and a registered ghost fails validation")
+
+    def test_at_least_one_command_ships(self):
+        # E1.2 onward this is a repo invariant: the plugin is not command-less. Written before the
+        # implementation landed (TDD RED) and kept as a regression floor.
+        self.assertTrue(self.manifest.get("commands"),
+                        "plugin.json:commands is empty — /vibe-suite:jobs (vibe-12) must be registered")
 
 
 if __name__ == "__main__":

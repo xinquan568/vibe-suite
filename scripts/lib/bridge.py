@@ -71,6 +71,49 @@ def classify(path):
     return "other"
 
 
+def open_dir_chain(root, relative):
+    """Public alias — deletion needs the same one-resolution guarantee writing does."""
+    return _open_dir_chain(root, relative)
+
+
+def lstat_at(root, rel):
+    """`lstat` a workspace-relative path without resolving any component by path."""
+    rel = Path(rel)
+    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        return os.lstat(rel.name, dir_fd=fd)
+    except FileNotFoundError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def unlink_at(root, rel):
+    """Remove a workspace-relative entry, never following a symlink in its path.
+
+    Deleting by path re-resolves every component at call time, so a symlink planted anywhere along it
+    redirects the removal — which is how a teardown deletes a user's file. Resolving the parent once
+    and unlinking relative to that descriptor removes the window.
+    """
+    import stat as _stat
+    rel = Path(rel)
+    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        try:
+            info = os.lstat(rel.name, dir_fd=fd)
+        except FileNotFoundError:
+            return False
+        # A directory needs rmdir, and which error unlink raises on one is platform-dependent —
+        # macOS says PermissionError where Linux says IsADirectoryError. The node type is not.
+        if _stat.S_ISDIR(info.st_mode):
+            os.rmdir(rel.name, dir_fd=fd)
+        else:
+            os.unlink(rel.name, dir_fd=fd)
+        return True
+    finally:
+        os.close(fd)
+
+
 def _open_dir_chain(root, relative):
     """Open `root/relative` by walking one component at a time, each with `O_NOFOLLOW`.
 

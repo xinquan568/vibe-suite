@@ -252,3 +252,51 @@ class TestBlockerRegressions(UnbridgeCase):
         import bridge, unbridge as unbridge_mod
         self.assertIs(unbridge_mod.BLOCKS, bridge.OWNED_BLOCKS,
                       "unbridge keeps its own copy — the W4 defect F1.4 exists to fix")
+
+
+class TestDescriptorRelativeDeletion(UnbridgeCase):
+    """The path layer rewritten around directory descriptors.
+
+    Deleting by path re-resolves every component at call time, so a symlink planted *anywhere* along
+    it redirects the removal. Guarding the final component only — the earlier fix — left the parent
+    open. Resolving the parent once and unlinking relative to that descriptor closes the class
+    rather than the instance.
+    """
+
+    def test_a_symlinked_parent_cannot_redirect_a_deletion(self):
+        outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (outside / "hooks.json").write_text("MINE\n", encoding="utf-8")
+        self.install()
+        shutil.rmtree(self.ws / ".codex")
+        (self.ws / ".codex").symlink_to(outside, target_is_directory=True)
+        self.unbridge("--confirm")
+        self.assertTrue((outside / "hooks.json").is_file(),
+                        "deletion followed a symlinked parent out of the workspace")
+        self.assertEqual((outside / "hooks.json").read_text(encoding="utf-8"), "MINE\n")
+
+    def test_a_symlink_inside_the_state_dir_is_not_followed(self):
+        outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (outside / "keep.txt").write_text("mine\n", encoding="utf-8")
+        self.install()
+        (self.ws / ".vibe-suite-state" / "link").symlink_to(outside / "keep.txt")
+        self.unbridge("--confirm")
+        self.assertTrue((outside / "keep.txt").is_file(),
+                        "a symlink inside the state dir took its target")
+
+    def test_a_directory_is_removed_by_type_not_by_errno(self):
+        """macOS raises PermissionError where Linux raises IsADirectoryError, so the removal has to
+        decide on the node type."""
+        import sys
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import bridge
+        (self.ws / "adir").mkdir()
+        self.assertTrue(bridge.unlink_at(self.ws, "adir"))
+        self.assertFalse((self.ws / "adir").exists())
+
+    def test_unlink_at_reports_a_missing_entry_rather_than_raising(self):
+        import sys
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import bridge
+        self.assertFalse(bridge.unlink_at(self.ws, "never-existed"))

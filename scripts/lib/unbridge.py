@@ -16,6 +16,7 @@ is not what the record claims, before anything is deleted.
 import base64
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -78,7 +79,21 @@ def restore(ws, entry, report):
         raise bridge.BridgeError(
             f"provenance names a path outside the workspace: {entry['path']}")
 
-    kind, actual = entry["kind"], bridge.classify(path)
+    # Classified through the descriptor chain, so a symlinked *parent* cannot make a foreign node
+    # look like ours. `bridge.classify` resolves by path and is unsafe for this decision.
+    rel_probe = str(path.relative_to(ws)) if path.is_relative_to(ws) else None
+    st = bridge.lstat_at(ws, rel_probe) if rel_probe else None
+    if st is None:
+        actual = "absent"
+    elif stat.S_ISLNK(st.st_mode):
+        actual = "symlink"
+    elif stat.S_ISDIR(st.st_mode):
+        actual = "dir"
+    elif stat.S_ISREG(st.st_mode):
+        actual = "file"
+    else:
+        actual = "other"
+    kind = entry["kind"]
     if actual == "symlink" and kind != "symlink":
         # The record says this was a regular file or absent; it is a link now. Acting on it would
         # write or delete through the link, so it is left exactly as it is.
@@ -107,14 +122,14 @@ def restore(ws, entry, report):
             if leftover:
                 report.append(f"{rel}: kept — it still holds entries that are not ours")
                 return
-            path.unlink()
+            bridge.unlink_at(ws, rel)
             report.append(f"{rel}: removed")
             return
         if stripped is not None and stripped.strip():
             bridge.write_atomic(ws, path, stripped)
             report.append(f"{rel}: kept — it holds content beyond the owned block")
         else:
-            path.unlink()
+            bridge.unlink_at(ws, rel)
             report.append(f"{rel}: removed")
         return
 
@@ -185,8 +200,9 @@ def prune(ws, record, report):
         if path is None:
             report.append(f"{raw}: outside the workspace, left alone")
             continue
-        if path.is_dir() and not any(path.iterdir()):
-            path.rmdir()
+        st = bridge.lstat_at(ws, str(path.relative_to(ws)))
+        if st and stat.S_ISDIR(st.st_mode) and not any(path.iterdir()):
+            bridge.unlink_at(ws, str(path.relative_to(ws)))
             report.append(f"{path.relative_to(ws)}/: removed")
 
 
@@ -226,11 +242,8 @@ def main(argv):
         # Depth-first over entries that are themselves not symlinks: a link inside would otherwise
         # be followed and take its target with it.
         for child in sorted(state.rglob("*"), key=lambda c: len(str(c)), reverse=True):
-            if child.is_symlink() or child.is_file():
-                child.unlink()
-            elif child.is_dir():
-                child.rmdir()
-        state.rmdir()
+            bridge.unlink_at(ws, str(child.relative_to(ws)))
+        bridge.unlink_at(ws, ".vibe-suite-state")
         report.append(".vibe-suite-state/: removed")
     print("\n".join(report))
     return 0

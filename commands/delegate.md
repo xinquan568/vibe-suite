@@ -68,10 +68,11 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --kind delegate --sandbox 
 
 ## 5. Verify — never trust
 
-**First, branch on the four-key result's `status` — verification is only for `completed`.** A
-result whose `status` is anything else (`failed`, `timed_out`, `cancelled`) is not an
-implementation to verify; it routes to §6's fallback. Verifying an unchanged workspace after a
-failed job would manufacture a false "nothing changed, looks fine".
+**First, branch on the four-key result's `status` — verification is only for `completed`.**
+`failed` and `timed_out` route to §6's fallback. **`cancelled` is the operator's own stop: report
+it and stop** — re-implementing a plan the operator just cancelled would defy the cancellation,
+so the manual fallback never applies to it. Verifying an unchanged workspace after a failed job
+would manufacture a false "nothing changed, looks fine".
 
 **`--wait` mode (automatic, when `status` is `"completed"`):** run the verification block in the
 target workspace and report what it shows — faithfully; every command's failure fails the block

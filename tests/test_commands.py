@@ -76,18 +76,26 @@ class TestDelegateContentContract(unittest.TestCase):
 
     def test_resolution_ladder_every_branch(self):
         resolve = self._section("## 2. Resolve", "## 3.")
-        self.assertIn("explicit `--sandbox` flag", resolve)
-        self.assertIn("**`workspace-write`**", resolve)
+        # sandbox: user precedence, then delegate's own default — both halves asserted.
+        self.assertIn("explicit `--sandbox` flag from the\n  operator, else **`workspace-write`**",
+                      resolve)
         self.assertIn("not consulted", resolve.lower(),
                       "unattributable config values must not change privileges")
         self.assertIn("reachable **only** via the operator's explicit `--sandbox` flag", resolve)
         self.assertIn("only after an explicit yes add `--confirm-danger`", resolve)
-        self.assertIn("omit both flags", resolve,
-                      "model/effort: pass through the user's flag, otherwise omit")
+        # model/effort: BOTH halves of pass-through-or-omit.
+        self.assertIn("flags through verbatim", resolve)
+        self.assertIn("omit both flags", resolve)
 
     def test_verification_branches_on_status(self):
         verify_section = self._section("## 5. Verify", "## 6.")
         self.assertIn("verification is only for `completed`", verify_section)
+        self.assertIn("`failed` and `timed_out` route to", verify_section)
+        self.assertIn("report\nit and stop", verify_section.replace("**", ""),
+                      "cancelled is the operator's stop — never the manual fallback")
+        self.assertIn("automatic", verify_section, "wait-mode verification is automatic")
+        self.assertIn("apply the same `status` branching", verify_section,
+                      "background mode branches on status too")
         self.assertIn("operator-invoked", verify_section)
 
     def test_fallback_covers_no_terminal_event_and_no_header_case(self):

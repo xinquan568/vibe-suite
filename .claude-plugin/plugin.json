@@ -19,6 +19,7 @@
     "./commands/bug-analyze.md",
     "./commands/continue.md",
     "./commands/delegate.md",
+    "./commands/init.md",
     "./commands/jobs.md",
     "./commands/preflight.md"
   ],

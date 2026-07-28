@@ -43,7 +43,11 @@ const SELF_DIR = path.dirname(fileURLToPath(import.meta.url));
 const RUNNER = path.join(SELF_DIR, "codex-runner.mjs");
 const STORE = path.join(SELF_DIR, "lib", "store.py");
 
-const HOOK_BUDGET_MS = 900_000;          // the harness's Stop timeout, mirrored in hooks.json
+// The harness's Stop timeout, mirrored in hooks.json. The env override only ever SHRINKS the
+// budget; it exists so the deadline behaviour is testable in a second rather than fifteen minutes.
+const HOOK_BUDGET_MS = Number(process.env.VIBE_TEST_GATE_BUDGET_MS) > 0
+  ? Math.min(900_000, Number(process.env.VIBE_TEST_GATE_BUDGET_MS))
+  : 900_000;
 const SHUTDOWN_RESERVE_MS = 20_000;      // always enough left to write our own decision
 const CONFIG_TIMEOUT_MS = 30_000;
 const GIT_TIMEOUT_MS = 60_000;
@@ -58,6 +62,7 @@ const TOTAL_UNTRACKED_CAP = 48_000;      // must fit inside PROMPT_CAP alongside
 const PROMPT_CAP = 96_000;
 const OUTPUT_MAX_BUFFER = 8 * 1024 * 1024;
 const REASON_CAP = 500;
+const DEADLINE_FLOOR_MS = 30_000;        // below this, stop collecting and report, do not guess
 
 const START = Date.now();
 const remainingMs = () => HOOK_BUDGET_MS - (Date.now() - START) - SHUTDOWN_RESERVE_MS;
@@ -153,6 +158,11 @@ function collectDiff(cwd) {
       continue;
     }
     if (budget <= 0) { capReached = true; break; }
+    // The absolute deadline governs this loop as well: a tree with thousands of untracked files
+    // can exhaust the budget in stat/read syscalls that no child-process timeout would ever see.
+    if (remainingMs() <= DEADLINE_FLOOR_MS) {
+      throw new Indeterminate("ran out of hook budget while collecting untracked files");
+    }
     let body;
     try {
       body = readFileSync(full, "utf8");

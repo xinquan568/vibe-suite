@@ -341,3 +341,21 @@ test("outside a git repository, rev-parse's 128 is a fault, not 'no commits yet'
   assert.ok(result.stderr.includes("could not be collected"),
     `a non-repository must be indeterminate, not an unborn repo: ${result.stderr}`);
 });
+
+test("the absolute deadline governs the collection loop, not just the child processes", () => {
+  // A synchronous read/stat loop over a large untracked tree consumes the hook budget without ever
+  // touching a child-process timeout. VIBE_TEST_GATE_BUDGET_MS shrinks the budget so the property
+  // is observable in a second instead of fifteen minutes.
+  const dir = repo({ enabled: true });
+  for (let i = 0; i < 40; i += 1) {
+    writeFileSync(path.join(dir, `bulk-${i}.txt`), "B".repeat(2_000));
+  }
+  const result = runHook(dir, {
+    fixture: "gate-allower.mjs",
+    env: { VIBE_TEST_GATE_BUDGET_MS: "1" },        // no budget left the moment collection starts
+  });
+  assert.equal(result.status, 0);
+  assert.equal(decisionOf(result), null, "fail-open is still the default posture");
+  assert.ok(/budget|could not be collected|no time left/.test(result.stderr),
+    `an exhausted budget must be reported, not guessed: ${result.stderr}`);
+});

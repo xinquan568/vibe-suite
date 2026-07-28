@@ -59,17 +59,41 @@ class TestDelegateContentContract(unittest.TestCase):
         dispatch = self.text.split("<!-- canonical-dispatch -->", 1)[1]
         dispatch = dispatch.split("```", 2)[1]
         self.assertIn("--kind delegate", dispatch)
-        self.assertIn("--sandbox", dispatch)
+        # Resolved values travel as DATA via env parameters, never textual substitution; the
+        # conditional confirmation flag is part of the canonical template, not an ad-hoc addition.
+        self.assertIn('--sandbox "${DELEGATE_SANDBOX:-workspace-write}"', dispatch)
+        self.assertIn('${DELEGATE_EFFORT:+--effort "$DELEGATE_EFFORT"}', dispatch)
+        self.assertIn('${DELEGATE_MODEL:+--model "$DELEGATE_MODEL"}', dispatch)
+        self.assertIn("${DELEGATE_CONFIRM_DANGER:+--confirm-danger}", dispatch)
         self.assertIn('"$(cat', dispatch, "the argv-safe quoted transport is the contract")
         self.assertNotIn("--resume", self.text, "delegate never uses resume inheritance")
+        verify = self.text.split("<!-- canonical-verify -->", 1)[1].split("```", 2)[1]
+        self.assertIn("set -euo pipefail", verify,
+                      "every verification command's failure must fail the block")
+
+    def _section(self, start, end):
+        return self.text.split(start, 1)[1].split(end, 1)[0]
 
     def test_resolution_ladder_every_branch(self):
-        self.assertIn("workspace-write", self.text)
-        # model/effort: pass through the user's flag, otherwise OMIT (the runner resolves config).
-        self.assertIn("omit", self.text.lower())
-        # sandbox config is deliberately not consulted — unattributable values must not escalate.
-        self.assertIn("not consulted", self.text.lower())
-        self.assertIn("danger-full-access", self.text)
+        resolve = self._section("## 2. Resolve", "## 3.")
+        self.assertIn("explicit `--sandbox` flag", resolve)
+        self.assertIn("**`workspace-write`**", resolve)
+        self.assertIn("not consulted", resolve.lower(),
+                      "unattributable config values must not change privileges")
+        self.assertIn("reachable **only** via the operator's explicit `--sandbox` flag", resolve)
+        self.assertIn("only after an explicit yes add `--confirm-danger`", resolve)
+        self.assertIn("omit both flags", resolve,
+                      "model/effort: pass through the user's flag, otherwise omit")
+
+    def test_verification_branches_on_status(self):
+        verify_section = self._section("## 5. Verify", "## 6.")
+        self.assertIn("verification is only for `completed`", verify_section)
+        self.assertIn("operator-invoked", verify_section)
+
+    def test_fallback_covers_no_terminal_event_and_no_header_case(self):
+        fallback = self.text.split("## 6.", 1)[1]
+        self.assertIn("no terminal event", fallback)
+        self.assertIn("**without** the header", fallback)
 
     def test_confirmation_precedes_danger_flag(self):
         ask = self.text.find("AskUserQuestion")

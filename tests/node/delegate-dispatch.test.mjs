@@ -63,22 +63,16 @@ test("the artifact's canonical dispatch runs the plan at workspace-write in the 
     "Provenance: unknown — supplied by the operator\n\n" + HOSTILE_PLAN + "\n");
   const probe = path.join(mkdtempSync(path.join(tmpdir(), "delegate-probe-")), "probe.json");
 
-  // Instantiate the template exactly as the command instructs: resolved sandbox, prompt file,
-  // optional flags omitted. ${CLAUDE_PLUGIN_ROOT} expands in the shell from the environment.
-  const command = dispatchTemplate
-    .replace(/\[--effort <flag>\]\s*/g, "")
-    .replace(/\[--model <flag>\]\s*/g, "")
-    .replace(/\[--background\]\s*/g, "")
-    .replace("<resolved>", "workspace-write")
-    .replace("<prompt-file>", promptFile);
-
-  const result = spawnSync("bash", ["-c", command], {
+  // The template is env-parameterized — resolved values travel as DATA in the environment, never
+  // by textual substitution. Executing it verbatim with only env set is the whole instantiation.
+  const result = spawnSync("bash", ["-c", dispatchTemplate], {
     cwd: scratch, encoding: "utf8", timeout: 60_000,
     env: {
       ...process.env,
       CLAUDE_PLUGIN_ROOT: REPO_ROOT,
       VIBE_SUITE_CODEX_BIN: WRITER,
       VIBE_TEST_PROBE: probe,
+      DELEGATE_PROMPT_FILE: promptFile,
     },
   });
   assert.equal(result.status, 0, `dispatch failed:\n${result.stdout}\n${result.stderr}`);
@@ -117,4 +111,40 @@ test("the artifact's canonical dispatch runs the plan at workspace-write in the 
   chmodSync(path.join(scratch, "run-tests.sh"), 0o755);
   const failing = spawnSync("bash", ["-c", verifyBlock], { cwd: scratch, encoding: "utf8", timeout: 30_000 });
   assert.notEqual(failing.status, 0, "a failing target test must fail verification");
+
+  // Faithful failure, git dimension: a broken inspection (not a git repo at all) must also fail
+  // the block — no later success may mask an earlier failed command (set -euo pipefail).
+  const notARepo = mkdtempSync(path.join(tmpdir(), "delegate-notrepo-"));
+  const brokenGit = spawnSync("bash", ["-c", verifyBlock], { cwd: notARepo, encoding: "utf8", timeout: 30_000 });
+  assert.notEqual(brokenGit.status, 0, "failed git inspection must fail verification");
+});
+
+test("override branch: env-carried effort/model values are data — even hostile ones", async () => {
+  const artifact = readFileSync(ARTIFACT, "utf8");
+  const dispatchTemplate = extractBlock(artifact, "<!-- canonical-dispatch -->");
+  const scratch = scratchRepo();
+  const promptFile = path.join(mkdtempSync(path.join(tmpdir(), "delegate-prompt-")), "prompt.md");
+  writeFileSync(promptFile, "Provenance: authored by Claude (this session)\n\ntrivial task\n");
+  const probe = path.join(mkdtempSync(path.join(tmpdir(), "delegate-probe-")), "probe.json");
+
+  const hostileModel = "x; touch pwned2 `touch pwned2`";
+  const result = spawnSync("bash", ["-c", dispatchTemplate], {
+    cwd: scratch, encoding: "utf8", timeout: 60_000,
+    env: {
+      ...process.env,
+      CLAUDE_PLUGIN_ROOT: REPO_ROOT,
+      VIBE_SUITE_CODEX_BIN: WRITER,
+      VIBE_TEST_PROBE: probe,
+      DELEGATE_PROMPT_FILE: promptFile,
+      DELEGATE_EFFORT: "low",
+      DELEGATE_MODEL: hostileModel,
+    },
+  });
+  assert.equal(result.status, 0, `override dispatch failed:\n${result.stdout}\n${result.stderr}`);
+  const recorded = JSON.parse(readFileSync(probe, "utf8"));
+  const argv = recorded.argv;
+  assert.ok(argv.includes("-m") && argv[argv.indexOf("-m") + 1] === hostileModel,
+    "the model override must arrive as ONE literal argv token");
+  assert.ok(!existsSync(path.join(scratch, "pwned2")),
+    "a hostile override value must never execute on the host");
 });

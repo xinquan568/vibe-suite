@@ -49,12 +49,18 @@ merits — that is the point of the line. The plan text follows verbatim.
 
 ## 4. Dispatch
 
-Run from the target workspace (the store lands under the CWD). The quoted `"$(cat …)"` delivers
-the prompt file as exactly one argument — embedded quotes, backticks and `$( )` stay data.
+Run from the target workspace (the store lands under the CWD). Every resolved value travels as
+**data through environment variables** — never textual substitution into the command line — and
+the quoted `"$(cat …)"` delivers the prompt file as exactly one argument: embedded quotes,
+backticks, `;` and `$( )` stay data everywhere. Set only the variables you resolved:
+`DELEGATE_PROMPT_FILE` (required), `DELEGATE_SANDBOX` (defaults to `workspace-write` in the
+template itself), `DELEGATE_EFFORT` / `DELEGATE_MODEL` (only when the operator passed the flag —
+unset means omit), `DELEGATE_BACKGROUND=1` for background mode, and `DELEGATE_CONFIRM_DANGER=1`
+**only after the explicit yes** from §2.
 
 <!-- canonical-dispatch -->
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --kind delegate --sandbox <resolved> [--effort <flag>] [--model <flag>] [--background] -- "$(cat "<prompt-file>")"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --kind delegate --sandbox "${DELEGATE_SANDBOX:-workspace-write}" ${DELEGATE_EFFORT:+--effort "$DELEGATE_EFFORT"} ${DELEGATE_MODEL:+--model "$DELEGATE_MODEL"} ${DELEGATE_BACKGROUND:+--background} ${DELEGATE_CONFIRM_DANGER:+--confirm-danger} -- "$(cat "$DELEGATE_PROMPT_FILE")"
 ```
 
 `--wait` is the default (the command returns the four-key result line when the job finishes);
@@ -62,12 +68,18 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --kind delegate --sandbox 
 
 ## 5. Verify — never trust
 
-**`--wait` mode (automatic, immediately after the result line):** run the verification block in
-the target workspace and report what it shows — faithfully; a failing check is reported as a
-failure, never absorbed.
+**First, branch on the four-key result's `status` — verification is only for `completed`.** A
+result whose `status` is anything else (`failed`, `timed_out`, `cancelled`) is not an
+implementation to verify; it routes to §6's fallback. Verifying an unchanged workspace after a
+failed job would manufacture a false "nothing changed, looks fine".
+
+**`--wait` mode (automatic, when `status` is `"completed"`):** run the verification block in the
+target workspace and report what it shows — faithfully; every command's failure fails the block
+(`set -euo pipefail`), and a failing check is reported as a failure, never absorbed.
 
 <!-- canonical-verify -->
 ```bash
+set -euo pipefail
 git status --porcelain
 git diff
 if [ -x ./run-tests.sh ]; then ./run-tests.sh
@@ -81,15 +93,17 @@ the engine's own output as data, not as the verdict.
 
 **`--background` mode (operator-invoked):** no mechanism re-awakens this command when a detached
 job finishes — verification is a documented follow-up, not a claim: after
-`/vibe-suite:jobs result <job-id>`, ask the session to run this same Verification section in the
-workspace. It is written to work in a fresh session from the workspace and job record alone.
+`/vibe-suite:jobs result <job-id>`, apply the same `status` branching, then (for `completed`) ask
+the session to run this same Verification section in the workspace. It is written to work in a
+fresh session from the workspace and job record alone.
 
 ## 6. When codex is unreachable — the fallback
 
-Per `commands/shared/fallback.md`: if the dispatch fails to spawn, times out, or the stream ends
-in `turn.failed`, disclose it with the diagnostic header (what failed, plus an actionable remedy —
-install/login/PATH; `/vibe-suite:preflight` is the diagnostic supplement) and then perform the
-plan **in-session as the manual fallback**, with the same verification step afterwards. A job that
-completes but returns empty or unusable output falls back the same way **without** the header
-(nothing was unreachable — the output just wasn't usable). Silent failure and silent fallback are
-both defects.
+Per `commands/shared/fallback.md`: if the dispatch fails to spawn, times out, ends in
+`turn.failed`, or produces **no terminal event at all** (the runner records all of these as
+`failed` — the exit code is never the verdict), disclose it with the diagnostic header (what
+failed, plus an actionable remedy — install/login/PATH; `/vibe-suite:preflight` is the diagnostic
+supplement) and then perform the plan **in-session as the manual fallback**, with the same
+verification step afterwards. A job whose `status` is `completed` but whose output is empty or
+unusable falls back the same way **without** the header (nothing was unreachable — the output just
+wasn't usable). Silent failure and silent fallback are both defects.

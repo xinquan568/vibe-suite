@@ -192,3 +192,63 @@ class TestCommandWiring(UnbridgeCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBlockerRegressions(UnbridgeCase):
+    """Each reproduced against `0cde28c` before the fix."""
+
+    def test_a_symlinked_target_does_not_delete_what_it_points_at(self):
+        """`.resolve()` resolved away the final symlink, so containment passed and the delete landed
+        on the target. Verified to destroy a user file."""
+        self.install()
+        (self.ws / "notes.md").write_text("MY IMPORTANT NOTES\n", encoding="utf-8")
+        (self.ws / "AGENTS.md").unlink()
+        (self.ws / "AGENTS.md").symlink_to(self.ws / "notes.md")
+        self.unbridge("--confirm")
+        self.assertTrue((self.ws / "notes.md").is_file(), "the user's file was deleted")
+        self.assertEqual((self.ws / "notes.md").read_text(encoding="utf-8"),
+                         "MY IMPORTANT NOTES\n")
+
+    def test_a_symlinked_state_dir_does_not_delete_outside_the_workspace(self):
+        outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (outside / "keep.txt").write_text("mine\n", encoding="utf-8")
+        self.install()
+        record = (self.ws / ".vibe-suite-state" / "install-provenance.json").read_bytes()
+        shutil.rmtree(self.ws / ".vibe-suite-state")
+        (self.ws / ".vibe-suite-state").symlink_to(outside, target_is_directory=True)
+        (outside / "install-provenance.json").write_bytes(record)
+        self.unbridge("--confirm")
+        self.assertTrue((outside / "keep.txt").is_file(),
+                        "unbridge recursively deleted outside the workspace")
+
+    def test_a_server_added_after_init_is_not_lost_to_the_pre_image(self):
+        """`restore` wrote the pre-image unconditionally for JSON targets."""
+        (self.ws / ".mcp.json").write_text('{"mcpServers": {"pre": {"command": "a"}}}\n',
+                                           encoding="utf-8")
+        self.install()
+        doc = json.loads((self.ws / ".mcp.json").read_text())
+        doc["mcpServers"]["added-later"] = {"command": "b"}
+        (self.ws / ".mcp.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        self.unbridge("--confirm")
+        after = json.loads((self.ws / ".mcp.json").read_text())["mcpServers"]
+        self.assertIn("added-later", after, "a server added after init was discarded")
+        self.assertIn("pre", after)
+        self.assertNotIn("vibe-mcp", after)
+
+    def test_a_toml_registration_is_actually_removed(self):
+        self.install()
+        text = (self.ws / ".codex" / "config.toml").read_text(encoding="utf-8")
+        self.assertIn("vibe-mcp", text)
+        self.unbridge("--confirm")
+        path = self.ws / ".codex" / "config.toml"
+        remaining = path.read_text(encoding="utf-8") if path.is_file() else ""
+        self.assertNotIn("mcp_servers.vibe-mcp", remaining,
+                         "a TOML registration was enumerated but never removed")
+
+    def test_the_owned_block_map_is_not_a_second_inventory(self):
+        import sys
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import bridge, unbridge as unbridge_mod
+        self.assertIs(unbridge_mod.BLOCKS, bridge.OWNED_BLOCKS,
+                      "unbridge keeps its own copy — the W4 defect F1.4 exists to fix")

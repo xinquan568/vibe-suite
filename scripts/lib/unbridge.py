@@ -25,10 +25,8 @@ sys.path.insert(0, str(HERE))
 import bridge  # noqa: E402
 import init_bridge  # noqa: E402
 
-#: name -> (relative path, codec). The inventory drives which regions come out of which file.
-BLOCKS = (("AGENTS.md", "memory", "md"), ("CLAUDE.md", "import", "md"),
-          ("GEMINI.md", "import", "md"), (".gitignore", "ignore", "text"),
-          (".codex/config.toml", "server:vibe-mcp", "text"))
+#: Read from `bridge`, never redeclared here — one inventory is what F1.4 requires.
+BLOCKS = bridge.OWNED_BLOCKS
 
 
 def recorded_path(ws, raw):
@@ -40,9 +38,13 @@ def recorded_path(ws, raw):
     """
     path = Path(raw)
     try:
-        return ws / path.resolve().relative_to(ws)
+        # The *parent* is resolved, never the final component. Resolving the whole path follows a
+        # symlink planted at the target, so containment passes and the deletion lands on whatever it
+        # points at — verified to destroy a user file.
+        anchored = ws / path.parent.resolve().relative_to(ws) / path.name
     except (ValueError, OSError):
         return None
+    return anchored
 
 
 def strip_owned(ws, rel, name, codec):
@@ -55,6 +57,20 @@ def strip_owned(ws, rel, name, codec):
     return text, stripped
 
 
+def _json_without_ours(ws, rel, path):
+    """The file with our registrations dropped, or None if it is not a JSON target we own."""
+    if rel not in (".mcp.json", ".codex/hooks.json"):
+        return None
+    doc = bridge.load_json(path)
+    if rel == ".mcp.json":
+        for name in list((doc.get("mcpServers") or {})):
+            if name in bridge.SENTINEL_LITERALS or name.startswith(bridge.SENTINEL_PREFIX):
+                bridge.json_server_remove(doc, name)
+    else:
+        bridge.json_hook_entry_remove(doc, "Stop")
+    return (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 def restore(ws, entry, report):
     """One target, from its recorded pre-image. Refuses anything the record misdescribes."""
     path = recorded_path(ws, entry["path"])
@@ -63,6 +79,11 @@ def restore(ws, entry, report):
             f"provenance names a path outside the workspace: {entry['path']}")
 
     kind, actual = entry["kind"], bridge.classify(path)
+    if actual == "symlink" and kind != "symlink":
+        # The record says this was a regular file or absent; it is a link now. Acting on it would
+        # write or delete through the link, so it is left exactly as it is.
+        report.append(f"{path.name}: now a symlink, not what provenance recorded — left alone")
+        return
     if actual == "absent":
         report.append(f"{path.name}: already gone")
         return
@@ -109,8 +130,20 @@ def restore(ws, entry, report):
                 bridge.write_atomic(ws, path, stripped)
                 report.append(f"{rel}: owned block removed; your later edits kept")
         else:
-            bridge.write_atomic(ws, path, pre, mode=int(entry["mode"], 8))
-            report.append(f"{rel}: restored")
+            # No text block here: JSON, config and history. The pre-image is only safe to write back
+            # when nothing of the user's has arrived since — otherwise restoring it discards their
+            # edit, which is the same mistake the strip-then-compare rule exists to avoid.
+            current = path.read_bytes()
+            ours_removed = _json_without_ours(ws, rel, path)
+            if ours_removed is not None and ours_removed != pre:
+                bridge.write_atomic(ws, path, ours_removed)
+                report.append(f"{rel}: our entries removed; your later changes kept")
+            elif ours_removed is None and current != pre and rel not in (
+                    ".vibe-suite.md", ".claude/vibe-history.json"):
+                report.append(f"{rel}: changed since install — left as it is")
+            else:
+                bridge.write_atomic(ws, path, pre, mode=int(entry["mode"], 8))
+                report.append(f"{rel}: restored")
         return
 
     report.append(f"{rel}: left as it is ({kind})")
@@ -126,6 +159,16 @@ def json_targets(ws, report, dry):
                 bridge.write_atomic(ws, ws / ".mcp.json",
                                     json.dumps(bridge.json_server_remove(doc, name),
                                                indent=2, sort_keys=True) + "\n")
+    toml_path = ws / ".codex" / "config.toml"
+    if toml_path.is_file():
+        text = bridge.read_text_verbatim(toml_path)
+        for name in bridge.toml_owned_names(text):
+            if bridge.toml_server_has(text, name):
+                report.append(f".codex/config.toml: {name}")
+                if not dry:
+                    text = bridge.toml_server_remove(text, name)
+        if not dry:
+            bridge.write_atomic(ws, toml_path, text)
     hooks = bridge.load_json(ws / ".codex" / "hooks.json")
     if bridge.json_hook_entry_has(hooks, "Stop"):
         report.append(".codex/hooks.json: owned Stop entry")
@@ -177,9 +220,16 @@ def main(argv):
         restore(ws, entry, report)
     prune(ws, record, report)
     state = ws / ".vibe-suite-state"
-    if state.is_dir():
-        for child in sorted(state.rglob("*"), key=lambda p: len(str(p)), reverse=True):
-            child.unlink() if child.is_file() else child.rmdir()
+    if state.is_symlink():
+        report.append(".vibe-suite-state/: a symlink, not a directory — left alone")
+    elif state.is_dir():
+        # Depth-first over entries that are themselves not symlinks: a link inside would otherwise
+        # be followed and take its target with it.
+        for child in sorted(state.rglob("*"), key=lambda c: len(str(c)), reverse=True):
+            if child.is_symlink() or child.is_file():
+                child.unlink()
+            elif child.is_dir():
+                child.rmdir()
         state.rmdir()
         report.append(".vibe-suite-state/: removed")
     print("\n".join(report))

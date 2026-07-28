@@ -362,6 +362,14 @@ def json_hook_entry_has(doc, event):
                for e in (doc.get("hooks") or {}).get(event) or [])
 
 
+#: Every owned text/markdown region: (relative path, block name, codec). This lives beside the
+#: sentinel names because it is the same inventory — F1.4 requires teardown to iterate *one* source,
+#: and a consumer keeping its own copy is exactly the cc-suite W4 defect.
+OWNED_BLOCKS = (("AGENTS.md", "memory", "md"), ("CLAUDE.md", "import", "md"),
+                ("GEMINI.md", "import", "md"), (".gitignore", "ignore", "text"),
+                (".codex/config.toml", "server:vibe-mcp", "text"))
+
+
 def inventory_enumerate(root):
     """Every suite-owned sentinel in a workspace, across every store that can hold one.
 

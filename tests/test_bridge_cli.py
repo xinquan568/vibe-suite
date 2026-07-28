@@ -186,3 +186,72 @@ class TestNamespace(BridgeCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBlockerRegressions(BridgeCase):
+    """Each reproduced against `3be00fd`."""
+
+    def test_a_secret_repeated_in_args_does_not_cross(self):
+        """Withholding `env` was not enough — the same value routinely appears in `args` too, and a
+        leak through a second field is the same leak."""
+        (self.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {"x": {
+            "command": "run", "args": ["--key", SECRET], "env": {"K": SECRET}}}},
+            indent=2) + "\n", encoding="utf-8")
+        self.run_bridge("mcp")
+        self.assertNotIn(SECRET, self.toml(), "the secret crossed through args")
+
+    def test_a_secret_nested_in_env_is_collected(self):
+        (self.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {"x": {
+            "command": SECRET, "env": {"outer": {"inner": SECRET}}}}},
+            indent=2) + "\n", encoding="utf-8")
+        self.run_bridge("mcp")
+        self.assertNotIn(SECRET, self.toml())
+
+    def test_a_crafted_server_name_cannot_close_the_sentinel(self):
+        hostile = 'evil"]\n# <<< vibe-suite:mcp-mirror <<<\nescaped = 1\n[mcp_servers.x'
+        (self.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {hostile: {"command": "c"}}},
+                                                      indent=2) + "\n", encoding="utf-8")
+        self.run_bridge("mcp")
+        text = self.toml()
+        # The marker text may appear *inside* the quoted key — escaped, and therefore inert. What
+        # must not happen is a second marker at the start of a line, which would end the block early
+        # and leave the rest outside our ownership.
+        closers = [ln for ln in text.splitlines() if ln.startswith("# <<< vibe-suite:mcp-mirror")]
+        self.assertEqual(len(closers), 1, "a crafted name injected a real closing marker")
+        self.assertNotIn("\nescaped = 1", text)
+
+    def test_hooks_are_idempotent_and_do_not_fall_back_on_a_rerun(self):
+        """Mirrored entries were unmarked, so the second run read its own output as user content."""
+        self.seed_project_hooks() if hasattr(self, "seed_project_hooks") else None
+        (self.ws / ".claude").mkdir(exist_ok=True)
+        (self.ws / ".claude" / "settings.json").write_text(
+            json.dumps({"hooks": {"PreToolUse": [{"cmd": "a"}]}}, indent=2) + "\n",
+            encoding="utf-8")
+        self.run_bridge("hooks")
+        first = (self.ws / ".codex" / "hooks.json").read_bytes()
+        self.run_bridge("hooks")
+        self.assertFalse((self.ws / ".codex" / "hooks.vibe-suite.json").exists(),
+                         "a second run fell back to a side file it did not need")
+        self.assertEqual((self.ws / ".codex" / "hooks.json").read_bytes(), first)
+
+    def test_a_wrong_skills_link_is_refused_not_deleted(self):
+        (self.ws / ".agents").mkdir()
+        (self.ws / "elsewhere").mkdir()
+        (self.ws / ".agents" / "skills").symlink_to(self.ws / "elsewhere")
+        result = self.run_bridge("skills")
+        self.assertTrue((self.ws / ".agents" / "skills").is_symlink())
+        self.assertEqual(os.readlink(self.ws / ".agents" / "skills"), str(self.ws / "elsewhere"),
+                         "a link the user pointed elsewhere was replaced")
+        self.assertIn("refused", result.stdout)
+
+    def test_a_foreign_top_level_key_in_hooks_json_survives(self):
+        (self.ws / ".codex").mkdir(exist_ok=True)
+        (self.ws / ".codex" / "hooks.json").write_text(
+            json.dumps({"hooks": {}, "somethingElse": {"keep": True}}, indent=2) + "\n",
+            encoding="utf-8")
+        (self.ws / ".claude").mkdir(exist_ok=True)
+        (self.ws / ".claude" / "settings.json").write_text(
+            json.dumps({"hooks": {"Stop": [{"cmd": "a"}]}}, indent=2) + "\n", encoding="utf-8")
+        self.run_bridge("hooks")
+        after = json.loads((self.ws / ".codex" / "hooks.json").read_text())
+        self.assertEqual(after.get("somethingElse"), {"keep": True})

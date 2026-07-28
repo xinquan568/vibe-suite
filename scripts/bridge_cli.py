@@ -29,24 +29,84 @@ SHARED_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"
 SIDE_FILE = ".codex/hooks.vibe-suite.json"
 
 
+def _secret_values(spec):
+    """Every leaf under `env`, at any depth.
+
+    Withholding `env` was not enough: the same value routinely appears in `args` too (`--key
+    sk-...`), and a leak through a second field is the same leak. So the values are collected first
+    and then treated as poison wherever they appear.
+    """
+    out = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+        elif isinstance(node, str) and node:
+            out.add(node)
+
+    walk(spec.get("env") or {})
+    return out
+
+
+def _toml_key(name):
+    """A quoted TOML key. Bare keys are ASCII alphanumerics, `-` and `_` — anything else is quoted,
+    and quoting escapes, because an unescaped quote lets a crafted name close the sentinel block and
+    write outside our ownership."""
+    if name and all(c.isascii() and (c.isalnum() or c in "-_") for c in name):
+        return name
+    escaped = name.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
+
+
+def _toml_scalar(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
+    return json.dumps(str(value))
+
+
 def mirror_mcp(ws, report):
     """`.mcp.json` → a `config.toml` sentinel block. Values from `env` never cross."""
     doc = bridge.load_json(ws / ".mcp.json")
     servers = doc.get("mcpServers") or {}
-    lines = []
+    lines, withheld = [], 0
     for name, spec in sorted(servers.items()):
         if name.startswith("cc-suite-") or not isinstance(spec, dict):
             continue
         if spec.get("command") == "vibe-suite":
             continue                      # mirroring our own registration would recurse
-        quoted = f'"{name}"' if not name.replace("-", "").replace("_", "").isalnum() else name
-        lines.append(f"[mcp_servers.{quoted}]")
-        if spec.get("command"):
-            lines.append(f'command = {json.dumps(spec["command"])}')
-        if isinstance(spec.get("args"), list):
-            lines.append(f"args = {json.dumps(spec['args'])}")
-        for var in sorted((spec.get("env") or {})):
-            # The name crosses; the value never does.
+        secrets = _secret_values(spec)
+        lines.append(f"[mcp_servers.{_toml_key(name)}]")
+        command = spec.get("command")
+        if isinstance(command, str) and command:
+            if command in secrets:
+                lines.append("# command withheld — it repeats a value from env")
+                withheld += 1
+            else:
+                lines.append(f"command = {_toml_scalar(command)}")
+        args = spec.get("args")
+        if isinstance(args, list):
+            rendered, dropped = [], False
+            for arg in args:
+                if not isinstance(arg, (str, int, float, bool)):
+                    dropped = True          # a dict or list is not a TOML array member
+                    continue
+                if isinstance(arg, str) and arg in secrets:
+                    dropped = True
+                    withheld += 1
+                    continue
+                rendered.append(_toml_scalar(arg))
+            lines.append("args = [" + ", ".join(rendered) + "]")
+            if dropped:
+                lines.append("# some args were withheld — they repeated an env value or were not "
+                             "scalars")
+        for var in sorted(k for k in (spec.get("env") or {}) if isinstance(k, str)):
+            # The name crosses; no value ever does, in this field or any other.
             lines.append(f"# env: {var} (value not mirrored — set it in your own environment)")
         lines.append("")
     body = "\n".join(lines).rstrip() or "# no project MCP servers to mirror"
@@ -55,7 +115,8 @@ def mirror_mcp(ws, report):
     updated = bridge.text_block_upsert(existing, "mcp-mirror", body)
     if updated != existing:
         bridge.write_atomic(ws, dest, updated)
-    report.append(f"mcp: mirrored {len(servers)} server(s), no env values copied")
+    report.append(f"mcp: mirrored {len(servers)} server(s), no env values copied"
+                  + (f" ({withheld} field(s) withheld for repeating one)" if withheld else ""))
 
 
 def mirror_hooks(ws, report):
@@ -70,23 +131,34 @@ def mirror_hooks(ws, report):
     hooks = doc.get("hooks") or {}
     owned = [e for e in hooks.values() for e in (e or [])
              if isinstance(e, dict) and e.get(f"_{bridge.MARKER}_owned") is not None]
-    user_content = any(
-        not (isinstance(entry, dict) and entry.get(f"_{bridge.MARKER}_owned") is not None)
-        for entries in hooks.values() for entry in (entries or []))
+    def ours(entry):
+        return isinstance(entry, dict) and (
+            entry.get(f"_{bridge.MARKER}_owned") is not None
+            or entry.get(f"_{bridge.MARKER}_mirrored") is not None)
 
+    # Mirrored entries are marked, so a second run recognises its own work instead of mistaking it
+    # for the user's and falling back to a side file it does not need.
+    user_content = any(not ours(entry)
+                       for entries in hooks.values() for entry in (entries or []))
+
+    marked = {e: [dict(x, **{f"_{bridge.MARKER}_mirrored": 1}) for x in v if isinstance(x, dict)]
+              for e, v in shared.items()}
     if user_content:
         # The target is the user's. A side file mirrors without touching what they wrote.
         bridge.write_atomic(ws, ws / SIDE_FILE,
-                            json.dumps({"hooks": shared}, indent=2, sort_keys=True) + "\n")
+                            json.dumps({"hooks": marked}, indent=2, sort_keys=True) + "\n")
         report.append(f"hooks: {len(shared)} event(s) mirrored to {SIDE_FILE} "
                       "(the target holds your own entries)")
     else:
-        merged = dict(shared)
+        merged = dict(marked)
         for entries in hooks.values():
             for entry in entries or []:
                 if isinstance(entry, dict) and entry.get(f"_{bridge.MARKER}_owned") is not None:
                     merged.setdefault("Stop", []).append(entry)
-        updated = json.dumps({"hooks": merged}, indent=2, sort_keys=True) + "\n"
+        # Preserve any top-level key that is not `hooks` — the file is not ours alone.
+        out = {k: v for k, v in doc.items() if k != "hooks"}
+        out["hooks"] = merged
+        updated = json.dumps(out, indent=2, sort_keys=True) + "\n"
         if updated != (dest.read_text(encoding="utf-8") if dest.is_file() else ""):
             bridge.write_atomic(ws, dest, updated)
         report.append(f"hooks: {len(shared)} event(s) mirrored, "
@@ -101,11 +173,18 @@ def link_skills(ws, report, plugin_root):
                         (".agents/skills", Path("../.claude/skills"))):
         path = ws / rel
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            bridge.assert_inside(ws, path.parent)
+        except bridge.BridgeError as exc:
+            report.append(f"skills: {rel} refused — {exc}")
+            continue
         if path.is_symlink():
             if os.readlink(path) == str(target):
                 report.append(f"skills: {rel} already correct")
                 continue
-            path.unlink()                      # ours to repoint; a wrong link is refused below
+            # A link pointing somewhere else is the user's decision, not ours to overwrite.
+            report.append(f"skills: {rel} points at {os.readlink(path)} — refused, not replaced")
+            continue
         elif path.exists():
             report.append(f"skills: {rel} is a real path — left alone")
             continue

@@ -18,6 +18,7 @@
   "commands": [
     "./commands/bridge.md",
     "./commands/bug-analyze.md",
+    "./commands/config.md",
     "./commands/continue.md",
     "./commands/delegate.md",
     "./commands/doctor.md",

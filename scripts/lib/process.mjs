@@ -145,8 +145,9 @@ export function runWithDeadline({
     const confirmGroupReaped = () => new Promise((done) => {
       if (!signalGroup(child.pid, 0)) { done(true); return; }
       signalGroup(child.pid, "SIGTERM");
-      signalGroup(child.pid, "SIGKILL");
-      killedHard = true;
+      // `killedHard` claims a delivered SIGKILL — assert it only when signalGroup confirms
+      // delivery, not merely because escalation was attempted.
+      if (signalGroup(child.pid, "SIGKILL")) killedHard = true;
       const reapDeadline = Date.now() + GROUP_REAP_DEADLINE_MS;
       const poll = setInterval(() => {
         if (!signalGroup(child.pid, 0)) { clearInterval(poll); done(true); }

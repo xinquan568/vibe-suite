@@ -38,6 +38,7 @@ function scriptedRun(answers) {
       calls.push(key);
       return {
         exitCode: 0, stdout: "", stderr: "", timedOut: false, spawnFailed: false,
+        groupReaped: true,          // the real detached path always reports a boolean
         ...(answers[key] ?? {}),
       };
     },
@@ -166,6 +167,16 @@ test("groupReaped:false fails closed — a completed-looking smoke cannot make t
   assert.equal(row.smoke, "reap-failed",
     "a probe whose group survived escalation broke the deadline contract — the stream cannot override that");
   assert.equal(row.available, false);
+
+  // Missing confirmation fails closed too: only groupReaped === true counts as reaped.
+  const missing = scriptedRun({
+    ...OK_ANSWERS,
+    exec: { stdout: '{"type":"turn.completed","usage":{}}\n', groupReaped: undefined },
+  });
+  const { env: env2, now: now2 } = freshCacheEnv();
+  const row2 = await probeCodex({ run: missing.run, env: env2, now: now2 });
+  assert.equal(row2.smoke, "reap-failed");
+  assert.equal(row2.available, false);
 });
 
 test("groupReaped:false on an early probe stops the sequence — no further processes are spawned", async () => {

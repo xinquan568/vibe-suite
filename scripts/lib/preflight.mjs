@@ -93,7 +93,7 @@ async function defaultRun(args, timeoutMs, env) {
 }
 
 function classifyAuth(outcome) {
-  if (outcome.timedOut || outcome.spawnFailed || outcome.groupReaped === false) return "unknown";
+  if (outcome.timedOut || outcome.spawnFailed || outcome.groupReaped !== true) return "unknown";
   const text = (outcome.stdout + "\n" + outcome.stderr).toLowerCase();
   if (outcome.exitCode !== 0) return "not-authenticated";
   if (text.includes("not logged in")) return "not-authenticated";
@@ -104,9 +104,10 @@ function classifyAuth(outcome) {
 
 function classifySmoke(outcome) {
   if (outcome.spawnFailed) return "spawn-failed";
-  // Fail closed: a probe whose process group survived escalation broke the deadline contract —
-  // whatever its stream said cannot make the lane "ok" while its descendants are still alive.
-  if (outcome.groupReaped === false) return "reap-failed";
+  // Fail closed: only a CONFIRMED reap counts. `false` means the group survived escalation;
+  // anything else (missing, null) means confirmation never happened — either way, whatever the
+  // stream said cannot make the lane "ok" while descendants may still be alive.
+  if (outcome.groupReaped !== true) return "reap-failed";
   if (outcome.timedOut) return "timeout";
   for (const line of outcome.stdout.split("\n")) {
     try {
@@ -121,7 +122,7 @@ function classifySmoke(outcome) {
 }
 
 function classifyVersion(outcome) {
-  if (outcome.timedOut || outcome.spawnFailed || outcome.groupReaped === false) return "unknown";
+  if (outcome.timedOut || outcome.spawnFailed || outcome.groupReaped !== true) return "unknown";
   // Anchored, not substring: a valid-looking version embedded in arbitrary leading text is
   // arbitrary text. Oversized components are refused, never truncated into a plausible lie.
   const match = /^codex-cli (\d+\.\d+\.\d+)\b/.exec(outcome.stdout.trim());
@@ -157,7 +158,7 @@ export async function probeCodex(deps = {}) {
   }
   // Fail closed on a broken deadline contract: if this probe's group survived escalation, later
   // probes would spawn more of the same — stop, report, investigate.
-  if (versionOutcome.groupReaped === false) {
+  if (versionOutcome.groupReaped !== true) {
     return {
       engine: "codex", available: false, version: "unknown", auth: null, smoke: null, models,
       detail: "probe process group survived escalation — investigate before trusting this lane",
@@ -167,7 +168,7 @@ export async function probeCodex(deps = {}) {
 
   const authOutcome = await run(["login", "status"], AUTH_TIMEOUT_MS);
   const auth = classifyAuth(authOutcome);
-  if (authOutcome.groupReaped === false) {
+  if (authOutcome.groupReaped !== true) {
     return {
       engine: "codex", available: false, version, auth: "unknown", smoke: null, models,
       detail: "probe process group survived escalation — investigate before trusting this lane",

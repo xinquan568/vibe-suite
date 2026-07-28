@@ -15,7 +15,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  createRecord, finaliseRecord, newRecord, readRecord, updateRecord, STATE_DIRNAME,
+  createRecord, finaliseRecord, newRecord, readRecord, transact, updateRecord, STATE_DIRNAME,
 } from "../../scripts/lib/jobs.mjs";
 import {
   cancelJob, resolveCancelableJob, resolveResultJob, resolveStatusJobs, ResolveError,
@@ -135,20 +135,36 @@ test("a record corrupted AFTER resolve never reaches signalGroup — the claim i
   // transact re-reads under contention, so the version the claim commits against can differ from
   // the resolved one (Step-8 review, finding 1). Every corruption lands via the store's own CAS in
   // the onResolved window; the claim updater must refuse each, and the recorder must stay empty.
+  // One corruption per validator dimension: handle invariants, schema keys, types, identity.
+  function patch(p) {
+    return function corrupt(ws) { return updateRecord(ws, ID_A, p); };
+  }
   const corruptions = [
-    ["forged pgid without a worker", { pgid: 666 }],
-    ["pgid !== workerPid", { workerPid: 424242, pgid: 424243 }],
-    ["unknown status", { status: "zombie" }],
-    ["background flag corrupted", { background: "yes" }],
+    ["forged pgid without a worker", patch({ pgid: 666 })],
+    ["pgid !== workerPid", patch({ workerPid: 424242, pgid: 424243 })],
+    ["zero pid", patch({ workerPid: 0, pgid: 0 })],
+    ["negative pid", patch({ workerPid: -5, pgid: -5 })],
+    ["non-integer pid", patch({ workerPid: 10.5, pgid: 10.5 })],
+    ["unknown status", patch({ status: "zombie" })],
+    ["background flag corrupted", patch({ background: "yes" })],
+    ["unparseable timestamp", patch({ createdAt: "yesterday-ish" })],
+    ["identity mismatch", patch({ jobId: ID_B })],
+    ["missing contract key", async (ws) => {
+      await transact(ws, ID_A, (fresh) => {
+        const mutilated = { ...fresh };
+        delete mutilated.status;
+        return mutilated;
+      });
+    }],
   ];
-  for (const [label, patch] of corruptions) {
+  for (const [label, corrupt] of corruptions) {
     const ws = workspace();
     await createRecord(ws, record(ID_A, BG));
     const { fn, calls } = stubSignal([true]);
     await assert.rejects(
       () => cancelJob(ws, ID_A, {
         signalGroup: fn, sleep: instantSleep,
-        onResolved: async () => { await updateRecord(ws, ID_A, patch); },
+        onResolved: async () => { await corrupt(ws); },
       }),
       (error) => error instanceof ResolveError && error.code === "invalid",
       `corruption not refused: ${label}`,

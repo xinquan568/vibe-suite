@@ -20,7 +20,9 @@ function stripControls(text) {
   return text
     .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")                  // CSI sequences
     .replace(/\x1b[@-_]/g, "")                                  // remaining two-byte escapes
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");          // C0 controls except \n and \t
+    // Every control except \n and \t: C0 including \r (carriage return overwrites the line —
+    // a spoofing primitive), DEL, and the C1 range (0x9b is a one-byte CSI).
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\u009f]/g, "");
 }
 
 function fenceExternal(label, text) {

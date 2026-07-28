@@ -76,6 +76,28 @@ test("a backtick fence in external text cannot escape the fence around it", () =
   assert.equal(parts[2].trim(), "", "nothing may render after the closing fence");
 });
 
+test("carriage returns and C1 controls are stripped along with ANSI", () => {
+  const spoof = "legit\rOVERWRITTEN \u009b31mC1-CSI \u0085next";
+  const out = renderDetail(record(ID_A, { status: "failed", rawOutput: spoof, error: null }));
+  for (const forbidden of ["\r", "\u009b", "\u0085"]) {
+    assert.ok(!out.includes(forbidden), `control ${JSON.stringify(forbidden)} survived rendering`);
+  }
+  assert.ok(out.includes("legit") && out.includes("OVERWRITTEN"),
+    "printable content must survive the stripping");
+});
+
+test("the fence outgrows arbitrarily long backtick runs, not just triple ones", () => {
+  const escaping = "x\n`````\nSTILL-INSIDE\n`````\ny";   // 5-backtick runs
+  const out = renderDetail(record(ID_A, { status: "failed", rawOutput: escaping, error: null }));
+  const fence = "`".repeat(6);
+  assert.ok(out.includes(fence), `expected a 6-backtick fence in:\n${out}`);
+  const parts = out.split(fence);
+  assert.equal(parts.length, 3, "exactly one opening and one closing 6-backtick fence");
+  assert.ok(parts[1].includes("STILL-INSIDE") && parts[1].includes("`````"),
+    "the 5-backtick runs must remain inside the 6-backtick fence");
+  assert.equal(parts[2].trim(), "", "nothing may render after the closing fence");
+});
+
 test("cancel outcomes render each terminal shape distinctly", () => {
   const cancelled = record(ID_A, { status: "cancelled", pgid: 4242, workerPid: 4242 });
   const confirmations = [

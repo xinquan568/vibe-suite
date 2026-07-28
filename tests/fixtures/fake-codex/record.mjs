@@ -21,9 +21,34 @@ const RESUME_OPTIONS = new Set(["-c", "--config", "-m", "--model", "--json",
   "--skip-git-repo-check", "-o", "--output-last-message", "--output-schema", "-i", "--image",
   "--last", "--all"]);
 
-/** Reject argv the real CLI would reject, so a grammar error fails here instead of in production. */
+/**
+ * Reject argv the real CLI would reject, so a grammar error fails here instead of in production.
+ *
+ * Dispatches by top-level grammar (E1.3 / vibe-13): the preflight probes call `--version` and
+ * `login status`, which are commands, not exec options — validating them against the exec option
+ * set would reject `--version` and silently wave `login status` through. Each grammar is exact;
+ * anything else exits 2.
+ */
 export function assertArgvContract(argv) {
-  const isResume = argv[0] === "exec" && argv[1] === "resume";
+  if (argv[0] === "--version") {
+    if (argv.length !== 1) {
+      process.stderr.write("fake-codex: `codex --version` takes no further arguments\n");
+      process.exit(2);
+    }
+    return;
+  }
+  if (argv[0] === "login") {
+    if (argv.length !== 2 || argv[1] !== "status") {
+      process.stderr.write("fake-codex: only `codex login status` is modelled\n");
+      process.exit(2);
+    }
+    return;
+  }
+  if (argv[0] !== "exec") {
+    process.stderr.write(`fake-codex: unknown top-level command '${argv[0] ?? "(none)"}'\n`);
+    process.exit(2);
+  }
+  const isResume = argv[1] === "resume";
   const allowed = isResume ? RESUME_OPTIONS : EXEC_OPTIONS;
   for (const arg of argv) {
     if (!arg.startsWith("-") || arg === "--") continue;

@@ -75,8 +75,10 @@ and cannot tell that it is degraded.
 ```
 
 The suggested fix must be something the user can **act on now**: an install command, a login
-command, a PATH correction, an availability check. Richer diagnostics are planned — a preflight
-probe, a doctor command, a repair command — and those may be named as *forthcoming supplements*, but
+command, a PATH correction, an availability check. `/vibe-suite:preflight` is the available
+diagnostic supplement — it reports the full availability matrix (binary, auth, exec smoke, model
+discovery) and is worth naming alongside the remedy. Richer diagnostics beyond it — a doctor
+command, a repair command — are still planned and may be named as *forthcoming supplements*, but
 they are not the remedy. A pointer to a command that does not exist yet reads as actionable and is
 not, which is worse than offering nothing.
 

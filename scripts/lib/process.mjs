@@ -47,15 +47,27 @@ export function signalGroup(pid, signal) {
   }
 }
 
+/** How long the detached mode polls for the process group to disappear after SIGKILL. */
+export const GROUP_REAP_DEADLINE_MS = 5000;
+const GROUP_REAP_POLL_MS = 50;
+
 /**
  * Run `command args…` under a deadline.
  *
- * Resolves `{ exitCode, signal, stdout, stderr, timedOut, killedHard }`. Never rejects for a
- * non-zero exit — that is data, not an exception.
+ * Resolves `{ exitCode, signal, stdout, stderr, timedOut, killedHard, groupReaped }`. Never
+ * rejects for a non-zero exit — that is data, not an exception.
  *
  * `timeoutMs` must be a finite positive number. A deadline-bounded runner that silently accepts
  * "no deadline" is the defect this throw exists to prevent: the guard is enforced where the value is
  * relied upon, not only where it is set.
+ *
+ * **`detached: true` (E1.3 / vibe-13) makes the deadline group-wide.** The default mode signals
+ * only the direct child, so a child that spawns descendants into its group can leave them running
+ * past the deadline — fine for callers that manage their own workers (the runner detaches its
+ * workers itself), wrong for a probe calling an arbitrary external CLI. Detached mode spawns the
+ * child as a group leader, escalates through `signalGroup`, and resolves only after polling the
+ * group gone; `groupReaped` reports the confirmation (`null` in default mode — a non-detached
+ * child leads no group, and claiming one was reaped would be a lie).
  */
 export function runWithDeadline({
   command,
@@ -67,6 +79,7 @@ export function runWithDeadline({
   onHeartbeat = null,
   heartbeatMs = DEFAULT_HEARTBEAT_MS,
   onSpawned = null,
+  detached = false,
 }) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     return Promise.reject(new RangeError(
@@ -76,7 +89,7 @@ export function runWithDeadline({
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], detached });
     } catch (error) {
       reject(error);
       return;
@@ -95,13 +108,21 @@ export function runWithDeadline({
 
     const beat = onHeartbeat ? setInterval(() => { onHeartbeat(); }, heartbeatMs) : null;
 
+    // In detached mode the child leads its own group, so signalling `-pid` is safe and reaches
+    // descendants; in default mode `signalGroup` must NOT be used — the child shares the caller's
+    // group, and `-pid` would target the caller itself on the ESRCH fallback path.
+    const terminate = (signal) => {
+      if (detached) signalGroup(child.pid, signal);
+      else child.kill(signal);
+    };
+
     let killTimer = null;
     const deadline = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      terminate("SIGTERM");
       killTimer = setTimeout(() => {
         killedHard = true;
-        child.kill("SIGKILL");
+        terminate("SIGKILL");
       }, graceMs);
     }, timeoutMs);
 
@@ -118,18 +139,37 @@ export function runWithDeadline({
       reject(error);
     });
 
+    // Detached only: confirm the whole group is gone, escalating once more if the direct child's
+    // exit left descendants behind. A timer expiring proves nothing (the E1.1 rule) — only the
+    // group actually disappearing counts. Escalating here IS a hard kill and is reported as one.
+    const confirmGroupReaped = () => new Promise((done) => {
+      if (!signalGroup(child.pid, 0)) { done(true); return; }
+      signalGroup(child.pid, "SIGTERM");
+      // `killedHard` claims a delivered SIGKILL — assert it only when signalGroup confirms
+      // delivery, not merely because escalation was attempted.
+      if (signalGroup(child.pid, "SIGKILL")) killedHard = true;
+      const reapDeadline = Date.now() + GROUP_REAP_DEADLINE_MS;
+      const poll = setInterval(() => {
+        if (!signalGroup(child.pid, 0)) { clearInterval(poll); done(true); }
+        else if (Date.now() > reapDeadline) { clearInterval(poll); done(false); }
+      }, GROUP_REAP_POLL_MS);
+    });
+
     child.on("close", (code, signal) => {
       if (settled) return;
       settled = true;
       cleanup();
-      resolve({
+      const finish = (groupReaped) => resolve({
         exitCode: code,
         signal,
         stdout: Buffer.concat(stdout).toString("utf8"),
         stderr: Buffer.concat(stderr).toString("utf8"),
         timedOut,
         killedHard,
+        groupReaped,
       });
+      if (!detached) { finish(null); return; }
+      confirmGroupReaped().then(finish);
     });
   });
 }

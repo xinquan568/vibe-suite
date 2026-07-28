@@ -66,6 +66,17 @@ export function newJobId() {
   return `job_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
 }
 
+/**
+ * The canonical id shape `newJobId` produces. Consumers validate BEFORE any filesystem access:
+ * `recordPath` interpolates the id into a path, so an unvalidated operator-supplied id is a
+ * traversal vector (E1.2 / vibe-12).
+ */
+export const JOB_ID_RE = /^job_[0-9a-f]{20}$/;
+
+export function isValidJobId(id) {
+  return typeof id === "string" && JOB_ID_RE.test(id);
+}
+
 export function jobsDir(workspace) {
   return path.join(workspace, STATE_DIRNAME, "jobs");
 }
@@ -399,4 +410,113 @@ export async function reapOrphanTemps(workspace, { now = Date.now() } = {}) {
     }
   }
   return reaped;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Record validation + listing (E1.2 / vibe-12). `/vibe-suite:jobs` consumes records written by any
+// engine lane (codex today, agy after #17), so what it trusts is the SCHEMA, checked here — never
+// the lane, and never an unvalidated field. `pgid`/`workerPid` are control data: a forged or
+// malformed handle that reaches a kill(2) signals an arbitrary process group, which is why nothing
+// that fails this validator may be rendered as healthy, resolved, settled, or signalled.
+
+const KNOWN_STATUSES = new Set(["running", ...TERMINAL_STATUSES]);
+
+const isPid = (value) => Number.isSafeInteger(value) && value > 0;
+const isTimestamp = (value) => typeof value === "string" && !Number.isNaN(Date.parse(value));
+const nullOr = (check) => (value) => value === null || check(value);
+
+/** key -> type check, mirroring `newRecord`. Extra keys are tolerated (a later lane may add its
+ * own); a missing or mistyped contract key is not. */
+const RECORD_SHAPE = {
+  jobId: isValidJobId,
+  version: (v) => Number.isSafeInteger(v) && v > 0,
+  kind: (v) => typeof v === "string" && v.length > 0,
+  status: (v) => KNOWN_STATUSES.has(v),
+  sandbox: (v) => typeof v === "string" && v.length > 0,
+  effort: nullOr((v) => typeof v === "string"),
+  model: nullOr((v) => typeof v === "string"),
+  background: (v) => typeof v === "boolean",
+  threadId: nullOr((v) => typeof v === "string"),
+  workerPid: nullOr(isPid),
+  pgid: nullOr(isPid),
+  claimDigest: nullOr((v) => typeof v === "string"),
+  createdAt: isTimestamp,
+  startedAt: nullOr(isTimestamp),
+  endedAt: nullOr(isTimestamp),
+  updatedAt: isTimestamp,
+  heartbeatAt: nullOr(isTimestamp),
+  timeoutMs: nullOr((v) => Number.isFinite(v) && v > 0),
+  exitCode: nullOr((v) => Number.isSafeInteger(v)),
+  rawOutput: nullOr((v) => typeof v === "string"),
+  error: nullOr((v) => typeof v === "string"),
+  // The runner finalises `tokens` with `billableTokens(usage)` — a non-negative number (or null
+  // when no usage event arrived), NOT an object; see events.mjs.
+  tokens: nullOr((v) => Number.isFinite(v) && v >= 0),
+};
+
+/**
+ * One complete verdict on a record: schema, identity, handle invariants. Returns
+ * `{ ok: true }` or `{ ok: false, reason }` — a reason, because "invalid" without which field
+ * failed sends the operator to a JSON diff.
+ */
+export function validateRecord(record, jobId) {
+  if (typeof record !== "object" || record === null || Array.isArray(record)) {
+    return { ok: false, reason: "record is not an object" };
+  }
+  for (const [key, check] of Object.entries(RECORD_SHAPE)) {
+    if (!(key in record)) return { ok: false, reason: `missing key: ${key}` };
+    if (!check(record[key])) return { ok: false, reason: `invalid ${key}: ${JSON.stringify(record[key])}` };
+  }
+  if (record.jobId !== jobId) {
+    return { ok: false, reason: `identity mismatch: file says ${jobId}, record says ${record.jobId}` };
+  }
+  // Handle invariants. E1.1 sets pgid := workerPid on claim (the detached worker leads its group by
+  // construction), and only background workers are ever detached — anything else is a forgery or a
+  // corruption, and either way it must never reach a signal.
+  if (record.background === false && record.pgid !== null) {
+    return { ok: false, reason: "foreground record carries a pgid" };
+  }
+  if (record.pgid !== null && record.pgid !== record.workerPid) {
+    return { ok: false, reason: `pgid ${record.pgid} !== workerPid ${record.workerPid}` };
+  }
+  return { ok: true };
+}
+
+/**
+ * Every job in the store: canonical names enumerated, records loaded through `readRecord`.
+ *
+ * The split matters (round-1 plan review, finding 2): enumeration must see ONLY `<jobId>.json` —
+ * `.vN` slots and `.tmp./.pub.` temps are CAS protocol state, not records — but the LOAD must go
+ * through the store's slot-aware read, because a canonical file can be legitimately stale when a
+ * writer died between `link` and `rename`. Raw-reading canonicals here would report stale status.
+ *
+ * Invalid records are returned separately with reasons, never silently dropped: an operator whose
+ * job vanished from `status` with no trace would reasonably conclude the store lost it.
+ */
+export async function listRecords(workspace) {
+  let names;
+  try {
+    names = await readdir(jobsDir(workspace));
+  } catch (error) {
+    if (error.code === "ENOENT") return { records: [], invalid: [] };
+    throw error;
+  }
+  const records = [];
+  const invalid = [];
+  for (const name of names.sort()) {
+    const match = /^(job_[0-9a-f]{20})\.json$/.exec(name);
+    if (!match) continue;
+    const jobId = match[1];
+    try {
+      const record = await readRecord(workspace, jobId);
+      const verdict = validateRecord(record, jobId);
+      if (verdict.ok) records.push(record);
+      else invalid.push({ jobId, reason: verdict.reason });
+    } catch (error) {
+      invalid.push({ jobId, reason: String(error?.message ?? error) });
+    }
+  }
+  records.sort((a, b) =>
+    a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.jobId < b.jobId ? -1 : 1);
+  return { records, invalid };
 }

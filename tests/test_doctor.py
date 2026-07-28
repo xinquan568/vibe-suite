@@ -191,14 +191,19 @@ class TestBreakageClasses(DoctorCase):
         (self.ws / ".claude" / "nlpm.local.md").write_text("---\neffort: low\n---\n",
                                                            encoding="utf-8")
         (self.ws / ".claude" / "nlpm-reports").mkdir(exist_ok=True)
-        (self.ws / "codex-toolkit").mkdir()
-        (self.ws / "codex-toolkit" / "config.json").write_text('{"config":{}}\n', encoding="utf-8")
+        (self.ws / ".codex-toolkit-state").mkdir()
+        (self.ws / ".codex-toolkit-state" / "state.json").write_text(
+            '{"config":{"gate":{"stop_review_gate":true}}}\n', encoding="utf-8")
         doc = json.loads((self.ws / ".mcp.json").read_text())
         doc["mcpServers"]["cc-suite-mcp"] = {"command": "x"}
         (self.ws / ".mcp.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-        found = self.checks(self.report())
-        for check in ("legacy-config", "legacy-reports", "legacy-state", "legacy-sentinels"):
+        report = self.report()
+        found = self.checks(report)
+        for check in ("legacy-config", "legacy-state", "legacy-sentinels"):
             self.assertIn(check, found)
+        # Row 4 comes from survey.sh, consumed rather than reimplemented.
+        self.assertTrue(any(c.startswith("legacy-row-") for c in found),
+                        f"survey's rows were not forwarded: {sorted(found)}")
 
 
 class TestKnowledgeFreshness(DoctorCase):

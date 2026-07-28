@@ -4,6 +4,10 @@
 > refers to the command namespace as `/vibe:`; the namespace is now **`/vibe-suite:`** (D1-revised,
 > 2026-07-25), which follows from `.claude-plugin/plugin.json:name`. The bound issue2pr profile is
 > authoritative on project facts.
+> Known divergence: F4.4's specification does not claim the audit-report schema validation that
+> F9.1 assigns to it; **F4.4 (`bin/vibe-check`) does own it**, performed as fail-closed subset
+> checking against `schemas/audit-output.schema.json` within its stdlib-only constraint (ADR-0001,
+> 2026-07-28), which follows from the standard library having no JSON Schema implementation.
 
 # vibe-suite — Unified Function Catalog & Merge Proposal
 

@@ -7,6 +7,13 @@ later superseded. Where a discussion document disagrees with current configurati
 workflows, or the issue2pr profile — **current configuration wins**. Each file carries a banner
 noting its known divergences.
 
+A divergence has two sources. It may be **current configuration**, as with the `/vibe:` →
+`/vibe-suite:` namespace reversal, which follows from `.claude-plugin/plugin.json:name`. Or it may be
+a **decision made after the document was frozen**, recorded in [`../adr/`](../adr/) — a frozen
+document cannot be the authority for a decision that postdates it. Either way the banner **states
+what is true now** and cites the source; the body is left as written. Rewriting a body would make the
+file no longer the document that was written, which is the whole reason this directory exists.
+
 ## Lint exclusion (declared, not implicit)
 
 This directory is **excluded from the repository-wide pinned-model-identifier scan** (principle P9)

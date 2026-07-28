@@ -23,7 +23,7 @@ import { runWithDeadline } from "./process.mjs";
 export const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const ROW_KEYS = ["engine", "available", "version", "auth", "smoke", "models", "detail"];
 export const AUTH_MODES = new Set(["chatgpt", "api-key", "not-authenticated", "unknown"]);
-export const SMOKE_RESULTS = new Set(["ok", "turn-failed", "timeout", "spawn-failed"]);
+export const SMOKE_RESULTS = new Set(["ok", "turn-failed", "timeout", "spawn-failed", "reap-failed"]);
 
 const VERSION_TIMEOUT_MS = 10_000;
 const AUTH_TIMEOUT_MS = 10_000;
@@ -93,7 +93,7 @@ async function defaultRun(args, timeoutMs, env) {
 }
 
 function classifyAuth(outcome) {
-  if (outcome.timedOut || outcome.spawnFailed) return "unknown";
+  if (outcome.timedOut || outcome.spawnFailed || outcome.groupReaped === false) return "unknown";
   const text = (outcome.stdout + "\n" + outcome.stderr).toLowerCase();
   if (outcome.exitCode !== 0) return "not-authenticated";
   if (text.includes("not logged in")) return "not-authenticated";
@@ -104,6 +104,9 @@ function classifyAuth(outcome) {
 
 function classifySmoke(outcome) {
   if (outcome.spawnFailed) return "spawn-failed";
+  // Fail closed: a probe whose process group survived escalation broke the deadline contract —
+  // whatever its stream said cannot make the lane "ok" while its descendants are still alive.
+  if (outcome.groupReaped === false) return "reap-failed";
   if (outcome.timedOut) return "timeout";
   for (const line of outcome.stdout.split("\n")) {
     try {
@@ -118,9 +121,12 @@ function classifySmoke(outcome) {
 }
 
 function classifyVersion(outcome) {
-  if (outcome.timedOut || outcome.spawnFailed) return "unknown";
-  const match = /codex-cli (\d+\.\d+\.\d+)/.exec(outcome.stdout);
-  return match ? boundToken(`codex-cli ${match[1]}`, 32) : "unknown";
+  if (outcome.timedOut || outcome.spawnFailed || outcome.groupReaped === false) return "unknown";
+  // Anchored, not substring: a valid-looking version embedded in arbitrary leading text is
+  // arbitrary text. Oversized components are refused, never truncated into a plausible lie.
+  const match = /^codex-cli (\d+\.\d+\.\d+)\b/.exec(outcome.stdout.trim());
+  if (!match || match[1].length > 20) return "unknown";
+  return `codex-cli ${match[1]}`;
 }
 
 /**
@@ -129,7 +135,16 @@ function classifyVersion(outcome) {
  */
 export async function probeCodex(deps = {}) {
   const { env = process.env, now = Date.now } = deps;
-  const run = deps.run ?? ((args, timeoutMs) => defaultRun(args, timeoutMs, env));
+  const rawRun = deps.run ?? ((args, timeoutMs) => defaultRun(args, timeoutMs, env));
+  // The matrix must survive ANY probe failure: an unexpected subprocess error becomes a bounded
+  // spawn-failed outcome, never a stack trace in place of the report.
+  const run = async (args, timeoutMs) => {
+    try {
+      return await rawRun(args, timeoutMs);
+    } catch {
+      return { exitCode: null, stdout: "", stderr: "", timedOut: false, spawnFailed: true };
+    }
+  };
 
   const models = readModelsCache(env, { now });
 
@@ -140,9 +155,24 @@ export async function probeCodex(deps = {}) {
       detail: "codex CLI not found on PATH",
     };
   }
+  // Fail closed on a broken deadline contract: if this probe's group survived escalation, later
+  // probes would spawn more of the same — stop, report, investigate.
+  if (versionOutcome.groupReaped === false) {
+    return {
+      engine: "codex", available: false, version: "unknown", auth: null, smoke: null, models,
+      detail: "probe process group survived escalation — investigate before trusting this lane",
+    };
+  }
   const version = classifyVersion(versionOutcome);
 
-  const auth = classifyAuth(await run(["login", "status"], AUTH_TIMEOUT_MS));
+  const authOutcome = await run(["login", "status"], AUTH_TIMEOUT_MS);
+  const auth = classifyAuth(authOutcome);
+  if (authOutcome.groupReaped === false) {
+    return {
+      engine: "codex", available: false, version, auth: "unknown", smoke: null, models,
+      detail: "probe process group survived escalation — investigate before trusting this lane",
+    };
+  }
 
   const smoke = classifySmoke(await run([
     "exec", "-s", "read-only", "--skip-git-repo-check", "-c", "reasoning.effort=low", "--json",

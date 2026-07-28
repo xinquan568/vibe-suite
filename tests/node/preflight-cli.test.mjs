@@ -92,8 +92,14 @@ test("--json is one parseable document with both rows in the exact schema", () =
   for (const row of payload.engines) {
     assert.deepEqual(Object.keys(row),
       ["engine", "available", "version", "auth", "smoke", "models", "detail"]);
+    assert.deepEqual(Object.keys(row.models), ["status", "slugs"],
+      "the nested models shape is part of the schema contract");
+    assert.ok(Array.isArray(row.models.slugs) && row.models.slugs.every((s) => typeof s === "string"));
   }
   assert.equal(payload.engines[1].available, null);
+  assert.deepEqual(
+    [payload.engines[1].version, payload.engines[1].auth, payload.engines[1].smoke],
+    [null, null, null]);
 });
 
 test("authless lane: not-authenticated, exit 1, and the credential token never surfaces", () => {

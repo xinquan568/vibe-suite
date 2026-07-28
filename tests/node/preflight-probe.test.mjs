@@ -14,7 +14,8 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  agyRow, buildMatrix, MODELS_CACHE_TTL_MS, probeCodex, readModelsCache, ROW_KEYS,
+  agyRow, buildMatrix, AUTH_MODES, MODELS_CACHE_TTL_MS, probeCodex, readModelsCache, ROW_KEYS,
+  SMOKE_RESULTS,
 } from "../../scripts/lib/preflight.mjs";
 
 function tempHome() {
@@ -155,6 +156,53 @@ test("models cache: fresh, stale, missing, malformed — and slug bounding", asy
   }
 });
 
+test("groupReaped:false fails closed — a completed-looking smoke cannot make the lane available", async () => {
+  const { env, now } = freshCacheEnv();
+  const { run } = scriptedRun({
+    ...OK_ANSWERS,
+    exec: { stdout: '{"type":"turn.completed","usage":{}}\n', groupReaped: false },
+  });
+  const row = await probeCodex({ run, env, now });
+  assert.equal(row.smoke, "reap-failed",
+    "a probe whose group survived escalation broke the deadline contract — the stream cannot override that");
+  assert.equal(row.available, false);
+});
+
+test("groupReaped:false on an early probe stops the sequence — no further processes are spawned", async () => {
+  const { env, now } = freshCacheEnv();
+  const { run, calls } = scriptedRun({
+    ...OK_ANSWERS,
+    "--version": { stdout: "codex-cli 0.144.6\n", groupReaped: false },
+  });
+  const row = await probeCodex({ run, env, now });
+  assert.equal(row.available, false);
+  assert.ok(row.detail.includes("survived escalation"), row.detail);
+  assert.deepEqual(calls, ["--version"], "later probes must not spawn after a reap failure");
+});
+
+test("an unexpectedly rejecting run still yields a bounded row — the matrix never dies", async () => {
+  const { env, now } = freshCacheEnv();
+  const row = await probeCodex({
+    run: async () => { throw new Error("EPERM: something exotic"); }, env, now,
+  });
+  assert.equal(row.engine, "codex");
+  assert.equal(row.available, false);
+  assert.ok(!JSON.stringify(row).includes("exotic"), "unexpected errors are normalized, not echoed");
+});
+
+test("version is anchored and size-limited: embedded or oversized versions are refused", async () => {
+  for (const stdout of [
+    "warning: something\ncodex-cli 1.2.3\n",       // embedded after leading text
+    "prefix codex-cli 1.2.3\n",                    // embedded mid-line
+    `codex-cli ${"1".repeat(30)}.2.3\n`,           // oversized component
+  ]) {
+    const { env, now } = freshCacheEnv();
+    const { run } = scriptedRun({ ...OK_ANSWERS, "--version": { stdout } });
+    const row = await probeCodex({ run, env, now });
+    assert.equal(row.version, "unknown", `accepted: ${JSON.stringify(stdout)}`);
+  }
+});
+
 test("the CLI absent: available false, nothing else probed", async () => {
   const { env, now } = freshCacheEnv();
   const { run, calls } = scriptedRun({ "--version": { spawnFailed: true } });
@@ -167,14 +215,27 @@ test("the CLI absent: available false, nothing else probed", async () => {
   assert.ok(row.detail.includes("not found"));
 });
 
-test("the agy slot and the codex row share ONE exact schema", async () => {
+test("the agy slot and the codex row share ONE exact schema, down to nested keys and types", async () => {
   const { env, now } = freshCacheEnv();
   const { run } = scriptedRun(OK_ANSWERS);
   const codex = await probeCodex({ run, env, now });
   const agy = agyRow();
-  assert.deepEqual(Object.keys(codex), ROW_KEYS);
-  assert.deepEqual(Object.keys(agy), ROW_KEYS, "E1.7 fills values, never reshapes");
+
+  const MODEL_STATUSES = new Set(["fresh", "stale", "missing", "malformed", "pending"]);
+  for (const row of [codex, agy]) {
+    assert.deepEqual(Object.keys(row), ROW_KEYS, "E1.7 fills values, never reshapes");
+    assert.ok(row.available === true || row.available === false || row.available === null);
+    assert.ok(row.version === null || typeof row.version === "string");
+    assert.ok(row.auth === null || AUTH_MODES.has(row.auth), `auth outside its enum: ${row.auth}`);
+    assert.ok(row.smoke === null || SMOKE_RESULTS.has(row.smoke), `smoke outside its enum: ${row.smoke}`);
+    assert.deepEqual(Object.keys(row.models), ["status", "slugs"], "the nested models shape is part of the contract");
+    assert.ok(MODEL_STATUSES.has(row.models.status));
+    assert.ok(Array.isArray(row.models.slugs) && row.models.slugs.every((s) => typeof s === "string"));
+    assert.equal(typeof row.detail, "string");
+  }
   assert.equal(agy.available, null, "pending never counts as unavailable");
+  assert.deepEqual([agy.version, agy.auth, agy.smoke], [null, null, null],
+    "the slot claims nothing it has not probed");
   assert.equal(agy.models.status, "pending");
   assert.deepEqual(agy.models.slugs, []);
   assert.ok(agy.detail.includes("probe pending"), "the acceptance's exact column wording");

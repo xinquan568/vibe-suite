@@ -22,8 +22,10 @@
 // 6. **One absolute deadline.** The harness allows this hook 900 s; every child gets only the time
 //    actually left, with a shutdown reserve, so the hook returns its own decision instead of being
 //    killed mid-flight with nothing said.
-// 7. **The prompt is bounded in BYTES.** Character counts are not byte counts for a non-ASCII diff,
-//    and an unbounded prompt hits argv limits before it hits the model.
+// 7. **The prompt is bounded in BYTES, below the single-argument argv limit.** Character counts
+//    are not byte counts for a non-ASCII diff, and `codex exec` takes the prompt as one argv
+//    string — which Linux caps at 128 KiB. An unbounded prompt dies with E2BIG before it reaches
+//    any model, and it dies only on Linux, which is the worst way to learn about it.
 // 8. **Tracked diffs run with `--no-textconv --no-ext-diff`.** Git's textconv and external-diff
 //    drivers are configured *by the repository under review*; leaving them enabled lets a hostile
 //    `.gitattributes` execute a converter and inject its output — including files from outside the
@@ -47,8 +49,13 @@ const CONFIG_TIMEOUT_MS = 30_000;
 const GIT_TIMEOUT_MS = 60_000;
 const GIT_MAX_BUFFER = 32 * 1024 * 1024; // large enough that a real diff never silently truncates…
 const PER_FILE_CAP = 20_000;             // …the caps below are what bound the prompt instead
-const TOTAL_UNTRACKED_CAP = 120_000;
-const PROMPT_CAP = 400_000;              // bytes
+const TOTAL_UNTRACKED_CAP = 48_000;      // must fit inside PROMPT_CAP alongside the tracked diff
+// Bytes, and the number is not arbitrary: Linux caps a SINGLE argv string at MAX_ARG_STRLEN
+// (128 KiB), and the engine hands the prompt to `codex exec` as one argument. A 400 KB prompt
+// therefore died with E2BIG on Linux CI while passing on macOS — the platform-dependent break that
+// makes a locally-green gate fail in the place it matters. 96 KB leaves room for the runner's own
+// argv and the review preamble.
+const PROMPT_CAP = 96_000;
 const OUTPUT_MAX_BUFFER = 8 * 1024 * 1024;
 const REASON_CAP = 500;
 
@@ -134,6 +141,7 @@ function collectDiff(cwd) {
   }
 
   const listed = git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  const untrackedStart = parts.length;
   let budget = TOTAL_UNTRACKED_CAP;
   let capReached = false;
   for (const rel of listed.split("\0").filter(Boolean)) {
@@ -164,7 +172,12 @@ function collectDiff(cwd) {
     budget -= byteLength(body);
     parts.push(`## untracked file: ${rel}${note}\n${body}`);
   }
-  if (capReached) parts.push("## untracked files (total cap reached — the listing is truncated)");
+  // The notice goes FIRST among the untracked parts: a disclosure that the prompt cap can cut off
+  // is not a disclosure.
+  if (capReached) {
+    parts.splice(untrackedStart, 0,
+      "## untracked files (total cap reached — the listing below is truncated)");
+  }
   return parts.join("\n\n");
 }
 

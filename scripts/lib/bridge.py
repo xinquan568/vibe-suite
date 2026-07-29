@@ -27,6 +27,9 @@ from pathlib import Path
 SCHEMA = 1
 MARKER = "vibe-suite"
 
+#: `O_NOFOLLOW` where the platform has it; 0 elsewhere, so the flag composes unconditionally.
+O_NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
+
 #: Literal sentinel names, plus the prefix whose members are discovered at runtime.
 SENTINEL_LITERALS = ("vibe-mcp", "vibe-claude-mcp")
 SENTINEL_PREFIX = "vibe-agent:"
@@ -151,6 +154,90 @@ def symlink_at(root, rel, target):
         return True
     except FileExistsError:
         return False
+    finally:
+        os.close(fd)
+
+
+def publish_new(root, dest, content, mode=0o644):
+    """Create `dest` with `content`, or report that something is already there. Never overwrites.
+
+    The other half of the write surface. `write_atomic` *replaces*; this one *publishes*, and the
+    distinction is the whole safety argument for row 3's history migration: a store that appeared
+    while the migration ran must win, so the publication step has to fail rather than clobber.
+
+    Returns True when it created the file, False when the destination already existed. The link is
+    made from a fully written inode, so a reader never sees a partial file.
+    """
+    dest = Path(dest)
+    assert_inside(root, dest)
+    if dest.is_symlink():
+        # `lstat`, never `exists`: a dangling symlink reports False from `exists()`, and publishing
+        # through it would write to wherever it points.
+        raise BridgeError(f"{dest} is a symlink; refusing to publish through it")
+    rel = dest.relative_to(Path(root))
+    fd = _open_dir_chain(root, rel.parent.parts)
+    data = content if isinstance(content, bytes) else content.encode("utf-8")
+    tmp_name = None
+    try:
+        handle, tmp_name = _scratch(fd, dest.name, mode)
+        with os.fdopen(handle, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        try:
+            os.link(tmp_name, dest.name, src_dir_fd=fd, dst_dir_fd=fd)
+        except FileExistsError:
+            return False
+        _fsync_dir(fd)
+        return True
+    finally:
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+        os.close(fd)
+
+
+def _scratch(dir_fd, name, mode):
+    """An `O_EXCL` scratch file with an unpredictable name, created at `mode` from the start.
+
+    Both properties matter: a fixed name is a path the user may own, and creating at the default and
+    chmod-ing afterwards leaves a window in which a private file is readable — the window *is* the
+    leak.
+    """
+    import binascii
+    for _ in range(64):
+        suffix = binascii.hexlify(os.urandom(6)).decode("ascii")
+        candidate = f".{name}.{suffix}.vibe-tmp"
+        try:
+            return os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW_FLAG,
+                           mode, dir_fd=dir_fd), candidate
+        except FileExistsError:
+            continue
+    raise BridgeError("could not create a scratch file after 64 attempts")
+
+
+def _fsync_dir(dir_fd):
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+
+
+def secure_dir(root, rel, mode=0o700):
+    """Tighten a directory we own, through the audited descent.
+
+    A directory mode is not a file write, so it needs its own entry point rather than being inlined
+    at the one call site that wanted it — the same reasoning that gave `unlink_at` and `symlink_at`
+    a home. `fchmod` on the descriptor, never `chmod` on the path: a path-based call after the
+    descent can be redirected by swapping the name.
+    """
+    rel = Path(rel)
+    assert_inside(root, Path(root) / rel)
+    fd = _open_dir_chain(root, rel.parts)
+    try:
+        os.fchmod(fd, mode)
     finally:
         os.close(fd)
 

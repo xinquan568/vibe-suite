@@ -122,7 +122,7 @@ def provenance_open(ws):
                         mode=strictest or 0o600)
     # The directory holding it is traversable by default, so a pre-existing looser mode would
     # undo the file's own protection.
-    os.chmod(out.parent, 0o700)
+    bridge.secure_dir(ws, Path(PROVENANCE).parent)
 
 
 def set_gate(ws, value):

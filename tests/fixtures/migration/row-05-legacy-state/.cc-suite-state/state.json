@@ -1,0 +1,12 @@
+{
+  "config": {
+    "stopReviewGate": true,
+    "somethingEphemeral": 42
+  },
+  "jobs": [
+    {
+      "id": "j1",
+      "status": "running"
+    }
+  ]
+}

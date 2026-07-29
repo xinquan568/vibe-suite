@@ -18,6 +18,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLI = REPO_ROOT / "scripts" / "bridge_cli.py"
+import sys
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+import bridge  # noqa: E402
 
 SECRET = "sk-live-DO-NOT-COPY-8f3a91"
 
@@ -342,3 +345,46 @@ class TestIteration2(BridgeCase):
         self.assertFalse((outside / "skills").exists(),
                          "a link was created through a symlinked ancestor")
         self.assertIn("refused", result.stdout)
+
+
+class WriteAtomicRefusesSymlinks(unittest.TestCase):
+    """`classify()` has always returned "symlink"; `write_atomic` acted only on "dir" and "other",
+    so `os.replace` converted a user's link into a regular file. The bytes at the far end survive,
+    but the link does not — and teardown records `kind: symlink` while never restoring one, so the
+    conversion is permanent."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-wa-symlink-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_a_symlinked_destination_is_refused(self):
+        target = self.ws / "theirs.txt"
+        target.write_text("user data")
+        link = self.ws / "CLAUDE.md"
+        link.symlink_to(target)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.write_atomic(self.ws, link, "ours\n")
+        self.assertTrue(link.is_symlink(), "the user's link was converted to a regular file")
+        self.assertEqual(os.readlink(link), str(target))
+        self.assertEqual(target.read_text(), "user data")
+
+    def test_a_dangling_symlink_is_refused_too(self):
+        """`exists()` follows the link, so a dangling one reports False — the case every
+        "is it already there?" guard waves through."""
+        link = self.ws / "GEMINI.md"
+        link.symlink_to(self.ws / "never-existed.txt")
+        with self.assertRaises(bridge.BridgeError):
+            bridge.write_atomic(self.ws, link, "ours\n")
+        self.assertTrue(link.is_symlink())
+
+    def test_a_regular_destination_is_still_written(self):
+        plain = self.ws / "AGENTS.md"
+        plain.write_text("before")
+        bridge.write_atomic(self.ws, plain, "after\n")
+        self.assertEqual(plain.read_text(), "after\n")
+        self.assertFalse(plain.is_symlink())
+
+    def test_a_fresh_destination_is_still_created(self):
+        fresh = self.ws / "new.md"
+        bridge.write_atomic(self.ws, fresh, "made\n")
+        self.assertEqual(fresh.read_text(), "made\n")

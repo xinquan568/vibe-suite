@@ -125,6 +125,17 @@ def write_atomic(root, dest, content, mode=None):
                           "restorable from the provenance record, so the install refuses")
     if kind == "other":
         raise BridgeError(f"{dest} is neither a file nor a symlink; the install refuses")
+    if kind == "symlink":
+        # `classify()` has always returned "symlink"; nothing acted on it, so `os.replace` below
+        # converted the user's link into a regular file. The bytes at the far end survive, but the
+        # link does not — and teardown records `kind: symlink` while never restoring one, so the
+        # conversion is permanent.
+        #
+        # Refusing is the fix rather than restoring later: the destructive step is the conversion,
+        # and a step never taken needs no undo.
+        raise BridgeError(
+            f"{dest} is a symlink; replacing it would convert the user's link into a regular file "
+            f"and could not be undone by /vibe-suite:unbridge. Remove or re-point it and re-run")
 
     # A file's existing mode is the user's, not ours. An earlier revision created the temp at 0600
     # and never restored it, so every rewritten file silently became owner-only.

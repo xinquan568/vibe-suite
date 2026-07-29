@@ -13,6 +13,9 @@ three `gate.*` keys may be shadowed at all.
 
 import importlib.util
 import json
+import stat
+import shutil
+import os
 import subprocess
 import sys
 import tempfile
@@ -20,6 +23,9 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+import sys
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+import bridge  # noqa: E402
 STORE_PY = REPO_ROOT / "scripts" / "lib" / "store.py"
 
 
@@ -203,3 +209,46 @@ class TestEffectiveConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SetGoesThroughTheAuditedPrimitive(unittest.TestCase):
+    """`Store.set` hand-rolled tmp-and-rename: a **fixed** scratch name the user may own, no symlink
+    check on the destination, and an existing `0600` file republished at the default mode."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-store-write-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        self.state_dir = self.ws / ".vibe-suite-state"
+        self.state_dir.mkdir(parents=True)
+        self.path = self.state_dir / "state.json"
+
+    def store(self):
+        return store.Store(self.ws)
+
+    def test_a_symlinked_state_file_is_refused_not_replaced(self):
+        target = self.ws / "theirs.json"
+        target.write_text("{}")
+        self.path.symlink_to(target)
+        with self.assertRaises(bridge.BridgeError):
+            self.store().set("gate.stop_review_gate", True)
+        self.assertTrue(self.path.is_symlink(), "the user's link was replaced by a regular file")
+
+    def test_a_users_file_at_the_scratch_path_survives(self):
+        """The old code wrote `state.json.tmp` unconditionally."""
+        scratch = self.state_dir / "state.json.tmp"
+        scratch.write_text("something of mine")
+        self.store().set("gate.stop_review_gate", True)
+        self.assertTrue(scratch.is_file(), "a user's file at the scratch path was destroyed")
+        self.assertEqual(scratch.read_text(), "something of mine")
+
+    def test_a_fresh_state_file_is_not_world_readable(self):
+        """State records can hold private content, so a fresh one is created 0600."""
+        self.store().set("gate.stop_review_gate", True)
+        mode = stat.S_IMODE(self.path.lstat().st_mode)
+        self.assertEqual(mode & 0o077, 0, f"fresh state file is group/world readable at {oct(mode)}")
+
+    def test_an_existing_files_mode_is_preserved(self):
+        self.path.write_text("{}")
+        os.chmod(self.path, 0o600)
+        self.store().set("gate.stop_review_gate", True)
+        self.assertEqual(stat.S_IMODE(self.path.lstat().st_mode), 0o600)

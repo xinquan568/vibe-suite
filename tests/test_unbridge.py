@@ -25,6 +25,7 @@ import sys
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import bridge      # noqa: E402
 import unbridge    # noqa: E402
+import init_bridge # noqa: E402
 INIT = REPO_ROOT / "scripts" / "init.sh"
 
 
@@ -378,8 +379,29 @@ class ContentLossPaths(unittest.TestCase):
                 "ours\n"
                 "# <<< vibe-suite:ignore <<<\n")
         self.assertFalse(unbridge.markers_sane(text, "ignore", "text"))
-        # Proof the guard is not theatre: without it, removal eats the line between the markers.
-        self.assertNotIn("USER DATA", bridge.text_block_remove(text, "ignore"))
+        # Proof the guard is not theatre: the underlying pattern really does span the user's line,
+        # so an unguarded removal would delete it.
+        self.assertNotIn("USER DATA", bridge._block_re("ignore", "#", "").sub("", text))
+        # And the codec now refuses rather than performing that removal.
+        with self.assertRaises(bridge.BridgeError):
+            bridge.text_block_remove(text, "ignore")
+
+    def test_the_toml_codec_is_guarded_too(self):
+        """`toml_server_remove` used the raw pattern directly, so `.codex/config.toml` was removed
+        unvalidated no matter what teardown checked beforehand."""
+        text = ("# >>> vibe-suite:server:x v1 >>>\n"
+                "USER DATA\n"
+                "# >>> vibe-suite:server:x v1 >>>\n"
+                "ours\n"
+                "# <<< vibe-suite:server:x <<<\n")
+        with self.assertRaises(bridge.BridgeError):
+            bridge.toml_server_remove(text, "x")
+
+    def test_a_closer_with_trailing_text_is_rejected(self):
+        """The validator's grammar must match the remover's: accepting a marker the remover rejects
+        would pass a document whose removal still spans user data."""
+        self.assertFalse(bridge.markers_wellformed(
+            "# >>> vibe-suite:ignore v1 >>>\na\n# <<< vibe-suite:ignore <<< junk\n", "ignore"))
 
     def test_a_lone_closing_marker_is_malformed(self):
         self.assertFalse(unbridge.markers_sane(
@@ -425,3 +447,83 @@ class ContentLossPaths(unittest.TestCase):
         """The shared rule must not reach exclusive files, or teardown strands its own state."""
         self.assertTrue(unbridge.json_is_only_ours(
             ".claude/vibe-history.json", {"entries": [{"anything": 1}]}))
+
+
+class ProvenanceIsNotTrusted(unittest.TestCase):
+    """The record directs every mutation, so a tampered one directed them at the user's files.
+
+    These drive the **real command**, not the validator, because the previous round's tests passed
+    against a bypassed guard by only ever calling helpers.
+    """
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-prov-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.record_path = self.ws / init_bridge.PROVENANCE
+
+    def rewrite(self, mutate):
+        record = json.loads(self.record_path.read_text())
+        mutate(record)
+        self.record_path.write_text(json.dumps(record, indent=2))
+
+    def unbridge(self):
+        return subprocess.run(["bash", str(UNBRIDGE), "--workspace", str(self.ws), "--confirm"],
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
+
+    def test_a_forged_target_does_not_delete_a_user_file(self):
+        victim = self.ws / "notes.txt"
+        victim.write_text("a year of notes")
+        self.rewrite(lambda r: r["targets"].append(
+            {"path": str(victim), "kind": "absent"}))
+        self.assertEqual(self.unbridge().returncode, 1)
+        self.assertTrue(victim.is_file())
+        self.assertEqual(victim.read_text(), "a year of notes")
+
+    def test_a_forged_created_parent_does_not_remove_a_user_directory(self):
+        theirs = self.ws / "empty-but-theirs"
+        theirs.mkdir()
+        self.rewrite(lambda r: r.setdefault("parents_created", []).append(str(theirs)))
+        self.assertEqual(self.unbridge().returncode, 1)
+        self.assertTrue(theirs.is_dir())
+
+    def test_an_honest_record_still_runs(self):
+        """The guard has to reject forgeries without rejecting every real install."""
+        self.assertEqual(self.unbridge().returncode, 0)
+
+
+class SymlinkTargetsAreRefused(unittest.TestCase):
+    """The conversion, not the teardown, was the destructive step.
+
+    Init replacing a pre-existing symlink produced a regular 0644 copy of its target. Unbridge
+    removes only what it owns, so the copy survived and the original link target went with the
+    provenance — losing user-owned metadata and leaving content that had been reachable only through
+    a link the user controlled sitting in an independent file. Refusing the conversion removes the
+    whole class; there is nothing to restore because nothing is destroyed.
+    """
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-symlink-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_writing_over_a_symlink_is_refused(self):
+        secret = self.ws / "private.md"
+        secret.write_text("theirs")
+        link = self.ws / "CLAUDE.md"
+        link.symlink_to(secret)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.write_atomic(self.ws, link, "ours\n")
+        # The link is intact, still a link, still pointing where the user put it.
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), str(secret))
+        self.assertEqual(secret.read_text(), "theirs")
+
+    def test_a_regular_file_is_still_written(self):
+        target = self.ws / "CLAUDE.md"
+        target.write_text("before")
+        bridge.write_atomic(self.ws, target, "after\n")
+        self.assertEqual(target.read_text(), "after\n")
+        self.assertFalse(target.is_symlink())

@@ -58,27 +58,13 @@ EXCLUSIVE_JSON = (".claude/vibe-history.json",)
 
 
 def markers_sane(text, name, style):
-    """Whether this file's owned markers are a clean sequence of non-overlapping pairs.
+    """Delegates to the codec's validator so teardown cannot drift from what removal accepts.
 
-    `_block_re` matches non-greedily from an opening marker to the *next* closing one. A stray or
-    duplicated opening marker therefore makes the match start early and swallow everything up to the
-    real block's close — user content included — and the result is then written back. Counting the
-    markers first is what turns that from silent data loss into a refusal.
+    This lived here first, which is precisely why `.codex/config.toml` stayed exposed: a guard beside
+    one caller is not a guard on the operation.
     """
     od, cd = ("<!--", " -->") if style == "md" else ("#", "")
-    marker = re.escape(bridge.MARKER)
-    opens = [m.start() for m in re.finditer(
-        rf"{re.escape(od)} >>> {marker}:{re.escape(name)} v\d+ >>>{re.escape(cd)}", text)]
-    closes = [m.start() for m in re.finditer(
-        rf"{re.escape(od)} <<< {marker}:{re.escape(name)} <<<{re.escape(cd)}", text)]
-    if len(opens) != len(closes):
-        return False
-    expect = "o"
-    for _, kind in sorted([(p, "o") for p in opens] + [(p, "c") for p in closes]):
-        if kind != expect:
-            return False
-        expect = "c" if expect == "o" else "o"
-    return True
+    return bridge.markers_wellformed(text, name, od, cd)
 
 
 def json_is_only_ours(rel, doc):
@@ -240,6 +226,61 @@ def prune(ws, record, report):
             report.append(f"{path.relative_to(ws)}/: removed")
 
 
+def validate_record(ws, record):
+    """Every mutation this command performs is directed by the provenance record, so the record is
+    authority — and authority that is only shape-checked is authority a tampered file inherits.
+
+    Checking `targets` was a list let an entry rewritten to
+    `{"path": "<ws>/notes.txt", "kind": "absent"}` make `restore()` unlink an arbitrary user file,
+    and a forged `parents_created` remove an empty user directory. The paths init can legitimately
+    have touched are a **closed, known set**, so the record is checked against that set rather than
+    trusted to describe itself.
+
+    Returns a list of complaints; empty means usable.
+    """
+    problems = []
+    if not isinstance(record, dict):
+        return ["the provenance record is not an object"]
+    targets = record.get("targets")
+    if not isinstance(targets, list):
+        return ["the provenance record has no targets list"]
+
+    # Both sides go through `realpath`. The record holds the path as the *caller* gave it, while
+    # `main` resolves the workspace, so on macOS an honest record reads `/var/...` against an
+    # expected `/private/var/...`. Comparing raw strings rejects every real install.
+    allowed = {os.path.realpath(ws / rel) for rel in init_bridge.TARGETS}
+    seen = set()
+    for entry in targets:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            problems.append("a target entry is not an object with a path")
+            continue
+        if entry.get("kind") not in ("absent", "file", "symlink", "dir"):
+            problems.append(f"{entry['path']}: unknown kind {entry.get('kind')!r}")
+        resolved = os.path.realpath(entry["path"])
+        if resolved not in allowed:
+            problems.append(f"{entry['path']}: not a path this installer writes")
+        seen.add(resolved)
+    missing = allowed - seen
+    if missing:
+        problems.append(f"the record is missing {len(missing)} of the installer's own targets")
+
+    parents = record.get("parents_created") or []
+    if not isinstance(parents, list):
+        problems.append("parents_created is not a list")
+    else:
+        # A created parent can only be an ancestor directory of a target, never a target itself and
+        # never anything else in the tree.
+        ancestors = {os.path.realpath(ws / ".vibe-suite-state")}
+        for rel in init_bridge.TARGETS:
+            for parent in (ws / rel).parents:
+                if parent == ws or ws in parent.parents:
+                    ancestors.add(os.path.realpath(parent))
+        for raw in parents:
+            if not isinstance(raw, str) or os.path.realpath(raw) not in ancestors:
+                problems.append(f"{raw}: not a directory this installer creates")
+    return problems
+
+
 def main(argv):
     ws = Path(argv[1]).resolve()
     confirm = argv[2] == "1"
@@ -248,9 +289,12 @@ def main(argv):
         print("nothing to remove: no vibe-suite artefacts are registered here")
         return 0
     record = bridge.load_json(provenance)
-    if not isinstance(record, dict) or not isinstance(record.get("targets"), list):
-        print("error: no usable provenance record; unbridge restores from it and will not guess "
-              "what to remove", file=sys.stderr)
+    problems = validate_record(ws, record)
+    if problems:
+        print("error: the provenance record is not usable; unbridge is directed entirely by it and "
+              "will not act on one it cannot vouch for:", file=sys.stderr)
+        for problem in problems[:10]:
+            print(f"  - {problem}", file=sys.stderr)
         return 1
 
     report = []

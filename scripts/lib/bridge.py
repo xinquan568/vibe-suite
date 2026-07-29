@@ -114,6 +114,11 @@ def unlink_at(root, rel):
         os.close(fd)
 
 
+#: Identity of each workspace root this process has opened, so a mid-run replacement is detected
+#: rather than silently followed. Keyed by resolved path; values are `(st_dev, st_ino)`.
+_ROOT_PIN = {}
+
+
 def _open_dir_chain(root, relative):
     """Open `root/relative` by walking one component at a time, each with `O_NOFOLLOW`.
 
@@ -128,8 +133,23 @@ def _open_dir_chain(root, relative):
             raise BridgeError(
                 f"this platform lacks os.{flag}; the install refuses rather than write through a "
                 "path it cannot resolve safely")
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    # The root is the trust anchor, so it is resolved **once** and then opened `O_NOFOLLOW`.
+    # Opening it by the caller's path re-resolved every ancestor on every call, which let a swap of
+    # the root itself (or any component above it) redirect the entire descent — including deletions —
+    # outside the workspace. `realpath` has no symlink final component by construction, so
+    # `O_NOFOLLOW` here rejects exactly the case where that component became one after we looked.
+    anchor = os.path.realpath(root)
+    fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
+        st = os.fstat(fd)
+        # Keyed by the path the caller handed us, not by what it resolved to: keying by the resolved
+        # path would mint a fresh pin for the swapped-in directory and never notice the swap.
+        key = str(root)
+        if _ROOT_PIN.get(key) is None:
+            _ROOT_PIN[key] = (st.st_dev, st.st_ino)
+        elif _ROOT_PIN[key] != (st.st_dev, st.st_ino):
+            raise BridgeError(
+                f"{root} is not the directory this operation started against; refusing")
         for part in relative:
             if part in ("", "."):
                 continue
@@ -168,6 +188,17 @@ def write_atomic(root, dest, content, mode=None):
                           "restorable from the provenance record, so the install refuses")
     if kind == "other":
         raise BridgeError(f"{dest} is neither a file nor a symlink; the install refuses")
+    if kind == "symlink":
+        # Replacing it would turn the user's link into a regular 0644 *copy* of its target. Teardown
+        # cannot undo that: it removes what it owns and never writes a pre-image, so the copy stays
+        # and the original link target is lost with the provenance. That also widens exposure —
+        # content reachable only through a link the user controlled becomes an independent file.
+        #
+        # Refusing here is the fix, rather than restoring at teardown: the destructive step is the
+        # conversion, and a step never taken needs no undo.
+        raise BridgeError(
+            f"{dest} is a symlink; replacing it would convert the user's link into a regular copy "
+            f"and could not be undone by /vibe-suite:unbridge. Remove or re-point it and re-run")
 
     # A file's existing mode is the user's, not ours. An earlier revision created the temp at 0600
     # and never restored it, so every rewritten file silently became owner-only.
@@ -314,6 +345,35 @@ def text_block_has(existing, name, open_delim="#", close_delim=""):
     return bool(_block_re(name, open_delim, close_delim).search(existing))
 
 
+def markers_wellformed(existing, name, open_delim="#", close_delim=""):
+    """Whether this document's markers for `name` are clean, non-overlapping, full-line pairs.
+
+    `_block_re` matches non-greedily from an opening marker to the *next* close, so a stray or
+    duplicated opening marker makes the match start early and swallow everything up to the real
+    block's close — user content included. Validation therefore has to live **here**, beside the
+    removal it guards: a check in one caller left every other caller (`toml_server_remove` among
+    them) removing unvalidated.
+
+    The grammar is deliberately identical to `_block_re`'s, anchored to whole lines. A validator that
+    accepted a marker the remover rejects (a closer with trailing text, say) would pass a document
+    whose removal still spans user data.
+    """
+    marker = re.escape(MARKER)
+    od, cd = re.escape(open_delim), re.escape(close_delim)
+    opens = [m.start() for m in re.finditer(
+        rf"^{od} >>> {marker}:{re.escape(name)} v\d+ >>>{cd}$", existing, re.M)]
+    closes = [m.start() for m in re.finditer(
+        rf"^{od} <<< {marker}:{re.escape(name)} <<<{cd}$", existing, re.M)]
+    if len(opens) != len(closes):
+        return False
+    expect = "o"
+    for _, kind in sorted([(p, "o") for p in opens] + [(p, "c") for p in closes]):
+        if kind != expect:
+            return False
+        expect = "c" if expect == "o" else "o"
+    return True
+
+
 def text_block_remove(existing, name, open_delim="#", close_delim=""):
     """The exact inverse of `text_block_upsert`, so a clean install→remove round trip is
     byte-identical.
@@ -321,7 +381,12 @@ def text_block_remove(existing, name, open_delim="#", close_delim=""):
     Upsert appends `"\n" + block` to a non-empty file. Removal takes that one separator back and
     nothing else. An earlier revision normalised `\n\n\n` to `\n\n` anywhere in the file, which
     silently rewrote blank lines a user had put between their *own* paragraphs.
+
+    Refuses a document whose markers are malformed rather than removing across them.
     """
+    if not markers_wellformed(existing, name, open_delim, close_delim):
+        raise BridgeError(
+            f"owned markers for {name!r} are malformed; refusing to remove across them")
     pattern = _block_re(name, open_delim, close_delim)
     match = pattern.search(existing)
     if not match:
@@ -349,7 +414,10 @@ def toml_server_upsert(existing, name, body):
 
 
 def toml_server_remove(existing, name):
-    return _block_re(f"server:{name}", "#", "").sub("", existing)
+    # Through `text_block_remove`, not `_block_re` directly — otherwise this caller removes without
+    # the marker validation every other caller gets, which is exactly how `.codex/config.toml`
+    # stayed exposed after the guard was added.
+    return text_block_remove(existing, f"server:{name}")
 
 
 def toml_server_has(existing, name):

@@ -167,6 +167,14 @@ citable criterion, no finding). Counted occurrences: **11** x -2 = -22, capped
 at **-20**. The first counted occurrence stays line 11, so the finding's line
 anchor and the deduction are both unchanged by the carve-out.
 
+Because the third carve-out's wording is open-ended (the conventions passage
+enumerates no example form for the measurable-criterion clause), a kept R01
+finding is always accompanied by one zero-penalty borderline advisory -- "R01
+counted; carve-out forms absent -- if this is measurable-in-context, suppress
+via rule_overrides.R01" -- surfacing the residual ambiguity with the rubric's
+own config override as the sanctioned escape. It contributes nothing to the
+arithmetic.
+
 ## Kept-clean checklist (why nothing else fires)
 
 - Frontmatter parses (no -25 parse-failure penalty).
@@ -208,5 +216,11 @@ open-spec artifact: `skills/defective/SKILL.md` sits under no tool tree, per
 the scoring skill's tier classifier and the conventions overlay table),
 `score`, `band`, `verdict`, `findings` (each `{rule, check, line, penalty}`;
 R01's line is 11, the first counted occurrence; frontmatter and body findings
-carry line 1), and `advisories` (each `{rule, note}`, one per advisory-zero
-Skills-table row plus one per seeded worksheet defect class, in ledger order).
+carry line 1), and `advisories` (each `{rule, note}`): first the R01
+borderline advisory (class 10 -- a kept R01 finding always carries it), then
+one per advisory-zero Skills-table row plus one per seeded worksheet defect
+class in ledger order, and last the tier-boundary advisory (this open-spec
+file may belong to an open-spec corpus -- Tier 1.5 is a collection property
+with no per-file predicate, so the engine states the boundary instead of
+deciding it). Both synthesized advisories are zero-penalty and leave the
+score-45 arithmetic untouched.

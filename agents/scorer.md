@@ -59,8 +59,10 @@ stage rejects it, it is dropped:
 2. **Schema do-not-penalize list** — it must not match any Known False Positive Pattern in
    the scoring skill; those are pre-refuted, drop on match.
 3. **Path-scope/tier** — it must fit the artifact's type and tool tier (Tier 1 / 1.5 /
-   2-per-tool; the engine emits each file's classified tier); a row from another type's
-   table or another tool's overlay does not apply.
+   2-per-tool; the engine emits each file's classified tier, never `1.5` — the corpus
+   distinction is collection-level, surfaced per open-spec file as a tier-boundary
+   advisory for you to judge); a row from another type's table or another tool's overlay
+   does not apply.
 4. **Intent** — a documented intentional choice (an omission explained in CLAUDE.md or a
    design note) is architecture, not a defect; drop.
 5. **Tool-catalog** — before calling a tool unknown or undocumented, check the built-in

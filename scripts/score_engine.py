@@ -33,8 +33,10 @@ predicates: scripts/score_engine_rows.md):
                 overlay table): `2-Claude` / `2-Codex` / `2-Antigravity` under a tool tree,
                 else `1` (open-spec artifact; the Tier 1.5 open-spec-corpus distinction is a
                 property of a collection, not decidable from one file's path, so per-file
-                output never states it). Tool-specific rows are tier-conditioned: a row bound
-                to one tool's tier never fires on another tier's artifacts.
+                output never states it — instead every tier-`1` entry carries a zero-penalty
+                tier-boundary advisory naming the 1.5 possibility, so the boundary is
+                explicit rather than silent). Tool-specific rows are tier-conditioned: a row
+                bound to one tool's tier never fires on another tier's artifacts.
   description : counted in CHARACTERS of the description value — 500-800 -> -5, over 800 -> -10
   body (R05)  : counted in lines of the MARKDOWN BODY — the frontmatter block (both `---`
                 fences included) is excluded — 400..upper -> -5, over upper -> -10, where the
@@ -42,8 +44,12 @@ predicates: scripts/score_engine_rows.md):
   R01         : token-bounded occurrences of the 11 listed words, -2 each, capped at -20, minus
                 the three carve-outs of skills/conventions/SKILL.md §4 (heading `relevant`,
                 `relevant to <named-scope>`, term followed by a measurable-criterion clause —
-                encoded as a quantity in the remainder of the term's own sentence on its line:
-                a digit, or a spelled-out cardinal from the closed _NUMBER_WORDS list)
+                the owning text names no example form for that clause, so it is encoded as a
+                quantity in the remainder of the term's own sentence on its line: a digit, or
+                a spelled-out cardinal from the closed _NUMBER_WORDS list). A counted term is
+                by definition one no carve-out form followed; because the clause wording is
+                open-ended, every file with a kept R01 finding also carries one borderline
+                advisory pointing at rule_overrides.R01 — the rubric's own escape hatch
   degenerate  : unparseable frontmatter/config -> one -25 parse finding, and every row that
                 does not need the parsed structure is still scored; empty (0-byte) file ->
                 score 0, band Rewrite; unreadable file -> absent from files[], listed in
@@ -51,9 +57,11 @@ predicates: scripts/score_engine_rows.md):
 
 Artifact frontmatter is parsed by the permissive stdlib parser below — every schema-conforming
 SKILL.md/agent/command frontmatter parses (nested block mappings such as `metadata:`,
-sequences, flow mappings `{a: b}`, hyphenated keys, quoted scalars, block scalars); the -25
-`frontmatter parse` finding fires ONLY on a true structural failure: no closing `---` fence,
-a non-mapping top level, unbalanced quotes or brackets, or tab-broken indentation.
+sequences, flow mappings `{a: b}` including multiline flow collections bracket-matched across
+lines, hyphenated keys, quoted scalars, block scalars); the -25 `frontmatter parse` finding
+fires ONLY on a true structural failure: no closing `---` fence, a non-mapping top level,
+unbalanced quotes or brackets, tab-broken indentation, or trailing text after a closed flow
+collection (`key: {a: b} garbage` has no reading under the schema space).
 
 Config is read through scripts/lib/config.py — the one reader; no second parser:
   rule_overrides.<Rid>.suppress / enabled: false -> rule zeroed, findings moved to advisories
@@ -334,9 +342,11 @@ def classify_tier(rel):
     `monitors/monitors.json` Claude; `agents/openai.yaml`/`.codex-plugin` 2-Codex;
     `gemini-extension.json` 2-Antigravity; `hooks/**/*.json` is the Claude plugin hooks
     config the Tier 2-Claude hook table binds to). Everything else is `1` — an open-spec
-    artifact. Tier 1.5 (open-spec corpora) is a property of a collection, never decidable
-    from one file's path, so per-file classification never emits it; the distinction stays
-    advisory.
+    artifact. Tier 1.5 ("open-spec corpora", the scoring skill's whole definition) is a
+    property of a collection: a lone file shows the definition's "open-spec" marker but
+    its "corpora" marker is collection-level, so no per-file predicate exists and this
+    classifier never emits `1.5`; score_text surfaces the possibility as a zero-penalty
+    tier-boundary advisory on every tier-`1` file instead.
     """
     p = rel[2:] if rel.startswith("./") else rel
     parts = p.split("/")
@@ -392,9 +402,11 @@ class Controls:
 # reader). Artifact frontmatter is a different domain: its schema is the open SKILL.md spec,
 # whose files the engine must SCORE rather than refuse, so the parser here is permissive —
 # every schema-conforming shape parses (nested block mappings such as `metadata:`, sequences,
-# flow mappings `{a: b}`, hyphenated keys, quoted scalars, block scalars) and _FrontmatterError
-# is raised ONLY on true structural failure: a non-mapping top level, unbalanced quotes or
-# brackets, or tab-broken indentation (the missing closing fence is caught before parsing).
+# flow mappings `{a: b}` — bracket-matched across lines when a flow collection spans them —
+# hyphenated keys, quoted scalars, block scalars) and _FrontmatterError is raised ONLY on true
+# structural failure: a non-mapping top level, unbalanced quotes or brackets, tab-broken
+# indentation, or trailing text after a closed flow collection (the missing closing fence is
+# caught before parsing).
 
 
 class _FrontmatterError(Exception):
@@ -523,14 +535,44 @@ def _fm_flow_seq(text, index, line_no):
         out.append(value)
 
 
+def _flow_depth(text):
+    """Net `{}`/`[]` bracket depth outside quotes — the primitive behind both the
+    multiline flow join (depth > 0: the collection continues on later lines) and
+    nothing else; escapes inside double quotes are honored."""
+    depth, inside, index = 0, None, 0
+    while index < len(text):
+        char = text[index]
+        if inside:
+            if char == "\\" and inside == '"':
+                index += 2
+                continue
+            if char == inside:
+                inside = None
+        elif char in "\"'":
+            inside = char
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+        index += 1
+    return depth
+
+
 def _fm_value(rest, line_no):
-    """One already-stripped inline value; trailing text after a closed quote/flow is
-    tolerated (permissive), an unterminated one raises."""
+    """One already-stripped inline value. Trailing text after a closed QUOTED scalar is
+    tolerated (permissive); trailing text after a closed FLOW COLLECTION is a structural
+    failure — `key: {a: b} garbage` has no reading under the schema space. An
+    unterminated quote or flow raises."""
     char = rest[0]
-    if char == "{":
-        return _fm_flow_map(rest, 1, line_no)[0]
-    if char == "[":
-        return _fm_flow_seq(rest, 1, line_no)[0]
+    if char in "{[":
+        if char == "{":
+            value, end = _fm_flow_map(rest, 1, line_no)
+        else:
+            value, end = _fm_flow_seq(rest, 1, line_no)
+        if rest[end:].strip():
+            raise _FrontmatterError(
+                f"line {line_no}: trailing text after a closed flow collection")
+        return value
     if char in "\"'":
         return _fm_quoted(rest, 0, line_no)[0]
     return _fm_scalar_convert(rest)
@@ -595,6 +637,24 @@ class _FrontmatterParser:
             return self._seq(pos, indent)
         return self._map(pos, indent)
 
+    @staticmethod
+    def _opens_flow(rest):
+        """True when the value opens a flow collection that this line leaves unbalanced."""
+        return bool(rest) and rest[0] in "{[" and _flow_depth(rest) > 0
+
+    def _join_flow(self, rest, pos):
+        """Bracket-match a multiline flow collection: append following token lines
+        (whatever their indent) until the net depth closes; the joined text is then
+        parsed as one inline value. Running out of tokens leaves the text unbalanced,
+        which _fm_value reports as the unterminated structural failure."""
+        parts, depth = [rest], _flow_depth(rest)
+        while pos < len(self.tokens) and depth > 0:
+            content = self.tokens[pos][1]
+            parts.append(content)
+            depth += _flow_depth(content)
+            pos += 1
+        return " ".join(parts), pos
+
     def _map(self, pos, indent):
         out = {}
         while pos < len(self.tokens) and self.tokens[pos][0] == indent \
@@ -604,6 +664,9 @@ class _FrontmatterParser:
             pos += 1
             if rest and _BLOCK_HEADER.fullmatch(rest):
                 value, pos = self._block_scalar(pos, ind, line_index)
+            elif self._opens_flow(rest):
+                rest, pos = self._join_flow(rest, pos)
+                value = _fm_value(rest, line_index + 2)
             elif rest:
                 value = _fm_value(rest, line_index + 2)
                 while pos < len(self.tokens) and self.tokens[pos][0] > ind:
@@ -633,12 +696,17 @@ class _FrontmatterParser:
                     value, pos = self._node(pos)
                 else:
                     value = None
+            elif self._opens_flow(rest):            # `- {a: b,` continuing on later lines
+                rest, pos = self._join_flow(rest, pos)
+                value = _fm_value(rest, line_index + 2)
             else:
                 try:
                     key, item_rest = self._split_key(rest, line_index + 2)
                 except _FrontmatterError:
                     key = None
                 if key is not None:                 # `- key: value` mapping item
+                    if self._opens_flow(item_rest):
+                        item_rest, pos = self._join_flow(item_rest, pos)
                     value = {key: _fm_value(item_rest, line_index + 2) if item_rest else None}
                     if pos < len(self.tokens) and self.tokens[pos][0] > ind:
                         nested, pos = self._node(pos)
@@ -1022,12 +1090,34 @@ def score_text(text, rel, path, artifact_type, tier, overrides, pass_threshold):
         total = sum(finding["penalty"] for finding in members)
         if total < cap:
             members[-1]["penalty"] += cap - total
+    if any(f["rule"] == "R01" and f["check"] == "vague quantifier" for f in kept):
+        # conventions §4's third carve-out ("any listed term followed by a
+        # measurable-criterion clause") is open-ended: the owning text names no example
+        # form. A counted term is by definition one where no encoded carve-out form
+        # followed, so the deduction stands and the residual ambiguity is surfaced —
+        # resolvable through the rubric's own config override, never by widening the
+        # engine's closed encoding.
+        advisories.append({
+            "rule": "R01",
+            "note": "R01 counted; carve-out forms absent -- if this is "
+                    "measurable-in-context, suppress via rule_overrides.R01"})
     for rule, check in TYPE_ADVISORIES.get(artifact_type, ()):
         advisories.append({
             "rule": rule,
             "note": f"advisory-zero: {check}; no objective predicate for the engine"})
     for rule, note in TIER_ADVISORIES.get((artifact_type, tier), ()):
         advisories.append({"rule": rule, "note": note})
+    if tier == "1":
+        # The scoring skill's whole Tier 1.5 definition is "open-spec corpora" — a
+        # collection property. A tier-`1` file shows the definition's "open-spec"
+        # marker; whether it belongs to a corpus is not decidable from one file's
+        # bytes and path, so the boundary is stated explicitly instead of silently.
+        advisories.append({
+            "rule": "--",
+            "note": "tier boundary: emitted 1 (open-spec artifact); Tier 1.5 "
+                    "(open-spec corpora) is a collection property with no per-file "
+                    "predicate, so whether this file belongs to an open-spec corpus "
+                    "stays with the narrating agent"})
     if (overrides.get("R51") or {}).get("enabled") is True:
         # The R51 misconfigured row: enabled without engine registry support stays advisory.
         advisories.append({

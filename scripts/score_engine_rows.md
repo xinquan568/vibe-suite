@@ -72,13 +72,23 @@ lives under"):
 | `2-Antigravity` | a `.gemini/` or `.agent/` tree; `gemini-extension.json` |
 | `1` | everything else — an open-spec artifact |
 
-Tier 1.5 (open-spec corpora) is a property of a *collection*; the owning text
-states no per-file predicate for it, so the per-file classifier never emits it
-and the 1-vs-1.5 distinction stays with the narrating agent (advisory). The
-tier conditions tool-specific rows — the scorer gauntlet's do-not-penalize
-principle: "a row from another type's table or another tool's overlay does not
-apply". A row bound to one tool's tier never fires on another tier's artifacts;
-the tier-conditioned rows are marked in their Predicate cells below.
+Tier 1.5's entire definition in the owning text is the quoted sentence above —
+"**Tier 1.5** — open-spec corpora." — and that is a property of a *collection*:
+a corpus is a set of artifacts, and no sentence anywhere in the owning texts
+states a predicate a single file's bytes or path could satisfy to be "a
+corpus". Of the definition's two markers, "open-spec" is per-file observable
+(the file sits under no tool tree — the same marker as Tier 1) and "corpora"
+is not, so the per-file classifier has no per-file predicate to implement and
+never emits `1.5`. The boundary is explicit rather than silent: every tier-`1`
+files[] entry carries a zero-penalty tier-boundary advisory ("tier boundary:
+emitted 1 (open-spec artifact); Tier 1.5 (open-spec corpora) is a collection
+property with no per-file predicate, so whether this file belongs to an
+open-spec corpus stays with the narrating agent"), and the 1-vs-1.5 judgment
+belongs to the narrating agent. The tier conditions tool-specific rows — the
+scorer gauntlet's do-not-penalize principle: "a row from another type's table
+or another tool's overlay does not apply". A row bound to one tool's tier
+never fires on another tier's artifacts; the tier-conditioned rows are marked
+in their Predicate cells below.
 
 ## File-level parse semantics (not a table row)
 
@@ -93,12 +103,15 @@ parsed structure are skipped after a parse failure; rows that do not (body
 length, R01, command safety) are still scored. Artifact frontmatter is parsed
 by the engine's own permissive stdlib parser — every schema-conforming shape
 parses: nested block mappings (`metadata:`), sequences, flow mappings
-(`{author: x}`), hyphenated keys (`allowed-tools`), quoted scalars, block
-scalars — and -25 fires ONLY on a true structural failure: no closing `---`
-fence, a non-mapping top level, unbalanced quotes or brackets, or tab-broken
-indentation. (`.vibe-suite.md` itself keeps the strict fail-closed grammar of
-scripts/lib/config.py; the permissive grammar exists because artifacts are
-scored, not refused.)
+(`{author: x}`) including multiline flow mappings and sequences
+(bracket-matched across lines), hyphenated keys (`allowed-tools`), quoted
+scalars, block scalars — and -25 fires ONLY on a true structural failure: no
+closing `---` fence, a non-mapping top level, unbalanced quotes or brackets,
+tab-broken indentation, or trailing text after a closed flow collection
+(`key: {a: b} garbage` has no reading under the schema space, so accepting it
+would be a false parse). (`.vibe-suite.md` itself keeps the strict fail-closed
+grammar of scripts/lib/config.py; the permissive grammar exists because
+artifacts are scored, not refused.)
 
 ## Skills
 
@@ -359,9 +372,36 @@ file reaches the engine only when its path is scan-root-relative and contains
 
 ## All types: vague quantifiers
 
+The carve-out passage, quoted verbatim and in full from
+skills/conventions/SKILL.md §4:
+
+> Carve-outs (no penalty):
+>
+> - `relevant` inside a markdown header;
+> - `relevant to <named-scope>`;
+> - any listed term followed by a measurable-criterion clause.
+
+The passage names its own form for each of the first two carve-outs and
+enumerates NO example form for the third — no numeric example, no
+spelled-quantity example, no status-value example, nothing at all. The owning
+text's carve-out is therefore open-ended; the engine encodes its enumerated
+forms exactly and no others: the two `relevant` forms as written, and for the
+third a closed quantity reading — a digit, or a spelled-out cardinal from the
+engine's `_NUMBER_WORDS` list, in the remainder of the term's own sentence on
+its line. A counted term is by definition one where none of the encoded forms
+follow. Because the third carve-out's wording admits readings the closed
+encoding cannot decide (a criterion stated as an explicit status value, say),
+the residual ambiguity is surfaced rather than absorbed: every file with a
+kept R01 finding carries one borderline advisory — "R01 counted; carve-out
+forms absent -- if this is measurable-in-context, suppress via
+rule_overrides.R01" — and the rubric's own config override mechanism is the
+sanctioned escape. Widening the encoding itself (a unit lexicon, a status-word
+list, next-line context) would be inventing carve-out forms the owning text
+never wrote.
+
 | Rule | Check | Condition | Class | Predicate / justification |
 |------|-------|-----------|-------|---------------------------|
-| R01 | vague quantifier | each occurrence of: appropriate, relevant, as needed, sufficient, adequate, reasonable, properly, correctly, some, several, various — without measurable criteria | mechanical | token-bounded count of the 11 listed words, -2 per occurrence, minus the three conventions §4 carve-outs exactly as stated and no further contextual rules: `relevant` on a markdown heading line; `relevant to <named-scope>` (the term followed by `to` and a named scope); and the third, quoted verbatim — "any listed term followed by a measurable-criterion clause". The owning text supplies no finer definition or example of that clause, so its mechanical encoding is closed and exactly this: the remainder of the term's own sentence on its line carries a quantity — a digit, or a spelled-out cardinal from the engine's closed `_NUMBER_WORDS` list (zero–twenty, the tens thirty–ninety, hundred, thousand, million). "appropriate timeout of one minute" and "at most 3 retries" are carved out; "appropriate handling" deducts. The encoding is deliberately no wider: no unit lexicon, no next-line context, no part-of-speech judgment — a cardinal used as a pronoun ("until one loads") is mechanically indistinguishable from a quantity, and the encoding errs on the rubric's own closing principle (no citable criterion → no finding, so ambiguity resolves toward not deducting). Worksheet #10 records the fixture's 12 lexical occurrences, 11 counted after this carve-out |
+| R01 | vague quantifier | each occurrence of: appropriate, relevant, as needed, sufficient, adequate, reasonable, properly, correctly, some, several, various — without measurable criteria | mechanical | token-bounded count of the 11 listed words, -2 per occurrence, minus the three conventions §4 carve-outs exactly as stated and no further contextual rules: `relevant` on a markdown heading line; `relevant to <named-scope>` (the term followed by `to` and a named scope); and the third, quoted verbatim — "any listed term followed by a measurable-criterion clause". The owning text supplies no finer definition or example of that clause, so its mechanical encoding is closed and exactly this: the remainder of the term's own sentence on its line carries a quantity — a digit, or a spelled-out cardinal from the engine's closed `_NUMBER_WORDS` list (zero–twenty, the tens thirty–ninety, hundred, thousand, million). "appropriate timeout of one minute" and "at most 3 retries" are carved out; "appropriate handling" deducts. The encoding is deliberately no wider: no unit lexicon, no next-line context, no part-of-speech judgment — a cardinal used as a pronoun ("until one loads") is mechanically indistinguishable from a quantity, and the encoding errs on the rubric's own closing principle (no citable criterion → no finding, so ambiguity resolves toward not deducting). Every kept R01 finding is accompanied by the borderline advisory described above this table, with `rule_overrides.R01` as the sanctioned escape. Worksheet #10 records the fixture's 12 lexical occurrences, 11 counted after this carve-out |
 | R01 | cap | cap on total vague-quantifier penalty | mechanical | the summed vague-quantifier penalty clamps at -20 (or the R01 `threshold` override): the fixture's 11 counted x -2 = -22 lands at -20 (worksheet #10: "cap binds") |
 
 ## All types: vocabulary drift (R51) — opt-in, disabled by default

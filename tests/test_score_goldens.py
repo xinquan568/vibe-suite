@@ -28,7 +28,10 @@ ledger's mechanical set, so a future mechanical row without cases fails here.
 Tier: each files[] entry carries the artifact's tool tier (`1` open-spec vs
 `2-Claude`/`2-Codex`/`2-Antigravity`, classified per file from its canonical path);
 tool-specific rows are tier-conditioned and asserted not to fire across tiers
-(TierClassification's two-tool tree).
+(TierClassification's two-tool trees — one from explicit-type records, one end-to-end
+from scanner category letters through the engine's own classify.md routing). Tier 1.5
+("open-spec corpora") has no per-file predicate; every tier-`1` entry carries a
+zero-penalty tier-boundary advisory naming the possibility instead.
 """
 
 import importlib.util
@@ -386,6 +389,52 @@ class LedgerAndMatrix(unittest.TestCase):
         f = score_one(clean_skill() + "\nApply appropriate padding to the margin.\n")
         self.assertEqual(r01_total(f), -2, "non-quantity words are not criteria")
 
+    def test_r01_borderline_advisory_surfaces_the_open_ended_carveout(self):
+        """conventions §4's third carve-out ("any listed term followed by a
+        measurable-criterion clause") is open-ended — the passage enumerates no example
+        form of the clause. The engine encodes exactly the quantity forms (digit,
+        spelled cardinal) and no others, so a valid nonnumeric criterion (review
+        finding 2, iter 2: a condition on an explicit status value) still deducts —
+        WITH a borderline advisory naming the rubric's own override as the escape."""
+        # A status-value criterion: no digit, no spelled cardinal — deducts, advised.
+        f = score_one(
+            clean_skill() + "\nWait for an adequate result, meaning status equals READY.\n")
+        self.assertEqual(r01_total(f), -2)
+        notes = [a["note"] for a in f["advisories"] if a["rule"] == "R01"]
+        self.assertTrue(
+            any("carve-out forms absent" in n and "rule_overrides.R01" in n for n in notes),
+            notes)
+        # No counted occurrence (the reviewer's own carved-out case): no advisory.
+        f = score_one(clean_skill() + "\nSet an appropriate timeout of one minute.\n")
+        self.assertEqual(r01_total(f), 0)
+        self.assertEqual([a for a in f["advisories"] if a["rule"] == "R01"], [])
+        # The cap still binds and the advisory rides along with the capped finding.
+        f = score_one(clean_skill() + "\n" + " ".join(["appropriate"] * 12) + "\n")
+        self.assertEqual(r01_total(f), -20)
+        self.assertTrue(any("carve-out forms absent" in a["note"]
+                            for a in f["advisories"] if a["rule"] == "R01"))
+        # The sanctioned escape works end-to-end: rule_overrides.R01 suppress zeroes the
+        # deduction, and the borderline advisory yields to the suppression advisory.
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".vibe-suite.md"
+            config.write_text(
+                "---\nrule_overrides:\n  R01:\n    suppress: true\n---\n", encoding="utf-8")
+            d = Path(tmp) / "skills" / "probe"
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                clean_skill()
+                + "\nWait for an adequate result, meaning status equals READY.\n",
+                encoding="utf-8")
+            proc = run_engine([("skill", "skills/probe/SKILL.md")], tmp,
+                              extra=("--config", str(config)))
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+            f = json.loads(proc.stdout.decode())["files"][0]
+        self.assertEqual(r01_total(f), 0)
+        r01_notes = [a["note"] for a in f["advisories"] if a["rule"] == "R01"]
+        self.assertTrue(any("suppressed by rule_overrides" in n for n in r01_notes))
+        self.assertFalse(any("carve-out forms absent" in n for n in r01_notes),
+                         "a suppressed R01 has no standing deduction to advise about")
+
     def test_r01_cap_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / ".vibe-suite.md"
@@ -519,7 +568,11 @@ class MultiTypeScoring(unittest.TestCase):
             [("R10", "model declared", -5), ("R09", "example blocks", -5)],
         )
         self.assertEqual(agent["score"], 90)
-        self.assertEqual({a["rule"] for a in agent["advisories"]}, {"R10", "R11"})
+        self.assertEqual({a["rule"] for a in agent["advisories"]}, {"R10", "R11", "--"})
+        # Both files are open-spec (tier 1): each carries the tier-boundary advisory.
+        for entry in (skill, agent):
+            self.assertEqual(entry["tier"], "1")
+            self.assertTrue(any("Tier 1.5" in a["note"] for a in entry["advisories"]))
         # Row accounting: 12+2 skill rows plus 9+2 agent rows.
         self.assertEqual(out["run"]["considered_rows"], 25)
 
@@ -551,7 +604,12 @@ class MultiTypeScoring(unittest.TestCase):
             out = json.loads(proc.stdout.decode())
         f = out["files"][0]
         self.assertEqual([(x["rule"], x["penalty"]) for x in f["findings"]], [("R01", -2)])
-        self.assertEqual(f["advisories"], [])
+        # An untabled type gets no type/tier table advisories — only the two per-file
+        # synthesized ones: the R01 borderline advisory (its counted term had no
+        # carve-out form) and the tier-1 boundary advisory (open-spec artifact).
+        self.assertEqual([a["rule"] for a in f["advisories"]], ["R01", "--"])
+        self.assertIn("rule_overrides.R01", f["advisories"][0]["note"])
+        self.assertIn("Tier 1.5", f["advisories"][1]["note"])
         self.assertEqual(out["run"]["considered_rows"], 2)
 
 
@@ -617,7 +675,18 @@ class DegenerateInputs(unittest.TestCase):
                   "allowed-tools: Bash(git:*), Read\n---\n# probe\n\nBody.\n")
         block = ("---\nname: probe\ndescription: |\n  Concrete probe; use when testing\n"
                  "  block scalars.\nmetadata:\n  author: x\n---\n# probe\n\nBody.\n")
-        for body in (flow, nested, block):
+        # Flow collections bracket-match ACROSS lines (review finding 5, iter 3):
+        # a multiline flow mapping, a multiline flow sequence, and a nested mix.
+        multiline_map = ("---\nname: probe\n"
+                         "description: Concrete probe; use when testing spans.\n"
+                         "metadata: {author: x,\n  version: 1.0.0}\n---\n# probe\n\nBody.\n")
+        multiline_seq = ("---\nname: probe\n"
+                         "description: Concrete probe; use when testing spans.\n"
+                         "tags: [alpha,\n  beta, gamma]\n---\n# probe\n\nBody.\n")
+        multiline_nested = ("---\nname: probe\n"
+                            "description: Concrete probe; use when testing spans.\n"
+                            "metadata: {tags: [a,\n  b], author: x}\n---\n# probe\n\nBody.\n")
+        for body in (flow, nested, block, multiline_map, multiline_seq, multiline_nested):
             with self.subTest(head=body.splitlines()[3]):
                 f = score_one(body)
                 self.assertEqual(
@@ -627,12 +696,16 @@ class DegenerateInputs(unittest.TestCase):
     def test_true_structural_failures_still_minus_25(self):
         # -25 fires ONLY on true structural failure: unbalanced quotes/brackets,
         # tab-broken indentation, a non-mapping top level (the missing-closing-fence case
-        # is test_malformed_frontmatter_minus_25_and_continue above).
+        # is test_malformed_frontmatter_minus_25_and_continue above), and trailing text
+        # after a closed flow collection (review finding 5, iter 3: `key: {a: b} garbage`
+        # has no reading under the schema space, so accepting it would be a false parse).
         for body in (
             '---\nname: "unclosed\n---\n# probe\nBody.\n',
             "---\nmetadata: {author: x\n---\n# probe\nBody.\n",
             "---\nmetadata:\n\tauthor: x\n---\n# probe\nBody.\n",
             "---\n- a\n- b\n---\n# probe\nBody.\n",
+            "---\nmetadata: {author: x} garbage\n---\n# probe\nBody.\n",
+            "---\ntags: [a, b] junk\n---\n# probe\nBody.\n",
         ):
             with self.subTest(head=body.splitlines()[1]):
                 f = score_one(body)
@@ -927,6 +1000,83 @@ class TierClassification(unittest.TestCase):
         claude, codex = out["files"]
         self.assertIn("hook type valid", [x["check"] for x in claude["findings"]])
         self.assertNotIn("hook type valid", [x["check"] for x in codex["findings"]])
+
+    def test_tier_boundary_advisory_on_open_spec_files_only(self):
+        """Tier 1.5's whole definition in the owning text is "open-spec corpora" — a
+        collection property with no per-file predicate. The engine therefore emits
+        tier `1` and states the boundary: every open-spec file carries a zero-penalty
+        tier-boundary advisory naming the 1.5 possibility; tool-tree (tier-2) files
+        never do. The ledger documents the same boundary in its own words."""
+        open_spec = score_one(clean_skill())
+        self.assertEqual(open_spec["tier"], "1")
+        boundary = [a for a in open_spec["advisories"] if "Tier 1.5" in a["note"]]
+        self.assertEqual(len(boundary), 1)
+        self.assertIn("open-spec corpora", boundary[0]["note"])
+        self.assertIn("no per-file predicate", boundary[0]["note"])
+        out = run_tree({"hooks/hooks.json": HOOK_OK}, [("A", "hooks/hooks.json")])
+        claude = out["files"][0]
+        self.assertEqual(claude["tier"], "2-Claude")
+        self.assertEqual([a for a in claude["advisories"] if "Tier 1.5" in a["note"]], [])
+        # The ledger quotes the defining sentence and states why no per-file predicate
+        # exists — the documented boundary this advisory implements.
+        ledger = LEDGER.read_text(encoding="utf-8")
+        self.assertIn("**Tier 1.5** — open-spec corpora.", ledger)
+        self.assertIn("no per-file predicate", ledger)
+
+    def test_two_tool_end_to_end_from_category_records(self):
+        """End-to-end from scanner CATEGORY letters only: every route below is resolved
+        by the engine's own classify.md rules — no explicit-type records.
+
+        Production cannot produce a routed Codex hook-config: classify.md row 7 routes
+        `hooks/**/*.json` (anchored, so the Claude plugin hooks tree only) to
+        `hook-config`, and no other row matches a Codex-tree config — `.codex/hooks.json`
+        falls through to the `document` fallback (the ledger's Hooks (Codex CLI) note:
+        "no classify.md path yields a Codex hook-config type"). This test asserts THAT
+        documented unrouted behavior on the Codex hook path, and exercises the tier gate
+        through the closest fully-routable two-tool pair instead: `.mcp.json` at the root
+        (2-Claude) vs `.codex/.mcp.json` (2-Codex) — classify.md row 10 (`basename is
+        .mcp.json`) routes both, and the server-command row is tier-conditioned to
+        2-Claude, so the same bytes deduct on one tier and stay clean on the other."""
+        precompact = json.dumps({"hooks": {"PreCompact": []}}, indent=2)
+        sessionend = json.dumps({"hooks": {"SessionEnd": []}}, indent=2)
+        no_command = json.dumps({"mcpServers": {"a": {}}}, indent=2)
+        out = run_tree(
+            {
+                "hooks/hooks.json": precompact,
+                ".codex/hooks.json": sessionend,
+                ".mcp.json": no_command,
+                ".codex/.mcp.json": no_command,
+            },
+            [
+                ("A", "hooks/hooks.json"),
+                ("A", ".codex/hooks.json"),
+                ("B", ".mcp.json"),
+                ("B", ".codex/.mcp.json"),
+            ],
+        )
+        claude_hook, codex_hook, claude_mcp, codex_mcp = out["files"]
+        self.assertEqual([f["tier"] for f in out["files"]],
+                         ["2-Claude", "2-Codex", "2-Claude", "2-Codex"])
+        # The routed Claude hook-config deducts on the Codex-only event.
+        self.assertEqual(
+            [(x["rule"], x["check"], x["penalty"]) for x in claude_hook["findings"]],
+            [("R27", "event names valid", -15)])
+        # The Codex hook path is UNROUTED: category routing classifies it `document`
+        # (a type with no table), so the Claude-only event inside deducts nothing, no
+        # hook-table advisory appears, and only the two generic R01 rows are consulted.
+        self.assertEqual(codex_hook["findings"], [])
+        self.assertEqual(codex_hook["advisories"], [])
+        self.assertEqual(codex_hook["score"], 100)
+        # The tier gate, end-to-end on a fully-routable pair: same bytes, an MCP entry
+        # with no command — deducts at 2-Claude, tier-gated to clean at 2-Codex.
+        self.assertEqual(
+            [(x["rule"], x["check"], x["penalty"]) for x in claude_mcp["findings"]],
+            [("--", "server command present", -15)])
+        self.assertEqual(codex_mcp["findings"], [])
+        self.assertEqual(codex_mcp["score"], 100)
+        # Row accounting: hook-config@2-Claude (5 universal + 4 Claude + 2 generic),
+        # document (2 generic), mcp-config x2 (2 table + 2 generic each).
+        self.assertEqual(out["run"]["considered_rows"], 11 + 2 + 4 + 4)
 
 
 # ------------------------------------------------------------- mechanical-row case matrix

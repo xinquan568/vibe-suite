@@ -155,7 +155,17 @@ except config.ConfigValueError as exc:
     sys.stderr.write(f"error: rows 1-2: legacy value is not valid in the new schema: {exc}\n")
     raise SystemExit(1)
 
+# `lstat`, not `exists`: a dangling symlink reports False from `exists()`, so an existence guard
+# lets `replace()` destroy the user's link. This is the earliest writer of this path — guarding a
+# later one is not guarding the path.
+if target.is_symlink():
+    sys.stderr.write(f"error: rows 1-2: {config.CONFIG_FILENAME} is a symlink; replacing it would "
+                     f"destroy the link. Remove or re-point it and re-run\n")
+    raise SystemExit(1)
 tmp = target.with_suffix(target.suffix + ".tmp")
+if tmp.exists() or tmp.is_symlink():
+    sys.stderr.write(f"error: rows 1-2: scratch path {tmp.name} is occupied; refusing\n")
+    raise SystemExit(1)
 tmp.write_text(rendered, encoding="utf-8")
 tmp.replace(target)
 sys.stderr.write(f"note: rows 1-2: wrote {config.CONFIG_FILENAME} from "

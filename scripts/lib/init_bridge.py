@@ -163,16 +163,14 @@ def _verify_config(ws, text):  # noqa: D401
     # root and refuses ones that escape it, so a scratch directory would clear a config the actual
     # project rejects. The candidate is staged beside the target and removed either way.
     ws = Path(ws)
+    # A fixed scratch name is a path the user may already own. `write_atomic` would overwrite it,
+    # `os.replace` would move it away, and the `finally` below would delete it.
     staged = ws / f".{config_mod.CONFIG_FILENAME}.vibe-candidate"
-    real = ws / config_mod.CONFIG_FILENAME
-    if real.is_symlink():
-        # `os.replace` below is a direct rename: it does not go through `write_atomic`, so the
-        # symlink refusal there never sees this path. Replacing the link would convert the user's
-        # link into a regular copy of its target — the exact conversion teardown cannot undo, since
-        # it records `kind: symlink` and never restores one.
+    if staged.exists() or staged.is_symlink():
         raise bridge.BridgeError(
-            f"{real} is a symlink; replacing it would convert the user's link into a regular copy "
-            f"and could not be undone by /vibe-suite:unbridge. Remove or re-point it and re-run")
+            f"{staged} already exists; refusing to use an occupied path as scratch space")
+    real = ws / config_mod.CONFIG_FILENAME
+    bridge.refuse_if_symlink(real, "config write")
     keep = real.read_bytes() if real.is_file() else None
     try:
         bridge.write_atomic(ws, staged, text)

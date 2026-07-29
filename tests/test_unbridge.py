@@ -812,3 +812,44 @@ class OwnershipOfThingsInitTouches(unittest.TestCase):
                        capture_output=True, text=True)
         self.assertTrue(side.is_file(), "a foreign hook side file was deleted")
         self.assertEqual(json.loads(side.read_text())["hooks"]["Stop"][0]["command"], "theirs")
+
+
+class LstatNotExists(unittest.TestCase):
+    """One root cause, three sites. `exists()` follows the link, so a **dangling** symlink reports
+    False and every existence guard waves it through — which is how the user's link was replaced by
+    three different writers in turn, each fixed one pass after the last."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-lstat-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def init(self):
+        return subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                               "--audit-depth", "mini", "--strictness", "standard"],
+                              capture_output=True, text=True)
+
+    def test_a_dangling_config_symlink_survives_migration(self):
+        """The earliest writer is `migrate-config.sh`, not `_verify_config` — guarding the later one
+        left the path open. A dangling link is the case `exists()` cannot see."""
+        (self.ws / ".cc-suite.md").write_text("---\neffort: high\n---\n")
+        (self.ws / ".vibe-suite.md").symlink_to(self.ws / "missing.md")
+        self.init()
+        self.assertTrue((self.ws / ".vibe-suite.md").is_symlink(),
+                        "a dangling user symlink was replaced by a regular file")
+
+    def test_an_occupied_scratch_path_is_not_consumed(self):
+        theirs = self.ws / ".{}.vibe-candidate".format(".vibe-suite.md".lstrip("."))
+        theirs.write_text("something of mine")
+        self.init()
+        if theirs.exists():
+            self.assertEqual(theirs.read_text(), "something of mine")
+
+    def test_a_symlink_in_the_state_dir_is_judged_as_a_link(self):
+        """`load_json` follows the link, so the destination's ownership stamp was read as ownership
+        of the link itself."""
+        (self.ws / ".vibe-suite-state").mkdir(parents=True, exist_ok=True)
+        stamped = self.ws / "stamped.json"
+        stamped.write_text(json.dumps({"vibe_suite_owned": True}))
+        link = self.ws / ".vibe-suite-state" / "config.json"
+        link.symlink_to(stamped)
+        self.assertFalse(unbridge._is_suite_state(Path("config.json"), link))

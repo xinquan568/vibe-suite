@@ -190,6 +190,20 @@ def _open_dir_chain(root, relative):
     return fd
 
 
+def refuse_if_symlink(path, what="write"):
+    """Refuse when the final component is a symlink. `lstat`, never `exists`.
+
+    `exists()` follows the link, so a **dangling** symlink reports False and every "is it already
+    there?" guard waves it through — which is precisely how a user's link got replaced by three
+    different writers in turn. The link itself is the thing being asked about, so the question has to
+    be asked with `lstat`.
+    """
+    if Path(path).is_symlink():
+        raise BridgeError(
+            f"{path} is a symlink; a {what} here would replace the user's link with a regular file "
+            f"and could not be undone by /vibe-suite:unbridge. Remove or re-point it and re-run")
+
+
 def write_atomic(root, dest, content, mode=None):
     """Replace a file atomically, without ever resolving its parent path twice.
 

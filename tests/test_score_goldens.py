@@ -708,9 +708,20 @@ class DegenerateInputs(unittest.TestCase):
                          "description: Concrete probe; use when testing block opacity.\n"
                          "metadata: |\n  example: 'arbitrary block text\n"
                          "  still arbitrary block text\n---\n# probe\n\nBody.\n")
+        # Same opacity with an indentation indicator (`|2`) and a chomping+indent form —
+        # the indicator grammar must mirror the walker's _BLOCK_HEADER.
+        block_indicator = ("---\nname: probe\n"
+                           "description: Concrete probe; use when testing indicators.\n"
+                           "metadata: |2\n  example: 'arbitrary block text\n"
+                           "  still arbitrary block text\n---\n# probe\n\nBody.\n")
+        block_chomp_indicator = ("---\nname: probe\n"
+                                 "description: Concrete probe; use when testing chomping.\n"
+                                 "metadata: |-2\n  example: 'arbitrary block text\n"
+                                 "  still arbitrary block text\n---\n# probe\n\nBody.\n")
         for body in (flow, nested, block, multiline_map, multiline_seq,
                      multiline_nested, multiline_quoted, comment_apostrophe,
-                     plain_apostrophe, block_apostrophe, block_keylike):
+                     plain_apostrophe, block_apostrophe, block_keylike,
+                     block_indicator, block_chomp_indicator):
             with self.subTest(head=body.splitlines()[3]):
                 f = score_one(body)
                 self.assertEqual(

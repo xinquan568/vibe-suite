@@ -602,10 +602,12 @@ def _fm_quoted_value_rest(logical):
     return match.group(1) if match.group(1) is not None else match.group(2)
 
 
-#: `key: |` / `key: >` (chomping indicators allowed, trailing comment allowed) — the line
-#: that opens a block scalar. Everything more-indented after it is opaque content.
+#: `key: |` / `key: >` — the line that opens a block scalar; the indicator grammar mirrors
+#: _BLOCK_HEADER exactly ([|>][+-]?\d* — chomping and indentation indicators in the shapes
+#: the walker itself accepts), trailing comment allowed. Everything more-indented after it
+#: is opaque content.
 _BLOCK_SCALAR_OPEN = re.compile(
-    r"^(\s*)(?:-\s+)?(?:\"[^\"\n]*\"|'[^'\n]*'|[A-Za-z0-9_.-]+)\s*:\s*[|>][+-]?\s*(?:#.*)?$"
+    r"^(\s*)(?:-\s+)?(?:\"[^\"\n]*\"|'[^'\n]*'|[A-Za-z0-9_.-]+)\s*:\s*[|>][+-]?\d*\s*(?:#.*)?$"
 )
 
 

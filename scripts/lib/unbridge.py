@@ -246,6 +246,20 @@ def prune(ws, record, report):
 EXCLUSIVE_FILES = (".vibe-suite.md", ".claude/vibe-history.json")
 
 
+#: What the suite writes into `.vibe-suite-state/`. Anything else in there is the user's.
+SUITE_STATE = ("install-provenance.json", "state.json", "config.json", "jobs.json", "history.json")
+
+
+def _is_suite_state(relative):
+    """Whether a path inside `.vibe-suite-state/` is one the suite wrote."""
+    parts = relative.parts
+    if not parts:
+        return False
+    if parts[0] in ("jobs", "runs", "cache"):
+        return True   # suite-owned subtrees
+    return len(parts) == 1 and parts[0] in SUITE_STATE
+
+
 def _is_recognisably_ours(rel, path):
     """Whether a file's *content* still identifies it as the installer's own.
 
@@ -293,8 +307,23 @@ def validate_record(ws, record):
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
             problems.append("a target entry is not an object with a path")
             continue
-        if entry.get("kind") not in ("absent", "file", "symlink", "dir"):
-            problems.append(f"{entry['path']}: unknown kind {entry.get('kind')!r}")
+        kind = entry.get("kind")
+        if kind not in ("absent", "file", "symlink", "dir"):
+            problems.append(f"{entry['path']}: unknown kind {kind!r}")
+        else:
+            # `kind` and the pre-image fields are written together, so they must agree. Flipping a
+            # `file` entry to `absent` to make teardown delete the user's file leaves those fields
+            # behind — which is what makes an accidentally or deliberately edited record detectable
+            # without authenticating it.
+            pre_image = {"mode", "sha256", "content_b64", "link_target"} & set(entry)
+            if kind == "absent" and pre_image:
+                problems.append(
+                    f"{entry['path']}: recorded absent but carries {', '.join(sorted(pre_image))}; "
+                    f"the kind and the pre-image disagree")
+            if kind == "file" and not {"sha256", "content_b64"} <= set(entry):
+                problems.append(f"{entry['path']}: recorded as a file without its pre-image")
+            if kind == "symlink" and "link_target" not in entry:
+                problems.append(f"{entry['path']}: recorded as a symlink without its target")
         resolved = os.path.realpath(entry["path"])
         if resolved not in allowed:
             problems.append(f"{entry['path']}: not a path this installer writes")
@@ -368,12 +397,21 @@ def main(argv):
     if state.is_symlink():
         report.append(".vibe-suite-state/: a symlink, not a directory — left alone")
     elif state.is_dir():
-        # Depth-first over entries that are themselves not symlinks: a link inside would otherwise
-        # be followed and take its target with it.
+        # Only what the suite puts there. `rglob("*")` deleted every child, so anything a user had
+        # placed in this directory before install — it is a plain directory, nothing stops them —
+        # was destroyed by a command that is supposed to remove only what it owns.
         for child in sorted(state.rglob("*"), key=lambda c: len(str(c)), reverse=True):
-            bridge.unlink_at(ws, str(child.relative_to(ws)))
-        bridge.unlink_at(ws, ".vibe-suite-state")
-        report.append(".vibe-suite-state/: removed")
+            rel = str(child.relative_to(ws))
+            if _is_suite_state(child.relative_to(state)):
+                bridge.unlink_at(ws, rel)
+            else:
+                report.append(f"{rel}: not a suite state file — left alone")
+        # Depth-first above, so the directory is empty here exactly when everything in it was ours.
+        if not any(state.iterdir()):
+            bridge.unlink_at(ws, ".vibe-suite-state")
+            report.append(".vibe-suite-state/: removed")
+        else:
+            report.append(".vibe-suite-state/: kept — it still holds files that are not ours")
     print("\n".join(report))
     return 0
 

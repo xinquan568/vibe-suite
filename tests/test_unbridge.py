@@ -590,3 +590,64 @@ class ProvenanceKindIsNotAuthority(unittest.TestCase):
         self.unbridge()
         self.assertTrue(gitignore.is_file(), "the user's .gitignore was deleted on the record's word")
         self.assertIn("mine.log", gitignore.read_text())
+
+
+class StateDirectoryIsNotOursToEmpty(unittest.TestCase):
+    """`.vibe-suite-state/` is a plain directory. Nothing stops a user putting something in it, and
+    `rglob("*")` deleted every child — so a command that removes only what it owns destroyed files
+    it did not."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-state-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_a_users_file_in_the_state_directory_survives(self):
+        (self.ws / ".vibe-suite-state").mkdir()
+        theirs = self.ws / ".vibe-suite-state" / "personal.txt"
+        theirs.write_text("notes I keep here")
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        subprocess.run(["bash", str(UNBRIDGE), "--workspace", str(self.ws), "--confirm"],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertTrue(theirs.is_file(), "a user's file in the state directory was deleted")
+        self.assertEqual(theirs.read_text(), "notes I keep here")
+
+    def test_a_state_directory_holding_only_ours_is_removed(self):
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        subprocess.run(["bash", str(UNBRIDGE), "--workspace", str(self.ws), "--confirm"],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertFalse((self.ws / ".vibe-suite-state").exists(),
+                         "the suite's own state directory survived teardown")
+
+
+class KindAndPreImageMustAgree(unittest.TestCase):
+    """Flipping `file` to `absent` left the pre-image fields behind. That disagreement is what makes
+    an edited record detectable without authenticating it — and it covers accidental corruption,
+    which the same-write-access argument does not."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-shape-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        (self.ws / ".vibe-suite.md").write_text("---\neffort: high\n---\nmine, from before\n")
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_exclusive_file_flipped_to_absent_is_refused(self):
+        record_path = self.ws / init_bridge.PROVENANCE
+        record = json.loads(record_path.read_text())
+        for entry in record["targets"]:
+            if entry["path"].endswith(".vibe-suite.md"):
+                entry["kind"] = "absent"          # keep the pre-image fields, as a tamper would
+        record_path.write_text(json.dumps(record, indent=2))
+        proc = subprocess.run(["bash", str(UNBRIDGE), "--workspace", str(self.ws), "--confirm"],
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(proc.returncode, 1)
+        self.assertTrue((self.ws / ".vibe-suite.md").is_file(),
+                        "a pre-existing config was deleted on a self-contradicting record")

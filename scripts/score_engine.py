@@ -16,7 +16,7 @@ CLI contract (pinned by tests/test_score_goldens.py):
            category letter `A`–`F`; given a category, the engine classifies the path itself with
            the same first-match rules as commands/shared/classify.md.
   args   : --root <dir> [--config <file>] [--history <file>] [--scope <tag>]
-  stdout : JSON {"files":[{"path","score","band","verdict",
+  stdout : JSON {"files":[{"path","tier","score","band","verdict",
            "findings":[{"rule","check","line","penalty"}],"advisories":[{"rule","note"}]}],
            "run":{"files","total_penalty","considered_rows","skipped"}}
   exit   : 0 scored; 1 history append failed; 2 contract refusal (bad record, bad root,
@@ -28,17 +28,32 @@ Scoring semantics (owning text: skills/scoring/SKILL.md; row classifications wit
 predicates: scripts/score_engine_rows.md):
   formula     : final = max(0, min(100, 100 + sum(penalties)))
   verdict     : pass/fail against the config `score_threshold` (default 70); bands stay fixed
+  tier        : each files[] entry carries the artifact's tool tier, classified per file from
+                its canonical path (the scoring skill's tier classifier + the conventions
+                overlay table): `2-Claude` / `2-Codex` / `2-Antigravity` under a tool tree,
+                else `1` (open-spec artifact; the Tier 1.5 open-spec-corpus distinction is a
+                property of a collection, not decidable from one file's path, so per-file
+                output never states it). Tool-specific rows are tier-conditioned: a row bound
+                to one tool's tier never fires on another tier's artifacts.
   description : counted in CHARACTERS of the description value — 500-800 -> -5, over 800 -> -10
   body (R05)  : counted in lines of the MARKDOWN BODY — the frontmatter block (both `---`
                 fences included) is excluded — 400..upper -> -5, over upper -> -10, where the
                 upper boundary is 500 or the R05 `threshold` override; the 400 lower stays
   R01         : token-bounded occurrences of the 11 listed words, -2 each, capped at -20, minus
                 the three carve-outs of skills/conventions/SKILL.md §4 (heading `relevant`,
-                `relevant to <named-scope>`, term followed by a measurable-criterion clause)
+                `relevant to <named-scope>`, term followed by a measurable-criterion clause —
+                encoded as a quantity in the remainder of the term's own sentence on its line:
+                a digit, or a spelled-out cardinal from the closed _NUMBER_WORDS list)
   degenerate  : unparseable frontmatter/config -> one -25 parse finding, and every row that
                 does not need the parsed structure is still scored; empty (0-byte) file ->
                 score 0, band Rewrite; unreadable file -> absent from files[], listed in
                 run.skipped, exit stays 0
+
+Artifact frontmatter is parsed by the permissive stdlib parser below — every schema-conforming
+SKILL.md/agent/command frontmatter parses (nested block mappings such as `metadata:`,
+sequences, flow mappings `{a: b}`, hyphenated keys, quoted scalars, block scalars); the -25
+`frontmatter parse` finding fires ONLY on a true structural failure: no closing `---` fence,
+a non-mapping top level, unbalanced quotes or brackets, or tab-broken indentation.
 
 Config is read through scripts/lib/config.py — the one reader; no second parser:
   rule_overrides.<Rid>.suppress / enabled: false -> rule zeroed, findings moved to advisories
@@ -83,6 +98,16 @@ _VAGUE = re.compile(
     re.IGNORECASE)
 _HEADING = re.compile(r"#{1,6}\s")
 _SENTENCE_END = re.compile(r"[.!?]")
+#: The quantity lexemes of the measurable-criterion carve-out (conventions §4: "any listed
+#: term followed by a measurable-criterion clause"). The owning text supplies no finer
+#: definition, so the mechanical encoding is a closed one: a digit, or one of these
+#: spelled-out cardinals ("appropriate timeout of one minute", "at most three retries").
+_NUMBER_WORDS = frozenset((
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+    "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty",
+    "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "million",
+))
 
 #: Confirmed Claude hook events and hook types, verbatim from the scoring skill's
 #: "Hooks (Claude Code, Tier 2-Claude)" table conditions.
@@ -91,6 +116,16 @@ CLAUDE_HOOK_EVENTS = (
     "PermissionRequest", "Stop", "StopFailure", "FileChanged",
 )
 CLAUDE_HOOK_TYPES = ("command", "http", "mcp_tool", "prompt", "agent")
+#: Confirmed Codex hook events, verbatim from the scoring skill's
+#: "Hooks (Codex CLI, Tier 2-Codex)" table condition.
+CODEX_HOOK_EVENTS = (
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest",
+    "PreCompact", "PostCompact", "SubagentStart", "SubagentStop", "Stop",
+)
+#: Per-tool hook event tables, keyed by the tier whose artifacts they bind to. The
+#: Antigravity table is deliberately absent: its owning text holds every Antigravity hook
+#: finding advisory (confidence: low), so the engine never deducts on it.
+HOOK_EVENTS_BY_TIER = {"2-Claude": CLAUDE_HOOK_EVENTS, "2-Codex": CODEX_HOOK_EVENTS}
 #: Dangerous patterns, verbatim from the universal hooks table's command-safety condition.
 DANGEROUS_PATTERNS = ("rm -rf", "git push --force", "DROP TABLE")
 #: semver.org shape for the manifest's `version is semver` row.
@@ -142,7 +177,6 @@ TYPE_ADVISORIES = {
     ),
     "hook-config": (
         ("R29", "scripts exist"),
-        ("--", "MCP matcher format"),
     ),
     "settings": (
         ("--", "no hardcoded secrets"),
@@ -168,14 +202,42 @@ TYPE_ADVISORIES = {
 }
 TYPE_ADVISORIES["user-command"] = TYPE_ADVISORIES["command"]
 
+#: Tier-conditioned advisory-zero rows: rows of a per-tool table that bind only to that
+#: tool's tier and stay advisory there by the owning text. Each value is (rule, full note).
+TIER_ADVISORIES = {
+    ("hook-config", "2-Claude"): (
+        ("--", "advisory-zero: MCP matcher format; no objective predicate for the engine"),
+    ),
+    ("hook-config", "2-Codex"): (
+        ("--", "advisory-zero: hooks config key (deprecated [features].codex_hooks); "
+               "the owning text marks the row (advisory)"),
+    ),
+    ("hook-config", "2-Antigravity"): (
+        ("R27", "advisory-zero: event names valid; the owning text holds every Antigravity "
+                "hook finding advisory (confidence: low)"),
+        ("R27", "advisory-zero: case correct; the owning text holds every Antigravity "
+                "hook finding advisory (confidence: low)"),
+    ),
+}
+
 #: Penalty-table rows one evaluation of the type consults (the type's own tables); every
-#: evaluation additionally consults the two all-types R01 rows.
+#: evaluation additionally consults the two all-types R01 rows. hook-config is absent here:
+#: its per-tool table is tier-conditioned, so `type_rows` computes it.
 TYPE_TABLE_ROWS = {
     "skill": 12, "agent": 9, "command": 6, "user-command": 6, "shared-partial": 2,
-    "rule": 7, "hook-config": 9, "manifest": 3, "mcp-config": 2, "lsp-config": 1,
+    "rule": 7, "manifest": 3, "mcp-config": 2, "lsp-config": 1,
     "settings": 5, "claude-md": 11, "memory": 7,
 }
+#: The universal hooks table plus the per-tool hook table the artifact's tier binds to.
+HOOK_TABLE_ROWS = {"2-Claude": 4, "2-Codex": 3, "2-Antigravity": 2}
 GENERIC_ROWS = 2
+
+
+def type_rows(artifact_type, tier):
+    """Table rows one evaluation consults for a file of this type and tier (R01 excluded)."""
+    if artifact_type == "hook-config":
+        return 5 + HOOK_TABLE_ROWS.get(tier, 0)
+    return TYPE_TABLE_ROWS.get(artifact_type, 0)
 
 
 # ------------------------------------------------------------------- path classification
@@ -259,6 +321,43 @@ def classify_path(rel):
     return "document"
 
 
+def classify_tier(rel):
+    """Deterministic tool tier from the artifact's canonical path — first match wins.
+
+    Owning texts: the scoring skill's tier classifier ("**Tier 1** — open-spec artifacts.
+    **Tier 1.5** — open-spec corpora. **Tier 2** — overlays specific to each tool: 2-Claude,
+    2-Codex, 2-Antigravity.") and the conventions overlay table ("classify its target tool
+    from the canonical path it lives under"): conventions-claude governs `.claude/` and
+    `plugin.json`; conventions-codex governs `.codex/`, `.agents/`, `AGENTS.md`;
+    conventions-antigravity governs `.gemini/`, `.agent/`. The per-file markers beyond the
+    trees come from the scoring skill's own table headings (`.mcp.json`/`.lsp.json`/
+    `monitors/monitors.json` Claude; `agents/openai.yaml`/`.codex-plugin` 2-Codex;
+    `gemini-extension.json` 2-Antigravity; `hooks/**/*.json` is the Claude plugin hooks
+    config the Tier 2-Claude hook table binds to). Everything else is `1` — an open-spec
+    artifact. Tier 1.5 (open-spec corpora) is a property of a collection, never decidable
+    from one file's path, so per-file classification never emits it; the distinction stays
+    advisory.
+    """
+    p = rel[2:] if rel.startswith("./") else rel
+    parts = p.split("/")
+    name = parts[-1]
+    dirs = parts[:-1]
+    if ".claude" in dirs or ".claude-plugin" in dirs:
+        return "2-Claude"
+    if ".codex" in dirs or ".codex-plugin" in dirs or ".agents" in dirs:
+        return "2-Codex"
+    if ".gemini" in dirs or ".agent" in dirs:
+        return "2-Antigravity"
+    if name in ("CLAUDE.md", ".mcp.json", ".lsp.json") or p == "monitors/monitors.json" \
+            or _glob(p, "hooks/**/*.json"):
+        return "2-Claude"
+    if name == "AGENTS.md" or (name == "openai.yaml" and dirs and dirs[-1] == "agents"):
+        return "2-Codex"
+    if name == "gemini-extension.json":
+        return "2-Antigravity"
+    return "1"
+
+
 _CATEGORY = re.compile(r"[A-F]")
 
 
@@ -288,21 +387,308 @@ class Controls:
         self.threshold = row.get("threshold")
 
 
+# ----------------------------------------------------- permissive artifact frontmatter parser
+# `.vibe-suite.md` keeps the strict fail-closed config grammar (scripts/lib/config.py, the one
+# reader). Artifact frontmatter is a different domain: its schema is the open SKILL.md spec,
+# whose files the engine must SCORE rather than refuse, so the parser here is permissive —
+# every schema-conforming shape parses (nested block mappings such as `metadata:`, sequences,
+# flow mappings `{a: b}`, hyphenated keys, quoted scalars, block scalars) and _FrontmatterError
+# is raised ONLY on true structural failure: a non-mapping top level, unbalanced quotes or
+# brackets, or tab-broken indentation (the missing closing fence is caught before parsing).
+
+
+class _FrontmatterError(Exception):
+    """True structural failure of an artifact frontmatter block."""
+
+
+_BLOCK_HEADER = re.compile(r"[|>][+-]?\d*")
+_PLAIN_INT = re.compile(r"-?\d+")
+_BARE_KEY = re.compile(r"([A-Za-z0-9_.-]+):(\S.*)")
+
+
+def _fm_strip_comment(line):
+    """Drop a ` #` comment that sits outside quotes and outside flow brackets."""
+    inside, depth, index = None, 0, 0
+    while index < len(line):
+        char = line[index]
+        if inside:
+            if char == "\\" and inside == '"':
+                index += 2
+                continue
+            if char == inside:
+                inside = None
+        elif char in "\"'":
+            inside = char
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+        elif char == "#" and depth == 0 and (index == 0 or line[index - 1] in " \t"):
+            return line[:index]
+        index += 1
+    return line
+
+
+def _fm_scalar_convert(text):
+    if text in ("", "null", "~"):
+        return None
+    if text in ("true", "True", "false", "False"):
+        return text.lower() == "true"
+    if _PLAIN_INT.fullmatch(text):
+        return int(text)
+    return text
+
+
+def _fm_quoted(text, index, line_no):
+    """Parse the quoted scalar opening at text[index]; returns (value, end)."""
+    quote = text[index]
+    index += 1
+    out = []
+    while index < len(text):
+        char = text[index]
+        if quote == '"' and char == "\\":
+            if index + 1 >= len(text):
+                break
+            out.append(text[index + 1])
+            index += 2
+            continue
+        if char == quote:
+            if quote == "'" and text[index + 1:index + 2] == "'":
+                out.append("'")
+                index += 2
+                continue
+            return "".join(out), index + 1
+        out.append(char)
+        index += 1
+    raise _FrontmatterError(f"line {line_no}: unterminated quoted scalar")
+
+
+def _fm_flow_value(text, index, line_no):
+    while index < len(text) and text[index] == " ":
+        index += 1
+    if index >= len(text):
+        return None, index
+    char = text[index]
+    if char == "{":
+        return _fm_flow_map(text, index + 1, line_no)
+    if char == "[":
+        return _fm_flow_seq(text, index + 1, line_no)
+    if char in "\"'":
+        return _fm_quoted(text, index, line_no)
+    end = index
+    while end < len(text) and text[end] not in ",}]":
+        end += 1
+    return _fm_scalar_convert(text[index:end].strip()), end
+
+
+def _fm_flow_map(text, index, line_no):
+    out = {}
+    while True:
+        while index < len(text) and text[index] in " ,":
+            index += 1
+        if index >= len(text):
+            raise _FrontmatterError(f"line {line_no}: unterminated flow mapping")
+        if text[index] == "}":
+            return out, index + 1
+        if text[index] == "]":
+            raise _FrontmatterError(f"line {line_no}: mismatched bracket in flow mapping")
+        if text[index] in "\"'":
+            key, index = _fm_quoted(text, index, line_no)
+        else:
+            end = index
+            while end < len(text) and text[end] not in ":,}]":
+                end += 1
+            key, index = text[index:end].strip(), end
+        while index < len(text) and text[index] == " ":
+            index += 1
+        if index < len(text) and text[index] == ":":
+            value, index = _fm_flow_value(text, index + 1, line_no)
+        else:
+            value = None
+        out[str(key)] = value
+
+
+def _fm_flow_seq(text, index, line_no):
+    out = []
+    while True:
+        while index < len(text) and text[index] in " ,":
+            index += 1
+        if index >= len(text):
+            raise _FrontmatterError(f"line {line_no}: unterminated flow sequence")
+        if text[index] == "]":
+            return out, index + 1
+        if text[index] == "}":
+            raise _FrontmatterError(f"line {line_no}: mismatched bracket in flow sequence")
+        value, index = _fm_flow_value(text, index, line_no)
+        out.append(value)
+
+
+def _fm_value(rest, line_no):
+    """One already-stripped inline value; trailing text after a closed quote/flow is
+    tolerated (permissive), an unterminated one raises."""
+    char = rest[0]
+    if char == "{":
+        return _fm_flow_map(rest, 1, line_no)[0]
+    if char == "[":
+        return _fm_flow_seq(rest, 1, line_no)[0]
+    if char in "\"'":
+        return _fm_quoted(rest, 0, line_no)[0]
+    return _fm_scalar_convert(rest)
+
+
+class _FrontmatterParser:
+    """Block-structure walker over the fenced lines (fences excluded)."""
+
+    def __init__(self, lines):
+        self.lines = lines
+        self.tokens = []          # (indent, comment-stripped content, source line index)
+        for line_index, raw in enumerate(lines):
+            content = _fm_strip_comment(raw).strip()
+            if not content:
+                continue
+            leading = raw[:len(raw) - len(raw.lstrip())]
+            if "\t" in leading:
+                raise _FrontmatterError(f"line {line_index + 2}: tab in indentation")
+            self.tokens.append((len(leading), content, line_index))
+
+    @staticmethod
+    def _is_item(content):
+        return content == "-" or content.startswith("- ")
+
+    @staticmethod
+    def _split_key(content, line_no):
+        """Split `key: rest`; raises when the line is not a mapping entry."""
+        if content[0] in "\"'":
+            key, end = _fm_quoted(content, 0, line_no)
+            rest = content[end:].lstrip()
+            if rest.startswith(":"):
+                return str(key), rest[1:].strip()
+            raise _FrontmatterError(f"line {line_no}: expected 'key: value'")
+        depth = 0
+        for index, char in enumerate(content):
+            if char in "{[":
+                depth += 1
+            elif char in "}]":
+                depth -= 1
+            elif char == ":" and depth == 0 \
+                    and (index + 1 == len(content) or content[index + 1] == " "):
+                return content[:index].strip(), content[index + 1:].strip()
+        bare = _BARE_KEY.fullmatch(content)     # `key:value` — tolerated authoring shorthand
+        if bare:
+            return bare.group(1), bare.group(2).strip()
+        raise _FrontmatterError(f"line {line_no}: expected 'key: value'")
+
+    def parse(self):
+        if not self.tokens:
+            return {}
+        if self._is_item(self.tokens[0][1]):
+            raise _FrontmatterError("line 2: top level is a sequence, not a mapping")
+        result, pos = self._map(0, self.tokens[0][0])
+        if pos != len(self.tokens):
+            line_no = self.tokens[pos][2] + 2
+            raise _FrontmatterError(f"line {line_no}: content outside the top-level mapping")
+        return result
+
+    def _node(self, pos):
+        indent = self.tokens[pos][0]
+        if self._is_item(self.tokens[pos][1]):
+            return self._seq(pos, indent)
+        return self._map(pos, indent)
+
+    def _map(self, pos, indent):
+        out = {}
+        while pos < len(self.tokens) and self.tokens[pos][0] == indent \
+                and not self._is_item(self.tokens[pos][1]):
+            ind, content, line_index = self.tokens[pos]
+            key, rest = self._split_key(content, line_index + 2)
+            pos += 1
+            if rest and _BLOCK_HEADER.fullmatch(rest):
+                value, pos = self._block_scalar(pos, ind, line_index)
+            elif rest:
+                value = _fm_value(rest, line_index + 2)
+                while pos < len(self.tokens) and self.tokens[pos][0] > ind:
+                    # deeper lines after an inline scalar: multi-line plain continuation
+                    if isinstance(value, str):
+                        value = f"{value} {self.tokens[pos][1]}"
+                    pos += 1
+            elif pos < len(self.tokens) and self.tokens[pos][0] > ind:
+                value, pos = self._node(pos)
+            elif pos < len(self.tokens) and self.tokens[pos][0] == ind \
+                    and self._is_item(self.tokens[pos][1]):
+                value, pos = self._seq(pos, ind)    # sequence at the parent key's indent
+            else:
+                value = None
+            out[key] = value                        # duplicate keys: last wins (permissive)
+        return out, pos
+
+    def _seq(self, pos, indent):
+        out = []
+        while pos < len(self.tokens) and self.tokens[pos][0] == indent \
+                and self._is_item(self.tokens[pos][1]):
+            ind, content, line_index = self.tokens[pos]
+            rest = content[1:].strip()
+            pos += 1
+            if not rest:
+                if pos < len(self.tokens) and self.tokens[pos][0] > ind:
+                    value, pos = self._node(pos)
+                else:
+                    value = None
+            else:
+                try:
+                    key, item_rest = self._split_key(rest, line_index + 2)
+                except _FrontmatterError:
+                    key = None
+                if key is not None:                 # `- key: value` mapping item
+                    value = {key: _fm_value(item_rest, line_index + 2) if item_rest else None}
+                    if pos < len(self.tokens) and self.tokens[pos][0] > ind:
+                        nested, pos = self._node(pos)
+                        if isinstance(nested, dict):
+                            value.update(nested)
+                else:
+                    value = _fm_value(rest, line_index + 2)
+            out.append(value)
+        return out, pos
+
+    def _block_scalar(self, pos, indent, header_line_index):
+        body, stop = [], header_line_index + 1
+        for line_index in range(header_line_index + 1, len(self.lines)):
+            raw = self.lines[line_index]
+            if raw.strip() and len(raw) - len(raw.lstrip()) <= indent:
+                break
+            body.append(raw)
+            stop = line_index + 1
+        while body and not body[-1].strip():
+            body.pop()
+        widths = [len(l) - len(l.lstrip()) for l in body if l.strip()]
+        width = min(widths) if widths else 0
+        text = "\n".join(l[width:] if l.strip() else "" for l in body)
+        while pos < len(self.tokens) and self.tokens[pos][2] < stop:
+            pos += 1
+        return (text + "\n" if text else ""), pos
+
+
 def parse_md_frontmatter(text, rel):
     """Returns (fields, parse_failed).
 
     A file whose first line is not a `---` fence has NO frontmatter — its keys are simply
     missing ({} — the presence rows fire), which is not the malformed-parse case. A file that
-    opens a fence but fails the accepted YAML subset is malformed: (None, True), the -25
-    file-level penalty. The parser is the config module's — one grammar — with the artifact
-    key alphabet, so documented hyphenated keys (`allowed-tools`) parse instead of penalizing.
+    opens a fence is parsed by the permissive parser above: (None, True) — the -25 file-level
+    penalty — ONLY on true structural failure (no closing fence, non-mapping top level,
+    unbalanced quotes/brackets, tab-broken indentation).
     """
     if text.split("\n", 1)[0].strip() != "---":
         return {}, False
+    lines = text.split("\n")
+    closing = None
+    for index in range(1, len(lines)):
+        if not lines[index].startswith((" ", "\t")) and lines[index].rstrip() == "---":
+            closing = index
+            break
+    if closing is None:
+        return None, True
     try:
-        return config_mod.parse_frontmatter(
-            text, source=rel, key_pattern=config_mod.ARTIFACT_KEY), False
-    except config_mod.ConfigSyntaxError:
+        return _FrontmatterParser(lines[1:closing]).parse(), False
+    except _FrontmatterError:
         return None, True
 
 
@@ -330,13 +716,25 @@ def _walk_json(node, key=None):
         yield (key, node)
 
 
+def _measurable_criterion(clause):
+    """conventions §4's third carve-out: "any listed term followed by a measurable-criterion
+    clause". The owning text supplies no finer definition or example, so the mechanical
+    encoding is closed and exactly this: the clause carries a quantity — a digit, or a
+    spelled-out cardinal from _NUMBER_WORDS ("appropriate timeout of one minute",
+    "a reasonable number of times, at most three"). No other context is consulted."""
+    if re.search(r"\d", clause):
+        return True
+    return any(word.lower() in _NUMBER_WORDS for word in re.findall(r"[A-Za-z]+", clause))
+
+
 def count_r01(text):
     """R01 occurrences after the three conventions §4 carve-outs; returns (count, first_line).
 
     Carve-outs, exactly as skills/conventions/SKILL.md states them and no further contextual
     rules: `relevant` on a markdown heading line; `relevant to <named-scope>` (the term
     followed by `to` and a named scope); any listed term followed by a measurable-criterion
-    clause — mechanically, a digit in the remainder of the term's own sentence on its line.
+    clause — the remainder of the term's own sentence on its line carries a quantity
+    (a digit or a spelled-out cardinal; see `_measurable_criterion`).
     """
     count, first_line = 0, None
     for match in _VAGUE.finditer(text):
@@ -349,7 +747,7 @@ def count_r01(text):
             if re.match(r"\s+to\s+\S", text[match.end():end]):
                 continue
         sentence = _SENTENCE_END.split(text[match.end():end], 1)[0]
-        if re.search(r"\d", sentence):
+        if _measurable_criterion(sentence):
             continue
         count += 1
         if first_line is None:
@@ -360,6 +758,8 @@ def count_r01(text):
 # ---------------------------------------------------------------------- per-type checks
 # One function per artifact type carrying mechanical rows. Every emit cites a ledger row
 # classified `mechanical` (or the file-level parse semantics); nothing else may deduct.
+# Rows of a tool-specific table are tier-conditioned (the scorer gauntlet's do-not-penalize
+# principle): they fire only on artifacts of that tool's tier, never across tiers.
 
 def _load_json(text, emit, check):
     try:
@@ -369,7 +769,7 @@ def _load_json(text, emit, check):
         return None
 
 
-def check_skill(text, rel, path, overrides, emit):
+def check_skill(text, rel, path, overrides, emit, tier):
     frontmatter, failed = parse_md_frontmatter(text, rel)
     if failed:
         emit("--", "frontmatter parse", -25)
@@ -404,7 +804,7 @@ def check_skill(text, rel, path, overrides, emit):
         emit("R05", "body length", -5)
 
 
-def check_agent(text, rel, path, overrides, emit):
+def check_agent(text, rel, path, overrides, emit, tier):
     frontmatter, failed = parse_md_frontmatter(text, rel)
     if failed:
         emit("--", "frontmatter parse", -25)
@@ -424,7 +824,7 @@ def check_agent(text, rel, path, overrides, emit):
         emit("R12", "output format", -10)
 
 
-def check_command(text, rel, path, overrides, emit):
+def check_command(text, rel, path, overrides, emit, tier):
     frontmatter, failed = parse_md_frontmatter(text, rel)
     if failed:
         emit("--", "frontmatter parse", -25)
@@ -432,7 +832,7 @@ def check_command(text, rel, path, overrides, emit):
         emit("--", "description present", -25)
 
 
-def check_shared_partial(text, rel, path, overrides, emit):
+def check_shared_partial(text, rel, path, overrides, emit, tier):
     frontmatter, failed = parse_md_frontmatter(text, rel)
     if failed:
         emit("--", "frontmatter parse", -25)
@@ -440,7 +840,7 @@ def check_shared_partial(text, rel, path, overrides, emit):
         emit("R19", "`user-invocable: false`", -25)
 
 
-def check_rule(text, rel, path, overrides, emit):
+def check_rule(text, rel, path, overrides, emit, tier):
     frontmatter, failed = parse_md_frontmatter(text, rel)
     if failed:
         emit("--", "frontmatter parse", -25)
@@ -452,7 +852,7 @@ def check_rule(text, rel, path, overrides, emit):
         emit("R23", "budget", -15)
 
 
-def check_hook_config(text, rel, path, overrides, emit):
+def check_hook_config(text, rel, path, overrides, emit, tier):
     # Text-level row first: the dangerous patterns are literal, parse or no parse.
     if any(pattern in text for pattern in DANGEROUS_PATTERNS):
         emit("--", "command safety", -15)
@@ -460,7 +860,6 @@ def check_hook_config(text, rel, path, overrides, emit):
     if data is None:
         return
     events, bad_matcher, bad_timeout, bad_type = [], False, False, False
-    lowered = {event.lower() for event in CLAUDE_HOOK_EVENTS}
     for key, value in _walk_json(data):
         if key == "hooks-map":
             events.extend(k for k in value if isinstance(k, str))
@@ -476,22 +875,30 @@ def check_hook_config(text, rel, path, overrides, emit):
             bad_timeout = True
         elif key == "type" and isinstance(value, str) and value not in CLAUDE_HOOK_TYPES:
             bad_type = True
+    # Universal rows ("Hooks — universal (all tools)") fire on every tier.
     if bad_matcher:
         emit("--", "matcher regex valid", -10)
     if bad_timeout:
         emit("--", "timeout reasonable", -5)
-    unknown = [e for e in events if e not in CLAUDE_HOOK_EVENTS]
-    if any(e.lower() not in lowered for e in unknown):
-        emit("R27", "event names valid", -15)
-    if any(e.lower() in lowered for e in unknown):
-        emit("R27", "case correct", -10)
-    if bad_type:
+    # Per-tool event tables are tier-conditioned: the Claude/Codex R27 rows fire only on
+    # their own tier's artifacts; Antigravity stays advisory by its owning text.
+    confirmed = HOOK_EVENTS_BY_TIER.get(tier)
+    if confirmed is not None:
+        lowered = {event.lower() for event in confirmed}
+        unknown = [e for e in events if e not in confirmed]
+        if any(e.lower() not in lowered for e in unknown):
+            emit("R27", "event names valid", -15)
+        if any(e.lower() in lowered for e in unknown):
+            emit("R27", "case correct", -10)
+    if tier == "2-Claude" and bad_type:
         emit("--", "hook type valid", -10)
 
 
-def check_manifest(text, rel, path, overrides, emit):
+def check_manifest(text, rel, path, overrides, emit, tier):
     data = _load_json(text, emit, "valid JSON")
-    if data is None:
+    if data is None or tier != "2-Claude":
+        # The content rows belong to the "plugin.json (Claude, `.claude-plugin/plugin.json`)"
+        # table — 2-Claude tier only; the parse row above is the universal file-level -25.
         return
     if not isinstance(data, dict):
         data = {}
@@ -504,10 +911,10 @@ def check_manifest(text, rel, path, overrides, emit):
         emit("--", "description present", -5)
 
 
-def check_mcp_config(text, rel, path, overrides, emit):
+def check_mcp_config(text, rel, path, overrides, emit, tier):
     data = _load_json(text, emit, "valid JSON")
-    if data is None:
-        return
+    if data is None or tier != "2-Claude":
+        return                    # the server-command row is the Claude .mcp.json table's
     servers = data.get("mcpServers") if isinstance(data, dict) else None
     if isinstance(servers, dict) and any(
             not (isinstance(entry, dict) and entry.get("command"))
@@ -515,14 +922,14 @@ def check_mcp_config(text, rel, path, overrides, emit):
         emit("--", "server command present", -15)
 
 
-def check_lsp_config(text, rel, path, overrides, emit):
+def check_lsp_config(text, rel, path, overrides, emit, tier):
     _load_json(text, emit, "valid JSON")
 
 
-def check_settings(text, rel, path, overrides, emit):
+def check_settings(text, rel, path, overrides, emit, tier):
     data = _load_json(text, emit, "valid JSON")
-    if data is None:
-        return
+    if data is None or tier != "2-Claude":
+        return          # the hook-definitions row checks Claude events — 2-Claude tier only
     hooks = data.get("hooks") if isinstance(data, dict) else None
     if isinstance(hooks, dict):
         for event in hooks:                       # -10 per invalid, per the row
@@ -530,7 +937,7 @@ def check_settings(text, rel, path, overrides, emit):
                 emit("--", "hook definitions valid", -10)
 
 
-def check_claude_md(text, rel, path, overrides, emit):
+def check_claude_md(text, rel, path, overrides, emit, tier):
     if len(text.splitlines()) > 200:
         emit("--", "under 200 lines", -5)
     broken = False
@@ -543,7 +950,7 @@ def check_claude_md(text, rel, path, overrides, emit):
         emit("R36", "valid `@` imports", -10)
 
 
-def check_memory(text, rel, path, overrides, emit):
+def check_memory(text, rel, path, overrides, emit, tier):
     frontmatter, failed = parse_md_frontmatter(text, rel)
     if failed:
         emit("--", "frontmatter parse", -25)
@@ -578,7 +985,7 @@ TYPE_CHECKS = {
 
 # ------------------------------------------------------------------------------- scoring
 
-def score_text(text, rel, path, artifact_type, overrides, pass_threshold):
+def score_text(text, rel, path, artifact_type, tier, overrides, pass_threshold):
     """Score one decoded file. Returns (files[] entry, summed penalty)."""
     findings = []
 
@@ -587,7 +994,7 @@ def score_text(text, rel, path, artifact_type, overrides, pass_threshold):
 
     checks = TYPE_CHECKS.get(artifact_type)
     if checks:
-        checks(text, rel, path, overrides, emit)
+        checks(text, rel, path, overrides, emit, tier)
 
     hits, first_line = count_r01(text)
     if hits:
@@ -619,6 +1026,8 @@ def score_text(text, rel, path, artifact_type, overrides, pass_threshold):
         advisories.append({
             "rule": rule,
             "note": f"advisory-zero: {check}; no objective predicate for the engine"})
+    for rule, note in TIER_ADVISORIES.get((artifact_type, tier), ()):
+        advisories.append({"rule": rule, "note": note})
     if (overrides.get("R51") or {}).get("enabled") is True:
         # The R51 misconfigured row: enabled without engine registry support stays advisory.
         advisories.append({
@@ -630,6 +1039,7 @@ def score_text(text, rel, path, artifact_type, overrides, pass_threshold):
     score = max(0, min(100, 100 + total))
     return {
         "path": rel,
+        "tier": tier,
         "score": score,
         "band": band(score),
         "verdict": "pass" if score >= pass_threshold else "fail",
@@ -717,20 +1127,21 @@ def main(argv=None):
     skipped = []
     considered = 0
     for artifact_type, rel, path in resolved:
+        tier = classify_tier(rel)
         try:
             data = path.read_bytes()
         except OSError:
             skipped.append(rel)          # unreadable: noted, never fatal
             continue
         if not data:
-            files.append({"path": rel, "score": 0, "band": "Rewrite",
+            files.append({"path": rel, "tier": tier, "score": 0, "band": "Rewrite",
                           "verdict": "pass" if pass_threshold <= 0 else "fail",
                           "findings": [], "advisories": []})
             totals.append(0)
             continue
-        considered += TYPE_TABLE_ROWS.get(artifact_type, 0) + GENERIC_ROWS
+        considered += type_rows(artifact_type, tier) + GENERIC_ROWS
         entry, total = score_text(data.decode("utf-8", errors="replace"), rel, path,
-                                  artifact_type, overrides, pass_threshold)
+                                  artifact_type, tier, overrides, pass_threshold)
         files.append(entry)
         totals.append(total)
 

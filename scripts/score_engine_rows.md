@@ -7,17 +7,19 @@ scripts/score_engine.py:
   objective predicate from the owning text.
 - `advisory-zero` — the engine never deducts on the row, because no objective
   predicate exists in the owning text **that the engine can evaluate from the
-  scored file's own bytes and path**. Three honest sub-reasons appear below:
+  scored file's own bytes and path**. Four honest sub-reasons appear below:
   the condition is a judgment word with no stated criteria; the condition is a
-  cross-file or whole-plugin fact a per-file evaluation cannot observe; or no
-  type produced by the deterministic path classifier routes to the table at
-  all (the Tier 2-Codex/-Antigravity sidecar tables — their artifacts classify
-  as `document`/`framework-agent` under commands/shared/classify.md, and type
+  cross-file or whole-plugin fact a per-file evaluation cannot observe; the
+  owning text itself marks the row advisory; or no type produced by the
+  deterministic path classifier routes to the table at all (most Tier
+  2-Codex/-Antigravity sidecar tables — their artifacts classify as
+  `document`/`framework-agent` under commands/shared/classify.md, and type
   tables apply per type).
 
 For each scored file the engine emits every advisory-zero row of the file's own
-type tables as a zero-penalty advisory; rows of unrouted tables are emitted for
-no one, because no scored file belongs to them.
+type tables (including the tier-conditioned rows of its tier) as a zero-penalty
+advisory; rows of unrouted tables are emitted for no one, because no scored
+file belongs to them.
 
 Ground truth for the Skills classifications: the hand-computed worksheet
 tests/fixtures/nl-audit/defective-skill/README.md (cited as "worksheet #n").
@@ -35,15 +37,17 @@ tables below bind to types like this:
 | Commands | `command`, `user-command` |
 | Shared Partials | `shared-partial` |
 | Rules | `rule` |
-| Hooks — universal + Hooks (Claude Code) | `hook-config` |
-| plugin.json (Claude) | `manifest` |
-| .mcp.json | `mcp-config` |
+| Hooks — universal + Hooks (Claude Code) | `hook-config` at tier 2-Claude |
+| Hooks (Codex CLI) | `hook-config` at tier 2-Codex (explicit-type records only — no classify.md path routes there) |
+| Hooks (Antigravity) | `hook-config` at tier 2-Antigravity — advisory by its owning text |
+| plugin.json (Claude) | `manifest` (content rows tier-conditioned to 2-Claude) |
+| .mcp.json | `mcp-config` (server-command row tier-conditioned to 2-Claude) |
 | .lsp.json | `lsp-config` |
-| Settings files | `settings` |
+| Settings files | `settings` (hook-definitions row tier-conditioned to 2-Claude) |
 | CLAUDE.md | `claude-md` |
 | Memory files | `memory` |
 | All types: vague quantifiers (R01) | every scored file |
-| Hooks (Codex), Hooks (Antigravity), .codex-plugin/plugin.json, .agents/plugins/marketplace.json, agents/openai.yaml, gemini-extension.json, .gemini/commands/*.toml, .codex/config.toml, monitors/monitors.json | no route — see the advisory-zero definition above |
+| .codex-plugin/plugin.json, .agents/plugins/marketplace.json, agents/openai.yaml, gemini-extension.json, .gemini/commands/*.toml, .codex/config.toml, monitors/monitors.json | no route — see the advisory-zero definition above |
 | All types: vocabulary drift (R51) | ship-disabled; advisory only |
 | Cross-component | whole-plugin lint, not per-file — no per-file route |
 
@@ -52,19 +56,49 @@ Types with no table (`marketplace`, `plugin-config`, `prompt`, `framework-*`,
 closing principle: "any finding with no specific penalty-table row to cite gets
 dropped."
 
+## Tier classification
+
+Each files[] entry carries a `tier`, classified deterministically per file from
+its canonical path — the scoring skill's tier classifier ("**Tier 1** —
+open-spec artifacts. **Tier 1.5** — open-spec corpora. **Tier 2** — overlays
+specific to each tool: 2-Claude, 2-Codex, 2-Antigravity.") applied through the
+conventions overlay table ("classify its target tool from the canonical path it
+lives under"):
+
+| Tier | Path / tool markers (first match wins) |
+|---|---|
+| `2-Claude` | a `.claude/` or `.claude-plugin/` tree; the Claude-marked per-file names `CLAUDE.md`, `.mcp.json`, `.lsp.json`, `monitors/monitors.json`; `hooks/**/*.json` (the Claude plugin hooks config the Tier 2-Claude hook table binds to) |
+| `2-Codex` | a `.codex/`, `.codex-plugin/`, or `.agents/` tree; `AGENTS.md` (conventions overlay table); `agents/openai.yaml` (the scoring skill's own heading) |
+| `2-Antigravity` | a `.gemini/` or `.agent/` tree; `gemini-extension.json` |
+| `1` | everything else — an open-spec artifact |
+
+Tier 1.5 (open-spec corpora) is a property of a *collection*; the owning text
+states no per-file predicate for it, so the per-file classifier never emits it
+and the 1-vs-1.5 distinction stays with the narrating agent (advisory). The
+tier conditions tool-specific rows — the scorer gauntlet's do-not-penalize
+principle: "a row from another type's table or another tool's overlay does not
+apply". A row bound to one tool's tier never fires on another tier's artifacts;
+the tier-conditioned rows are marked in their Predicate cells below.
+
 ## File-level parse semantics (not a table row)
 
 The rubric's file-level semantics assign every artifact type a parse-failure
 penalty: "Malformed frontmatter or config (YAML/JSON/TOML that fails to parse)
 takes the parse-failure penalty for that artifact type: **-25**." The engine
 implements it as the `frontmatter parse` finding on markdown types whose
-opening `---` fence fails the accepted YAML subset (a file with no fence has no
-frontmatter — its presence rows fire instead), and as the `valid JSON` finding
-on JSON types with no dedicated parse row (the Claude plugin.json table). Rows
-that need the parsed structure are skipped after a parse failure; rows that do
-not (body length, R01, command safety) are still scored. Skill frontmatter is
-parsed with the artifact key alphabet — documented hyphenated keys such as
-`allowed-tools` are valid, and -25 fires ONLY on a true parse failure.
+opening `---` fence fails to parse (a file with no fence has no frontmatter —
+its presence rows fire instead), and as the `valid JSON` finding on JSON types
+with no dedicated parse row (the Claude plugin.json table). Rows that need the
+parsed structure are skipped after a parse failure; rows that do not (body
+length, R01, command safety) are still scored. Artifact frontmatter is parsed
+by the engine's own permissive stdlib parser — every schema-conforming shape
+parses: nested block mappings (`metadata:`), sequences, flow mappings
+(`{author: x}`), hyphenated keys (`allowed-tools`), quoted scalars, block
+scalars — and -25 fires ONLY on a true structural failure: no closing `---`
+fence, a non-mapping top level, unbalanced quotes or brackets, or tab-broken
+indentation. (`.vibe-suite.md` itself keeps the strict fail-closed grammar of
+scripts/lib/config.py; the permissive grammar exists because artifacts are
+scored, not refused.)
 
 ## Skills
 
@@ -139,42 +173,52 @@ parsed with the artifact key alphabet — documented hyphenated keys such as
 
 ## Hooks (Claude Code, Tier 2-Claude)
 
+Tier-conditioned: these rows bind to `hook-config` artifacts of tier
+**2-Claude** only (the path route `hooks/**/*.json` is the Claude plugin hooks
+config and classifies 2-Claude; an explicit-type record under another tool's
+tree never takes these rows).
+
 | Rule | Check | Condition | Class | Predicate / justification |
 |------|-------|-----------|-------|---------------------------|
-| R27 | event names valid | unrecognized event; confirmed Claude events: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop, StopFailure, FileChanged | mechanical | event names are the string values of `event` keys plus the keys of any mapping under a `hooks` key; a name outside the confirmed list (and not merely a case variant of one) → -15 |
-| R27 | case correct | wrong case (e.g. lowercase pretooluse) | mechanical | an extracted event name that case-insensitively equals a confirmed event but differs in case → -10 |
-| -- | hook type valid | unrecognized type; confirmed types: command, http, mcp_tool, prompt, agent | mechanical | any string value under a `type` key outside the confirmed list → -10 |
+| R27 | event names valid | unrecognized event; confirmed Claude events: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop, StopFailure, FileChanged | mechanical | on a 2-Claude-tier hook-config: event names are the string values of `event` keys plus the keys of any mapping under a `hooks` key; a name outside the confirmed list (and not merely a case variant of one) → -15 |
+| R27 | case correct | wrong case (e.g. lowercase pretooluse) | mechanical | on a 2-Claude-tier hook-config: an extracted event name that case-insensitively equals a confirmed event but differs in case → -10 |
+| -- | hook type valid | unrecognized type; confirmed types: command, http, mcp_tool, prompt, agent | mechanical | on a 2-Claude-tier hook-config: any string value under a `type` key outside the confirmed list → -10 |
 | -- | MCP matcher format | targets an MCP tool without the `mcp__<server>__<tool>` pattern | advisory-zero | whether a matcher "targets an MCP tool" when it does not already carry the `mcp__` pattern is not objectively decidable from the config |
 
 ## Hooks (Codex CLI, Tier 2-Codex)
 
-No route: commands/shared/classify.md yields no Codex hook-config type (Codex
-hooks live in `.codex/` files that classify `document`), so no scored file
-reaches this table.
+Tier-conditioned: no classify.md path yields a Codex hook-config type, but the
+record protocol admits an explicit-type `hook-config` record for a config under
+a Codex tree (e.g. `.codex/hooks.json`, tier 2-Codex). On such an artifact the
+two R27 rows carry the same objective list-membership predicate as the Claude
+table — against the Codex event list — and are mechanical; they never fire on
+another tier's artifacts.
 
 | Rule | Check | Condition | Class | Predicate / justification |
 |------|-------|-----------|-------|---------------------------|
-| R27 | event names valid | unrecognized event; confirmed Codex events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, PreCompact, PostCompact, SubagentStart, SubagentStop, Stop | advisory-zero | objective list-membership predicate, but unrouted — see the table note |
-| R27 | case correct | wrong case | advisory-zero | unrouted — see the table note |
-| -- | hooks config key | config.toml uses deprecated `[features].codex_hooks` instead of `[features].hooks` (renamed around CLI 0.129) | advisory-zero | the owning text itself marks the penalty "(advisory)"; also unrouted |
+| R27 | event names valid | unrecognized event; confirmed Codex events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, PreCompact, PostCompact, SubagentStart, SubagentStop, Stop | mechanical | on a 2-Codex-tier hook-config: an extracted event name outside the confirmed Codex list (and not merely a case variant of one) → -15 |
+| R27 | case correct | wrong case | mechanical | on a 2-Codex-tier hook-config: an extracted event name that case-insensitively equals a confirmed Codex event but differs in case → -10 |
+| -- | hooks config key | config.toml uses deprecated `[features].codex_hooks` instead of `[features].hooks` (renamed around CLI 0.129) | advisory-zero | the owning text itself marks the penalty "(advisory)"; the condition also names config.toml, a different file — emitted as an advisory on 2-Codex-tier hook-configs |
 
 ## Hooks (Antigravity/Gemini lineage, Tier 2-Antigravity)
 
 The owning text marks the entire table ADVISORY with `confidence: low`
-(multi-tool design decision #3), and no classify.md type routes to it.
+(multi-tool design decision #3): even on a 2-Antigravity-tier hook-config
+(explicit-type record under `.gemini/` or `.agent/`) the engine deducts
+nothing and emits the two rows as advisories.
 
 | Rule | Check | Condition | Class | Predicate / justification |
 |------|-------|-----------|-------|---------------------------|
-| R27 | event names valid | unrecognized event; confirmed events: SessionStart, BeforeAgent, BeforeModel, BeforeToolSelection, BeforeTool, AfterTool, AfterModel, AfterAgent, SessionEnd, Notification, PreCompress | advisory-zero | the owning text holds every Antigravity hook finding advisory; also unrouted |
-| R27 | case correct | wrong case | advisory-zero | same — advisory by the owning text; unrouted |
+| R27 | event names valid | unrecognized event; confirmed events: SessionStart, BeforeAgent, BeforeModel, BeforeToolSelection, BeforeTool, AfterTool, AfterModel, AfterAgent, SessionEnd, Notification, PreCompress | advisory-zero | the owning text holds every Antigravity hook finding advisory |
+| R27 | case correct | wrong case | advisory-zero | same — advisory by the owning text |
 
 ## plugin.json (Claude, `.claude-plugin/plugin.json`)
 
 | Rule | Check | Condition | Class | Predicate / justification |
 |------|-------|-----------|-------|---------------------------|
-| -- | name present | missing | mechanical | the parsed JSON object has no `name` value — objective (parse failure itself takes the file-level -25 and skips these rows) |
-| -- | version is semver | present but invalid | mechanical | a present `version` value that does not match the semver.org `MAJOR.MINOR.PATCH[-prerelease][+build]` shape → -10; an absent version never fires ("present but invalid") |
-| -- | description present | missing | mechanical | the parsed JSON object has no `description` value — objective |
+| -- | name present | missing | mechanical | on a 2-Claude-tier manifest (the table heading names `.claude-plugin/plugin.json`): the parsed JSON object has no `name` value — objective (parse failure itself takes the file-level -25 and skips these rows) |
+| -- | version is semver | present but invalid | mechanical | on a 2-Claude-tier manifest: a present `version` value that does not match the semver.org `MAJOR.MINOR.PATCH[-prerelease][+build]` shape → -10; an absent version never fires ("present but invalid") |
+| -- | description present | missing | mechanical | on a 2-Claude-tier manifest: the parsed JSON object has no `description` value — objective |
 
 ## .codex-plugin/plugin.json (Tier 2-Codex)
 
@@ -244,7 +288,7 @@ No route: classifies `document`.
 | Rule | Check | Condition | Class | Predicate / justification |
 |------|-------|-----------|-------|---------------------------|
 | -- | valid JSON | parse fail | mechanical | json.loads fails → -25 |
-| -- | server command present | MCP entry missing its command field | mechanical | any entry under the parsed `mcpServers` mapping without a truthy `command` value → -15 |
+| -- | server command present | MCP entry missing its command field | mechanical | on a 2-Claude-tier mcp-config (the table heading says "Claude, repo root"): any entry under the parsed `mcpServers` mapping without a truthy `command` value → -15 |
 
 ## .codex/config.toml (Tier 2-Codex)
 
@@ -279,7 +323,7 @@ No route: `monitors/monitors.json` matches no classify.md row and classifies
 | -- | no hardcoded secrets | API keys/tokens/passwords present | advisory-zero | recognizing a secret is a judgment; the owning text states no pattern list |
 | -- | permission mode sanity | bypassPermissions enabled in SHARED project settings (not .local) | advisory-zero | "enabled" requires knowledge of the settings schema's permission structure that the owning text does not supply; a substring probe cannot tell an enabled mode from a mention |
 | -- | recognized keys | unknown top-level keys | advisory-zero | the owning text supplies no list of recognized settings keys to diff against |
-| -- | hook definitions valid | hooks key present → check event names + case | mechanical | when the parsed object carries a top-level `hooks` mapping, each key that is not a confirmed Claude event (the Hooks Claude table's list) → -10 per invalid, per the row's own "per invalid" |
+| -- | hook definitions valid | hooks key present → check event names + case | mechanical | on a 2-Claude-tier settings file (the table heading names `.claude/settings*.json`; the row checks Claude events): when the parsed object carries a top-level `hooks` mapping, each key that is not a confirmed Claude event (the Hooks Claude table's list) → -10 per invalid, per the row's own "per invalid" |
 
 ## CLAUDE.md
 
@@ -317,8 +361,8 @@ file reaches the engine only when its path is scan-root-relative and contains
 
 | Rule | Check | Condition | Class | Predicate / justification |
 |------|-------|-----------|-------|---------------------------|
-| R01 | vague quantifier | each occurrence of: appropriate, relevant, as needed, sufficient, adequate, reasonable, properly, correctly, some, several, various — without measurable criteria | mechanical | token-bounded count of the 11 listed words, -2 per occurrence, minus the three conventions §4 carve-outs exactly as stated and no further contextual rules: `relevant` on a markdown heading line; `relevant to <named-scope>` (the term followed by `to` and a named scope); any listed term followed by a measurable-criterion clause — a digit in the remainder of the term's own sentence on its line. Worksheet #10 verified the fixture's 12 occurrences "identical under substring and word-boundary matching", none excluded by a carve-out |
-| R01 | cap | cap on total vague-quantifier penalty | mechanical | the summed vague-quantifier penalty clamps at -20 (or the R01 `threshold` override): the fixture's 12 x -2 = -24 lands at -20 (worksheet #10: "cap binds") |
+| R01 | vague quantifier | each occurrence of: appropriate, relevant, as needed, sufficient, adequate, reasonable, properly, correctly, some, several, various — without measurable criteria | mechanical | token-bounded count of the 11 listed words, -2 per occurrence, minus the three conventions §4 carve-outs exactly as stated and no further contextual rules: `relevant` on a markdown heading line; `relevant to <named-scope>` (the term followed by `to` and a named scope); and the third, quoted verbatim — "any listed term followed by a measurable-criterion clause". The owning text supplies no finer definition or example of that clause, so its mechanical encoding is closed and exactly this: the remainder of the term's own sentence on its line carries a quantity — a digit, or a spelled-out cardinal from the engine's closed `_NUMBER_WORDS` list (zero–twenty, the tens thirty–ninety, hundred, thousand, million). "appropriate timeout of one minute" and "at most 3 retries" are carved out; "appropriate handling" deducts. The encoding is deliberately no wider: no unit lexicon, no next-line context, no part-of-speech judgment — a cardinal used as a pronoun ("until one loads") is mechanically indistinguishable from a quantity, and the encoding errs on the rubric's own closing principle (no citable criterion → no finding, so ambiguity resolves toward not deducting). Worksheet #10 records the fixture's 12 lexical occurrences, 11 counted after this carve-out |
+| R01 | cap | cap on total vague-quantifier penalty | mechanical | the summed vague-quantifier penalty clamps at -20 (or the R01 `threshold` override): the fixture's 11 counted x -2 = -22 lands at -20 (worksheet #10: "cap binds") |
 
 ## All types: vocabulary drift (R51) — opt-in, disabled by default
 

@@ -23,11 +23,12 @@ File facts (measured):
 - Frontmatter is valid YAML, contains `description` only -- no `name` key, no
   `user_invocable` key.
 - Description value: `A helpful skill for working with data.` -- 38 characters.
-- Flagged R01 words: exactly **12** occurrences, one per line at lines 11-22
-  (`as needed`, `appropriate`, `relevant`, `sufficient`, `adequate`, `reasonable`,
-  `properly`, `correctly`, `some`, `several`, `various`, `some`). Verified
-  identical under substring and word-boundary matching; zero occurrences elsewhere
-  in the file.
+- Flagged R01 words: exactly **12** lexical occurrences, one per line at lines
+  11-22 (`as needed`, `appropriate`, `relevant`, `sufficient`, `adequate`,
+  `reasonable`, `properly`, `correctly`, `some`, `several`, `various`, `some`).
+  Verified identical under substring and word-boundary matching; zero
+  occurrences elsewhere in the file. Under the measurable-criterion carve-out
+  (class 10) the line-21 `various` is excluded, leaving **11 counted**.
 - One pseudocode fence (lines 40-45) and one runnable Python example (lines 49-56).
 - One link, to `references/missing.md` (line 60) -- the target does not exist on
   disk. It points inside the skill's own directory; the file contains no
@@ -150,12 +151,21 @@ relevant, as needed, sufficient, adequate, reasonable, properly, correctly, some
 several, various -- without measurable criteria | -2 each |` and
 `| R01 | cap | cap on total vague-quantifier penalty | max -20 |`
 
-Exactly 12 occurrences (lines 11-22, listed above), none with a measurable
-criterion attached: 12 x -2 = -24, capped at **-20**. None of the three
-conventions [section] 4 carve-outs excludes an occurrence: no flagged word sits
-on a heading line, the single `relevant` (line 13) is "the relevant columns",
-not "relevant to <named-scope>", and no occurrence is followed by a measurable
-criterion (no digit appears in any of lines 11-22).
+12 lexical occurrences (lines 11-22, listed above). The conventions [section] 4
+carve-outs, applied exactly as stated: no flagged word sits on a heading line;
+the single `relevant` (line 13) is "the relevant columns", not "relevant to
+<named-scope>"; and the third carve-out -- quoted verbatim, "any listed term
+followed by a measurable-criterion clause" -- is encoded, since the owning text
+supplies no finer definition, as a quantity in the remainder of the term's own
+sentence on its line: a digit, or a spelled-out cardinal from a closed list
+(zero-twenty, the tens thirty-ninety, hundred, thousand, million). No digit
+appears in any of lines 11-22; one cardinal does: line 21 reads "Try various
+encodings until one loads.", so the line-21 `various` is carved out. A
+mechanical encoding cannot tell pronoun-`one` from quantity-`one`, and the
+ambiguity resolves toward not deducting (the rubric's closing principle: no
+citable criterion, no finding). Counted occurrences: **11** x -2 = -22, capped
+at **-20**. The first counted occurrence stays line 11, so the finding's line
+anchor and the deduction are both unchanged by the carve-out.
 
 ## Kept-clean checklist (why nothing else fires)
 
@@ -165,8 +175,9 @@ criterion (no digit appears in any of lines 11-22).
 - Runnable example present (no R06 rows).
 - No `user_invocable: true` (no `<example>`-blocks row).
 - R51 opt-in config absent, so R51 is zero by rule.
-- Flagged-word count is exactly 12 in the whole file, verified by grep under both
-  substring and word-boundary conventions.
+- Flagged-word count is exactly 12 lexical / 11 counted in the whole file,
+  verified by grep under both substring and word-boundary conventions (the cap
+  binds at either count, so the R01 deduction is -20 regardless).
 
 ## Arithmetic
 
@@ -192,8 +203,10 @@ threshold is the default 70, so the verdict is **fail**.
 ## expected.json shape
 
 `expected.json` is the engine's `files[0]` object verbatim, so the acceptance
-test can compare the two for exact equality: `path`, `score`, `band`, `verdict`,
-`findings` (each `{rule, check, line, penalty}`; R01's line is 11, the first
-counted occurrence; frontmatter and body findings carry line 1), and
-`advisories` (each `{rule, note}`, one per advisory-zero Skills-table row plus
-one per seeded worksheet defect class, in ledger order).
+test can compare the two for exact equality: `path`, `tier` (`"1"` -- an
+open-spec artifact: `skills/defective/SKILL.md` sits under no tool tree, per
+the scoring skill's tier classifier and the conventions overlay table),
+`score`, `band`, `verdict`, `findings` (each `{rule, check, line, penalty}`;
+R01's line is 11, the first counted occurrence; frontmatter and body findings
+carry line 1), and `advisories` (each `{rule, note}`, one per advisory-zero
+Skills-table row plus one per seeded worksheet defect class, in ledger order).

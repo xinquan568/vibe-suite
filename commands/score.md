@@ -52,7 +52,11 @@ each file's pass/fail `verdict`), the three degenerate paths (malformed frontmat
 and continue; empty file → 0; unreadable → skipped and noted), and the scope-tagged,
 atomic, deduped history append. Its row ledger (`scripts/score_engine_rows.md`) records,
 for every rubric row of every penalty table, whether it is mechanical or advisory-zero —
-rows without an objective predicate in the rubric text never deduct.
+rows without an objective predicate in the rubric text never deduct. Each `files[]` entry
+also carries the artifact's tool tier (`1` open-spec — the Tier 1.5 corpus distinction is
+not per-file decidable — vs `2-Claude`/`2-Codex`/`2-Antigravity`, classified from the
+canonical path); tool-specific rows are tier-conditioned and never fire on another tool's
+artifacts.
 
 In parallel, the **vague-scanner** agent (`agents/vague-scanner.md`, haiku-class) recounts
 the 11 R01 words as an independent cross-check. **Deterministic counts win:** on any

@@ -37,8 +37,9 @@ Load these for rubric and terminology context — never as a license to score on
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/score_engine.py" --root "<abs-root>" < "<record-file>"
    ```
 
-3. Parse the engine's output: per-file findings (rule id, check, penalty) and final scores.
-   The numbers pass through untouched.
+3. Parse the engine's output: per-file findings (rule id, check, penalty), the per-file
+   tool tier (`1` / `2-Claude` / `2-Codex` / `2-Antigravity`), and final scores. The
+   numbers pass through untouched.
 4. Localize: Read each flagged artifact and record the line number(s) where the condition
    holds. A finding you cannot localize is still reported — with `line: ?` — never dropped.
 5. Write the Fix column: one concrete, actionable sentence per finding, naming the exact
@@ -58,7 +59,8 @@ stage rejects it, it is dropped:
 2. **Schema do-not-penalize list** — it must not match any Known False Positive Pattern in
    the scoring skill; those are pre-refuted, drop on match.
 3. **Path-scope/tier** — it must fit the artifact's type and tool tier (Tier 1 / 1.5 /
-   2-per-tool); a row from another type's table or another tool's overlay does not apply.
+   2-per-tool; the engine emits each file's classified tier); a row from another type's
+   table or another tool's overlay does not apply.
 4. **Intent** — a documented intentional choice (an omission explained in CLAUDE.md or a
    design note) is architecture, not a defect; drop.
 5. **Tool-catalog** — before calling a tool unknown or undocumented, check the built-in

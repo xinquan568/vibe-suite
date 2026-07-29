@@ -12,7 +12,7 @@ Engine CLI contract pinned here:
            ls_counts); a first field of `A`-`F` is a scanner discovery category and the
            engine classifies the path itself, agreeing with commands/shared/classify.md
   args   : --root <dir> [--config <file>] [--history <file>] [--scope <tag>]
-  stdout : JSON {"files":[{"path","score","band","verdict",
+  stdout : JSON {"files":[{"path","tier","score","band","verdict",
            "findings":[{"rule","check","line","penalty"}],"advisories":[{"rule","note"}]}],
            "run":{"files","total_penalty","considered_rows","skipped"}}
   exit   : 0 scored; 2 contract refusal (bad record, bad root); a missing --config file is
@@ -20,8 +20,15 @@ Engine CLI contract pinned here:
 
 Row ledger: scripts/score_engine_rows.md classifies every row of EVERY penalty table in the
 scoring skill as `mechanical` (predicate quoted from the owning text) or `advisory-zero`;
-this suite asserts the ledger carries every row of every table and that the engine deducts
-ONLY on mechanical rows.
+this suite asserts the ledger carries every row of every table, that the engine deducts
+ONLY on mechanical rows, and (MechanicalRowMatrix) that every mechanical ledger row has at
+least one positive and one negative case — the CASES keys are asserted equal to the
+ledger's mechanical set, so a future mechanical row without cases fails here.
+
+Tier: each files[] entry carries the artifact's tool tier (`1` open-spec vs
+`2-Claude`/`2-Codex`/`2-Antigravity`, classified per file from its canonical path);
+tool-specific rows are tier-conditioned and asserted not to fire across tiers
+(TierClassification's two-tool tree).
 """
 
 import importlib.util
@@ -363,6 +370,22 @@ class LedgerAndMatrix(unittest.TestCase):
         f = score_one(clean_skill() + "\nUse adequate padding.\nSet width to 3.\n")
         self.assertEqual(r01_total(f), -2)
 
+    def test_r01_carveout_spelled_out_quantities(self):
+        # The measurable-criterion clause is a quantity, not only a digit: spelled-out
+        # cardinals from the engine's closed list qualify (review finding 2, iter 2 —
+        # the reviewer's own example must not deduct).
+        f = score_one(clean_skill() + "\nSet an appropriate timeout of one minute.\n")
+        self.assertEqual(r01_total(f), 0, "'appropriate timeout of one minute' is exempt")
+        f = score_one(clean_skill() + "\nRetry a reasonable number of times, at most three.\n")
+        self.assertEqual(r01_total(f), 0)
+        f = score_one(clean_skill() + "\nKeep several buffers, twenty in the worst case.\n")
+        self.assertEqual(r01_total(f), 0)
+        # and the encoding is no wider than a quantity: a bare term still deducts
+        f = score_one(clean_skill() + "\nUse appropriate handling.\n")
+        self.assertEqual(r01_total(f), -2, "a bare term with no criterion still deducts")
+        f = score_one(clean_skill() + "\nApply appropriate padding to the margin.\n")
+        self.assertEqual(r01_total(f), -2, "non-quantity words are not criteria")
+
     def test_r01_cap_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / ".vibe-suite.md"
@@ -581,6 +604,42 @@ class DegenerateInputs(unittest.TestCase):
         self.assertEqual(
             [x["penalty"] for x in f["findings"] if "parse" in x["check"].lower()], [-25])
 
+    def test_schema_conforming_frontmatter_shapes_parse_clean(self):
+        # The permissive artifact parser accepts EVERY schema-conforming shape (review
+        # finding 5, iter 2): flow mappings (`metadata: {author: x}`), nested block
+        # mappings, sequences, quoted scalars, block scalars, hyphenated keys.
+        flow = ("---\nname: probe\ndescription: Concrete probe; use when testing keys.\n"
+                "metadata: {author: x}\n---\n# probe\n\nBody.\n")
+        nested = ("---\nname: \"probe\"\n"
+                  "description: 'Concrete probe; use when testing shapes.'\n"
+                  "metadata:\n  author: x\n  version: 1.0.0\n"
+                  "tags:\n  - alpha\n  - beta\n"
+                  "allowed-tools: Bash(git:*), Read\n---\n# probe\n\nBody.\n")
+        block = ("---\nname: probe\ndescription: |\n  Concrete probe; use when testing\n"
+                 "  block scalars.\nmetadata:\n  author: x\n---\n# probe\n\nBody.\n")
+        for body in (flow, nested, block):
+            with self.subTest(head=body.splitlines()[3]):
+                f = score_one(body)
+                self.assertEqual(
+                    [x for x in f["findings"] if "parse" in x["check"].lower()], [])
+                self.assertEqual(f["score"], 100, f["findings"])
+
+    def test_true_structural_failures_still_minus_25(self):
+        # -25 fires ONLY on true structural failure: unbalanced quotes/brackets,
+        # tab-broken indentation, a non-mapping top level (the missing-closing-fence case
+        # is test_malformed_frontmatter_minus_25_and_continue above).
+        for body in (
+            '---\nname: "unclosed\n---\n# probe\nBody.\n',
+            "---\nmetadata: {author: x\n---\n# probe\nBody.\n",
+            "---\nmetadata:\n\tauthor: x\n---\n# probe\nBody.\n",
+            "---\n- a\n- b\n---\n# probe\nBody.\n",
+        ):
+            with self.subTest(head=body.splitlines()[1]):
+                f = score_one(body)
+                self.assertEqual(
+                    [x["penalty"] for x in f["findings"] if "parse" in x["check"].lower()],
+                    [-25])
+
     def test_empty_file_scores_zero(self):
         f = score_one("")
         self.assertEqual(f["score"], 0)
@@ -754,6 +813,572 @@ class HistoryAppend(unittest.TestCase):
                 )
             finally:
                 ro_dir.chmod(0o755)
+
+
+def run_tree(files, records):
+    """Materialize a mini-tree, run the engine over `records`, return the parsed output."""
+    with tempfile.TemporaryDirectory() as tmp:
+        for rel, content in files.items():
+            target = Path(tmp) / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        proc = run_engine(records, tmp)
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr.decode())
+        return json.loads(proc.stdout.decode())
+
+
+class TierClassification(unittest.TestCase):
+    """The deterministic Tier 1 / 2-Claude / 2-Codex / 2-Antigravity classifier and the
+    tier-conditioned do-not-penalize behavior it drives."""
+
+    def test_classify_tier_markers(self):
+        engine = load_engine()
+        for path, tier in (
+            ("skills/demo/SKILL.md", "1"),
+            ("docs/notes.md", "1"),
+            ("commands/score.md", "1"),
+            (".claude/skills/demo/SKILL.md", "2-Claude"),
+            (".claude/settings.json", "2-Claude"),
+            (".claude-plugin/plugin.json", "2-Claude"),
+            ("CLAUDE.md", "2-Claude"),
+            (".mcp.json", "2-Claude"),
+            (".lsp.json", "2-Claude"),
+            ("monitors/monitors.json", "2-Claude"),
+            ("hooks/hooks.json", "2-Claude"),
+            ("home/.claude/projects/p/memory/note.md", "2-Claude"),
+            (".codex/config.toml", "2-Codex"),
+            (".codex/hooks.json", "2-Codex"),
+            (".codex-plugin/plugin.json", "2-Codex"),
+            (".agents/skills/demo/SKILL.md", "2-Codex"),
+            (".agents/plugins/marketplace.json", "2-Codex"),
+            ("AGENTS.md", "2-Codex"),
+            ("agents/openai.yaml", "2-Codex"),
+            (".gemini/commands/x.toml", "2-Antigravity"),
+            (".agent/skills/demo/SKILL.md", "2-Antigravity"),
+            ("gemini-extension.json", "2-Antigravity"),
+            ("./agents/openai.yaml", "2-Codex"),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(engine.classify_tier(path), tier)
+
+    def test_two_tool_tree_tier_gated_hook_rows(self):
+        # One mini-repo, Claude tree + Codex tree + Antigravity tree, byte-identical hook
+        # configs: PreCompact is a confirmed Codex event but not a Claude one; SessionEnd
+        # is a confirmed Claude event but not a Codex one. The SAME BYTES must deduct on
+        # one tier and stay clean on the other — the tier-conditioned do-not-penalize rule
+        # made observable in both directions. Antigravity findings stay advisory-zero per
+        # their owning text even on a bogus event.
+        precompact = json.dumps({"hooks": {"PreCompact": []}}, indent=2)
+        sessionend = json.dumps({"hooks": {"SessionEnd": []}}, indent=2)
+        out = run_tree(
+            {
+                "hooks/claude-a.json": precompact,
+                "hooks/claude-b.json": sessionend,
+                ".codex/hooks-a.json": precompact,
+                ".codex/hooks-b.json": sessionend,
+                ".gemini/hooks.json": json.dumps({"hooks": {"TotallyBogus": []}}, indent=2),
+            },
+            [
+                ("A", "hooks/claude-a.json"),          # scanner category → engine classifies
+                ("A", "hooks/claude-b.json"),
+                ("hook-config", ".codex/hooks-a.json"),
+                ("hook-config", ".codex/hooks-b.json"),
+                ("hook-config", ".gemini/hooks.json"),
+            ],
+        )
+        claude_a, claude_b, codex_a, codex_b, agy = out["files"]
+        self.assertEqual([f["tier"] for f in out["files"]],
+                         ["2-Claude", "2-Claude", "2-Codex", "2-Codex", "2-Antigravity"])
+        # PreCompact: deducts on the Claude tier, clean on the Codex tier.
+        self.assertEqual(
+            [(x["rule"], x["check"], x["penalty"]) for x in claude_a["findings"]],
+            [("R27", "event names valid", -15)])
+        self.assertEqual(claude_a["score"], 85)
+        self.assertEqual(codex_a["findings"], [])
+        self.assertEqual(codex_a["score"], 100)
+        # SessionEnd: the mirror image — clean on Claude, deducts on Codex.
+        self.assertEqual(claude_b["findings"], [])
+        self.assertEqual(
+            [(x["rule"], x["check"], x["penalty"]) for x in codex_b["findings"]],
+            [("R27", "event names valid", -15)])
+        # Antigravity: even a bogus event never deducts; the R27 rows surface as advisories.
+        self.assertEqual(agy["findings"], [])
+        self.assertEqual(agy["score"], 100)
+        agy_notes = [a["note"] for a in agy["advisories"] if a["rule"] == "R27"]
+        self.assertEqual(len(agy_notes), 2)
+        for note in agy_notes:
+            self.assertIn("advisory", note)
+        # Tier-conditioned advisories on the tool tables.
+        self.assertTrue(any("MCP matcher format" in a["note"]
+                            for a in claude_a["advisories"]))
+        self.assertTrue(any("hooks config key" in a["note"]
+                            for a in codex_a["advisories"]))
+        # Row accounting: universal 5 + per-tool table (Claude 4 ×2, Codex 3 ×2,
+        # Antigravity 2) + the two R01 rows per file.
+        self.assertEqual(out["run"]["considered_rows"], (9 + 2) * 2 + (8 + 2) * 2 + (7 + 2))
+
+    def test_hook_type_row_is_claude_tier_only(self):
+        bad_type = json.dumps({"hooks": {"PreToolUse": [{"type": "weird"}]}}, indent=2)
+        out = run_tree(
+            {"hooks/hooks.json": bad_type, ".codex/hooks.json": bad_type},
+            [("A", "hooks/hooks.json"), ("hook-config", ".codex/hooks.json")],
+        )
+        claude, codex = out["files"]
+        self.assertIn("hook type valid", [x["check"] for x in claude["findings"]])
+        self.assertNotIn("hook type valid", [x["check"] for x in codex["findings"]])
+
+
+# ------------------------------------------------------------- mechanical-row case matrix
+# One entry per ledger row classified `mechanical`, keyed by the ledger's own
+# (section, rule, check, condition) cells. Each entry carries at least one positive case
+# (the row deducts, exact value) and one negative case (clean); numeric rows carry
+# boundary cases. `test_cases_cover_the_ledger_mechanical_set_exactly` asserts the key set
+# equals the parsed ledger's mechanical set, so a future mechanical row without cases
+# fails before it can ship untested.
+
+S_SKILLS = "Skills"
+S_AGENTS = "Agents"
+S_COMMANDS = "Commands"
+S_PARTIALS = "Shared Partials"
+S_RULES = "Rules"
+S_HOOKS_U = "Hooks — universal (all tools)"
+S_HOOKS_CLAUDE = "Hooks (Claude Code, Tier 2-Claude)"
+S_HOOKS_CODEX = "Hooks (Codex CLI, Tier 2-Codex)"
+S_MANIFEST = "plugin.json (Claude, `.claude-plugin/plugin.json`)"
+S_MCP = ".mcp.json (Claude, repo root)"
+S_LSP = ".lsp.json (Tier 2-Claude)"
+S_SETTINGS = "Settings files (.claude/settings.json, .claude/settings.local.json)"
+S_CLAUDE_MD = "CLAUDE.md"
+S_MEMORY = "Memory files (`.md` under `~/.claude/projects/*/memory/`)"
+S_R01 = "All types: vague quantifiers"
+
+SKILL_AT = ("skill", "skills/probe/SKILL.md")
+AGENT_AT = ("agent", "agents/helper.md")
+HOOK_AT = ("hook-config", "hooks/hooks.json")
+CODEX_HOOK_AT = ("hook-config", ".codex/hooks.json")
+MEMORY_AT = ("memory", "proj/memory/note.md")
+
+AGENT_NO_DESC = (
+    "---\nname: helper\nmodel: haiku\ntools: Read\n---\n\n# helper\n\n"
+    "## Output format\n\nOne line per file.\n\n"
+    + "<example>\nContext: probe.\nuser: go?\nassistant: going.\n</example>\n" * 2
+)
+UI_SKILL = ("---\nname: probe\ndescription: Concrete probe; use when testing blocks.\n"
+            "user_invocable: true\n---\n# probe\nBody.\n")
+MANIFEST_FULL = json.dumps(
+    {"name": "probe", "version": "1.2.3", "description": "A probe plugin."}, indent=2)
+MEMORY_FULL = "---\nname: n\ndescription: d\ntype: user\n---\nBody.\n"
+HOOK_OK = json.dumps({"hooks": {"PreToolUse": [
+    {"type": "command", "timeout": 5, "matcher": "Bash", "command": "echo ok"}]}}, indent=2)
+
+
+def hooks_json(**kwargs):
+    return json.dumps({"hooks": kwargs}, indent=2)
+
+
+def rule_of_lines(total):
+    head = ["---", "description: Rule budget probe.", "---"]
+    return "\n".join(head + ["Line."] * (total - 3)) + "\n"
+
+
+def claude_md_of_lines(total):
+    return "\n".join(["# Title"] + ["A plain line."] * (total - 1)) + "\n"
+
+
+def case(kind, files, record, row, expect, note=""):
+    return {"kind": kind, "files": files, "record": record, "row": row,
+            "expect": expect, "note": note}
+
+
+def _skill(body):
+    return {"skills/probe/SKILL.md": body}
+
+
+def _agent(body):
+    return {"agents/helper.md": body}
+
+
+def _r01_cases():
+    word_pos = clean_skill() + "\nUse appropriate handling here.\n"
+    return [
+        case("positive", _skill(word_pos), SKILL_AT, ("R01", "vague quantifier"), -2),
+        case("negative", _skill(clean_skill()), SKILL_AT, ("R01", "vague quantifier"), 0),
+        case("negative", _skill(clean_skill() + "\nSet an appropriate timeout of one minute.\n"),
+             SKILL_AT, ("R01", "vague quantifier"), 0, "measurable-criterion carve-out"),
+    ]
+
+
+def _r01_cap_cases():
+    def rep(n):
+        return _skill(clean_skill() + "\n" + " ".join(["appropriate"] * n) + "\n")
+    return [
+        case("positive", rep(12), SKILL_AT, ("R01", "vague quantifier"), -20, "cap binds"),
+        case("boundary", rep(10), SKILL_AT, ("R01", "vague quantifier"), -20, "exact reach"),
+        case("boundary", rep(11), SKILL_AT, ("R01", "vague quantifier"), -20, "first clamp"),
+        case("negative", rep(3), SKILL_AT, ("R01", "vague quantifier"), -6, "below the cap"),
+    ]
+
+
+CASES = {
+    (S_SKILLS, "--", "name present", "missing"): [
+        case("positive",
+             _skill("---\ndescription: Concrete probe; use when testing.\n---\n# x\nBody.\n"),
+             SKILL_AT, ("--", "name present"), -25),
+        case("negative", _skill(clean_skill()), SKILL_AT, ("--", "name present"), 0),
+    ],
+    (S_SKILLS, "--", "name matches parent dir",
+     "frontmatter name differs from parent directory name (conventions §5; open-spec MUST)"): [
+        case("positive", _skill(clean_skill(name="other")), SKILL_AT,
+             ("--", "name matches parent dir"), -15),
+        case("negative", _skill(clean_skill()), SKILL_AT,
+             ("--", "name matches parent dir"), 0),
+    ],
+    (S_SKILLS, "R04", "description present", "missing"): [
+        case("positive", _skill("---\nname: probe\n---\n# x\nBody.\n"), SKILL_AT,
+             ("R04", "description present"), -25),
+        case("negative", _skill(clean_skill()), SKILL_AT, ("R04", "description present"), 0),
+    ],
+    (S_SKILLS, "R04", "description length", "500–800 chars"): [
+        case("positive", _skill(clean_skill(description="x" * 600)), SKILL_AT,
+             ("R04", "description length"), -5),
+        case("boundary", _skill(clean_skill(description="x" * 499)), SKILL_AT,
+             ("R04", "description length"), 0),
+        case("boundary", _skill(clean_skill(description="x" * 500)), SKILL_AT,
+             ("R04", "description length"), -5),
+        case("boundary", _skill(clean_skill(description="x" * 800)), SKILL_AT,
+             ("R04", "description length"), -5),
+        case("negative", _skill(clean_skill()), SKILL_AT, ("R04", "description length"), 0),
+    ],
+    (S_SKILLS, "R04", "description length", "over 800 chars"): [
+        case("positive", _skill(clean_skill(description="x" * 801)), SKILL_AT,
+             ("R04", "description length"), -10),
+        case("boundary", _skill(clean_skill(description="x" * 800)), SKILL_AT,
+             ("R04", "description length"), -5, "mutually exclusive with the 500-800 band"),
+        case("negative", _skill(clean_skill(description="x" * 100)), SKILL_AT,
+             ("R04", "description length"), 0),
+    ],
+    (S_SKILLS, "R05", "body length", "400–500 lines"): [
+        case("positive", _skill(skill_with_body(450)), SKILL_AT, ("R05", "body length"), -5),
+        case("boundary", _skill(skill_with_body(399)), SKILL_AT, ("R05", "body length"), 0),
+        case("boundary", _skill(skill_with_body(400)), SKILL_AT, ("R05", "body length"), -5),
+        case("boundary", _skill(skill_with_body(500)), SKILL_AT, ("R05", "body length"), -5),
+        case("negative", _skill(skill_with_body(100)), SKILL_AT, ("R05", "body length"), 0),
+    ],
+    (S_SKILLS, "R05", "body length", "over 500 lines"): [
+        case("positive", _skill(skill_with_body(501)), SKILL_AT, ("R05", "body length"), -10),
+        case("boundary", _skill(skill_with_body(500)), SKILL_AT, ("R05", "body length"), -5,
+             "a mutually exclusive band that never stacks"),
+        case("negative", _skill(skill_with_body(399)), SKILL_AT, ("R05", "body length"), 0),
+    ],
+    (S_SKILLS, "R06", "example blocks",
+     "zero `<example>` blocks on a `user_invocable: true` skill"): [
+        case("positive", _skill(UI_SKILL), SKILL_AT, ("R06", "example blocks"), -10),
+        case("negative",
+             _skill(UI_SKILL + "<example>\nContext: p.\nuser: p?\nassistant: p.\n</example>\n"),
+             SKILL_AT, ("R06", "example blocks"), 0),
+        case("negative", _skill(clean_skill(examples=0)), SKILL_AT,
+             ("R06", "example blocks"), 0, "without user_invocable the row cannot fire"),
+    ],
+    (S_AGENTS, "R09", "description present", "missing"): [
+        case("positive", _agent(AGENT_NO_DESC), AGENT_AT, ("R09", "description present"), -25),
+        case("negative", _agent(agent_md()), AGENT_AT, ("R09", "description present"), 0),
+    ],
+    (S_AGENTS, "R09", "example blocks", "exactly 1 example"): [
+        case("positive", _agent(agent_md(examples=1)), AGENT_AT, ("R09", "example blocks"), -5),
+        case("negative", _agent(agent_md(examples=2)), AGENT_AT, ("R09", "example blocks"), 0),
+    ],
+    (S_AGENTS, "R09", "example blocks", "zero examples"): [
+        case("positive", _agent(agent_md(examples=0)), AGENT_AT, ("R09", "example blocks"), -15),
+        case("boundary", _agent(agent_md(examples=1)), AGENT_AT, ("R09", "example blocks"), -5),
+        case("boundary", _agent(agent_md(examples=2)), AGENT_AT, ("R09", "example blocks"), 0),
+        case("negative", _agent(agent_md()), AGENT_AT, ("R09", "example blocks"), 0),
+    ],
+    (S_AGENTS, "R10", "model declared", "not declared"): [
+        case("positive", _agent(agent_md(model=False)), AGENT_AT, ("R10", "model declared"), -5),
+        case("negative", _agent(agent_md()), AGENT_AT, ("R10", "model declared"), 0),
+    ],
+    (S_AGENTS, "R11", "tools declared", "not declared"): [
+        case("positive", _agent(agent_md(tools=False)), AGENT_AT, ("R11", "tools declared"), -5),
+        case("negative", _agent(agent_md()), AGENT_AT, ("R11", "tools declared"), 0),
+    ],
+    (S_AGENTS, "R12", "output format", "no output format spec in body"): [
+        case("positive", _agent(agent_md(output_heading=False)), AGENT_AT,
+             ("R12", "output format"), -10),
+        case("negative", _agent(agent_md()), AGENT_AT, ("R12", "output format"), 0),
+    ],
+    (S_COMMANDS, "--", "description present", "missing"): [
+        case("positive", {"commands/go.md": "---\nargument-hint: x\n---\n# go\nBody.\n"},
+             ("command", "commands/go.md"), ("--", "description present"), -25),
+        case("negative", {"commands/go.md": "---\ndescription: Runs go.\n---\n# go\nBody.\n"},
+             ("command", "commands/go.md"), ("--", "description present"), 0),
+    ],
+    (S_PARTIALS, "R19", "`user-invocable: false`", "missing or true"): [
+        case("positive", {"commands/shared/x.md": "---\ndescription: Shared.\n---\nBody.\n"},
+             ("shared-partial", "commands/shared/x.md"),
+             ("R19", "`user-invocable: false`"), -25, "missing"),
+        case("positive", {"commands/shared/x.md": "---\nuser-invocable: true\n---\nBody.\n"},
+             ("shared-partial", "commands/shared/x.md"),
+             ("R19", "`user-invocable: false`"), -25, "true"),
+        case("negative", {"commands/shared/x.md": "---\nuser-invocable: false\n---\nBody.\n"},
+             ("shared-partial", "commands/shared/x.md"),
+             ("R19", "`user-invocable: false`"), 0),
+    ],
+    (S_RULES, "R21", "description present", "missing frontmatter description"): [
+        case("positive", {".claude/rules/01-x.md": "---\nname: x\n---\n**Do X.** Because.\n"},
+             ("rule", ".claude/rules/01-x.md"), ("R21", "description present"), -10),
+        case("negative", {".claude/rules/01-x.md": rule_of_lines(10)},
+             ("rule", ".claude/rules/01-x.md"), ("R21", "description present"), 0),
+    ],
+    (S_RULES, "R23", "budget", "rule file over 500 lines"): [
+        case("positive", {".claude/rules/01-x.md": rule_of_lines(501)},
+             ("rule", ".claude/rules/01-x.md"), ("R23", "budget"), -15),
+        case("boundary", {".claude/rules/01-x.md": rule_of_lines(500)},
+             ("rule", ".claude/rules/01-x.md"), ("R23", "budget"), 0),
+        case("negative", {".claude/rules/01-x.md": rule_of_lines(10)},
+             ("rule", ".claude/rules/01-x.md"), ("R23", "budget"), 0),
+    ],
+    (S_HOOKS_U, "--", "valid syntax", "config fails to parse (JSON or TOML per tool)"): [
+        case("positive", {"hooks/hooks.json": "{broken"}, HOOK_AT, ("--", "valid syntax"), -25),
+        case("negative", {"hooks/hooks.json": HOOK_OK}, HOOK_AT, ("--", "valid syntax"), 0),
+    ],
+    (S_HOOKS_U, "--", "command safety",
+     "dangerous patterns (`rm -rf`, `git push --force`, `DROP TABLE`)"): [
+        case("positive",
+             {"hooks/hooks.json": hooks_json(PreToolUse=[
+                 {"type": "command", "command": "rm -rf /tmp/x"}])},
+             HOOK_AT, ("--", "command safety"), -15),
+        case("negative", {"hooks/hooks.json": HOOK_OK}, HOOK_AT, ("--", "command safety"), 0),
+    ],
+    (S_HOOKS_U, "--", "matcher regex valid", "does not compile"): [
+        case("positive",
+             {"hooks/hooks.json": hooks_json(PreToolUse=[{"type": "command", "matcher": "("}])},
+             HOOK_AT, ("--", "matcher regex valid"), -10),
+        case("negative", {"hooks/hooks.json": HOOK_OK}, HOOK_AT,
+             ("--", "matcher regex valid"), 0),
+    ],
+    (S_HOOKS_U, "--", "timeout reasonable", "timeout over 30s"): [
+        case("positive",
+             {"hooks/hooks.json": hooks_json(PreToolUse=[{"type": "command", "timeout": 31}])},
+             HOOK_AT, ("--", "timeout reasonable"), -5),
+        case("boundary",
+             {"hooks/hooks.json": hooks_json(PreToolUse=[{"type": "command", "timeout": 30}])},
+             HOOK_AT, ("--", "timeout reasonable"), 0),
+        case("negative", {"hooks/hooks.json": HOOK_OK}, HOOK_AT,
+             ("--", "timeout reasonable"), 0),
+    ],
+    (S_HOOKS_CLAUDE, "R27", "event names valid",
+     "unrecognized event; confirmed Claude events: SessionStart, SessionEnd, "
+     "UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop, StopFailure, "
+     "FileChanged"): [
+        case("positive", {"hooks/hooks.json": hooks_json(PreCompact=[])}, HOOK_AT,
+             ("R27", "event names valid"), -15, "a Codex-only event on the Claude tier"),
+        case("negative", {"hooks/hooks.json": HOOK_OK}, HOOK_AT,
+             ("R27", "event names valid"), 0),
+        case("negative", {".codex/hooks.json": hooks_json(PreCompact=[])}, CODEX_HOOK_AT,
+             ("R27", "event names valid"), 0, "tier-conditioned: same bytes, Codex tier"),
+    ],
+    (S_HOOKS_CLAUDE, "R27", "case correct", "wrong case (e.g. lowercase pretooluse)"): [
+        case("positive", {"hooks/hooks.json": hooks_json(pretooluse=[])}, HOOK_AT,
+             ("R27", "case correct"), -10),
+        case("negative", {"hooks/hooks.json": HOOK_OK}, HOOK_AT, ("R27", "case correct"), 0),
+    ],
+    (S_HOOKS_CLAUDE, "--", "hook type valid",
+     "unrecognized type; confirmed types: command, http, mcp_tool, prompt, agent"): [
+        case("positive", {"hooks/hooks.json": hooks_json(PreToolUse=[{"type": "weird"}])},
+             HOOK_AT, ("--", "hook type valid"), -10),
+        case("negative", {"hooks/hooks.json": HOOK_OK}, HOOK_AT, ("--", "hook type valid"), 0),
+        case("negative", {".codex/hooks.json": hooks_json(PreToolUse=[{"type": "weird"}])},
+             CODEX_HOOK_AT, ("--", "hook type valid"), 0,
+             "tier-conditioned: the row is the Claude table's"),
+    ],
+    (S_HOOKS_CODEX, "R27", "event names valid",
+     "unrecognized event; confirmed Codex events: SessionStart, UserPromptSubmit, "
+     "PreToolUse, PostToolUse, PermissionRequest, PreCompact, PostCompact, SubagentStart, "
+     "SubagentStop, Stop"): [
+        case("positive", {".codex/hooks.json": hooks_json(SessionEnd=[])}, CODEX_HOOK_AT,
+             ("R27", "event names valid"), -15, "a Claude-only event on the Codex tier"),
+        case("negative", {".codex/hooks.json": hooks_json(PreCompact=[])}, CODEX_HOOK_AT,
+             ("R27", "event names valid"), 0),
+        case("negative", {"hooks/hooks.json": hooks_json(SessionEnd=[])}, HOOK_AT,
+             ("R27", "event names valid"), 0, "tier-conditioned: same bytes, Claude tier"),
+    ],
+    (S_HOOKS_CODEX, "R27", "case correct", "wrong case"): [
+        case("positive", {".codex/hooks.json": hooks_json(precompact=[])}, CODEX_HOOK_AT,
+             ("R27", "case correct"), -10),
+        case("negative", {".codex/hooks.json": hooks_json(PreCompact=[])}, CODEX_HOOK_AT,
+             ("R27", "case correct"), 0),
+    ],
+    (S_MANIFEST, "--", "name present", "missing"): [
+        case("positive",
+             {".claude-plugin/plugin.json": json.dumps({"version": "1.0.0",
+                                                        "description": "d"})},
+             ("manifest", ".claude-plugin/plugin.json"), ("--", "name present"), -25),
+        case("negative", {".claude-plugin/plugin.json": MANIFEST_FULL},
+             ("manifest", ".claude-plugin/plugin.json"), ("--", "name present"), 0),
+    ],
+    (S_MANIFEST, "--", "version is semver", "present but invalid"): [
+        case("positive",
+             {".claude-plugin/plugin.json": json.dumps({"name": "x", "version": "nope",
+                                                        "description": "d"})},
+             ("manifest", ".claude-plugin/plugin.json"), ("--", "version is semver"), -10),
+        case("negative", {".claude-plugin/plugin.json": MANIFEST_FULL},
+             ("manifest", ".claude-plugin/plugin.json"), ("--", "version is semver"), 0),
+        case("negative",
+             {".claude-plugin/plugin.json": json.dumps({"name": "x", "description": "d"})},
+             ("manifest", ".claude-plugin/plugin.json"), ("--", "version is semver"), 0,
+             "an absent version never fires (present but invalid)"),
+    ],
+    (S_MANIFEST, "--", "description present", "missing"): [
+        case("positive",
+             {".claude-plugin/plugin.json": json.dumps({"name": "x", "version": "1.0.0"})},
+             ("manifest", ".claude-plugin/plugin.json"), ("--", "description present"), -5),
+        case("negative", {".claude-plugin/plugin.json": MANIFEST_FULL},
+             ("manifest", ".claude-plugin/plugin.json"), ("--", "description present"), 0),
+    ],
+    (S_MCP, "--", "valid JSON", "parse fail"): [
+        case("positive", {".mcp.json": "{broken"}, ("mcp-config", ".mcp.json"),
+             ("--", "valid JSON"), -25),
+        case("negative",
+             {".mcp.json": json.dumps({"mcpServers": {"a": {"command": "x"}}})},
+             ("mcp-config", ".mcp.json"), ("--", "valid JSON"), 0),
+    ],
+    (S_MCP, "--", "server command present", "MCP entry missing its command field"): [
+        case("positive", {".mcp.json": json.dumps({"mcpServers": {"a": {}}})},
+             ("mcp-config", ".mcp.json"), ("--", "server command present"), -15),
+        case("negative",
+             {".mcp.json": json.dumps({"mcpServers": {"a": {"command": "x"}}})},
+             ("mcp-config", ".mcp.json"), ("--", "server command present"), 0),
+    ],
+    (S_LSP, "--", "valid JSON", "parse fail"): [
+        case("positive", {".lsp.json": "{broken"}, ("lsp-config", ".lsp.json"),
+             ("--", "valid JSON"), -25),
+        case("negative", {".lsp.json": "{}"}, ("lsp-config", ".lsp.json"),
+             ("--", "valid JSON"), 0),
+    ],
+    (S_SETTINGS, "--", "valid JSON", "parse fail"): [
+        case("positive", {".claude/settings.json": "{broken"},
+             ("settings", ".claude/settings.json"), ("--", "valid JSON"), -25),
+        case("negative", {".claude/settings.json": "{}"},
+             ("settings", ".claude/settings.json"), ("--", "valid JSON"), 0),
+    ],
+    (S_SETTINGS, "--", "hook definitions valid",
+     "hooks key present → check event names + case"): [
+        case("positive",
+             {".claude/settings.json": json.dumps({"hooks": {"bogusA": [], "bogusB": []}})},
+             ("settings", ".claude/settings.json"), ("--", "hook definitions valid"), -20,
+             "-10 per invalid, twice"),
+        case("boundary",
+             {".claude/settings.json": json.dumps({"hooks": {"bogusA": []}})},
+             ("settings", ".claude/settings.json"), ("--", "hook definitions valid"), -10),
+        case("negative",
+             {".claude/settings.json": json.dumps({"hooks": {"PreToolUse": []}})},
+             ("settings", ".claude/settings.json"), ("--", "hook definitions valid"), 0),
+    ],
+    (S_CLAUDE_MD, "--", "under 200 lines", "exceeds 200 lines"): [
+        case("positive", {"CLAUDE.md": claude_md_of_lines(201)}, ("claude-md", "CLAUDE.md"),
+             ("--", "under 200 lines"), -5),
+        case("boundary", {"CLAUDE.md": claude_md_of_lines(200)}, ("claude-md", "CLAUDE.md"),
+             ("--", "under 200 lines"), 0),
+        case("negative", {"CLAUDE.md": claude_md_of_lines(5)}, ("claude-md", "CLAUDE.md"),
+             ("--", "under 200 lines"), 0),
+    ],
+    (S_CLAUDE_MD, "R36", "valid `@` imports", "an `@` import references a nonexistent file"): [
+        case("positive", {"CLAUDE.md": "@missing.md\n"}, ("claude-md", "CLAUDE.md"),
+             ("R36", "valid `@` imports"), -10),
+        case("negative", {"CLAUDE.md": "@AGENTS.md\n", "AGENTS.md": "# memory\n"},
+             ("claude-md", "CLAUDE.md"), ("R36", "valid `@` imports"), 0),
+    ],
+    (S_MEMORY, "--", "has YAML frontmatter", "—"): [
+        case("positive", {"proj/memory/note.md": "# just a body\n"}, MEMORY_AT,
+             ("--", "has YAML frontmatter"), -15),
+        case("negative", {"proj/memory/note.md": MEMORY_FULL}, MEMORY_AT,
+             ("--", "has YAML frontmatter"), 0),
+    ],
+    (S_MEMORY, "--", "name in frontmatter", "—"): [
+        case("positive", {"proj/memory/note.md": "---\ndescription: d\ntype: user\n---\nB.\n"},
+             MEMORY_AT, ("--", "name in frontmatter"), -10),
+        case("negative", {"proj/memory/note.md": MEMORY_FULL}, MEMORY_AT,
+             ("--", "name in frontmatter"), 0),
+    ],
+    (S_MEMORY, "--", "description in frontmatter", "—"): [
+        case("positive", {"proj/memory/note.md": "---\nname: n\ntype: user\n---\nB.\n"},
+             MEMORY_AT, ("--", "description in frontmatter"), -10),
+        case("negative", {"proj/memory/note.md": MEMORY_FULL}, MEMORY_AT,
+             ("--", "description in frontmatter"), 0),
+    ],
+    (S_MEMORY, "--", "type in frontmatter (values: user/feedback/project/reference)", "—"): [
+        case("positive", {"proj/memory/note.md": "---\nname: n\ndescription: d\n---\nB.\n"},
+             MEMORY_AT,
+             ("--", "type in frontmatter (values: user/feedback/project/reference)"), -5,
+             "absent"),
+        case("positive",
+             {"proj/memory/note.md": "---\nname: n\ndescription: d\ntype: bogus\n---\nB.\n"},
+             MEMORY_AT,
+             ("--", "type in frontmatter (values: user/feedback/project/reference)"), -5,
+             "outside the closed list"),
+        case("negative", {"proj/memory/note.md": MEMORY_FULL}, MEMORY_AT,
+             ("--", "type in frontmatter (values: user/feedback/project/reference)"), 0),
+    ],
+    (S_R01, "R01", "vague quantifier",
+     "each occurrence of: appropriate, relevant, as needed, sufficient, adequate, "
+     "reasonable, properly, correctly, some, several, various — without measurable "
+     "criteria"): _r01_cases(),
+    (S_R01, "R01", "cap", "cap on total vague-quantifier penalty"): _r01_cap_cases(),
+}
+
+#: Rows whose condition is numeric (a count, length, or cap): boundary cases required.
+NUMERIC_ROWS = {
+    key for key in CASES
+    if key[3] in ("500–800 chars", "over 800 chars", "400–500 lines", "over 500 lines",
+                  "rule file over 500 lines", "timeout over 30s", "exceeds 200 lines",
+                  "cap on total vague-quantifier penalty", "zero examples")
+    or key[1:3] == ("--", "hook definitions valid")
+}
+
+
+class MechanicalRowMatrix(unittest.TestCase):
+    """Positive/negative/boundary coverage for EVERY mechanical ledger row, table-driven."""
+
+    @staticmethod
+    def ledger_mechanical_rows():
+        rows, section = [], None
+        for line in LEDGER.read_text(encoding="utf-8").splitlines():
+            if line.startswith("## "):
+                section = line[3:].strip()
+                continue
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) >= 5 and cells[3] == "mechanical":
+                rows.append((section, cells[0], cells[1], cells[2]))
+        return rows
+
+    def test_cases_cover_the_ledger_mechanical_set_exactly(self):
+        ledger_rows = self.ledger_mechanical_rows()
+        self.assertGreaterEqual(len(ledger_rows), 40, "the ledger parse found too few rows")
+        self.assertEqual(len(ledger_rows), len(set(ledger_rows)), "duplicate ledger rows")
+        self.assertEqual(
+            set(CASES), set(ledger_rows),
+            "CASES must cover the ledger's mechanical set exactly — a mechanical row "
+            "without cases (or a case for a row the ledger no longer carries) fails here",
+        )
+        for key, cases in CASES.items():
+            kinds = {entry["kind"] for entry in cases}
+            self.assertIn("positive", kinds, key)
+            self.assertIn("negative", kinds, key)
+        for key in NUMERIC_ROWS:
+            self.assertIn("boundary", {entry["kind"] for entry in CASES[key]}, key)
+
+    def test_every_mechanical_row_case(self):
+        for key, cases in sorted(CASES.items()):
+            for entry in cases:
+                with self.subTest(row=key[1:3], kind=entry["kind"], note=entry["note"]):
+                    out = run_tree(entry["files"], [entry["record"]])
+                    rule, check = entry["row"]
+                    got = sum(f["penalty"] for f in out["files"][0]["findings"]
+                              if f["rule"] == rule and f["check"] == check)
+                    self.assertEqual(got, entry["expect"])
 
 
 class EngineContract(unittest.TestCase):

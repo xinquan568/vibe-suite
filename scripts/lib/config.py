@@ -34,10 +34,11 @@ from pathlib import Path
 CONFIG_FILENAME = ".vibe-suite.md"
 MAX_DEPTH = 3
 _KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
-#: Artifact frontmatter (SKILL.md, commands, agents) uses the same grammar but its documented
-#: schema includes hyphenated keys — `allowed-tools`, `argument-hint`, `user-invocable`. The
-#: scoring engine passes this pattern so a conforming skill is never mis-flagged as malformed;
-#: the config file itself keeps the stricter `_KEY`.
+#: Artifact frontmatter (SKILL.md, commands, agents) documents hyphenated keys —
+#: `allowed-tools`, `argument-hint`, `user-invocable`. Callers that parse artifact
+#: frontmatter through this grammar pass this pattern; the scoring engine now carries its own
+#: permissive artifact parser (scripts/score_engine.py), and the config file itself keeps the
+#: stricter `_KEY`.
 ARTIFACT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*$")
 _PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9-]*")   # applied with fullmatch — `$` would admit "safe\n"
 _INT = re.compile(r"-?[0-9]+$")

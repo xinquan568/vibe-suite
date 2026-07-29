@@ -1,0 +1,341 @@
+---
+name: scoring
+description: Score NL artifact quality on the 100-point rubric — deterministic per-type penalty tables, score bands, and multi-tool tier classification. Use when scoring artifacts, applying penalties, or calibrating lint judgment; borderline cases can pull the four worked examples (Weak Rule, Excellent Rule, Rewrite Agent, Excellent Agent) from references/calibration-examples.md on demand.
+---
+
+# Artifact Quality Scoring Rubric
+
+Every artifact starts at 100 points and loses points only through the deterministic penalties below; when a score sits near a band edge, judgment is anchored by the four walk-throughs in [the calibration reference](references/calibration-examples.md).
+
+## Scoring Formula
+
+```
+base_score   = 100
+adjustments  = sum of all applicable penalties (every penalty is negative)
+final_score  = max(0, min(100, base_score + adjustments))
+```
+
+- Penalties stack. The floor is 0 and the ceiling is 100.
+- There are NO bonuses. Well-formedness is assumed; quality is measured as the absence of defects.
+
+### File-level semantics
+
+- Malformed frontmatter or config (YAML/JSON/TOML that fails to parse) takes the parse-failure penalty for that artifact type: **-25**.
+- How the scorer treats files it cannot assess at all (empty, unreadable, binary) is runtime
+  behavior owned by the `/vibe-suite:score` command's own specification, not by this rubric.
+
+## Penalty Tables
+
+Rule ids (R01–R51) are defined in the [rules](../rules/SKILL.md) skill. A `--` in the Rule column means the check has no dedicated rule id.
+
+### Skills
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| -- | name present | missing | -25 |
+| -- | name matches parent dir | frontmatter name differs from parent directory name (conventions §5; open-spec MUST) | -15 |
+| R04 | description present | missing | -25 |
+| R04 | trigger quality | generic description (at most one specific phrase) | -15 |
+| R04 | description length | 500–800 chars | -5 |
+| R04 | description length | over 800 chars | -10 |
+| R05 | body length | 400–500 lines | -5 |
+| R05 | body length | over 500 lines | -10 |
+| R06 | code examples | complex concepts but no examples | -5 |
+| R06 | code examples | no examples at all in a technical skill | -10 |
+| R06 | example blocks | zero `<example>` blocks on a `user_invocable: true` skill | -10 |
+| R07 | scope note | no scope note / cross-references | -3 |
+
+> **Scope-note discipline.** R07 means one thing only: a scope note is missing even though related skills exist. Missing example blocks is the R06 row above, at -10 — never -15. Historical drift to guard against: a 2026-05-13 audit of lijigang/ljg-skills applied "R07 / -15" fourteen times, wrong on both counts (R07 has nothing to do with examples, and -15 is the agents-table value). A rule-id validator now catches mismatched rule/penalty pairings in CI.
+
+> **name-matches-parent-dir.** Added 2026-05-25 after the google/skills audit; the open Agent Skills spec (agentskills.io) makes it a MUST. The check is deterministic — a single-line diff of the frontmatter name against the basename of the containing directory — so mark such findings `confidence: high` (manifest-vs-disk-diff principle, scorer agent step 6). The penalty only took effect on 2026-05-25, so older audits come out slightly lower when re-scored; and since no PRs were ever opened on this finding, retroactive contribution impact is nil.
+
+### Agents
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| R09 | description present | missing | -25 |
+| R09 | example blocks | exactly 1 example | -5 |
+| R09 | example blocks | zero examples | -15 |
+| R10 | model declared | not declared | -5 |
+| R10 | model appropriate | wrong tier for the task (e.g. opus for parsing) | -5 |
+| R11 | tools declared | not declared | -5 |
+| R11 | unused tools | each declared-but-unused tool | -3 each |
+| R12 | output format | no output format spec in body | -10 |
+| R11 | write on read-only | audit/review/scan agent declares Write or Edit | -10 |
+
+### Commands
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| -- | description present | missing | -25 |
+| R18 | argument-hint present | takes input but no hint | -5 |
+| R14 | steps numbered | multi-step body without numbered steps | -10 |
+| R15 | empty input handling | none | -10 |
+| R16 | output format | none defined | -10 |
+| R17 | error paths | no handling for missing files / bad data | -5 |
+
+### Shared Partials
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| R19 | `user-invocable: false` | missing or true | -25 |
+| R20 | purpose clear | description does not state it is a partial | -10 |
+
+### Rules
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| R21 | description present | missing frontmatter description | -10 |
+| R21 | bold imperative | no bold imperative opening | -5 |
+| R21 | rationale | no rationale after the imperative | -10 |
+| R22 | enforceability | not specific/testable | -10 |
+| R23 | budget | rule file over 500 lines | -15 |
+| R26 | conflicts | direct contradiction with another rule in the same set | -20 |
+| R24 | duplicates tooling | restates eslint/ruff/clippy checks | -10 |
+
+### Hooks — universal (all tools)
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| -- | valid syntax | config fails to parse (JSON or TOML per tool) | -25 |
+| R29 | scripts exist | referenced script missing | -20 |
+| -- | command safety | dangerous patterns (`rm -rf`, `git push --force`, `DROP TABLE`) | -15 |
+| -- | matcher regex valid | does not compile | -10 |
+| -- | timeout reasonable | timeout over 30s | -5 |
+
+### Hooks (Claude Code, Tier 2-Claude)
+
+Authoritative event list: [conventions-claude](../conventions-claude/SKILL.md) §7. Multi-tool design decision #4 holds that no 1:1 mapping exists between the hook event vocabularies of Claude, Codex, and Antigravity; each tool therefore gets its own table, and no translation layer exists.
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| R27 | event names valid | unrecognized event; confirmed Claude events: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop, StopFailure, FileChanged | -15 |
+| R27 | case correct | wrong case (e.g. lowercase pretooluse) | -10 |
+| -- | hook type valid | unrecognized type; confirmed types: command, http, mcp_tool, prompt, agent | -10 |
+| -- | MCP matcher format | targets an MCP tool without the `mcp__<server>__<tool>` pattern | -5 |
+
+### Hooks (Codex CLI, Tier 2-Codex)
+
+Authoritative event list: [conventions-codex](../conventions-codex/SKILL.md) §6.
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| R27 | event names valid | unrecognized event; confirmed Codex events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, PreCompact, PostCompact, SubagentStart, SubagentStop, Stop | -15 |
+| R27 | case correct | wrong case | -10 |
+| -- | hooks config key | config.toml uses deprecated `[features].codex_hooks` instead of `[features].hooks` (renamed around CLI 0.129) | -5 (advisory) |
+
+### Hooks (Antigravity/Gemini lineage, Tier 2-Antigravity) — ADVISORY
+
+Authoritative event list: [conventions-antigravity](../conventions-antigravity/SKILL.md) §5. Until the Antigravity 2.0 spec stabilizes, every Antigravity hook finding remains advisory and carries `confidence: low` (multi-tool design decision #3).
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| R27 | event names valid | unrecognized event; confirmed events: SessionStart, BeforeAgent, BeforeModel, BeforeToolSelection, BeforeTool, AfterTool, AfterModel, AfterAgent, SessionEnd, Notification, PreCompress | -10 (advisory) |
+| R27 | case correct | wrong case | -5 (advisory) |
+
+### plugin.json (Claude, `.claude-plugin/plugin.json`)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| name present | missing | -25 |
+| version is semver | present but invalid | -10 |
+| description present | missing | -5 |
+
+### .codex-plugin/plugin.json (Tier 2-Codex; schema: conventions-codex §3)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| valid JSON | parse fail | -25 |
+| name present | missing | -25 |
+| name kebab-case | mixed case or underscores | -10 |
+| version semver | invalid | -10 |
+| description present | missing | -5 |
+| component paths relative | skills/mcpServers/apps/hooks paths absolute or missing the `./` prefix | -5 each |
+
+### .agents/plugins/marketplace.json (Tier 2-Codex; schema: conventions-codex §4; largely compatible with the Claude marketplace.json)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| valid JSON | parse fail | -25 |
+| name present | missing | -25 |
+| plugins array present | missing or empty | -10 |
+| per-plugin source valid | source.source not one of github/git/local, or a required repo/path missing | -10 each |
+| per-plugin category present | missing (informational) | -3 each |
+
+### agents/openai.yaml (Codex skill sidecar, Tier 2-Codex; schema: conventions-codex §2)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| valid YAML | parse fail | -25 |
+| sidecar colocated | not in the same directory as a SKILL.md | -10 |
+| interface.display_name present | missing | -5 (informational) |
+
+### gemini-extension.json (Tier 2-Antigravity, ADVISORY until the post-2026-06-18 spec stabilizes; schema: conventions-antigravity §3)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| valid JSON | parse fail | -25 |
+| name present | missing | -25 |
+| version present | missing | -10 |
+| contextFileName includes AGENTS.md | multi-tool config should include AGENTS.md, not just GEMINI.md | -3 (advisory; multi-tool nudge) |
+
+### .gemini/commands/*.toml (legacy/transitional, Tier 2-Antigravity; schema: conventions-antigravity §4)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| valid TOML | parse fail | -25 |
+| prompt field present | missing (required) | -25 |
+| description field present | missing (auto-generated from filename; explicit is better) | -3 |
+
+### .mcp.json (Claude, repo root)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| valid JSON | parse fail | -25 |
+| server command present | MCP entry missing its command field | -15 |
+
+### .codex/config.toml (Tier 2-Codex; schema: conventions-codex §5)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| valid TOML | parse fail | -25 |
+| deprecated `[features].codex_hooks` | should be `[features].hooks` (~CLI 0.129) | -5 (advisory) |
+| per-MCP command present | `[mcp_servers.<id>]` missing command | -15 each |
+
+### .lsp.json (Tier 2-Claude; schema details: conventions-claude §12; stable 2026)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| valid JSON | parse fail | -25 |
+
+### monitors/monitors.json (Tier 2-Claude; conventions-claude §13; stable 2026)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| valid JSON | parse fail | -25 |
+
+### Settings files (.claude/settings.json, .claude/settings.local.json)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| valid JSON | parse fail | -25 |
+| no hardcoded secrets | API keys/tokens/passwords present | -25 |
+| permission mode sanity | bypassPermissions enabled in SHARED project settings (not .local) | -15 |
+| recognized keys | unknown top-level keys | -5 each, cap -15 |
+| hook definitions valid | hooks key present → check event names + case | -10 per invalid |
+
+### CLAUDE.md
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| R49 | file exists | no CLAUDE.md in plugin root | -10 |
+| -- | under 200 lines | exceeds 200 lines | -5 |
+| R38 | actionable content | no actionable guidance (filler only) | -10 |
+| R33 | build/run command | absent | -10 |
+| R34 | test command | absent | -5 |
+| R35 | architecture overview | no what-lives-where description | -5 |
+| R36 | valid `@` imports | an `@` import references a nonexistent file | -10 |
+| R37 | no stale file refs | mentions removed files/functions | -10 |
+| R38 | actionability ratio | more than 60% description vs instruction | -5 |
+| -- | prerequisites section | no required-tools/versions/setup section | -5 |
+| R39 | no rule conflicts | CLAUDE.md says X while a .claude/rules/ file says not-X | -15 |
+
+### Memory files (`.md` under `~/.claude/projects/*/memory/`)
+
+Passing a check adds nothing (+0); each failed check takes the listed penalty.
+
+| Rule | Check | Penalty on fail |
+|------|-------|-----------------|
+| -- | has YAML frontmatter | -15 |
+| -- | name in frontmatter | -10 |
+| -- | description in frontmatter | -10 |
+| -- | type in frontmatter (values: user/feedback/project/reference) | -5 |
+| -- | content matches declared type | -10 |
+| -- | referenced in MEMORY.md index | -5 (orphaned memory) |
+| R37 | no stale content (refs to removed files/functions) | -10 |
+
+### Agent Workflow Programs (project-root program.md-style)
+
+Recognized as a distinct artifact type on 2026-05-28 (see conventions §2). It is a hybrid: part memory file (AGENTS.md-shaped context) and part slash command (numbered workflow, output format, error paths), driving an autonomous agent loop.
+
+- NO type-specific penalty rows exist yet. Scoring instead takes the union of four groups: R14–R17 (command rules), R33–R39 (memory rules), universal R01 on vague quantifiers, and R03 on positive framing.
+- Type-specific rows are deferred until at least 3 real examples exist (N ≥ 3) — the same deferral discipline used for multi-tool discovery, avoiding over-fitting from N=1.
+- Reward patterns, loaded on demand from [patterns](../patterns/SKILL.md): P10 numeric anchoring of subjective principles; P11 paired CAN/CANNOT contract; P12 autonomy instruction + rationale + fallback ladder; P13 vivid closing use-case.
+
+### All types: vague quantifiers
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| R01 | vague quantifier | each occurrence of: appropriate, relevant, as needed, sufficient, adequate, reasonable, properly, correctly, some, several, various — without measurable criteria | -2 each |
+| R01 | cap | cap on total vague-quantifier penalty | max -20 |
+
+### All types: vocabulary drift (R51) — opt-in, disabled by default
+
+Active only when the local config `.claude/vibe-suite.local.md` contains `R51: { enabled: true, vocabulary_skill: <path> }`; otherwise the penalty is always zero. A `registry.yaml` holding canonical + deprecated terms has to exist inside the configured vocabulary skill; when that file is absent, findings drop to advisory with zero penalty.
+
+| Rule | Check | Condition | Penalty |
+|------|-------|-----------|---------|
+| R51 | deprecated term | each occurrence of a `deprecated:` term from registry.yaml, within the artifact's scope | -2 each |
+| R51 | drift cap | cap per file | max -10 |
+| R51 | misconfigured | enabled but vocabulary_skill unset / no registry.yaml | 0 (advisory only) |
+
+Why opt-in: vocabulary discipline is high-leverage after drift accumulates but premature while a domain is still forming; each project decides when literary warrant (P6) suffices. Six design principles are documented in the suite's vocabulary design notes.
+
+### Cross-component (`--plugin` flag; whole-plugin lint, not per-file)
+
+| Check | Condition | Penalty |
+|-------|-----------|---------|
+| broken partial refs | a command references a nonexistent commands/shared/X.md | -20 |
+| broken skill refs | an agent references an uninstalled plugin skill | -20 |
+| missing scripts | a hook references a nonexistent script | -20 |
+| orphaned files | agent/command/skill referenced by nothing | -5 per file |
+| contradictions | two rules/instructions in the same plugin directly contradict | -15 per pair |
+
+## Score Bands
+
+| Score | Band | Meaning |
+|-------|------|---------|
+| 90–100 | Excellent | production-ready; minor or no issues |
+| 80–89 | Good | solid; one or two non-critical gaps |
+| 70–79 | Adequate | meets threshold; noticeable gaps |
+| 60–69 | Weak | below threshold; significant issues |
+| <60 | Rewrite | fundamental problems; rewrite from scratch |
+
+Default pass threshold: **70**, configurable in `.claude/vibe-suite.local.md`.
+
+## Calibration Examples
+
+The bands are anchored by four worked examples — **Weak Rule (40)**, **Excellent Rule (92)**, **Rewrite Agent (41)**, and **Excellent Agent (95)** — kept in [the calibration reference](references/calibration-examples.md). Load them on demand only when a score falls near a band boundary (around 88–92, 68–72, or 58–62); routine scoring never needs them, because the penalty tables above stand on their own. To hold this rubric inside the R05 500-line body budget, the examples were moved out of this file on 2026-05-28.
+
+## Scope Note
+
+This skill owns the formula, the penalty tables, the bands, and the calibration examples. Out of scope:
+
+- Artifact schemas and field values → [conventions](../conventions/SKILL.md), with per-tool overlays [conventions-claude](../conventions-claude/SKILL.md), [conventions-codex](../conventions-codex/SKILL.md), and [conventions-antigravity](../conventions-antigravity/SKILL.md) (overlays created in PR-B).
+- The patterns catalog → [patterns](../patterns/SKILL.md).
+- How to run the score command → the `/vibe-suite:score` command doc.
+
+### Multi-tool scoring
+
+Three ecosystems have been in scope since PR-B landed on 2026-05-25: Claude Code, Codex CLI, and Antigravity — the latter absorbed Gemini CLI on 2026-06-18.
+
+Tier classifier (applied by the scorer agent):
+
+- **Tier 1** — open-spec artifacts.
+- **Tier 1.5** — open-spec corpora.
+- **Tier 2** — overlays specific to each tool: 2-Claude, 2-Codex, 2-Antigravity.
+
+Hook scoring happens per tool; no universal translation layer exists (design decision #4). Four Codex artifacts are scored: `.codex/config.toml`, `agents/openai.yaml`, `.codex-plugin/plugin.json`, and `.agents/plugins/marketplace.json`. Antigravity artifacts (advisory-only): `gemini-extension.json`, `.gemini/commands/*.toml`, and hook events. Claude 2026 additions: `.lsp.json` and `monitors/monitors.json` (JSON-parse-only until detailed schemas land), plus new SKILL.md fields tracked in conventions-claude.
+
+### Known False Positive Patterns
+
+These have all been reported historically but have NO rubric backing — the scorer MUST NOT penalize them:
+
+1. Missing `namespace:` on a skill — conventions §5 never lists such a key, and the skill schema does not include it.
+2. plugin.json lacking inline `hooks:`/`skills:` registration blocks — under conventions §1 these are optional path strings.
+3. AskUserQuestion / Task / WebFetch flagged as undocumented tools — built-in per conventions §14.
+4. An agent missing `skills:` when the omission is documented in CLAUDE.md — an intentional architectural choice.
+5. A plugin.json that omits `main:`, `engines:`, or `minClaudeVersion:` — conventions §1 marks each of them optional.
+6. A plugin.json description shorter than the sibling marketplace.json description — desync is not a defect; penalize only an absent required field.
+
+Closing principle: any finding with no specific penalty-table row to cite gets dropped.

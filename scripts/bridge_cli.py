@@ -130,6 +130,21 @@ def mirror_mcp(ws, report):
                   + (f"; {reduced} declare env, so only names crossed" if reduced else ""))
 
 
+def _side_file_is_ours(side):
+    """Whether the hook side file is one we wrote.
+
+    It was treated as owned on its *name*: a pre-existing file there was overwritten, and — worse —
+    unlinked outright when the mirror was no longer needed. A symlink is never ours, and neither is
+    a document without our stamp.
+    """
+    if side.is_symlink():
+        return False
+    if not side.exists():
+        return True   # nothing there; we may create it
+    doc = bridge.load_json(side)
+    return isinstance(doc, dict) and doc.get("vibe_suite_owned") is True
+
+
 def mirror_hooks(ws, report):
     """The *project's* Claude hooks → `.codex/hooks.json`, preserving the owned entry."""
     settings = bridge.load_json(ws / ".claude" / "settings.json")
@@ -156,14 +171,19 @@ def mirror_hooks(ws, report):
               for e, v in shared.items()}
     if user_content:
         # The target is the user's. A side file mirrors without touching what they wrote.
-        payload = json.dumps({"hooks": marked}, indent=2, sort_keys=True) + "\n"
+        payload = json.dumps({"hooks": marked, "vibe_suite_owned": True},
+                             indent=2, sort_keys=True) + "\n"
         side = ws / SIDE_FILE
+        if not _side_file_is_ours(side):
+            report.append(f"hooks: {SIDE_FILE} exists and is not ours — left alone, not mirrored")
+            return
         if not side.is_file() or side.read_text(encoding="utf-8") != payload:
             bridge.write_atomic(ws, side, payload)
         report.append(f"hooks: {len(shared)} event(s) mirrored to {SIDE_FILE} "
                       "(the target holds your own entries)")
     else:
-        if (ws / SIDE_FILE).is_file():
+        side = ws / SIDE_FILE
+        if side.is_file() and _side_file_is_ours(side):
             # The fallback existed because the target was the user's; it no longer is. Leaving it
             # behind would let two mirrors drift apart with nothing saying which one is live.
             bridge.unlink_at(ws, SIDE_FILE)

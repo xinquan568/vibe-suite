@@ -26,6 +26,7 @@
     "./commands/jobs.md",
     "./commands/preflight.md",
     "./commands/repair.md",
+    "./commands/unbridge.md",
     "./commands/update.md"
   ],
   "hooks": "./hooks/hooks.json",

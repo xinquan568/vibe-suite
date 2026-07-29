@@ -102,7 +102,12 @@ if len(markers_in(check)) != 1:
 # Through the primitive. `publish_new` is create-only by construction: it writes a scratch file
 # with an unpredictable `O_EXCL` name at the destination's mode from the start, fsyncs it, and links
 # it into place — so a store that appeared while this ran still wins, which is row 3's rule.
-if not bridge.publish_new(Path(target_path).parent, Path(target_path), body):
+# The source's mode travels with its bytes: a 0600 legacy history holds whatever the user put
+# there, and publishing it 0644 exposes exactly that. The workspace is the root, not the
+# destination's own parent.
+source_mode = os.stat(legacy_path).st_mode & 0o7777
+if not bridge.publish_new(Path(target_path).parent.parent, Path(target_path), body,
+                          mode=source_mode):
     sys.stderr.write("note: row 3: .claude/vibe-history.json appeared concurrently — left as "
                      "it is (new store wins)\n")
     raise SystemExit(0)

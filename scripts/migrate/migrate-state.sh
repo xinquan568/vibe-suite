@@ -94,7 +94,7 @@ if len(distinct) > 1:
             encoding="utf-8", errors="replace").startswith(stamp):
         sys.stderr.write(f"error: row 5: {report} exists and is not ours; refusing to overwrite\n")
         raise SystemExit(1)
-    bridge.write_atomic(Path(report).parent, Path(report), stamp + "\n".join(lines) + "\n")
+    bridge.write_atomic(Path(sys.argv[1]), Path(report), stamp + "\n".join(lines) + "\n")
     sys.stderr.write(f"decision required — see {report}\n")
     raise SystemExit(3)
 

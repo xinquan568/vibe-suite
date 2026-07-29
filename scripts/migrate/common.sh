@@ -46,16 +46,17 @@ vibe_report_url() { printf '%s\n' "$(vibe_redact "$1")"; }
 # nothing to say about it. Returns 0 whether it wrote or skipped; callers that need to know check
 # vibe_exists first.
 vibe_safe_write() {
-    local dest="$1" tmp
+    local dest="$1"
     if [ -e "$dest" ]; then
         vibe_note "$dest already exists — left as it is (new store wins)"
         cat > /dev/null
         return 0
     fi
+    # `publish` is create-only by construction — an `O_EXCL` scratch at the destination's mode,
+    # fsynced, then linked into place. The old `mktemp` + `mv -f` followed a symlink at `$dest` and
+    # `mv -f` would clobber whatever was there.
     mkdir -p "$(dirname "$dest")"
-    tmp="$(mktemp "${dest}.XXXXXX")"
-    cat > "$tmp"
-    mv -f "$tmp" "$dest"
+    cat | python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/bridge.py" publish "$(dirname "$dest")" "$dest"
 }
 
 vibe_exists() { [ -e "$1" ]; }
@@ -74,8 +75,7 @@ vibe_provenance_write() {
         printf '  "schema": 1,\n'
         printf '  "steps": [%s]\n' "$(vibe_json_list "$@")"
         printf '}\n'
-    } > "$path.tmp"
-    mv -f "$path.tmp" "$path"
+    } | python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/bridge.py" write "$(dirname "$path")" "$path" 600
     vibe_fsync_dir "$(dirname "$path")"
 }
 
@@ -122,7 +122,7 @@ if step not in data.setdefault("steps", []):
 # pre-images, so that scratch file was a world-readable copy of a `0600` `.mcp.json`: the very leak
 # `c2112ac` closed on the record itself, reopened one path over.
 target = Path(path)
-bridge.write_atomic(target.parent, target,
+bridge.write_atomic(target.parent.parent, target,
                     json.dumps(data, indent=2, sort_keys=True) + "\n",
                     mode=(target.lstat().st_mode & 0o7777) if target.is_file() else 0o600)
 PY
@@ -172,6 +172,6 @@ vibe_sha256() {
 vibe_decision_report() {
     local path="$1"; shift
     mkdir -p "$(dirname "$path")"
-    printf '%s\n' "$@" > "$path"
+    printf '%s\n' "$@" | python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/bridge.py" write "$(dirname "$path")" "$path"
     vibe_log "decision required — see $path"
 }

@@ -58,6 +58,17 @@ def vibe_name(legacy):
 
 mcp_path, toml_path = ws / ".mcp.json", ws / ".codex" / "config.toml"
 
+def write_provenance(path, text):
+    """The row-6 record holds complete `.mcp.json` pre-images — credentials included — so it is
+    written `0600` inside a `0700` directory. Publishing it at the default mode copied a private
+    legacy config into a group/world-readable file: the same leak `c2112ac` closed on the install
+    record, in the row that migrates the very file the secrets live in."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bridge.write_atomic(ws, path, text,
+                        mode=(path.lstat().st_mode & 0o7777) if path.is_file() else 0o600)
+    bridge.secure_dir(ws, path.parent.relative_to(ws))
+
+
 def write_atomically(path, text):
     """Publish live configuration through the audited primitive.
 
@@ -71,7 +82,7 @@ def write_atomically(path, text):
     and being right twice is exactly what a shared primitive makes unnecessary.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    bridge.write_atomic(path.parent, path, text,
+    bridge.write_atomic(ws, path, text,
                         mode=(path.lstat().st_mode & 0o7777) if path.is_file() else None)
 
 def read_json(path):
@@ -201,7 +212,7 @@ def checkpoint(step):
     record = json.loads(provenance.read_text(encoding="utf-8"))
     if step not in record["steps"]:
         record["steps"].append(step)
-    write_atomically(provenance, json.dumps(record, indent=2, sort_keys=True) + "\n")
+    write_provenance(provenance, json.dumps(record, indent=2, sort_keys=True) + "\n")
     if FAIL_AFTER == step:
         sys.stderr.write(f"error: row 6: aborting after {step} (VIBE_FAIL_AFTER)\n")
         raise SystemExit(1)
@@ -212,7 +223,7 @@ if not provenance.is_file():
         sys.stderr.write("error: row 6: aborting before provenance (VIBE_FAIL_AFTER)\n")
         raise SystemExit(1)
     state.mkdir(parents=True, exist_ok=True)
-    write_atomically(provenance, json.dumps({
+    write_provenance(provenance, json.dumps({
         "row": 6, "schema": 1, "steps": [],
         "legacy": {"mcp.json": json_legacy, "codex/config.toml": toml_legacy},
         # Both stores are recorded in restorable form. Recording only the JSON side would make the

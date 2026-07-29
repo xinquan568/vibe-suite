@@ -34,6 +34,10 @@ O_NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
 SENTINEL_LITERALS = ("vibe-mcp", "vibe-claude-mcp")
 SENTINEL_PREFIX = "vibe-agent:"
 
+OWNED_BLOCKS = (("AGENTS.md", "memory", "md"), ("CLAUDE.md", "import", "md"),
+                ("GEMINI.md", "import", "md"), (".gitignore", "ignore", "text"),
+                (".codex/config.toml", "server:vibe-mcp", "text"))
+
 
 class BridgeError(Exception):
     """Refusal. The caller aborts; nothing has been written."""
@@ -42,6 +46,19 @@ class BridgeError(Exception):
 # --------------------------------------------------------------------------------------------
 # Containment and atomicity
 # --------------------------------------------------------------------------------------------
+
+def assert_root(root):
+    """Refuse a root that is itself a symlink.
+
+    Containment compares the destination against `root`, so when a caller passes the destination's
+    own parent — and that parent is a symlink out of the workspace — the check compares the escape
+    against itself and passes it. Refusing here makes the mistake impossible to make quietly rather
+    than relying on every caller choosing the right anchor.
+    """
+    if Path(root).is_symlink():
+        raise BridgeError(
+            f"{root} is a symlink and cannot be the containment root; pass the workspace")
+
 
 def assert_inside(root, candidate):
     """Refuse a destination that escapes the workspace.
@@ -74,6 +91,30 @@ def classify(path):
     return "other"
 
 
+#: Identity of each workspace root this process has opened, so a mid-run replacement is detected
+#: rather than silently followed. Keyed by the **caller-supplied** path — keying by the resolved path
+#: would mint a fresh pin for a swapped-in directory and never notice the swap.
+_ROOT_PIN = {}
+
+
+def pin_root(root):
+    """Establish the root's identity **before** anything reads or writes through it.
+
+    The pin used to be created lazily, on the first descriptor operation — which happens after
+    provenance validation and after path-based reads. A workspace swapped before that point simply
+    became the pinned one, and the record was then applied to it. A command that will delete calls
+    this at entry, so every later step is checked against the directory the decisions were made
+    about.
+    """
+    fd = os.open(os.path.realpath(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
+    _ROOT_PIN[str(root)] = (st.st_dev, st.st_ino)
+    return _ROOT_PIN[str(root)]
+
+
 def _open_dir_chain(root, relative):
     """Open `root/relative` by walking one component at a time, each with `O_NOFOLLOW`.
 
@@ -88,8 +129,23 @@ def _open_dir_chain(root, relative):
             raise BridgeError(
                 f"this platform lacks os.{flag}; the install refuses rather than write through a "
                 "path it cannot resolve safely")
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    # The root is the trust anchor, so it is resolved **once** and then opened `O_NOFOLLOW`.
+    # Opening it by the caller's path re-resolved every ancestor on every call, which let a swap of
+    # the root itself (or any component above it) redirect the entire descent — including deletions —
+    # outside the workspace. `realpath` has no symlink final component by construction, so
+    # `O_NOFOLLOW` here rejects exactly the case where that component became one after we looked.
+    anchor = os.path.realpath(root)
+    fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
+        st = os.fstat(fd)
+        # Keyed by the path the caller handed us, not by what it resolved to: keying by the resolved
+        # path would mint a fresh pin for the swapped-in directory and never notice the swap.
+        key = str(root)
+        if _ROOT_PIN.get(key) is None:
+            _ROOT_PIN[key] = (st.st_dev, st.st_ino)
+        elif _ROOT_PIN[key] != (st.st_dev, st.st_ino):
+            raise BridgeError(
+                f"{root} is not the directory this operation started against; refusing")
         for part in relative:
             if part in ("", "."):
                 continue
@@ -122,22 +178,36 @@ def open_dir_chain(root, relative):
 
 
 def unlink_at(root, rel):
-    """Remove `root/rel` relative to a descriptor opened by the audited descent.
+    """Remove a workspace-relative entry, never following a symlink in its path.
 
-    A path-based `unlink` re-resolves every ancestor at the moment of the call, so a directory
-    swapped for a symlink between the check and the removal takes the deletion somewhere else.
+    Deleting by path re-resolves every component at call time, so a symlink planted anywhere along it
+    redirects the removal — which is how a teardown deletes a user's file. Resolving the parent once
+    and unlinking relative to that descriptor removes the window.
     """
+    import stat as _stat
     rel = Path(rel)
     assert_inside(root, Path(root) / rel)
     fd = _open_dir_chain(root, rel.parent.parts)
     try:
-        target = Path(root) / rel
-        if target.is_dir() and not target.is_symlink():
+        try:
+            info = os.lstat(rel.name, dir_fd=fd)
+        except FileNotFoundError:
+            return False
+        # A directory needs rmdir, and which error unlink raises on one is platform-dependent —
+        # macOS says PermissionError where Linux says IsADirectoryError. The node type is not.
+        if _stat.S_ISDIR(info.st_mode):
             os.rmdir(rel.name, dir_fd=fd)
         else:
             os.unlink(rel.name, dir_fd=fd)
+        return True
     finally:
         os.close(fd)
+
+
+#: Identity of each workspace root this process has opened, so a mid-run replacement is detected
+#: rather than silently followed. Keyed by the **caller-supplied** path — keying by the resolved path
+#: would mint a fresh pin for a swapped-in directory and never notice the swap.
+_ROOT_PIN = {}
 
 
 def symlink_at(root, rel, target):
@@ -169,6 +239,7 @@ def publish_new(root, dest, content, mode=0o644):
     made from a fully written inode, so a reader never sees a partial file.
     """
     dest = Path(dest)
+    assert_root(root)
     assert_inside(root, dest)
     if dest.is_symlink():
         # `lstat`, never `exists`: a dangling symlink reports False from `exists()`, and publishing
@@ -242,6 +313,36 @@ def secure_dir(root, rel, mode=0o700):
         os.close(fd)
 
 
+def lstat_at(root, rel):
+    """`lstat` a workspace-relative path without resolving any component by path."""
+    rel = Path(rel)
+    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        return os.lstat(rel.name, dir_fd=fd)
+    except FileNotFoundError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def pin_root(root):
+    """Establish the root's identity **before** anything reads or writes through it.
+
+    The pin used to be created lazily, on the first descriptor operation — which happens after
+    provenance validation and after path-based reads. A workspace swapped before that point simply
+    became the pinned one, and the record was then applied to it. A command that will delete calls
+    this at entry, so every later step is checked against the directory the decisions were made
+    about.
+    """
+    fd = os.open(os.path.realpath(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
+    _ROOT_PIN[str(root)] = (st.st_dev, st.st_ino)
+    return _ROOT_PIN[str(root)]
+
+
 def write_atomic(root, dest, content, mode=None):
     """Replace a file atomically, without ever resolving its parent path twice.
 
@@ -251,6 +352,7 @@ def write_atomic(root, dest, content, mode=None):
     `O_DIRECTORY|O_NOFOLLOW` and then working relative to that descriptor removes the window: every
     subsequent operation names the directory by handle, not by path.
     """
+    assert_root(root)
     assert_inside(root, dest)
     dest = Path(dest)
     kind = classify(dest)
@@ -359,13 +461,31 @@ def _block(name, body, open_delim, close_delim):
             f"{open_delim} <<< {MARKER}:{name} <<<{close_delim}\n")
 
 
+def _marker_open(name, open_delim, close_delim):
+    """The opening marker, anchored to a whole line."""
+    return (rf"^{re.escape(open_delim)} >>> {re.escape(MARKER)}:{re.escape(name)} v\d+ >>>"
+            rf"{re.escape(close_delim)}$")
+
+
+def _marker_close(name, open_delim, close_delim):
+    """The closing marker, anchored to a whole line."""
+    return (rf"^{re.escape(open_delim)} <<< {re.escape(MARKER)}:{re.escape(name)} <<<"
+            rf"{re.escape(close_delim)}$")
+
+
 def _block_re(name, open_delim, close_delim):
+    """Detection and removal, built from the **same** anchored markers the validator uses.
+
+    This was two regexes: an unanchored one here and an anchored one in `markers_wellformed`. A line
+    like `prefix # >>> vibe-suite:x v1 >>>` therefore counted as zero markers to the validator — so
+    the document passed as well-formed — while still matching here, and removal deleted through the
+    user's content between it and the next close. Two parsers for one grammar is the defect; the
+    parity is now structural rather than a thing to keep in step by hand.
+    """
     return re.compile(
-        rf"{re.escape(open_delim)} >>> {re.escape(MARKER)}:{re.escape(name)} v\d+ >>>"
-        rf"{re.escape(close_delim)}\n.*?"
-        rf"{re.escape(open_delim)} <<< {re.escape(MARKER)}:{re.escape(name)} <<<"
-        rf"{re.escape(close_delim)}\n",
-        re.S)
+        _marker_open(name, open_delim, close_delim) + r"\n.*?"
+        + _marker_close(name, open_delim, close_delim) + r"\n",
+        re.S | re.M)
 
 
 def text_block_upsert(existing, name, body, open_delim="#", close_delim=""):
@@ -416,10 +536,55 @@ def text_block_has(existing, name, open_delim="#", close_delim=""):
     return bool(_block_re(name, open_delim, close_delim).search(existing))
 
 
+def markers_wellformed(existing, name, open_delim="#", close_delim=""):
+    """Whether this document's markers for `name` are clean, non-overlapping, full-line pairs.
+
+    `_block_re` matches non-greedily from an opening marker to the *next* close, so a stray or
+    duplicated opening marker makes the match start early and swallow everything up to the real
+    block's close — user content included. Validation therefore has to live **here**, beside the
+    removal it guards: a check in one caller left every other caller (`toml_server_remove` among
+    them) removing unvalidated.
+
+    The grammar is not merely *like* `_block_re`'s — it is built from the same two functions, so the
+    two cannot drift. A validator that recognised a marker the remover did not (or the reverse) would
+    pass a document whose removal still spans user data.
+    """
+    opens = [m.start() for m in re.finditer(
+        _marker_open(name, open_delim, close_delim), existing, re.M)]
+    closes = [m.start() for m in re.finditer(
+        _marker_close(name, open_delim, close_delim), existing, re.M)]
+    if len(opens) != len(closes):
+        return False
+    expect = "o"
+    for _, kind in sorted([(p, "o") for p in opens] + [(p, "c") for p in closes]):
+        if kind != expect:
+            return False
+        expect = "c" if expect == "o" else "o"
+    return True
+
+
 def text_block_remove(existing, name, open_delim="#", close_delim=""):
-    """Remove the owned region and the blank line that separated it, leaving user text untouched."""
-    without = _block_re(name, open_delim, close_delim).sub("", existing)
-    return without.replace("\n\n\n", "\n\n")
+    """The exact inverse of `text_block_upsert`, so a clean install→remove round trip is
+    byte-identical.
+
+    Upsert appends `"\n" + block` to a non-empty file. Removal takes that one separator back and
+    nothing else. An earlier revision normalised `\n\n\n` to `\n\n` anywhere in the file, which
+    silently rewrote blank lines a user had put between their *own* paragraphs.
+
+    Refuses a document whose markers are malformed rather than removing across them.
+    """
+    if not markers_wellformed(existing, name, open_delim, close_delim):
+        raise BridgeError(
+            f"owned markers for {name!r} are malformed; refusing to remove across them")
+    pattern = _block_re(name, open_delim, close_delim)
+    match = pattern.search(existing)
+    if not match:
+        return existing
+    start, end = match.span()
+    # Reclaim the single separator newline upsert inserted before the block, if it is there.
+    if start >= 1 and existing[start - 1] == "\n" and (start == 1 or existing[start - 2] == "\n"):
+        start -= 1
+    return existing[:start] + existing[end:]
 
 
 def md_block_has(existing, name):
@@ -438,7 +603,7 @@ def toml_server_upsert(existing, name, body):
 
 
 def toml_server_remove(existing, name):
-    return _block_re(f"server:{name}", "#", "").sub("", existing)
+    return text_block_remove(existing, f"server:{name}")
 
 
 def toml_server_has(existing, name):
@@ -537,6 +702,20 @@ def load_json(path):
 
 
 def main(argv):
+    if len(argv) >= 4 and argv[1] == "write":
+        # For shell callers. A native redirection (`printf ... > path`) **follows a symlink**, so a
+        # link planted at a fixed path redirects the write onto whatever it points at — and
+        # redirections are invisible to the AST lint, which is how one survived the sweep that
+        # routed every Python write. Content arrives on stdin so no argv limit applies.
+        root, dest = Path(argv[2]), Path(argv[3])
+        mode = int(argv[4], 8) if len(argv) >= 5 else None
+        write_atomic(root, dest, sys.stdin.read(), mode=mode)
+        return 0
+    if len(argv) >= 4 and argv[1] == "publish":
+        # Create-only, for shell callers. `mv -f` clobbers; this refuses, which is what "a store
+        # that appeared while we ran still wins" requires.
+        root, dest = Path(argv[2]), Path(argv[3])
+        return 0 if publish_new(root, dest, sys.stdin.read()) else 0
     if len(argv) >= 3 and argv[1] == "list-owned":
         for name in inventory_enumerate(argv[2]):
             print(name)

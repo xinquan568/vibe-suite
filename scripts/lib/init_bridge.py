@@ -269,6 +269,17 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
         front.extend(f"  - {pattern}" for pattern in patterns)
     bom, sep = (newline[:1], newline[1:]) if newline.startswith("\ufeff") else ("", newline)
     rendered = bom + sep.join(["---", *front, "---", ""]) + rest
+    if not dest.exists():
+        # An ownership marker, written only when init *creates* the file — never when merging into
+        # one the user already had. It is what lets `/vibe-suite:unbridge` prove the file is ours
+        # before deleting it: otherwise teardown takes the provenance record's unauthenticated word,
+        # and a record edited to say `absent` deletes a config that predated the install.
+        #
+        # Remove the block and the file stops being recognisably ours, so teardown leaves it alone.
+        # That is the intended outcome — the marker is the claim, so deleting it withdraws the claim.
+        rendered = bridge.md_block_upsert(
+            rendered, "config",
+            "Created by /vibe-suite:init. Remove this block to keep the file on teardown.")
     if rendered != existing:
         _verify_config(ws, rendered)
         bridge.write_atomic(ws, dest, rendered)
@@ -320,8 +331,11 @@ def _history_baseline(ws, threshold):
                 f"{dest}: 'snapshots' is {type(snapshots).__name__}, not a list; refusing to append")
         container = history
     elif history is None and not dest.is_file():
+        # Created by us, so stamped as ours. Teardown needs on-disk proof before deleting a whole
+        # file; an edited provenance record is not proof. A pre-existing history is never stamped,
+        # so it is never deleted.
         snapshots = []
-        container = {"snapshots": snapshots}
+        container = {"vibe_suite_owned": True, "snapshots": snapshots}
     else:
         # Valid JSON of an unexpected shape. Replacing it would discard a file the user may care
         # about, and this command has no mandate to decide that.

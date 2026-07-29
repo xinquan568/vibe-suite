@@ -117,7 +117,10 @@ class Store:
         # State records can hold private content, so a *fresh* one is created `0600`; an existing
         # one keeps whatever mode the user gave it.
         fresh_mode = None if self.path.is_file() else 0o600
-        bridge.write_atomic(self.path.parent, self.path,
+        # The workspace is the root, not the file's own parent. Anchoring on the parent lets a
+        # symlinked `.vibe-suite-state` *be* the trusted root, so `assert_inside` can no longer
+        # catch a write that escapes the workspace.
+        bridge.write_atomic(self.workspace, self.path,
                             json.dumps(raw, indent=2, sort_keys=True) + "\n", mode=fresh_mode)
 
     def overrides(self):

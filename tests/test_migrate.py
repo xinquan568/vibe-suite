@@ -605,3 +605,48 @@ class TestSurvey(MigrationCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FixedReportPathsAreNotTruncated(unittest.TestCase):
+    """A fixed path is a path the user may own. Row 5's conflicts report truncated whatever sat
+    there; row 6 replaced the live config through a symlink and forced it to 0644."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-fixedpath-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        (self.ws / ".vibe-suite-state").mkdir(parents=True)
+
+    def _state_dirs_disagreeing(self):
+        for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+            d = self.ws / name
+            d.mkdir()
+            (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+
+    def test_a_users_conflicts_report_is_not_overwritten(self):
+        self._state_dirs_disagreeing()
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.txt"
+        report.write_text("notes I keep here")
+        proc = subprocess.run(["bash", str(REPO_ROOT / "scripts/migrate/migrate-state.sh"),
+                               "--workspace", str(self.ws)], capture_output=True, text=True)
+        self.assertEqual(report.read_text(), "notes I keep here",
+                         "a user's file at the report path was truncated")
+        self.assertEqual(proc.returncode, 1)
+
+    def test_row_six_preserves_the_live_configs_mode(self):
+        mcp = self.ws / ".mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": {"cc-suite-mcp": {"command": "x"}}}))
+        os.chmod(mcp, 0o600)
+        subprocess.run(["bash", str(REPO_ROOT / "scripts/migrate/migrate-sentinels.sh"),
+                        "--workspace", str(self.ws), "--confirm"], capture_output=True, text=True)
+        mode = stat.S_IMODE(mcp.lstat().st_mode)
+        self.assertEqual(mode & 0o077, 0,
+                         f"a 0600 config was republished group/world readable at {oct(mode)}")
+
+    def test_row_six_refuses_a_symlinked_live_config(self):
+        real = self.ws / "elsewhere.json"
+        real.write_text(json.dumps({"mcpServers": {"cc-suite-mcp": {"command": "x"}}}))
+        (self.ws / ".mcp.json").symlink_to(real)
+        subprocess.run(["bash", str(REPO_ROOT / "scripts/migrate/migrate-sentinels.sh"),
+                        "--workspace", str(self.ws), "--confirm"], capture_output=True, text=True)
+        self.assertTrue((self.ws / ".mcp.json").is_symlink(),
+                        "the user's link was converted to a regular file")

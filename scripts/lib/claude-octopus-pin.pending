@@ -1,0 +1,3 @@
+The pinned claude-octopus version is not shipped yet. Owner: E7.1 (stage S7).
+When E7.1 lands it deletes this file and adds claude-octopus-pin.txt.
+See scripts/lib/mcp_pin.py:resolve_pin for the five states.

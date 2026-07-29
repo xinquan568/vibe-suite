@@ -1,20 +1,22 @@
 {
-  "file": "skills/defective/SKILL.md",
-  "score": 42,
+  "path": "skills/defective/SKILL.md",
+  "score": 45,
   "band": "Rewrite",
-  "total_penalty": -58,
+  "verdict": "fail",
   "findings": [
-    {"rule": "--", "check": "name present", "penalty": -25},
-    {"rule": "R05", "check": "body length", "penalty": -10},
-    {"rule": "R07", "check": "scope note", "penalty": -3},
-    {"rule": "R01", "check": "vague quantifier", "penalty": -20}
+    {"rule": "--", "check": "name present", "line": 1, "penalty": -25},
+    {"rule": "R05", "check": "body length", "line": 1, "penalty": -10},
+    {"rule": "R01", "check": "vague quantifier", "line": 11, "penalty": -20}
   ],
   "advisories": [
-    {"class": "generic description", "reason": "no objective predicate"},
-    {"class": "broken references link", "reason": "no objective predicate"},
-    {"class": "pseudocode example", "reason": "no objective predicate"},
-    {"class": "domain mixing", "reason": "no objective predicate"},
-    {"class": "redundant content", "reason": "no objective predicate"},
-    {"class": "orphaned registration", "reason": "no objective predicate"}
+    {"rule": "R04", "note": "advisory-zero: trigger quality; no objective predicate for the engine"},
+    {"rule": "R06", "note": "advisory-zero: code examples (complex concepts but no examples); no objective predicate for the engine"},
+    {"rule": "R06", "note": "advisory-zero: code examples (no examples at all in a technical skill); no objective predicate for the engine"},
+    {"rule": "R07", "note": "advisory-zero: scope note; no objective predicate for the engine"},
+    {"rule": "--", "note": "advisory-zero: broken references link; no objective predicate for the engine"},
+    {"rule": "--", "note": "advisory-zero: pseudocode example; no objective predicate for the engine"},
+    {"rule": "--", "note": "advisory-zero: domain mixing; no objective predicate for the engine"},
+    {"rule": "--", "note": "advisory-zero: redundant content; no objective predicate for the engine"},
+    {"rule": "--", "note": "advisory-zero: orphaned registration; no objective predicate for the engine"}
   ]
 }

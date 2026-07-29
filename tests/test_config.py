@@ -422,6 +422,50 @@ class TestRuleOverridesPerRule(unittest.TestCase):
             write_config(root, "rule_overrides:\n  R01:\n    suppress: true\n")
             self.assertEqual(config.load(root)["score_threshold"], 70)
 
+    def test_rule_ids_outside_r01_to_r51_are_rejected(self):
+        # The defined rule ids are exactly R01-R51; R52 or R99 is a typo that must refuse,
+        # not a silently inert override (review finding 6).
+        for bad in ("R52", "R99", "R00", "R1", "R510"):
+            with self.subTest(rule=bad):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, f"rule_overrides:\n  {bad}:\n    suppress: true\n")
+                    with self.assertRaises(config.ConfigValueError):
+                        config.load(root)
+
+    def test_rule_ids_across_the_valid_range_are_accepted(self):
+        for good in ("R01", "R09", "R23", "R49", "R51"):
+            with self.subTest(rule=good):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, f"rule_overrides:\n  {good}:\n    suppress: true\n")
+                    self.assertIs(config.load(root)["rule_overrides"][good]["suppress"], True)
+
+    def test_max_penalty_must_be_a_negative_int_within_minus_100(self):
+        # Penalties are negative and the score floors at 0 from a base of 100, so the only
+        # meaningful cap values are -1..-100; anything else is a config error.
+        for bad in ("0", "5", "-101", "-1000"):
+            with self.subTest(value=bad):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, f"rule_overrides:\n  R01:\n    max_penalty: {bad}\n")
+                    with self.assertRaises(config.ConfigValueError):
+                        config.load(root)
+        for good in ("-1", "-20", "-100"):
+            with self.subTest(value=good):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, f"rule_overrides:\n  R01:\n    max_penalty: {good}\n")
+                    self.assertEqual(
+                        config.load(root)["rule_overrides"]["R01"]["max_penalty"], int(good))
+
+    def test_threshold_must_be_a_positive_int(self):
+        for bad in ("0", "-5"):
+            with self.subTest(value=bad):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, f"rule_overrides:\n  R05:\n    threshold: {bad}\n")
+                    with self.assertRaises(config.ConfigValueError):
+                        config.load(root)
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "rule_overrides:\n  R05:\n    threshold: 600\n")
+            self.assertEqual(config.load(root)["rule_overrides"]["R05"]["threshold"], 600)
+
 
 class TestContainment(unittest.TestCase):
     """Component-wise, after canonicalising both sides."""

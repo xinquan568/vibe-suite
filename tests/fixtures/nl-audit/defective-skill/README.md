@@ -13,7 +13,7 @@ check/condition/penalty content of every quote is otherwise verbatim.
 
 `skills/defective/SKILL.md` -- artifact type: **skill**, so the "Skills" penalty
 table plus the "All types: vague quantifiers" (R01) table apply. R51 is opt-in and
-no `.claude/vibe-suite.local.md` exists in this fixture, so R51 stays at zero by
+no `.vibe-suite.md` exists in this fixture, so R51 stays at zero by
 rule.
 
 File facts (measured):
@@ -113,16 +113,23 @@ Reminder" (lines 66-68). Determination: advisory-zero -- "redundant" is a judgme
 word with no stated criteria; R02 ("Every line earns its token cost") has no
 penalty row in any table.
 
-### 8. Missing scope note -- DEDUCTS -3
+### 8. Missing scope note -- ADVISORY-ZERO
 
 Skills table row (verbatim): `| R07 | scope note | no scope note / cross-references | -3 |`
 
-The file contains no scope note and no cross-reference to any sibling skill (its
-only link targets its own `references/` directory). Absence is mechanically
-checkable: **-3**. Per the rubric's scope-note-discipline note (verbatim): "R07
-means one thing only: a scope note is missing even though related skills exist.
-Missing example blocks is the R06 row above, at -10 -- never -15." The penalty is
--3, never conflated with example blocks.
+Determination: advisory-zero -- the row's own applicability condition is not
+mechanically decidable. The rubric's scope-note-discipline note (verbatim): "R07
+means one thing only: a scope note is missing even though related skills exist."
+The condition therefore requires related skills to exist, and this fixture ships
+exactly one skill -- there is no sibling skill on disk, let alone a *related*
+one; whether two skills are "related" is a judgment word with no stated criteria
+in the owning text. Any mechanical detector (for example "a heading naming scope,
+or a `../` cross-reference link") would be an invented predicate: no such
+definition of a scope note appears anywhere in the rubric. The absence of a
+scope note is recorded as an advisory at zero penalty; the -3 deducts only when
+an objective definition of relatedness and of a scope note enters the owning
+text. (The note's second half still holds: missing example blocks is the R06 row
+above, at -10 -- never -15 -- and never conflated with R07.)
 
 ### 9. Orphaned registration -- ADVISORY-ZERO
 
@@ -144,7 +151,11 @@ several, various -- without measurable criteria | -2 each |` and
 `| R01 | cap | cap on total vague-quantifier penalty | max -20 |`
 
 Exactly 12 occurrences (lines 11-22, listed above), none with a measurable
-criterion attached: 12 x -2 = -24, capped at **-20**.
+criterion attached: 12 x -2 = -24, capped at **-20**. None of the three
+conventions [section] 4 carve-outs excludes an occurrence: no flagged word sits
+on a heading line, the single `relevant` (line 13) is "the relevant columns",
+not "relevant to <named-scope>", and no occurrence is followed by a measurable
+criterion (no digit appears in any of lines 11-22).
 
 ## Kept-clean checklist (why nothing else fires)
 
@@ -163,15 +174,26 @@ criterion attached: 12 x -2 = -24, capped at **-20**.
 base                = 100
 name present        =  -25
 R05 body length     =  -10
-R07 scope note      =   -3
 R01 vague (capped)  =  -20
-total penalty       =  -58
-final = max(0, min(100, 100 + (-58))) = 42
+total penalty       =  -55
+final = max(0, min(100, 100 + (-55))) = 45
 ```
+
+(R07 scope note is advisory-zero per class 8 above and contributes nothing.)
 
 Band table (verbatim row): `| <60 | Rewrite | fundamental problems; rewrite from scratch |`
 
-**Score: 42 -- Band: Rewrite -- Total penalty: -58.**
+**Score: 45 -- Band: Rewrite -- Total penalty: -55.**
 
-42 sits well inside the Rewrite band (boundary zones are 58-62, 68-72, 88-92), so
-no calibration-example consultation is required.
+45 sits well inside the Rewrite band (boundary zones are 58-62, 68-72, 88-92), so
+no calibration-example consultation is required. With no config present the pass
+threshold is the default 70, so the verdict is **fail**.
+
+## expected.json shape
+
+`expected.json` is the engine's `files[0]` object verbatim, so the acceptance
+test can compare the two for exact equality: `path`, `score`, `band`, `verdict`,
+`findings` (each `{rule, check, line, penalty}`; R01's line is 11, the first
+counted occurrence; frontmatter and body findings carry line 1), and
+`advisories` (each `{rule, note}`, one per advisory-zero Skills-table row plus
+one per seeded worksheet defect class, in ledger order).

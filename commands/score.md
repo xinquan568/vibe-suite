@@ -32,19 +32,27 @@ plugin-root path, never a relative one:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/score_engine.py" --root "<abs-target>" \
-  --config "<target>/.vibe-suite.md" --history "<target>/.claude/vibe-history.json" \
+  --history "<target>/.claude/vibe-history.json" \
   --scope "<scope-tag>" < "<record-file>"
 ```
 
-The record file carries `<type>\x1f<relative-path>\x00` entries (the suite's lossless
-framing; built with the Write tool, never shell interpolation). The engine owns the penalty
-tables, the R01 vague-word counting, caps, the formula (100 + Σ penalties, floored at 0),
-config overrides (`rule_overrides`: `suppress`, `enabled`, `max_penalty`, per-rule
-`threshold`; top-level `score_threshold`, default 70), the three degenerate paths (malformed
-frontmatter → −25 and continue; empty file → 0; unreadable → skipped and noted), and the
-scope-tagged, atomic, deduped history append. Its row ledger
-(`scripts/score_engine_rows.md`) records, for every rubric row, whether it is mechanical or
-advisory-zero — rows without an objective predicate in the rubric text never deduct.
+Add `--config "<target>/.vibe-suite.md"` **only when that file exists**; with the flag
+absent — or pointing at a file that does not exist — the engine scores with the suite
+defaults. A project without the optional config is never refused.
+
+The record file carries `<type-or-category>\x1f<relative-path>\x00` entries (the suite's
+lossless framing; built with the Write tool, never shell interpolation). The first field is
+either an artifact type or the scanner's discovery category letter `A`–`E` — given a
+category, the engine classifies the path itself with the same first-match rules as
+`commands/shared/classify.md`, so scanner records pass through unchanged. The engine owns
+the penalty tables, the R01 vague-word counting, caps and carve-outs, the formula (100 + Σ
+penalties, floored at 0), config overrides (`rule_overrides`: `suppress`, `enabled`,
+`max_penalty`, per-rule `threshold`; top-level `score_threshold`, default 70, which drives
+each file's pass/fail `verdict`), the three degenerate paths (malformed frontmatter → −25
+and continue; empty file → 0; unreadable → skipped and noted), and the scope-tagged,
+atomic, deduped history append. Its row ledger (`scripts/score_engine_rows.md`) records,
+for every rubric row of every penalty table, whether it is mechanical or advisory-zero —
+rows without an objective predicate in the rubric text never deduct.
 
 In parallel, the **vague-scanner** agent (`agents/vague-scanner.md`, haiku-class) recounts
 the 11 R01 words as an independent cross-check. **Deterministic counts win:** on any

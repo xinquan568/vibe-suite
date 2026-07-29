@@ -27,10 +27,14 @@ Load these for rubric and terminology context — never as a license to score on
 1. Resolve the scan root and target set handed over by the dispatching command; every path
    you touch stays inside that root.
 2. Run the engine **by its plugin-root path — never a relative path, which would resolve
-   inside the scanned repository and could execute a file the scan target controls**:
+   inside the scanned repository and could execute a file the scan target controls**. The
+   engine takes no positional targets: the target set arrives on stdin as record-framed
+   `<type-or-category>\x1f<relative-path>\x00` entries (write the record file with the
+   Write tool, never shell interpolation; the scanner's `A`–`E` category letters pass
+   through unchanged — the engine classifies the paths itself):
 
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/score_engine.py" --root "<abs-root>" <targets…>
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/score_engine.py" --root "<abs-root>" < "<record-file>"
    ```
 
 3. Parse the engine's output: per-file findings (rule id, check, penalty) and final scores.

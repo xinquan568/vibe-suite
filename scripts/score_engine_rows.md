@@ -1,16 +1,72 @@
 # Score-engine row ledger (E3.3 / vibe-28)
 
-Every row of the scoring skill's Skills penalty table (skills/scoring/SKILL.md), plus the two R01 rows from its "All types: vague quantifiers" table, classified for scripts/score_engine.py:
+Every row of every penalty table in skills/scoring/SKILL.md, classified for
+scripts/score_engine.py:
 
 - `mechanical` — the engine deducts; the Predicate column quotes or states the
   objective predicate from the owning text.
-- `advisory-zero` — the engine reports the class as an advisory and never deducts,
-  because no objective predicate exists in the owning text.
+- `advisory-zero` — the engine never deducts on the row, because no objective
+  predicate exists in the owning text **that the engine can evaluate from the
+  scored file's own bytes and path**. Three honest sub-reasons appear below:
+  the condition is a judgment word with no stated criteria; the condition is a
+  cross-file or whole-plugin fact a per-file evaluation cannot observe; or no
+  type produced by the deterministic path classifier routes to the table at
+  all (the Tier 2-Codex/-Antigravity sidecar tables — their artifacts classify
+  as `document`/`framework-agent` under commands/shared/classify.md, and type
+  tables apply per type).
 
-Ground truth for every classification: the hand-computed worksheet
+For each scored file the engine emits every advisory-zero row of the file's own
+type tables as a zero-penalty advisory; rows of unrouted tables are emitted for
+no one, because no scored file belongs to them.
+
+Ground truth for the Skills classifications: the hand-computed worksheet
 tests/fixtures/nl-audit/defective-skill/README.md (cited as "worksheet #n").
 
-## Penalty-table rows
+## Type routing
+
+The engine classifies each record's path with the same first-match rules as
+commands/shared/classify.md (a record may instead carry an explicit type). The
+tables below bind to types like this:
+
+| Table | Engine type(s) |
+|---|---|
+| Skills | `skill` |
+| Agents | `agent` |
+| Commands | `command`, `user-command` |
+| Shared Partials | `shared-partial` |
+| Rules | `rule` |
+| Hooks — universal + Hooks (Claude Code) | `hook-config` |
+| plugin.json (Claude) | `manifest` |
+| .mcp.json | `mcp-config` |
+| .lsp.json | `lsp-config` |
+| Settings files | `settings` |
+| CLAUDE.md | `claude-md` |
+| Memory files | `memory` |
+| All types: vague quantifiers (R01) | every scored file |
+| Hooks (Codex), Hooks (Antigravity), .codex-plugin/plugin.json, .agents/plugins/marketplace.json, agents/openai.yaml, gemini-extension.json, .gemini/commands/*.toml, .codex/config.toml, monitors/monitors.json | no route — see the advisory-zero definition above |
+| All types: vocabulary drift (R51) | ship-disabled; advisory only |
+| Cross-component | whole-plugin lint, not per-file — no per-file route |
+
+Types with no table (`marketplace`, `plugin-config`, `prompt`, `framework-*`,
+`design-doc`, `document`) take only the all-types R01 rows, per the rubric's
+closing principle: "any finding with no specific penalty-table row to cite gets
+dropped."
+
+## File-level parse semantics (not a table row)
+
+The rubric's file-level semantics assign every artifact type a parse-failure
+penalty: "Malformed frontmatter or config (YAML/JSON/TOML that fails to parse)
+takes the parse-failure penalty for that artifact type: **-25**." The engine
+implements it as the `frontmatter parse` finding on markdown types whose
+opening `---` fence fails the accepted YAML subset (a file with no fence has no
+frontmatter — its presence rows fire instead), and as the `valid JSON` finding
+on JSON types with no dedicated parse row (the Claude plugin.json table). Rows
+that need the parsed structure are skipped after a parse failure; rows that do
+not (body length, R01, command safety) are still scored. Skill frontmatter is
+parsed with the artifact key alphabet — documented hyphenated keys such as
+`allowed-tools` are valid, and -25 fires ONLY on a true parse failure.
+
+## Skills
 
 | Rule | Check | Condition | Class | Predicate / justification |
 |------|-------|-----------|-------|---------------------------|
@@ -20,20 +76,284 @@ tests/fixtures/nl-audit/defective-skill/README.md (cited as "worksheet #n").
 | R04 | trigger quality | generic description (at most one specific phrase) | advisory-zero | worksheet #2: "'Generic' is a judgment word" and "specific phrase" has "no mechanical definition anywhere in the rubric" — deciding whether a phrase is specific is not mechanical |
 | R04 | description length | 500–800 chars | mechanical | counted in CHARACTERS of the description value: fires when 500 <= chars <= 800 (worksheet #2 measures the fixture's description in characters: 38) |
 | R04 | description length | over 800 chars | mechanical | counted in CHARACTERS of the description value: fires when chars > 800; mutually exclusive with the 500-800 band |
-| R05 | body length | 400–500 lines | mechanical | counted in physical lines of the whole file: fires when 400 <= lines <= 500 — worksheet #3: "Objective line count"; "a mutually exclusive band" that never stacks |
-| R05 | body length | over 500 lines | mechanical | counted in physical lines of the whole file: fires when lines > 500 — the fixture's 583-line file takes exactly this -10 (worksheet #3) |
+| R05 | body length | 400–500 lines | mechanical | counted in lines of the MARKDOWN BODY — the frontmatter block, fences included, is excluded (the table and conventions call this body length): fires when 400 <= body lines <= 500; "a mutually exclusive band" that never stacks (worksheet #3). A config `threshold: N` replaces the 500 upper boundary only; the 400 lower boundary stays |
+| R05 | body length | over 500 lines | mechanical | fires when body lines > 500 (or > the overridden upper boundary) — the fixture's 580-line body takes exactly this -10 (worksheet #3) |
 | R06 | code examples | complex concepts but no examples | advisory-zero | worksheet #5: the row penalizes only absence and "complex concepts" is a judgment call with no stated criteria in the owning text |
 | R06 | code examples | no examples at all in a technical skill | advisory-zero | worksheet #5: "technical skill" is a judgment call with no stated criteria in the owning text |
 | R06 | example blocks | zero `<example>` blocks on a `user_invocable: true` skill | mechanical | implemented: fires when the parsed frontmatter sets `user_invocable: true` and the file contains zero literal `<example>` blocks — both facts are mechanically checkable (worksheet #5 notes the row "cannot fire" without `user_invocable: true`) |
-| R07 | scope note | no scope note / cross-references | mechanical | worksheet #8: "Absence is mechanically checkable" — fires when the file has no heading naming scope and no `](../` cross-reference to a sibling skill; the penalty is -3, never conflated with example blocks (rubric's scope-note-discipline note) |
-| R01 | vague quantifier | each occurrence of: appropriate, relevant, as needed, sufficient, adequate, reasonable, properly, correctly, some, several, various — without measurable criteria | mechanical | token-bounded count of the 11 listed words, -2 per occurrence — worksheet #10 verified the fixture's 12 occurrences "identical under substring and word-boundary matching" |
-| R01 | cap | cap on total vague-quantifier penalty | mechanical | the summed vague-quantifier penalty clamps at -20: the fixture's 12 x -2 = -24 lands at -20 (worksheet #10: "cap binds") |
+| R07 | scope note | no scope note / cross-references | advisory-zero | worksheet #8: the rubric's scope-note discipline says R07 fires only "even though related skills exist", and whether skills are related is a judgment with no stated criteria; the rubric also never defines what a scope note looks like, so any detector (heading text, `../` links) would be an invented predicate |
+
+## Agents
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| R09 | description present | missing | mechanical | the parsed frontmatter has no `description` key — objective |
+| R09 | example blocks | exactly 1 example | mechanical | the count of literal `<example>` blocks in the file equals 1 — objective (the -5 band of the same count as the next row) |
+| R09 | example blocks | zero examples | mechanical | the count of literal `<example>` blocks in the file equals 0 — objective; R09's own text pins the minimum at 2 |
+| R10 | model declared | not declared | mechanical | the parsed frontmatter has no `model` key — objective |
+| R10 | model appropriate | wrong tier for the task (e.g. opus for parsing) | advisory-zero | "wrong tier for the task" requires judging what the task is; R10's haiku/sonnet/opus guidance states no mechanical criteria |
+| R11 | tools declared | not declared | mechanical | the parsed frontmatter has no `tools` key — objective |
+| R11 | unused tools | each declared-but-unused tool | advisory-zero | whether a natural-language body "uses" a declared tool is a judgment call — the engine cannot execute the prose to find out |
+| R12 | output format | no output format spec in body | mechanical | R12 (verbatim): "Define the agent's output format in its body", and conventions §3: "the body of each command and agent spells out its exact output structure" — the engine tests the stated section's presence: a markdown heading whose text contains "output" (case-insensitive); absent → -10 |
+| R11 | write on read-only | audit/review/scan agent declares Write or Edit | advisory-zero | deciding that an agent IS an audit/review/scan agent is a judgment about its purpose with no stated criteria (a name probe would misfire on any differently-named reviewer) |
+
+## Commands
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | description present | missing | mechanical | the parsed frontmatter has no `description` key — objective |
+| R18 | argument-hint present | takes input but no hint | advisory-zero | "takes input" is a judgment about the command's semantics; no mechanical definition exists in the owning text |
+| R14 | steps numbered | multi-step body without numbered steps | advisory-zero | "multi-step body" is a judgment call with no stated criteria |
+| R15 | empty input handling | none | advisory-zero | whether prose handles an empty `$ARGUMENTS` is a semantic reading, not a mechanical check |
+| R16 | output format | none defined | advisory-zero | R16 (verbatim) demands the template itself: "'Show the results' is not a specification; give the report template itself" — whether inline prose or a fenced block constitutes the template is a judgment; a section-name probe would misfire on commands that define output by template without a named section (this suite's own score.md does exactly that) |
+| R17 | error paths | no handling for missing files / bad data | advisory-zero | whether error handling is "defined" in prose is a semantic judgment with no stated criteria |
+
+## Shared Partials
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| R19 | `user-invocable: false` | missing or true | mechanical | the parsed frontmatter's `user-invocable` key is absent or not `false` — objective (the hyphenated key parses under the artifact key alphabet) |
+| R20 | purpose clear | description does not state it is a partial | advisory-zero | whether a description "states it is a partial" is a semantic judgment; a substring probe would misfire on this suite's own partials, whose descriptions open with "Shared:" |
+
+## Rules
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| R21 | description present | missing frontmatter description | mechanical | the parsed frontmatter has no `description` key — objective |
+| R21 | bold imperative | no bold imperative opening | advisory-zero | whether bold text is an imperative is a grammatical judgment with no stated criteria |
+| R21 | rationale | no rationale after the imperative | advisory-zero | recognizing a rationale is a semantic judgment |
+| R22 | enforceability | not specific/testable | advisory-zero | R22 itself defines enforceability by what "a reviewer" can verify — a judgment |
+| R23 | budget | rule file over 500 lines | mechanical | the file's physical line count exceeds 500 (the condition names the rule file); a config `threshold: N` replaces the 500 boundary (conventions §6 example: "R23 `threshold: 800` (rules budget, from 500 lines)") |
+| R26 | conflicts | direct contradiction with another rule in the same set | advisory-zero | detecting a semantic contradiction across rules is judgment, and cross-file |
+| R24 | duplicates tooling | restates eslint/ruff/clippy checks | advisory-zero | deciding that prose restates a linter's check is a semantic judgment |
+
+## Hooks — universal (all tools)
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | valid syntax | config fails to parse (JSON or TOML per tool) | mechanical | `hooks/**/*.json` is JSON: json.loads fails → -25; rows needing the parsed structure are then skipped, text-level rows still fire |
+| R29 | scripts exist | referenced script missing | advisory-zero | the owning text never defines how "the referenced script" is extracted from a free-form command string (`python3 -m pkg` has no script path; env-var-prefixed paths resolve at runtime); the Hook → script edge belongs to plugin-discover's whole-plugin cross-reference map |
+| -- | command safety | dangerous patterns (`rm -rf`, `git push --force`, `DROP TABLE`) | mechanical | the condition quotes its own predicate: the file text contains any of the three literal patterns |
+| -- | matcher regex valid | does not compile | mechanical | every string value under a `matcher` key anywhere in the parsed JSON must compile as a regex; any failure → -10 |
+| -- | timeout reasonable | timeout over 30s | mechanical | any numeric value under a `timeout` key anywhere in the parsed JSON exceeding 30 → -5 |
+
+## Hooks (Claude Code, Tier 2-Claude)
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| R27 | event names valid | unrecognized event; confirmed Claude events: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop, StopFailure, FileChanged | mechanical | event names are the string values of `event` keys plus the keys of any mapping under a `hooks` key; a name outside the confirmed list (and not merely a case variant of one) → -15 |
+| R27 | case correct | wrong case (e.g. lowercase pretooluse) | mechanical | an extracted event name that case-insensitively equals a confirmed event but differs in case → -10 |
+| -- | hook type valid | unrecognized type; confirmed types: command, http, mcp_tool, prompt, agent | mechanical | any string value under a `type` key outside the confirmed list → -10 |
+| -- | MCP matcher format | targets an MCP tool without the `mcp__<server>__<tool>` pattern | advisory-zero | whether a matcher "targets an MCP tool" when it does not already carry the `mcp__` pattern is not objectively decidable from the config |
+
+## Hooks (Codex CLI, Tier 2-Codex)
+
+No route: commands/shared/classify.md yields no Codex hook-config type (Codex
+hooks live in `.codex/` files that classify `document`), so no scored file
+reaches this table.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| R27 | event names valid | unrecognized event; confirmed Codex events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, PreCompact, PostCompact, SubagentStart, SubagentStop, Stop | advisory-zero | objective list-membership predicate, but unrouted — see the table note |
+| R27 | case correct | wrong case | advisory-zero | unrouted — see the table note |
+| -- | hooks config key | config.toml uses deprecated `[features].codex_hooks` instead of `[features].hooks` (renamed around CLI 0.129) | advisory-zero | the owning text itself marks the penalty "(advisory)"; also unrouted |
+
+## Hooks (Antigravity/Gemini lineage, Tier 2-Antigravity)
+
+The owning text marks the entire table ADVISORY with `confidence: low`
+(multi-tool design decision #3), and no classify.md type routes to it.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| R27 | event names valid | unrecognized event; confirmed events: SessionStart, BeforeAgent, BeforeModel, BeforeToolSelection, BeforeTool, AfterTool, AfterModel, AfterAgent, SessionEnd, Notification, PreCompress | advisory-zero | the owning text holds every Antigravity hook finding advisory; also unrouted |
+| R27 | case correct | wrong case | advisory-zero | same — advisory by the owning text; unrouted |
+
+## plugin.json (Claude, `.claude-plugin/plugin.json`)
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | name present | missing | mechanical | the parsed JSON object has no `name` value — objective (parse failure itself takes the file-level -25 and skips these rows) |
+| -- | version is semver | present but invalid | mechanical | a present `version` value that does not match the semver.org `MAJOR.MINOR.PATCH[-prerelease][+build]` shape → -10; an absent version never fires ("present but invalid") |
+| -- | description present | missing | mechanical | the parsed JSON object has no `description` value — objective |
+
+## .codex-plugin/plugin.json (Tier 2-Codex)
+
+No route: the file's parent is `.codex-plugin`, not `.claude-plugin`, so
+classify.md's manifest row does not match and the path classifies `document`;
+type tables apply per type. Every row is advisory-zero as unrouted.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | valid JSON | parse fail | advisory-zero | unrouted — see the table note |
+| -- | name present | missing | advisory-zero | unrouted |
+| -- | name kebab-case | mixed case or underscores | advisory-zero | unrouted |
+| -- | version semver | invalid | advisory-zero | unrouted |
+| -- | description present | missing | advisory-zero | unrouted |
+| -- | component paths relative | skills/mcpServers/apps/hooks paths absolute or missing the `./` prefix | advisory-zero | unrouted |
+
+## .agents/plugins/marketplace.json (Tier 2-Codex)
+
+No route: classify.md's marketplace row requires the `.claude-plugin` parent;
+`.agents/plugins/marketplace.json` classifies `document`. (The Claude
+`marketplace` type itself has NO table in the rubric — it takes only the R01
+rows.) Every row is advisory-zero as unrouted.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | valid JSON | parse fail | advisory-zero | unrouted — see the table note |
+| -- | name present | missing | advisory-zero | unrouted |
+| -- | plugins array present | missing or empty | advisory-zero | unrouted |
+| -- | per-plugin source valid | source.source not one of github/git/local, or a required repo/path missing | advisory-zero | unrouted |
+| -- | per-plugin category present | missing (informational) | advisory-zero | unrouted; the owning text marks it informational |
+
+## agents/openai.yaml (Codex skill sidecar, Tier 2-Codex)
+
+No route to this table: `agents/openai.yaml` matches classify.md's
+`**/agents/*.yaml` row and classifies `framework-agent`, a type with no table.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | valid YAML | parse fail | advisory-zero | unrouted — see the table note |
+| -- | sidecar colocated | not in the same directory as a SKILL.md | advisory-zero | unrouted |
+| -- | interface.display_name present | missing | advisory-zero | unrouted; the owning text marks it informational |
+
+## gemini-extension.json (Tier 2-Antigravity)
+
+No route: classifies `document`; the owning text also holds the table ADVISORY
+until the spec stabilizes.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | valid JSON | parse fail | advisory-zero | unrouted — see the table note |
+| -- | name present | missing | advisory-zero | unrouted |
+| -- | version present | missing | advisory-zero | unrouted |
+| -- | contextFileName includes AGENTS.md | multi-tool config should include AGENTS.md, not just GEMINI.md | advisory-zero | unrouted; the owning text marks it "(advisory; multi-tool nudge)" |
+
+## .gemini/commands/*.toml (legacy/transitional, Tier 2-Antigravity)
+
+No route: classifies `document`.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | valid TOML | parse fail | advisory-zero | unrouted — see the table note |
+| -- | prompt field present | missing (required) | advisory-zero | unrouted |
+| -- | description field present | missing (auto-generated from filename; explicit is better) | advisory-zero | unrouted |
+
+## .mcp.json (Claude, repo root)
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | valid JSON | parse fail | mechanical | json.loads fails → -25 |
+| -- | server command present | MCP entry missing its command field | mechanical | any entry under the parsed `mcpServers` mapping without a truthy `command` value → -15 |
+
+## .codex/config.toml (Tier 2-Codex)
+
+No route: classifies `document`.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | valid TOML | parse fail | advisory-zero | unrouted — see the table note |
+| -- | deprecated `[features].codex_hooks` | should be `[features].hooks` (~CLI 0.129) | advisory-zero | unrouted; the owning text marks it "(advisory)" |
+| -- | per-MCP command present | `[mcp_servers.<id>]` missing command | advisory-zero | unrouted |
+
+## .lsp.json (Tier 2-Claude)
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | valid JSON | parse fail | mechanical | json.loads fails → -25; the owning text scopes this table to JSON-parse-only until detailed schemas land |
+
+## monitors/monitors.json (Tier 2-Claude)
+
+No route: `monitors/monitors.json` matches no classify.md row and classifies
+`document`.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | valid JSON | parse fail | advisory-zero | objective predicate, but unrouted — see the table note |
+
+## Settings files (.claude/settings.json, .claude/settings.local.json)
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | valid JSON | parse fail | mechanical | json.loads fails → -25 |
+| -- | no hardcoded secrets | API keys/tokens/passwords present | advisory-zero | recognizing a secret is a judgment; the owning text states no pattern list |
+| -- | permission mode sanity | bypassPermissions enabled in SHARED project settings (not .local) | advisory-zero | "enabled" requires knowledge of the settings schema's permission structure that the owning text does not supply; a substring probe cannot tell an enabled mode from a mention |
+| -- | recognized keys | unknown top-level keys | advisory-zero | the owning text supplies no list of recognized settings keys to diff against |
+| -- | hook definitions valid | hooks key present → check event names + case | mechanical | when the parsed object carries a top-level `hooks` mapping, each key that is not a confirmed Claude event (the Hooks Claude table's list) → -10 per invalid, per the row's own "per invalid" |
+
+## CLAUDE.md
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| R49 | file exists | no CLAUDE.md in plugin root | advisory-zero | the row penalizes the FILE's absence; a per-file evaluation only ever sees files that exist — a whole-plugin fact, not observable from the scored file |
+| -- | under 200 lines | exceeds 200 lines | mechanical | the file's physical line count exceeds 200 → -5 |
+| R38 | actionable content | no actionable guidance (filler only) | advisory-zero | "actionable" and "filler" are judgment words with no stated criteria |
+| R33 | build/run command | absent | advisory-zero | recognizing that prose contains a build/run command is a semantic judgment |
+| R34 | test command | absent | advisory-zero | same as R33 — semantic judgment |
+| R35 | architecture overview | no what-lives-where description | advisory-zero | "what-lives-where description" is a judgment with no stated criteria |
+| R36 | valid `@` imports | an `@` import references a nonexistent file | mechanical | a line consisting solely of `@<path>` is the documented import form; a relative import whose target does not exist beside the file → -10 (absolute and `~` imports are outside the scan root and are not judged) |
+| R37 | no stale file refs | mentions removed files/functions | advisory-zero | knowing a mentioned file was "removed" needs repository history, not the file's bytes |
+| R38 | actionability ratio | more than 60% description vs instruction | advisory-zero | classifying each line as description or instruction is a judgment; the owning text defines no procedure |
+| -- | prerequisites section | no required-tools/versions/setup section | advisory-zero | what counts as such a section is a judgment; no section name is pinned by the owning text |
+| R39 | no rule conflicts | CLAUDE.md says X while a .claude/rules/ file says not-X | advisory-zero | semantic contradiction across files — judgment, and cross-file |
+
+## Memory files (`.md` under `~/.claude/projects/*/memory/`)
+
+The table carries no Condition column: each check fails or passes. A memory
+file reaches the engine only when its path is scan-root-relative and contains
+`/memory/` — the record protocol refuses `~`-anchored paths.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | has YAML frontmatter | — | mechanical | the file does not open with a `---` fence → -15 (an opening fence that fails to parse is the file-level -25 instead) |
+| -- | name in frontmatter | — | mechanical | the parsed frontmatter has no `name` key → -10 |
+| -- | description in frontmatter | — | mechanical | the parsed frontmatter has no `description` key → -10 |
+| -- | type in frontmatter (values: user/feedback/project/reference) | — | mechanical | the `type` key is absent or its value is outside the closed four-value list → -5 |
+| -- | content matches declared type | — | advisory-zero | whether content "matches" a type is a semantic judgment |
+| -- | referenced in MEMORY.md index | — | advisory-zero | a cross-file fact; the owning text also never defines what form a reference in the index takes |
+| R37 | no stale content (refs to removed files/functions) | — | advisory-zero | needs repository history, not the file's bytes |
+
+## All types: vague quantifiers
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| R01 | vague quantifier | each occurrence of: appropriate, relevant, as needed, sufficient, adequate, reasonable, properly, correctly, some, several, various — without measurable criteria | mechanical | token-bounded count of the 11 listed words, -2 per occurrence, minus the three conventions §4 carve-outs exactly as stated and no further contextual rules: `relevant` on a markdown heading line; `relevant to <named-scope>` (the term followed by `to` and a named scope); any listed term followed by a measurable-criterion clause — a digit in the remainder of the term's own sentence on its line. Worksheet #10 verified the fixture's 12 occurrences "identical under substring and word-boundary matching", none excluded by a carve-out |
+| R01 | cap | cap on total vague-quantifier penalty | mechanical | the summed vague-quantifier penalty clamps at -20 (or the R01 `threshold` override): the fixture's 12 x -2 = -24 lands at -20 (worksheet #10: "cap binds") |
+
+## All types: vocabulary drift (R51) — opt-in, disabled by default
+
+Ship-disabled: without `enabled: true` in the config the penalty is zero by
+rule. The engine ships no registry.yaml reader — the owning text never defines
+the registry's schema (how canonical and deprecated terms are declared) — so
+even when enabled, the misconfigured row's own "0 (advisory only)" applies and
+the engine emits one R51 advisory.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| R51 | deprecated term | each occurrence of a `deprecated:` term from registry.yaml, within the artifact's scope | advisory-zero | the registry.yaml schema is undefined in the owning text, so term extraction has no objective definition; ship-disabled besides |
+| R51 | drift cap | cap per file | advisory-zero | caps a penalty that never accrues — see the previous row |
+| R51 | misconfigured | enabled but vocabulary_skill unset / no registry.yaml | advisory-zero | the row's own penalty is "0 (advisory only)"; the engine emits it whenever R51 is enabled |
+
+## Cross-component (`--plugin` flag; whole-plugin lint, not per-file)
+
+The table's own heading scopes it to whole-plugin lint — a different scoring
+scope than the per-file score this engine produces (worksheet #9). No per-file
+route exists.
+
+| Rule | Check | Condition | Class | Predicate / justification |
+|------|-------|-----------|-------|---------------------------|
+| -- | broken partial refs | a command references a nonexistent commands/shared/X.md | advisory-zero | whole-plugin scope — see the table note |
+| -- | broken skill refs | an agent references an uninstalled plugin skill | advisory-zero | whole-plugin scope |
+| -- | missing scripts | a hook references a nonexistent script | advisory-zero | whole-plugin scope |
+| -- | orphaned files | agent/command/skill referenced by nothing | advisory-zero | whole-plugin scope (worksheet #9) |
+| -- | contradictions | two rules/instructions in the same plugin directly contradict | advisory-zero | whole-plugin scope, and semantic judgment besides |
 
 ## Worksheet defect classes with no penalty-table row
 
 The rubric's closing principle: "any finding with no specific penalty-table row to
 cite gets dropped." These seeded classes therefore deduct nothing; the engine emits
-each as an advisory so the narrating agent sees them without a penalty existing.
+each as an advisory on every scored skill so the narrating agent sees them without
+a penalty existing.
 
 | Rule | Check | Source | Class | Justification |
 |------|-------|--------|-------|---------------|

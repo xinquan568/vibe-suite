@@ -34,6 +34,11 @@ from pathlib import Path
 CONFIG_FILENAME = ".vibe-suite.md"
 MAX_DEPTH = 3
 _KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+#: Artifact frontmatter (SKILL.md, commands, agents) uses the same grammar but its documented
+#: schema includes hyphenated keys — `allowed-tools`, `argument-hint`, `user-invocable`. The
+#: scoring engine passes this pattern so a conforming skill is never mis-flagged as malformed;
+#: the config file itself keeps the stricter `_KEY`.
+ARTIFACT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*$")
 _PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9-]*")   # applied with fullmatch — `$` would admit "safe\n"
 _INT = re.compile(r"-?[0-9]+$")
 
@@ -81,7 +86,10 @@ SCHEMA = {
 RULE_OVERRIDE_LEAVES = {
     "suppress": "bool", "enabled": "bool", "max_penalty": "int", "threshold": "int",
 }
-_RULE_ID = re.compile(r"R[0-9]+")
+#: The defined rule ids are exactly R01–R51 (skills/rules/SKILL.md). An id outside that range
+#: (R52, R99) is a typo the reader must refuse, not a forward-compatible extension: a silently
+#: accepted unknown rule would let a mistyped override do nothing while looking applied.
+_RULE_ID = re.compile(r"R(?:0[1-9]|[1-4][0-9]|5[01])")
 
 CLOSED_MAPS = {
     "rule_overrides": {"R51": {**RULE_OVERRIDE_LEAVES, "vocabulary_skill": "string"}},
@@ -251,8 +259,15 @@ def _sequence(lines, start, indent, source):
     return items, index
 
 
-def parse_frontmatter(text, source=CONFIG_FILENAME):
-    """Parse the accepted subset into nested dicts. Raises on anything outside it."""
+def parse_frontmatter(text, source=CONFIG_FILENAME, key_pattern=None):
+    """Parse the accepted subset into nested dicts. Raises on anything outside it.
+
+    `key_pattern` selects the accepted key charset: the default `_KEY` for `.vibe-suite.md`
+    itself, `ARTIFACT_KEY` for artifact frontmatter whose documented schema carries hyphenated
+    keys (`allowed-tools`, `user-invocable`). One grammar, one parser — only the key alphabet
+    is parameterized.
+    """
+    key_re = _KEY if key_pattern is None else key_pattern
     lines = _split_frontmatter(text, source)
     root = {}
     stack = [(0, root)]
@@ -281,7 +296,7 @@ def parse_frontmatter(text, source=CONFIG_FILENAME):
             raise ConfigSyntaxError(f"{source}:{line_no}: expected 'key: value'")
         key, _, rest = content.partition(":")
         key, rest = key.strip(), rest.strip()
-        if not _KEY.match(key):
+        if not key_re.match(key):
             raise ConfigSyntaxError(f"{source}:{line_no}: invalid key name")
         if key in container:
             raise ConfigSyntaxError(f"{source}:{line_no}: duplicate key {key!r}")
@@ -371,8 +386,24 @@ def _check_map(key, value):
                 if leaf not in expected:
                     raise ConfigValueError(f"{key}.{sub}.{leaf}: not a known key")
                 _check_leaf(f"{key}.{sub}.{leaf}", leaf_value, expected[leaf])
+                if key == "rule_overrides":
+                    _check_override_range(f"{key}.{sub}.{leaf}", leaf, leaf_value)
         else:
             _check_leaf(f"{key}.{sub}", sub_value, expected)
+
+
+def _check_override_range(label, leaf, value):
+    """Domain checks for the numeric override leaves.
+
+    `max_penalty` caps a rule's summed penalty, and every penalty is negative with the score
+    floored at 0 from a base of 100 — so the only meaningful values are -1..-100. `threshold`
+    re-parameterizes a positive numeric trigger (a line count or an occurrence cap), so it must
+    be a positive integer. A value outside its domain is a config error, not a lenient no-op.
+    """
+    if leaf == "max_penalty" and not -100 <= value <= -1:
+        raise ConfigValueError(f"{label}: expected a negative integer in -100..-1")
+    if leaf == "threshold" and value < 1:
+        raise ConfigValueError(f"{label}: expected a positive integer")
 
 
 def _assert_inside(real_root, candidate, label):

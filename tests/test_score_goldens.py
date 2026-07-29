@@ -4,25 +4,33 @@
 The engine (scripts/score_engine.py) is the ONLY penalty authority; agents narrate. The
 oracle (tests/fixtures/nl-audit/defective-skill/expected.json + its worksheet README) was
 computed BY HAND from the scoring skill's tables before the engine existed — the engine must
-reproduce it, never the reverse.
+reproduce it, never the reverse. AC-3 is an EXACT whole-object comparison: expected.json is
+the engine's files[0] object verbatim, advisories included.
 
 Engine CLI contract pinned here:
-  stdin  : records `<type>\\x1f<relative-path>\\x00` (same lossless framing as ls_counts)
+  stdin  : records `<type-or-category>\\x1f<relative-path>\\x00` (same lossless framing as
+           ls_counts); a first field of `A`-`F` is a scanner discovery category and the
+           engine classifies the path itself, agreeing with commands/shared/classify.md
   args   : --root <dir> [--config <file>] [--history <file>] [--scope <tag>]
-  stdout : JSON {"files":[{"path","score","band","findings":[{"rule","check","line","penalty"}],
-           "advisories":[{"rule","note"}]}], "run":{"files","total_penalty","considered_rows"}}
-  exit   : 0 scored; 2 contract refusal (bad record, bad root)
+  stdout : JSON {"files":[{"path","score","band","verdict",
+           "findings":[{"rule","check","line","penalty"}],"advisories":[{"rule","note"}]}],
+           "run":{"files","total_penalty","considered_rows","skipped"}}
+  exit   : 0 scored; 2 contract refusal (bad record, bad root); a missing --config file is
+           NOT a refusal — defaults apply
 
-Row ledger: scripts/score_engine_rows.md classifies every scoring-table row as `mechanical`
-(predicate quoted from the owning text) or `advisory-zero`; this suite asserts the ledger is
-complete and that the engine deducts ONLY on mechanical rows.
+Row ledger: scripts/score_engine_rows.md classifies every row of EVERY penalty table in the
+scoring skill as `mechanical` (predicate quoted from the owning text) or `advisory-zero`;
+this suite asserts the ledger carries every row of every table and that the engine deducts
+ONLY on mechanical rows.
 """
 
+import importlib.util
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 from tests.test_skill_library import parse_frontmatter
@@ -55,14 +63,22 @@ def run_engine(records, root, extra=()):
     )
 
 
-def score_one(body, extra=(), name="probe", dirname=None):
-    """Score a synthetic one-skill tree; returns the engine's file object."""
+def load_engine():
+    """Import the engine in-process (for the classifier and the injected history failure)."""
+    spec = importlib.util.spec_from_file_location("vibe_score_engine", ENGINE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def score_one(body, extra=(), name="probe", dirname=None, record_type="skill"):
+    """Score a synthetic one-file tree; returns the engine's file object."""
     with tempfile.TemporaryDirectory() as tmp:
         skill_dir = Path(tmp) / "skills" / (dirname or name)
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(body, encoding="utf-8")
         rel = f"skills/{dirname or name}/SKILL.md"
-        proc = run_engine([("skill", rel)], tmp, extra)
+        proc = run_engine([(record_type, rel)], tmp, extra)
         if proc.returncode != 0:
             raise AssertionError(proc.stderr.decode())
         return json.loads(proc.stdout.decode())["files"][0]
@@ -79,6 +95,32 @@ def clean_skill(name="probe", description=None, body_lines=8, examples=1):
     for _ in range(examples):
         lines += ["<example>", "Context: probe.", "user: probe?", "assistant: probing.", "</example>"]
     return "\n".join(lines) + "\n"
+
+
+def skill_with_body(body_lines, name="probe", description="Concrete probe; use when testing."):
+    """A skill whose MARKDOWN BODY (frontmatter excluded) is exactly `body_lines` lines."""
+    head = ["---", f"name: {name}", f"description: {description}", "---"]
+    body = [f"Body line {i} of deterministic filler content." for i in range(body_lines)]
+    return "\n".join(head + body) + "\n"
+
+
+def agent_md(model=True, tools=True, examples=2, output_heading=True):
+    lines = ["---", "name: helper",
+             "description: Scores helper agents; use when testing the agents table."]
+    if model:
+        lines.append("model: haiku")
+    if tools:
+        lines.append("tools: Read")
+    lines += ["---", "", "# helper", ""]
+    if output_heading:
+        lines += ["## Output format", "", "One line per file.", ""]
+    for _ in range(examples):
+        lines += ["<example>", "Context: probe.", "user: go?", "assistant: going.", "</example>"]
+    return "\n".join(lines) + "\n"
+
+
+def r01_total(entry):
+    return sum(x["penalty"] for x in entry["findings"] if x["rule"] == "R01")
 
 
 class DeliverablesShip(unittest.TestCase):
@@ -116,6 +158,22 @@ class DeliverablesShip(unittest.TestCase):
             self.assertIn(stage, body.lower())
         self.assertIn('"${CLAUDE_PLUGIN_ROOT}/scripts/score_engine.py"', body)
 
+    def test_scorer_invocation_is_record_framed_stdin(self):
+        # The engine takes no positional targets; the scorer's example must show the
+        # record protocol, or the agent would invoke a contract that exits 2.
+        body = SCORER.read_text(encoding="utf-8")
+        self.assertIn('< "<record-file>"', body)
+        self.assertNotIn("<targets", body, "positional targets are not part of the contract")
+        self.assertIn("\\x1f", body)
+        self.assertIn("\\x00", body)
+
+    def test_command_config_is_conditional(self):
+        # A project without the optional .vibe-suite.md is scored with defaults, never
+        # refused — so the invocation note must not pass --config unconditionally.
+        body = COMMAND.read_text(encoding="utf-8")
+        self.assertIn("only when that file exists", body)
+        self.assertNotIn('--config "<target>/.vibe-suite.md" --history', body)
+
     def test_vague_scanner_list_matches_scoring_skill_verbatim(self):
         skill_row = SCORING_SKILL.read_text(encoding="utf-8")
         agent_body = VAGUE.read_text(encoding="utf-8")
@@ -141,45 +199,75 @@ class GoldenAndDeterminism(unittest.TestCase):
         return [("skill", "skills/defective/SKILL.md")]
 
     def test_ac2_same_output_three_runs(self):
-        outs = [run_engine(self._fixture_records(), FIXTURE).stdout for _ in range(3)]
+        procs = [run_engine(self._fixture_records(), FIXTURE) for _ in range(3)]
+        for proc in procs:
+            # A missing or crashing engine produces identical EMPTY stdout three times;
+            # the equality below is meaningful only after each run demonstrably scored.
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        outs = [proc.stdout for proc in procs]
         self.assertEqual(outs[0], outs[1])
         self.assertEqual(outs[1], outs[2])
 
-    def test_ac3_engine_reproduces_the_hand_oracle(self):
+    def test_ac3_engine_reproduces_the_hand_oracle_exactly(self):
         oracle = json.loads(ORACLE.read_text(encoding="utf-8"))
         proc = run_engine(self._fixture_records(), FIXTURE)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         got = json.loads(proc.stdout.decode())["files"][0]
-        self.assertEqual(got["score"], oracle["score"])
-        self.assertEqual(got["band"], oracle["band"])
-        got_total = sum(f["penalty"] for f in got["findings"])
-        self.assertEqual(got_total, oracle["total_penalty"])
-        got_set = sorted((f["rule"], f["check"], f["penalty"]) for f in got["findings"])
-        want_set = sorted((f["rule"], f["check"], f["penalty"]) for f in oracle["findings"])
-        self.assertEqual(got_set, want_set)
-        self.assertGreaterEqual(len(got["advisories"]), len(oracle["advisories"]))
+        # Exact whole-object equality — every field, findings AND the advisories list.
+        self.assertEqual(got, oracle)
+        # The worksheet arithmetic, restated independently of the JSON shapes.
+        self.assertEqual(sum(f["penalty"] for f in got["findings"]), -55)
+        self.assertEqual(got["score"], 45)
+        self.assertEqual(got["band"], "Rewrite")
+        self.assertEqual(got["verdict"], "fail")
 
 
 class LedgerAndMatrix(unittest.TestCase):
-    def _table_rows(self):
-        rows = []
-        in_skills = False
-        for line in SCORING_SKILL.read_text(encoding="utf-8").splitlines():
+    #: Recognized penalty-table headers and how their cells map onto (rule, check, condition).
+    HEADERS = {
+        ("Rule", "Check", "Condition", "Penalty"): lambda c: (c[0], c[1], c[2]),
+        ("Check", "Condition", "Penalty"): lambda c: ("--", c[0], c[1]),
+        ("Rule", "Check", "Penalty on fail"): lambda c: (c[0], c[1], ""),
+    }
+
+    def _all_penalty_rows(self):
+        """Every row of every penalty table in the scoring skill, as (rule, check, condition).
+
+        Parses ALL tables between `## Penalty Tables` and `## Score Bands`. Fails closed: an
+        unrecognized table header raises rather than silently skipping a table, and a floor
+        on the row count guards against a parse that quietly finds nothing.
+        """
+        text = SCORING_SKILL.read_text(encoding="utf-8")
+        section = text[text.index("## Penalty Tables"):text.index("## Score Bands")]
+        rows, header = [], None
+        for line in section.splitlines():
             if line.startswith("### "):
-                in_skills = line.strip() == "### Skills"
-            if in_skills and line.startswith("|") and not set(line) <= {"|", "-", " "}:
-                cells = [c.strip() for c in line.strip("|").split("|")]
-                if len(cells) == 4 and cells[0] != "Rule":
-                    rows.append(tuple(cells))
+                header = None
+                continue
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if all(set(c) <= set("-: ") for c in cells):
+                continue
+            if header is None:
+                header = tuple(cells)
+                if header not in self.HEADERS:
+                    raise AssertionError(f"unrecognized penalty-table header {header}")
+                continue
+            rows.append(self.HEADERS[header](cells))
+        self.assertGreaterEqual(len(rows), 100, "the table parse found too few rows to be real")
         return rows
 
-    def test_ledger_covers_every_skills_row_exactly_once(self):
+    def test_ledger_covers_every_row_of_every_table(self):
+        rows = self._all_penalty_rows()
         ledger = LEDGER.read_text(encoding="utf-8")
-        for rule, check, condition, penalty in self._table_rows():
-            self.assertEqual(
-                ledger.count(f"{rule} | {check} | {condition}"), 1,
-                f"ledger must carry the row {rule}/{check} exactly once",
-            )
+        for (rule, check, condition), multiplicity in Counter(rows).items():
+            needle = f"{rule} | {check} | {condition} |" if condition else f"{rule} | {check} |"
+            with self.subTest(rule=rule, check=check):
+                self.assertEqual(
+                    ledger.count(needle), multiplicity,
+                    f"ledger must carry {needle!r} exactly {multiplicity} time(s)",
+                )
         for cls in ("mechanical", "advisory-zero"):
             self.assertIn(cls, ledger)
 
@@ -209,64 +297,265 @@ class LedgerAndMatrix(unittest.TestCase):
             )
             self.assertEqual(got, expected, f"description length {n} chars")
 
-    def test_body_length_bands(self):
-        # clean_skill body_lines drives total line count; compute around the 400/500 edges.
-        def with_lines(total):
-            filler = [f"Line {i} of deterministic filler content." for i in range(total)]
-            return "---\nname: probe\ndescription: Concrete probe; use when testing.\n---\n" + "\n".join(filler) + "\n"
-        for total, expected in ((399 - 4, 0), (400 - 4, -5), (500 - 4, -5), (501 - 4, -10)):
-            f = score_one(with_lines(total))
+    def test_body_length_bands_counted_in_body_lines(self):
+        # R05's domain is the MARKDOWN BODY: the frontmatter block (fences included) is
+        # excluded. skill_with_body() builds a body of exactly N lines behind a 4-line
+        # frontmatter block, so the boundaries below are stated directly in body lines.
+        for body_lines, expected in ((399, 0), (400, -5), (500, -5), (501, -10)):
+            f = score_one(skill_with_body(body_lines))
             got = sum(x["penalty"] for x in f["findings"] if x["check"] == "body length")
-            self.assertEqual(got, expected, f"body at {total + 4} physical lines")
+            self.assertEqual(got, expected, f"body of {body_lines} lines")
+
+    def test_body_threshold_override_moves_only_the_upper_boundary(self):
+        # conventions §6: R05 `threshold: 600` (from 500 lines) — the upper boundary moves
+        # to 600 (-10 above it, -5 in 400..600); the 400 lower boundary stays.
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".vibe-suite.md"
+            config.write_text(
+                "---\nrule_overrides:\n  R05:\n    threshold: 600\n---\n", encoding="utf-8")
+            for body_lines, expected in ((399, 0), (400, -5), (550, -5), (600, -5), (601, -10)):
+                d = Path(tmp) / "skills" / "probe"
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "SKILL.md").write_text(skill_with_body(body_lines), encoding="utf-8")
+                proc = run_engine([("skill", "skills/probe/SKILL.md")], tmp,
+                                  extra=("--config", str(config)))
+                self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+                f = json.loads(proc.stdout.decode())["files"][0]
+                got = sum(x["penalty"] for x in f["findings"] if x["check"] == "body length")
+                self.assertEqual(got, expected, f"body of {body_lines} lines at threshold 600")
 
     def test_r01_vague_words_complete(self):
         for word in VAGUE_WORDS:
             body = clean_skill() + f"\nUse {word} handling here.\n"
             f = score_one(body)
-            got = sum(x["penalty"] for x in f["findings"] if x["rule"] == "R01")
-            self.assertEqual(got, -2, f"R01 must count {word!r} once")
+            self.assertEqual(r01_total(f), -2, f"R01 must count {word!r} once")
         # token boundary: 'somewhere' must not count as 'some'
         f = score_one(clean_skill() + "\nStore it somewhere safe.\n")
-        self.assertEqual(sum(x["penalty"] for x in f["findings"] if x["rule"] == "R01"), 0)
+        self.assertEqual(r01_total(f), 0)
+        # repeats on one line each count
+        f = score_one(clean_skill() + "\nDrop some rows, then some more, then some again.\n")
+        self.assertEqual(r01_total(f), -6)
         # cap: 12 occurrences -> -20 not -24
         f = score_one(clean_skill() + "\n" + " ".join(["appropriate"] * 12) + "\n")
-        self.assertEqual(sum(x["penalty"] for x in f["findings"] if x["rule"] == "R01"), -20)
+        self.assertEqual(r01_total(f), -20)
 
-    def test_formula_floor_and_bands(self):
-        # A file accumulating more than 100 penalty points floors at 0 / Rewrite.
-        horror = "---\ndescription: " + "x" * 900 + "\n---\n" + " ".join(["some"] * 12) + "\n"
+    def test_r01_carveout_relevant_in_heading(self):
+        f = score_one(clean_skill() + "\n## Relevant commands\n\nNone yet.\n")
+        self.assertEqual(r01_total(f), 0, "'relevant' inside a markdown header is exempt")
+        # the header carve-out is for `relevant` ONLY — no new contextual rules
+        f = score_one(clean_skill() + "\n## Appropriate use\n\nNone yet.\n")
+        self.assertEqual(r01_total(f), -2, "other terms in a heading still count")
+
+    def test_r01_carveout_relevant_to_named_scope(self):
+        f = score_one(clean_skill() + "\nThis applies when relevant to skills/scoring.\n")
+        self.assertEqual(r01_total(f), 0, "'relevant to <named-scope>' is exempt")
+        f = score_one(clean_skill() + "\nCollect the relevant columns.\n")
+        self.assertEqual(r01_total(f), -2, "bare 'relevant' still counts")
+
+    def test_r01_carveout_measurable_criterion(self):
+        f = score_one(clean_skill() + "\nAllocate sufficient memory for the batch (512 MB).\n")
+        self.assertEqual(r01_total(f), 0, "a term followed by a measurable criterion is exempt")
+        f = score_one(clean_skill() + "\nRetry a reasonable number of times: at most 3.\n")
+        self.assertEqual(r01_total(f), 0)
+        f = score_one(clean_skill() + "\nAllocate sufficient memory for the batch.\n")
+        self.assertEqual(r01_total(f), -2, "no criterion, no exemption")
+        # the criterion clause must follow the term — a number on the NEXT line is not one
+        f = score_one(clean_skill() + "\nUse adequate padding.\nSet width to 3.\n")
+        self.assertEqual(r01_total(f), -2)
+
+    def test_r01_cap_override(self):
         with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp) / "skills" / "wrong"
+            config = Path(tmp) / ".vibe-suite.md"
+            config.write_text(
+                "---\nrule_overrides:\n  R01:\n    threshold: 10\n---\n", encoding="utf-8")
+            d = Path(tmp) / "skills" / "probe"
             d.mkdir(parents=True)
-            (d / "SKILL.md").write_text(horror, encoding="utf-8")
-            out = json.loads(
-                run_engine([("skill", "skills/wrong/SKILL.md")], tmp).stdout.decode()
-            )["files"][0]
-        self.assertGreaterEqual(out["score"], 0)
-        self.assertLessEqual(out["score"], 100)
-        for score, band in ((95, "Excellent"), (89, "Good"), (75, "Adequate"), (65, "Weak"), (59, "Rewrite")):
-            pass  # band edges asserted via the engine's own mapping below
+            (d / "SKILL.md").write_text(
+                clean_skill() + "\n" + " ".join(["appropriate"] * 12) + "\n", encoding="utf-8")
+            proc = run_engine([("skill", "skills/probe/SKILL.md")], tmp,
+                              extra=("--config", str(config)))
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+            f = json.loads(proc.stdout.decode())["files"][0]
+            self.assertEqual(r01_total(f), -10, "R01 threshold overrides the -20 cap")
+
+    def test_r06_example_blocks_on_user_invocable(self):
+        head = ("---\nname: probe\ndescription: Concrete probe; use when testing blocks.\n"
+                "user_invocable: true\n---\n# probe\nBody.\n")
+        f = score_one(head)
+        self.assertEqual(
+            [x["penalty"] for x in f["findings"] if x["check"] == "example blocks"], [-10])
+        f = score_one(head + "<example>\nContext: p.\nuser: p?\nassistant: p.\n</example>\n")
+        self.assertEqual(
+            [x for x in f["findings"] if x["check"] == "example blocks"], [])
+        # without user_invocable: true the row cannot fire (worksheet #5)
+        f = score_one(clean_skill(examples=0))
+        self.assertEqual(
+            [x for x in f["findings"] if x["check"] == "example blocks"], [])
+
+    def test_band_edges_via_known_deduction_combos(self):
+        cases = (
+            (clean_skill(description="x" * 500), 95, "Excellent"),   # R04 length -5
+            (clean_skill(name="other"), 85, "Good"),                 # name mismatch -15
+            ("---\ndescription: Concrete probe; use when testing.\n---\n# x\nBody.\n",
+             75, "Adequate"),                                        # name missing -25
+            (skill_with_body(501).replace("name: probe\n", ""), 65, "Weak"),
+            # name missing -25 + R05 -10
+            ("---\ndescription: Concrete probe; use when testing.\n---\n# x\n"
+             + "\n".join(["Drop some rows now."] * 10) + "\n", 55, "Rewrite"),
+            # name missing -25 + 10 x R01 -2 = -45
+        )
+        for body, want_score, want_band in cases:
+            with self.subTest(score=want_score):
+                f = score_one(body, dirname="probe", name="other")
+                self.assertEqual(f["score"], want_score)
+                self.assertEqual(f["band"], want_band)
         clean = score_one(clean_skill())
         self.assertEqual(clean["score"], 100)
         self.assertEqual(clean["band"], "Excellent")
+        self.assertEqual(clean["verdict"], "pass")
+
+    def test_floor_binds_below_minus_100(self):
+        # A settings file with nine invalid hook events (-10 per invalid = -90) plus twelve
+        # R01 words (capped -20) accumulates -110; the formula floors the score at 0.
+        hooks = {f"bogus{letter}": [] for letter in "ABCDEFGHI"}
+        body = json.dumps(
+            {"hooks": hooks, "note": " ".join(["appropriate"] * 12)}, indent=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / ".claude"
+            d.mkdir()
+            (d / "settings.json").write_text(body, encoding="utf-8")
+            proc = run_engine([("B", ".claude/settings.json")], tmp)
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+            f = json.loads(proc.stdout.decode())["files"][0]
+        self.assertEqual(sum(x["penalty"] for x in f["findings"]), -110)
+        self.assertEqual(f["score"], 0)
+        self.assertEqual(f["band"], "Rewrite")
+        self.assertEqual(f["verdict"], "fail")
 
     def test_advisory_rows_never_deduct(self):
-        # The fixture seeds judgment classes; every advisory-zero ledger row must appear as
-        # an advisory, not a finding, in the fixture output.
+        # The fixture seeds judgment classes; no advisory-zero ledger row may appear as a
+        # deducting finding in the fixture output.
         proc = run_engine([("skill", "skills/defective/SKILL.md")], FIXTURE)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         got = json.loads(proc.stdout.decode())["files"][0]
         ledger = LEDGER.read_text(encoding="utf-8")
+        # Check names repeat across tables (an unrouted table's `name present` is
+        # advisory-zero while the Skills row is mechanical), so the advisory set is
+        # collected ONLY from the sections routed to the fixture's type: skill.
         advisory_checks = set()
+        section = None
         for line in ledger.splitlines():
+            if line.startswith("## "):
+                section = line[3:].strip()
+                continue
+            if section not in ("Skills", "All types: vague quantifiers",
+                               "Worksheet defect classes with no penalty-table row"):
+                continue
             if "advisory-zero" in line and line.startswith("|"):
                 cells = [c.strip() for c in line.strip("|").split("|")]
                 if len(cells) >= 2:
                     advisory_checks.add(cells[1])
+        self.assertGreaterEqual(len(advisory_checks), 8, "the ledger sections must parse")
         deducting = {x["check"] for x in got["findings"]}
         self.assertFalse(
             advisory_checks & deducting,
             f"advisory-zero rows deducted: {advisory_checks & deducting}",
         )
+        # R07 in particular moved to advisory-zero: it must appear as an advisory, never
+        # as a finding.
+        self.assertNotIn("R07", [x["rule"] for x in got["findings"]])
+        self.assertIn("R07", [a["rule"] for a in got["advisories"]])
+
+
+class MultiTypeScoring(unittest.TestCase):
+    """The type interface end-to-end: category records over a two-type mini-tree."""
+
+    def test_two_type_tree_scored_in_one_run_via_category_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "skills" / "demo"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(clean_skill(name="demo"), encoding="utf-8")
+            agent_dir = Path(tmp) / "agents"
+            agent_dir.mkdir()
+            (agent_dir / "helper.md").write_text(
+                agent_md(model=False, examples=1), encoding="utf-8")
+            proc = run_engine(
+                [("A", "skills/demo/SKILL.md"), ("A", "agents/helper.md")], tmp)
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+            out = json.loads(proc.stdout.decode())
+        self.assertEqual([f["path"] for f in out["files"]],
+                         ["skills/demo/SKILL.md", "agents/helper.md"])
+        skill, agent = out["files"]
+        # The skill scored on the Skills table: clean, and it carries the skill advisories.
+        self.assertEqual(skill["score"], 100)
+        self.assertEqual(skill["findings"], [])
+        self.assertIn("R07", [a["rule"] for a in skill["advisories"]])
+        # The agent scored on the Agents table: R10 model declared -5, R09 one example -5.
+        self.assertEqual(
+            [(x["rule"], x["check"], x["penalty"]) for x in agent["findings"]],
+            [("R10", "model declared", -5), ("R09", "example blocks", -5)],
+        )
+        self.assertEqual(agent["score"], 90)
+        self.assertEqual({a["rule"] for a in agent["advisories"]}, {"R10", "R11"})
+        # Row accounting: 12+2 skill rows plus 9+2 agent rows.
+        self.assertEqual(out["run"]["considered_rows"], 25)
+
+    def test_agent_table_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent_dir = Path(tmp) / "agents"
+            agent_dir.mkdir()
+            cases = (
+                (agent_md(), []),
+                (agent_md(examples=0), [("R09", "example blocks", -15)]),
+                (agent_md(tools=False), [("R11", "tools declared", -5)]),
+                (agent_md(output_heading=False), [("R12", "output format", -10)]),
+            )
+            for body, want in cases:
+                (agent_dir / "helper.md").write_text(body, encoding="utf-8")
+                proc = run_engine([("agent", "agents/helper.md")], tmp)
+                self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+                got = json.loads(proc.stdout.decode())["files"][0]
+                self.assertEqual(
+                    [(x["rule"], x["check"], x["penalty"]) for x in got["findings"]], want)
+
+    def test_untabled_type_takes_only_the_generic_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = Path(tmp) / "docs"
+            docs.mkdir()
+            (docs / "notes.md").write_text("# Notes\n\nDrop some rows.\n", encoding="utf-8")
+            proc = run_engine([("E", "docs/notes.md")], tmp)
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+            out = json.loads(proc.stdout.decode())
+        f = out["files"][0]
+        self.assertEqual([(x["rule"], x["penalty"]) for x in f["findings"]], [("R01", -2)])
+        self.assertEqual(f["advisories"], [])
+        self.assertEqual(out["run"]["considered_rows"], 2)
+
+
+class ClassifierAgreement(unittest.TestCase):
+    """The engine's path classifier must agree with commands/shared/classify.md."""
+
+    def test_engine_classifier_matches_the_partial(self):
+        from tests.test_shared_partials import EXPECTED, classify, parse_classify_rules
+        engine = load_engine()
+        rules = parse_classify_rules()
+        corpus = list(EXPECTED) + [
+            "commands/score.md", "commands/shared/discover.md", "docs/schema.json",
+            "templates/plain.md", "other/skills/demo/SKILL.md",
+            "skills/s/references/ref.md", "random/thing.txt", ".claude-plugin/plugin.json",
+            "home/.claude/projects/p/memory/note.md", "./agents/a.md",
+        ]
+        for path in corpus:
+            with self.subTest(path=path):
+                self.assertEqual(engine.classify_path(path), classify(path, rules))
+
+    def test_category_records_classify_types_and_explicit_types_pass_through(self):
+        engine = load_engine()
+        self.assertEqual(engine.resolve_type("A", "skills/x/SKILL.md"), "skill")
+        self.assertEqual(engine.resolve_type("A", "agents/a.md"), "agent")
+        self.assertEqual(engine.resolve_type("B", ".claude/settings.json"), "settings")
+        self.assertEqual(engine.resolve_type("skill", "anything.md"), "skill")
+        self.assertEqual(engine.resolve_type("agent", "anything.md"), "agent")
 
 
 class DegenerateInputs(unittest.TestCase):
@@ -277,9 +566,26 @@ class DegenerateInputs(unittest.TestCase):
         )
         self.assertIsInstance(f["score"], int)
 
+    def test_valid_hyphenated_frontmatter_keys_are_not_penalized(self):
+        # `allowed-tools` is part of the documented SKILL.md schema; a conforming skill
+        # must not take the malformed-frontmatter -25 (review finding 5).
+        body = ("---\nname: probe\ndescription: Concrete probe; use when testing keys.\n"
+                "allowed-tools: Bash(git:*), Read\n---\n# probe\n\nBody.\n")
+        f = score_one(body)
+        self.assertEqual([x for x in f["findings"] if "parse" in x["check"].lower()], [])
+        self.assertEqual(f["score"], 100)
+
+    def test_truly_broken_yaml_still_minus_25(self):
+        body = "---\nname: [probe\n---\n# probe\nBody.\n"
+        f = score_one(body)
+        self.assertEqual(
+            [x["penalty"] for x in f["findings"] if "parse" in x["check"].lower()], [-25])
+
     def test_empty_file_scores_zero(self):
         f = score_one("")
         self.assertEqual(f["score"], 0)
+        self.assertEqual(f["band"], "Rewrite")
+        self.assertEqual(f["verdict"], "fail")
 
     def test_unreadable_file_skipped_and_noted(self):
         import os
@@ -293,10 +599,12 @@ class DegenerateInputs(unittest.TestCase):
                 if os.access(target, os.R_OK):
                     self.skipTest("permission bits do not bind here")
                 proc = run_engine([("skill", "skills/probe/SKILL.md")], tmp)
-                out = json.loads(proc.stdout.decode())
-                self.assertEqual(out["files"], [] if not out["files"] else out["files"])
                 self.assertEqual(proc.returncode, 0)
-                self.assertIn("skip", proc.stdout.decode().lower())
+                out = json.loads(proc.stdout.decode())
+                self.assertEqual(out["files"], [], "an unreadable file must not be scored")
+                self.assertEqual(out["run"]["skipped"], ["skills/probe/SKILL.md"])
+                self.assertEqual(len(out["run"]["skipped"]), 1)
+                self.assertEqual(out["run"]["files"], 0)
             finally:
                 target.chmod(0o644)
 
@@ -323,14 +631,48 @@ class ConfigOverrides(unittest.TestCase):
             self.CFG.format(key="suppress", value="true"),
             clean_skill() + self.VAGUE_BODY_EXTRA,
         )
-        self.assertEqual(sum(x["penalty"] for x in f["findings"] if x["rule"] == "R01"), 0)
+        self.assertEqual(r01_total(f), 0)
+
+    def test_enabled_false_zeroes_a_rule(self):
+        f = self._with_config(
+            self.CFG.format(key="enabled", value="false"),
+            clean_skill() + self.VAGUE_BODY_EXTRA,
+        )
+        self.assertEqual(r01_total(f), 0)
+        self.assertTrue(
+            any(a["rule"] == "R01" and "zeroed" in a["note"] for a in f["advisories"]),
+            "a zeroed rule surfaces as an advisory, not silently",
+        )
 
     def test_max_penalty_caps_a_rule(self):
         f = self._with_config(
             self.CFG.format(key="max_penalty", value="-4"),
             clean_skill() + self.VAGUE_BODY_EXTRA,
         )
-        self.assertEqual(sum(x["penalty"] for x in f["findings"] if x["rule"] == "R01"), -4)
+        self.assertEqual(r01_total(f), -4)
+
+    def test_score_threshold_drives_the_verdict_not_the_bands(self):
+        # 75 (name missing -25) fails an 80 threshold and passes the default 70; the band
+        # stays Adequate either way — bands are fixed, only the verdict moves.
+        body = "---\ndescription: Concrete probe; use when testing.\n---\n# x\nBody.\n"
+        f = self._with_config("---\nscore_threshold: 80\n---\n", body)
+        self.assertEqual((f["score"], f["band"], f["verdict"]), (75, "Adequate", "fail"))
+        f = self._with_config("---\nscore_threshold: 70\n---\n", body)
+        self.assertEqual((f["score"], f["band"], f["verdict"]), (75, "Adequate", "pass"))
+
+    def test_missing_config_file_means_defaults_not_refusal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "skills" / "probe"
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(clean_skill(), encoding="utf-8")
+            proc = run_engine(
+                [("skill", "skills/probe/SKILL.md")], tmp,
+                extra=("--config", str(Path(tmp) / ".vibe-suite.md")),  # does not exist
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+            f = json.loads(proc.stdout.decode())["files"][0]
+        self.assertEqual(f["score"], 100)
+        self.assertEqual(f["verdict"], "pass", "the default threshold 70 applies")
 
 
 class HistoryAppend(unittest.TestCase):
@@ -356,6 +698,36 @@ class HistoryAppend(unittest.TestCase):
             entries = json.loads(hist.read_text(encoding="utf-8"))
             self.assertEqual(len(entries), 2, "distinct scopes append distinctly")
             self.assertEqual({e["scope"] for e in entries}, {"skills/probe", "other-scope"})
+
+    def test_injected_replace_failure_leaves_history_intact(self):
+        # The promised injected-failure test: the atomic-rename primitive itself fails
+        # (os.replace raises), in-process, so the property is proven for ANY rename
+        # failure, not only the permission-denied shape the subprocess test below covers.
+        engine = load_engine()
+        with tempfile.TemporaryDirectory() as tmp:
+            hist = Path(tmp) / "vibe-history.json"
+            seed = [{"scope": "s", "score": 100, "band": "Excellent",
+                     "total_penalty": 0, "file": "a"}]
+            hist.write_text(json.dumps(seed, indent=2, sort_keys=True) + "\n",
+                            encoding="utf-8")
+            before = hist.read_bytes()
+
+            def boom(*args, **kwargs):
+                raise OSError("injected replace failure")
+
+            original = engine.bridge.os.replace
+            engine.bridge.os.replace = boom
+            try:
+                with self.assertRaises(OSError):
+                    engine._append_history(
+                        hist, "s2", [{"path": "b", "score": 90, "band": "Excellent"}], [-10])
+            finally:
+                engine.bridge.os.replace = original
+            self.assertEqual(hist.read_bytes(), before, "prior bytes must stay untouched")
+            self.assertEqual(
+                [p.name for p in Path(tmp).iterdir()], ["vibe-history.json"],
+                "no temp residue may remain",
+            )
 
     def test_failed_write_leaves_history_intact(self):
         with tempfile.TemporaryDirectory() as tmp:

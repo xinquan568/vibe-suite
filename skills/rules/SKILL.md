@@ -250,7 +250,7 @@ Bad: "the scanner lints each file and flags issues" where the registry canonizes
 
 Why it exists: within weeks, a multi-author NL plugin's terminology drifts — a single concept picks up 2–4 names (validator / analyzer / scorer / linter), leaving consumers unable to predict which one fires. R51 is the operational handle for the six vocabulary design principles; the canonical noun/verb registry lives in the [vocabulary](../vocabulary/SKILL.md) skill.
 
-Enable it in `.claude/vibe-suite.local.md`:
+Enable it in `.vibe-suite.md`:
 
 ```yaml
 rule_overrides:

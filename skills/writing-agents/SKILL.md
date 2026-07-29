@@ -1,0 +1,324 @@
+---
+name: writing-agents
+description: Authoring guide for Claude Code agents — making them trigger reliably, run on the right model tier, and emit consistent output. Use when an agent definition is being created, improved, or reviewed.
+---
+
+# Writing Agents
+
+> Scope: authoring Claude Code agent `.md` files — Markdown plus YAML
+> frontmatter, stored under `.claude/agents/`. Codex CLI is different: there,
+> agents are `[agents.<name>]` TOML tables inside `.codex/config.toml`.
+> Antigravity subagents were under-documented at the time of writing. For
+> coordinating multiple agents, see [orchestration](../orchestration/SKILL.md);
+> for plugin architecture, see [writing-plugins](../writing-plugins/SKILL.md).
+
+An agent file has YAML frontmatter with four keys, a body (the system prompt),
+and `<example>` blocks after the body:
+
+```yaml
+---
+name: sql-risk-scanner
+description: "Scans database access code for injection risks. Use when reviewing query construction or database modules."
+model: sonnet          # haiku | sonnet | opus
+tools: [Read, Glob, Grep]
+---
+```
+
+## 1. Example Blocks Make or Break Triggering
+
+Without `<example>` blocks, dispatch is guesswork; with them, Claude matches
+incoming requests against concrete scenarios. Provide at least 2 examples, and
+ideally 3: an obvious trigger, an edge case, and a non-obvious case.
+
+### Anatomy
+
+Every example has exactly three lines inside the block:
+
+```
+<example>
+Context: [what the user is doing — specific, never generic]
+user: "[a realistic message that should trigger this agent]"
+assistant: "[a dispatch statement that shows the decision logic]"
+</example>
+```
+
+### Bad Example
+
+```
+<example>
+Context: User has some code.
+user: "Look at my code."
+assistant: "I'll use the code-checker agent."
+</example>
+```
+
+A vague example like this lands around 40% trigger accuracy. Its failure modes:
+generic context, generic query, and no decision logic.
+
+### Good Example
+
+```
+<example>
+Context: User just refactored the payments module and wants defects caught before merging.
+user: "Review the payments changes for anything risky."
+assistant: "I'll dispatch the code-checker agent to scan the payments module for bugs, error-handling gaps, and security issues."
+</example>
+```
+
+A specific scenario like this reaches roughly 92% trigger accuracy. Its success
+factors: a specific context (module plus situation), realistic phrasing, and
+visible decision logic (what the agent will check).
+
+### The Three-Example Pattern
+
+| # | Purpose | Demonstrates |
+|---|---|---|
+| 1 | Obvious trigger | Baseline dispatch — the user explicitly asks |
+| 2 | Edge case | Boundary — an adjacent ask still triggers |
+| 3 | Non-obvious | Discovery — the user doesn't know the agent exists, but the need matches |
+
+A worked triple for a performance-profiler agent:
+
+```
+<example>
+Context: An API endpoint has become noticeably slow after a recent deploy.
+user: "Can you profile the /search endpoint? It's taking 4 seconds now."
+assistant: "I'll dispatch the performance-profiler agent to measure where the /search request spends its time."
+</example>
+
+<example>
+Context: Memory usage keeps climbing during long test runs; the user suspects a leak but never says "profile".
+user: "Heap usage grows every hour until the worker dies. Something is leaking."
+assistant: "I'll use the performance-profiler agent to trace allocations and find what is holding memory."
+</example>
+
+<example>
+Context: A design discussion about data access — the user doesn't know a profiling agent exists.
+user: "Should this be one big JOIN or two separate queries?"
+assistant: "I'll dispatch the performance-profiler agent to benchmark both shapes so we can decide on measured numbers."
+</example>
+```
+
+## 2. Model Selection
+
+| Task type | Model | Signal words | Example agents |
+|---|---|---|---|
+| Mechanical — parsing, formatting, counting | haiku | count, list, extract, format, parse, scan | scanner, parser, formatter, counter, lister |
+| Analysis — reasoning, moderate judgment | sonnet | analyze, review, evaluate, summarize, compare | linter, reviewer, extractor, summarizer |
+| Complex judgment — orchestration, multi-agent | opus | coordinate, decide, assess, synthesize, architect | QC coordinator, architect, strategy planner |
+
+### Quick Heuristic
+
+Count instruction lines and look for judgment words:
+
+- haiku → fewer than 20 instruction lines AND zero judgment words.
+- sonnet → 20-50 lines, OR any judgment words present.
+- opus → more than 50 lines, OR coordination logic in the body.
+
+The judgment words to look for: decide, evaluate, determine, assess, weigh,
+prioritize, judge, recommend, infer, synthesize.
+
+### Cost Impact
+
+| Model | Relative cost | Upgrade when |
+|---|---|---|
+| haiku | 1x | It gets edge cases wrong |
+| sonnet | 10x | It gets easy cases wrong |
+| opus | 30x | The agent coordinates other agents or makes architectural decisions |
+
+Rule: start with haiku and upgrade only when output quality demands it.
+
+## 3. Tool Least-Privilege
+
+List only the tools the body actually references. Every extra tool is a
+potential misuse vector.
+
+### Common Mistakes
+
+| Agent type | Typical over-grant | Correct set |
+|---|---|---|
+| Audit/review agent | Write, Edit, Bash it never needs | Read, Glob, Grep |
+| Code generator | Read, Grep it never uses | Write, Edit, Bash |
+| Orchestrator (no IO of its own) | Read, Write | Task |
+| Scanner | Bash just to run grep | Grep, Glob, Read |
+
+### Tool Reference
+
+| Tool | Include when |
+|---|---|
+| Read | The agent reads file contents |
+| Write | The agent creates new files |
+| Edit | The agent modifies existing files |
+| Glob | The agent searches for files by pattern |
+| Grep | The agent searches file contents |
+| Bash | The agent runs shell commands (linters, tests, builds) |
+| Task | The agent dispatches sub-agents |
+| Fetch | The agent makes HTTP requests |
+
+## 4. Output Format
+
+Every agent MUST define its output format in the body. Without one, output
+varies per invocation and parent agents cannot parse the results.
+
+### Pattern 1: Structured Report
+
+A section containing a markdown table, followed by a Summary block listing the
+total items, the issues found, and a pass/fail verdict.
+
+### Pattern 2: Severity-Tagged Findings
+
+One block per finding:
+
+```
+**[HIGH] Unparameterized query in user lookup**
+- File: src/db/users.js
+- Line: 42
+- Issue: User input is interpolated directly into the SQL string.
+- Fix: Switch to a parameterized query with bound arguments.
+```
+
+Order findings by severity: CRITICAL > HIGH > MEDIUM > LOW > INFO.
+
+### Pattern 3: Pass/Fail Gate
+
+The final line of output is exactly one of:
+
+```
+PASS: All checks passed
+WARN: {N} warnings found (see above)
+FAIL: {N} errors found (see above)
+```
+
+## 5. System Prompt Structure
+
+Order matters: the model reads top to bottom, so early instructions are
+front-loaded. Use five sections, in this order:
+
+1. **Mission** — 1-2 sentences: what the agent does and WHY.
+2. **Instructions** — numbered steps.
+3. **Boundaries** — "Do NOT" items plus ambiguity resolutions ("If X then Y").
+4. **Output Format** — the exact template.
+5. **Error Handling** — case → resolution lines, e.g. no files found → report
+   and exit; a tool call fails → report and continue; scope unclear → take the
+   narrower interpretation.
+
+### Section Sizing
+
+| Section | Target lines | Over-budget signal |
+|---|---|---|
+| Mission | 2-3 | More than 1 paragraph |
+| Instructions | 5-15 | More than 20 numbered steps |
+| Boundaries | 3-7 | More than 10 "Do NOT" items |
+| Output Format | 5-15 | More than 3 output sections |
+| Error Handling | 3-5 | More than 5 error cases |
+
+Aim for a total body of 25-45 lines. Over 60 lines means the agent is doing too
+much — split it.
+
+## 6. Worked Example
+
+### Before (score 52/100)
+
+```yaml
+---
+name: code-checker
+description: "Checks code."
+model: opus
+tools: [Read, Write, Edit, Bash, Grep, Glob, Task]
+---
+
+Check the code for problems. Be thorough.
+```
+
+| Problem | Penalty |
+|---|---|
+| Description has 0 trigger phrases and no "Use when..." clause | -30 |
+| opus for a simple review task | -10 |
+| 7 tools granted while the body uses about 3 | -10 |
+| No examples → unreliable triggering | -15 |
+| No output format → inconsistent results | -15 |
+| No boundaries → scope creep | -10 |
+| No error handling → silent failures | -10 |
+
+### After (score 95/100)
+
+```yaml
+---
+name: code-checker
+description: "Reviews source code for bugs, error-handling gaps, security risks, resource leaks, race conditions, and dead code. Use when the user asks for a code review, a quality check, or a pre-push scan."
+model: sonnet
+tools: [Read, Glob, Grep]
+---
+
+## Mission
+Find real defects in the target code and report them in a consistent,
+parseable format.
+
+## Instructions
+1. Glob the target scope for source files.
+2. Read each file that matches.
+3. Grep for risk patterns: empty catch blocks, hardcoded credentials, TODO/FIXME.
+4. Assess each candidate: is it a real defect, and at what severity?
+5. Emit the report in the format below.
+
+## Boundaries
+- Read-only: do NOT modify any file.
+- Do NOT run shell commands.
+- Defer style nits to the linter; report defects only.
+- If no scope is given, default to src/.
+
+## Output Format
+One block per finding:
+**[SEVERITY] title**
+- File: {path}
+- Line: {N}
+- Issue: {description}
+- Fix: {concrete suggestion}
+
+Order CRITICAL > HIGH > MEDIUM > LOW > INFO, then end with exactly one of:
+PASS: All checks passed
+WARN: {N} warnings found (see above)
+FAIL: {N} errors found (see above)
+
+## Error Handling
+- No files match the scope → report that and exit.
+- A file cannot be read → note it and continue.
+```
+
+```
+<example>
+Context: User is about to push a branch and wants a quality check first.
+user: "Give this branch a once-over before I push."
+assistant: "I'll dispatch the code-checker agent to scan the changed files for defects and give a PASS/WARN/FAIL verdict."
+</example>
+
+<example>
+Context: A bug reached production and the user wants nearby code scanned for similar defects.
+user: "That null crash made it to prod — is the rest of the checkout flow safe?"
+assistant: "I'll use the code-checker agent to sweep the checkout modules for the same class of defect."
+</example>
+```
+
+### Changes Made
+
+| Change | Delta |
+|---|---|
+| Description: 0 → 6 trigger phrases | +30 |
+| Model: opus → sonnet — analysis tier, reasoning not orchestration (20x cheaper) | +10 |
+| Tools: 7 → 3 — read-only analysis gets read-only tools | +10 |
+| 2 `<example>` blocks added | +15 |
+| Output format defined | +15 |
+| Boundaries added | +10 |
+| Error handling added | +5 |
+
+## 7. Common Mistakes
+
+| Mistake | Impact | Fix |
+|---|---|---|
+| No examples | 40% trigger accuracy | Add 2-3 specific scenario examples |
+| opus for mechanical work | 30x the cost, same result | haiku for parsing, sonnet for analysis |
+| All tools granted | Writes when it should only read | List only body-referenced tools |
+| No output format | A different format every run | Define the exact template |
+| Body over 60 lines | The agent is doing too much | Split into focused sub-agents |
+| "Be thorough" in the body | Meaningless filler | Replace with specific instructions |
+| No error handling | Silent failures | Add 3-5 error cases with resolutions |

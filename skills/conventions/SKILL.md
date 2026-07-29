@@ -1,0 +1,218 @@
+---
+name: conventions
+description: Tool-agnostic conventions floor for natural-language artifacts — SKILL.md open spec, AGENTS.md canonical memory, prompt layering, vague quantifiers, naming, rule overrides, and MCP tool naming; per-tool schemas live in overlay skills.
+---
+
+# Conventions — Universal Floor
+
+Baseline conventions for natural-language (NL) artifacts that hold no matter
+which agent tool reads them. Tool-specific schemas are deliberately excluded
+here; they live in overlay skills layered on top of this floor.
+
+## How overlays extend the floor
+
+- This skill is the **floor**: every rule in it applies to all SKILL.md files
+  and NL artifacts, in every tool.
+- An **overlay** contributes one tool's schemas and path rules; overlay rules
+  bind only to artifacts under that tool's canonical paths.
+- To evaluate an artifact, classify its target tool from the canonical path
+  it lives under, then apply the floor plus the matching overlay:
+
+| Overlay | Canonical paths governed |
+|---|---|
+| [conventions-claude](../conventions-claude/SKILL.md) | `.claude/`, `plugin.json` |
+| conventions-codex *(planned, not yet shipped in this suite)* | `.codex/`, `.agents/`, `AGENTS.md` |
+| conventions-antigravity *(planned, not yet shipped in this suite)* | `.gemini/`, `.agent/` |
+
+## 1. SKILL.md — the cross-tool open standard
+
+SKILL.md is an open specification (Agent Skills). Its steward is the Agentic
+AI Foundation, which sits inside the Linux Foundation; Anthropic first
+published the spec on 2025-12-18; adoption followed from OpenAI, Microsoft, and Google
+within 48 hours, and 32+ tools read the format by 2026-03. Authoritative spec:
+<https://agentskills.io/specification>.
+
+### Required frontmatter
+
+| Key | Constraint |
+|---|---|
+| `name` | 1-64 chars, lowercase + hyphens, MUST equal the parent directory name, no leading/trailing/consecutive hyphens |
+| `description` | 1-1024 chars; states both WHAT the skill covers and WHEN to load it |
+
+### Optional frontmatter
+
+| Key | Constraint |
+|---|---|
+| `license` | license identifier |
+| `compatibility` | max 500 chars; environment needs |
+| `metadata` | arbitrary key/value map — author and version belong HERE, not top-level |
+| `allowed-tools` | space-separated; experimental in the spec, tool-specific in practice |
+
+Tool-specific frontmatter extensions are documented in the overlays.
+
+### Canonical skill paths per tool
+
+| Tool | Path |
+|---|---|
+| Open spec + Codex | `.agents/skills/<name>/SKILL.md` |
+| Claude Code | `.claude/skills/<name>/SKILL.md` |
+| Antigravity | `<workspace>/.agent/skills/<name>/SKILL.md` (singular `.agent`) AND `.agents/skills/...` as an alias |
+| Legacy Gemini | `.gemini/skills/<name>/SKILL.md` |
+| Continue / Cursor / Kiro | `.<tool>/skills/<name>/SKILL.md` |
+
+### Body guidance (recommendations, not spec requirements)
+
+- Keep the body under 500 lines; the spec's own guidance is a body under
+  5000 tokens, with overflow moved to `references/`.
+- A skill body is reference material only — imperative workflow steps belong
+  in commands and agents.
+- Include a scope note that spells out the skill's coverage and, just as
+  explicitly, what it will NOT handle.
+- Related skills get cross-referenced through their `plugin:skill` ids.
+- The spec places "no format restrictions" on the body, so a missing section
+  such as `## Output` is a tool-style preference, never a violation — do not
+  penalize it.
+
+### Supporting directories (per spec)
+
+- `scripts/` — executable code
+- `references/` — documentation loaded on demand
+- `assets/` — templates, images, data
+
+### Progressive disclosure (three levels)
+
+1. Metadata (~100 tokens): `name` + `description` of every skill; this
+   level loads for every skill when the session starts.
+2. Instructions (<5000 tokens): the body, loaded on activation.
+3. Resources: supporting files, loaded on demand.
+
+## 2. AGENTS.md — canonical universal memory
+
+`AGENTS.md` is the canonical memory file across tools (suite design
+decision). Per-tool native behavior:
+
+- **Codex** reads AGENTS.md natively; hierarchical root→cwd resolution with
+  the closer file overriding; 32 KiB cap; personal overlay at
+  `~/.codex/AGENTS.override.md`.
+- **Antigravity / Gemini** read GEMINI.md natively, but `context.fileName`
+  accepts an array — set it to `["AGENTS.md", "GEMINI.md"]`.
+- **Claude Code** reads CLAUDE.md natively and supports `@file.md` imports —
+  canonically, CLAUDE.md holds a single line: `@AGENTS.md`.
+
+Multi-tool layout to aim for: a root `AGENTS.md` holding all content; a
+one-line `CLAUDE.md` (`@AGENTS.md`); a one-line GEMINI.md only if native
+@-import works there; and `.gemini/settings.json` with `context.fileName`
+set as above.
+
+Body conventions: a one-line project description opener; `## Architecture`
+or `## Project Structure`; `## Build` / `## Run` / `## Test` with verifiable
+commands; `## Prerequisites`; `## Conventions`.
+
+Tool-specific memory extensions (Claude `@`-import, Gemini `@{path}`
+injection, Codex `project_doc_fallback_filenames`) are overlay material.
+
+### Agent workflow programs
+
+A recognized artifact variant with NO dedicated penalty rubric yet: a single
+project-root imperative Markdown file that drives an autonomous loop — a
+hybrid of memory file and slash command. Canonical example:
+karpathy/autoresearch `program.md` (audited 2026-05-28, scoring ~90). Such
+files are covered by floor rules R01/R03/R09, command rules R14–R17, and
+memory-file rules R33–R39; a standalone rubric is deferred until at least
+three (N≥3) examples exist.
+
+## 3. General prompt engineering
+
+- **Layer order** (complex prompts must keep this sequence): 1 role/persona,
+  2 context, 3 task, 4 constraints, 5 output format.
+- **Few-shot**: give 2+ concrete input→output examples for complex judgment
+  tasks.
+- **Positive framing**: state what to DO, not prohibitions (which trigger
+  the Pink Elephant effect).
+- **Explicit output format**: the body of each command and agent spells out
+  its exact output structure.
+
+## 4. Vague quantifiers (R01)
+
+Penalized terms — the list is exact and closed: appropriate, relevant, as
+needed, sufficient, adequate, reasonable, then the adverbs properly and
+correctly, and the quantity words some, several, various.
+
+Carve-outs (no penalty):
+
+- `relevant` inside a markdown header;
+- `relevant to <named-scope>`;
+- any listed term followed by a measurable-criterion clause.
+
+Penalty values are owned by the suite scoring rubric: -2 per occurrence,
+capped at -20. R01 applies regardless of target tool.
+
+## 5. Naming conventions
+
+| Item | Convention |
+|---|---|
+| File names | kebab-case |
+| Plugin / package names | kebab-case |
+| Skill references | `plugin-name:skill-name` |
+| Ordered rule files | `NN-kebab.md` (e.g. `01-formatting.md`) |
+| Environment variables | SCREAMING_SNAKE |
+| Plugin-dir env vars | `<TOOL>_PLUGIN_ROOT` (`CLAUDE_PLUGIN_ROOT`, `CODEX_PLUGIN_ROOT`) |
+
+Portable paths: reference intra-plugin files through the tool's plugin-root
+env var; hardcoded absolute paths break portability. Exact per-tool
+semantics are overlay material.
+
+## 6. Rule overrides
+
+A universal override system with a per-tool config file:
+
+| Tool | Override file |
+|---|---|
+| Claude Code | `.claude/vibe-suite.local.md` |
+| Codex | `.codex/vibe-suite.local.md` |
+| Antigravity | `.gemini/vibe-suite.local.md` (or `.agent/` — TBD post-2026-06-18) |
+
+Frontmatter keys: `strictness` (example value: `standard`),
+`score_threshold` (default 70), and a `rule_overrides` map.
+
+| Override type | Effect |
+|---|---|
+| `suppress: true` | penalty becomes 0 |
+| `enabled: true` | activates a ship-disabled rule (currently only R51) |
+| `max_penalty: N` | caps the penalty; less negative = more lenient |
+| `threshold: N` | adjusts a numeric threshold |
+| `min_examples: N` | adjusts an example-count minimum |
+| `vocabulary_skill: <path>` | R51 only — points at the vocabulary skill |
+
+Example overrides by intent:
+
+- R01 `max_penalty: -10` (from -20)
+- R05 `threshold: 600` (from 500 lines)
+- R09 `min_examples: 1` (from 2)
+- R10 `suppress: true` (the model-tier check)
+- R23 `threshold: 800` (rules budget, from 500 lines)
+- R51 `enabled: true` plus `vocabulary_skill: <path>`
+
+Rules absent from the map keep the suite scoring defaults; ship-disabled
+rules (R51) contribute zero unless explicitly enabled.
+
+## 7. Universal tool references (MCP naming)
+
+MCP tools follow `mcp__<server-name>__<tool-name>` — e.g. a `validate` tool
+on a `mermaid` server is invoked as `mcp__mermaid__validate`. Per-tool
+built-in tool catalogs are overlay material; the Claude Code catalog lives in
+the Claude overlay's
+[tool-catalog reference](../conventions-claude/references/reference.md).
+
+## Rule ids cited by this floor
+
+R01 vague quantifiers; R03 positive framing; R05 500-line skill cap;
+R09 prompt layers / minimum examples; R10 model tier; R14–R17 command rules;
+R23 rules budget (500 lines); R33–R39 memory-file rules; R51 vocabulary
+drift (opt-in, default-disabled).
+
+## Scope
+
+This floor does NOT cover: tool schemas (see the overlays); penalty tables
+(see the suite scoring rubric); anti-pattern and best-practice catalogs; or
+general software-engineering conventions outside NL artifacts.

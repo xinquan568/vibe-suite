@@ -1,0 +1,217 @@
+---
+name: writing-rules
+description: How to author, improve, and review project rules — .claude/rules/ files that the model actually follows, covering the enforceability test, token budgets, positive framing, and path scoping.
+---
+
+# Writing Rules
+
+> Scope: only Claude Code has `.claude/rules/` — instruction files that stay
+> loaded at all times and scope themselves through `paths:` glob frontmatter.
+> Neither Codex CLI nor Antigravity offers an exact counterpart: each keeps
+> its always-on project instructions in a hierarchical memory file instead
+> (for Codex that file is `AGENTS.md`; for Antigravity, `GEMINI.md`), and
+> either tool can be pointed at one canonical `AGENTS.md` (see
+> [conventions-codex](../conventions-codex/SKILL.md) and
+> [conventions-antigravity](../conventions-antigravity/SKILL.md)). The
+> technique below — bold imperative plus rationale — carries into any tool's
+> instruction files. CLAUDE.md / AGENTS.md conventions are covered in
+> [writing-plugins](../writing-plugins/SKILL.md); system prompts broadly in
+> [writing-prompts](../writing-prompts/SKILL.md).
+
+## 1. The Golden Format
+
+Every rule has three parts:
+
+| Part | Content |
+|---|---|
+| Bold imperative | Do X, not Y |
+| Consequence | The concrete bad outcome when the rule is absent |
+| Mechanism | Why that failure happens |
+
+Illustration: "**Return a typed Result from every handler.** Without it,
+failures surface as context-free 500 errors — a raw panic bypasses the error
+middleware and crashes the worker."
+
+The one-line form is fine when the mechanism is obvious — for example
+prescribing `const`/`let` over `var` with the hoisting rationale attached in
+the same sentence. Use the multi-line form when the mechanism needs
+explanation — for example requiring explicit transactions around multi-table
+writes, because the ORM's save call does not wrap them automatically, so the
+transaction call must be made by hand.
+
+## 2. Positive Framing (Pink Elephant Effect)
+
+Prohibitions make the model fixate on the banned construct: "Don't use X"
+primes X. In the illustrative before/after, a rules file written as a negative
+list scored **60**; the positive rewrite scored **90**.
+
+Rewrite prohibitions as prescriptions:
+
+- "Don't use var" → prescribe `const`/`let`.
+- "Don't mutate parameters" → prescribe returning new objects.
+- "No console.log" → prescribe the logger service, with the rationale that it
+  is stripped in production.
+
+### Conversion Table
+
+| Negative pattern | Positive rewrite |
+|---|---|
+| "Don't use X" | "**Use Y**" — where Y is the correct alternative |
+| "Never do X" | "**Always do Y**" |
+| "Avoid X because…" | "**Use Y because…**" — flip the rationale |
+| "X is deprecated" | "**Use Y, which replaced X in version N**" |
+
+## 3. Enforceability Test
+
+Before writing any rule, ask the gate question: could a reviewer verify
+compliance within a **30-second** code review? If not, it is not a rule.
+
+### Enforceable
+
+| Rule | 30-second test |
+|---|---|
+| Handlers return typed Results | Grep the handlers; check return types |
+| Auth decorator on all endpoints | Grep the route definitions |
+| Parameterized SQL only | Grep SQL strings for concatenation or template literals |
+
+### Not Enforceable (and why)
+
+- "Write clean, maintainable code" — undefined.
+- "Keep functions small" — no threshold.
+- "Use meaningful variable names" — subjective.
+- "Follow best practices" — unspecified.
+
+### Making Vague Rules Enforceable
+
+- "Keep functions small" → functions under **40 lines**, backed by the linter
+  (`eslint max-lines-per-function`).
+- "Meaningful names" → variable names run **>= 3 characters**; the loop
+  indices `i`, `j`, `k` are exempt.
+- "Handle errors properly" → a `catch` block has exactly three legal moves:
+  re-throw, OR log and return an error response, OR call `reportError()`.
+
+## 4. Budget Discipline
+
+Hard budget: **under 500 lines** summed over every file in `.claude/rules/`.
+Rules are always loaded, so every line costs tokens on every single
+interaction.
+
+### Token Cost
+
+| Total lines | Cost per interaction | Assessment |
+|---|---|---|
+| **100** | **~400** tokens | Negligible |
+| **300** | **~1,200** tokens | Noticeable |
+| **500** | **~2,000** tokens | The budget line |
+| **800+** | **~3,200+** tokens | Over budget — consolidate |
+
+### Reduction Strategies
+
+| Strategy | Typical savings |
+|---|---|
+| Defer to the linter — cite e.g. `pnpm lint` instead of restating its rules | 10-30 lines |
+| Merge related files (3 → 1) | 15-25 lines |
+| Delete rules the model already knows from training | 5-15 lines |
+| Tables over lists — 10 rules run ≈ 20 lines as a list, ≈ 12 as a table | 5-10 lines |
+
+### Safe to Delete
+
+Behaviors already baked into model training need no rule: descriptive naming,
+commenting complex code, null/undefined checks, preferring async/await. Write
+rules ONLY for project-specific facts the model cannot know.
+
+## 5. Path Scoping
+
+The frontmatter mechanism is a YAML `paths:` glob list:
+
+```yaml
+---
+paths: ["src/api/**/*.ts"]
+---
+```
+
+An unscoped rule file loads for every file — costly, and often wrong for the
+file being edited.
+
+### Scoping Strategy
+
+| Rule topic | Scope to |
+|---|---|
+| API conventions | `src/api/**/*.ts`, `src/routes/**/*.ts` |
+| Database rules | `src/db/**/*.ts`, `src/models/**/*.ts` |
+| Test conventions | `**/*.test.ts`, `**/*.spec.ts` |
+| Universal rules | Omit the `paths` field |
+
+Bright line: naming a particular directory, layer, or technology obligates the
+rule to carry a scope.
+
+### Cost Impact
+
+An unscoped 200-line file costs **800 tokens** on every interaction. The same
+content split into 4 scoped files costs **200 tokens** per interaction,
+because only the relevant file loads.
+
+## 6. Conflict Prevention
+
+Two rules must never contradict each other. Whenever a contradiction is even
+possible, put both rules in ONE file and spell out the conditions.
+
+Bad: two separate files mandate opposing return shapes — one demands raw JSON,
+the other a wrapped Result. Good: a single file that splits by condition —
+wrapped returns for API handlers (the middleware does the formatting), raw
+returns for internal service functions (they are not client-facing).
+
+### Detection Checklist (before adding any rule)
+
+1. Keyword-search the existing rules.
+2. Check whether the opposite statement already exists.
+3. Check whether a broader rule already subsumes yours.
+4. On conflict, merge into one file with explicit conditions.
+
+## 7. Worked Example
+
+### Before: 800 lines, 12 files — score 45/100
+
+| File | Lines | Defect |
+|---|---|---|
+| naming.md | 80 | Mostly restates ESLint rules |
+| errors.md | 90 | Contradicts exceptions.md |
+| exceptions.md | 70 | Contradicts errors.md |
+| logging.md | 60 | Unscoped; only relevant to `src/api/` |
+| testing.md | 85 | Contains test-framework tutorial content |
+| database.md | 95 | Unscoped; only relevant to `src/db/` |
+| api.md | 70 | Overlaps errors.md |
+| security.md | 55 | Restates OWASP basics the model already knows |
+| performance.md | 45 | Vague advice, unenforceable |
+| imports.md | 30 | Restates ESLint import rules |
+| comments.md | 25 | Training-known behavior |
+| types.md | 95 | Half of it is a language tutorial |
+
+### After: 180 lines, 4 files — score 92/100
+
+| File | Lines | Scope |
+|---|---|---|
+| api.md | 55 | `src/api/**` |
+| database.md | 45 | `src/db/**` |
+| testing.md | 40 | `**/*.test.ts` |
+| universal.md | 40 | Unscoped |
+
+What happened: the linter-covered, training-known, and vague files were
+deleted outright; the contradictory errors/exceptions pair collapsed into
+api.md under explicit conditions; logging also moved into api.md and picked
+up a scope; types was shrunk to its **10** project-specific lines and folded
+into universal.md.
+
+Savings: 800 → 180 lines, a **78% reduction**; per-interaction cost fell from
+**~3,200 to ~720** tokens.
+
+## 8. Quality Checklist
+
+- [ ] Each rule keeps to the golden shape — imperative, then consequence, then mechanism
+- [ ] Primary instructions are positively framed — never a "Don't…"
+- [ ] The 30-second enforceability test passes for each rule
+- [ ] All rule files together stay < **500 lines**
+- [ ] `paths:` frontmatter scoping wherever a rule is not universal
+- [ ] No cross-file contradictions
+- [ ] No rules restating training-default behavior
+- [ ] No rules duplicating the linter — reference the linter instead

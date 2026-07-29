@@ -1,0 +1,325 @@
+---
+name: orchestration
+description: Workflow patterns for coordinating multiple agents in Claude Code — sequential pipelines, parallel dispatch, retry loops with QC gates, plus shared partials. Use when the system being designed spans several agents, commands, or processing stages.
+---
+
+# Orchestration
+
+> Scope: multi-agent workflow design only. To author the individual agents these
+> workflows dispatch, see [writing-agents](../writing-agents/SKILL.md). For overall
+> plugin architecture, see [writing-plugins](../writing-plugins/SKILL.md).
+
+## 1. Four Orchestration Patterns
+
+### Pattern A: Parallel Dispatch
+
+Several agents work simultaneously on independent slices of the same problem. A
+command fans the work out through the Task tool, waits for every agent to return,
+and synthesizes the results into a single deliverable (fan-out plus synthesis).
+
+```
+                    +--> [analysis agent 1] --+
+[command] --fan-out-+--> [analysis agent 2] --+--> [merged final report]
+                    +--> [analysis agent 3] --+
+```
+
+**Use when:** the agents have no dependency on each other's output.
+
+**Real examples:** the grill plugin fans out to 6 review agents at once;
+docs-guardian dispatches 4 agents covering staleness, accuracy, coverage, and
+quality.
+
+Implementation sketch (command body):
+
+```markdown
+## Steps
+1. Dispatch every analysis agent in parallel via the Task tool — one Task call
+   per agent, all issued together.
+2. Collect each agent's report as it completes.
+3. Synthesize one final report, cross-referencing findings that more than one
+   agent raised independently.
+```
+
+| Decision | Recommendation |
+|---|---|
+| Max parallel agents | 6 — diminishing returns above that |
+| Timeout per agent | 120 seconds for sonnet, 300 for opus |
+| Failure handling | One agent failing → continue with the others |
+| Result merging | Deduplicate findings that appear in multiple agents' output |
+
+### Pattern B: Sequential Pipeline
+
+Stage N's output becomes stage N+1's input.
+
+```
+parse --> chunk --> summarize --> QC --> output
+```
+
+**Use when:** a stage cannot begin until the stage before it has produced its
+output.
+
+**Real examples:** reading-assistant, whose pipeline is parse PDF → chunk →
+summarize → QC → output, and tdd-guardian, which chains discover tests → run →
+check coverage → analyze failures → report → enforce.
+
+Implementation sketch (4-phase command body):
+
+```markdown
+## Phase 1 — Parse (haiku)
+Read the raw inputs and emit structured JSON.
+
+## Phase 2 — Process (sonnet)
+Consume the Phase 1 JSON and perform the substantive work.
+
+## Phase 3 — QC (sonnet)
+Verify the Phase 2 output and emit a pass/warn/fail verdict.
+
+## Phase 4 — Output
+On QC pass, deliver the result. On QC fail, report the failures and stop.
+```
+
+| Decision | Recommendation |
+|---|---|
+| Phase boundary | Every phase needs a clear input type and output type |
+| Error propagation | Fail fast — never continue past a failed phase |
+| State passing | Structured output (JSON) between phases |
+| Resumability | Track phase status for long pipelines (see section 4) |
+
+### Pattern C: QC Gate
+
+AI does the processing, then a quality check verifies the output before the user
+ever sees it.
+
+```
+[mechanical prep] --> [AI work] --> [QC verify] ----> [output]
+     (haiku)          (sonnet)     (sonnet/opus)
+                                        |-- pass --> deliver
+                                        |-- warn --> deliver + warnings
+                                        +-- fail --> stop + report
+```
+
+**Use when:** AI output needs verification before delivery.
+
+| Verdict | Condition | Action |
+|---|---|---|
+| PASS | All checks green | Deliver directly |
+| WARN | Minor issues, < 3 low-severity | Deliver with a warnings section |
+| FAIL | Any critical issue OR > 5 total issues | Stop, report the failures, suggest a re-run |
+
+**Real examples:** the QC agents in reading-assistant check summaries for
+accuracy, completeness, and fidelity; audit-fix in codex-toolkit cycles through
+audit → fix → verify.
+
+### Pattern D: Retry Loop
+
+When QC fails, re-dispatch the same agent with the error context attached, and
+loop until it passes or the retry budget runs out. If the final attempt still
+fails, report it.
+
+**Use when:** a failed quality check has a real chance of passing on a retry
+that carries added context.
+
+Retry protocol:
+
+- Maximum 3 retries.
+- The retry prompt must include the previous output (or a summary if it is long),
+  the specific QC failures, and a directive to fix ONLY the listed failures
+  without changing the sections that passed.
+- Once retries are exhausted, output the best attempt annotated with its
+  remaining failures.
+
+| Decision | Recommendation |
+|---|---|
+| Max retries | 3 — success is rare after 3 consecutive fails |
+| Error context | Pass the specific failures, never a bare "try again" |
+| Retry scope | Fix the failures only; preserve output that passed |
+| Cost cap | Each retry is a full agent invocation — budget for it |
+
+## 2. Shared Partials for DRY
+
+Extract logic that several commands repeat into `commands/shared/*.md` files
+whose frontmatter carries `user-invocable: false`.
+
+### When to Extract
+
+| Situation | Verdict |
+|---|---|
+| Same logic in 3+ commands | Always extract |
+| 2 commands, complex logic (> 20 lines) | Extract |
+| 2 commands, simple logic (< 10 lines) | Don't — the duplication is fine |
+| 1 command, speculative reuse | Don't — wait for actual reuse |
+
+### Good Candidates
+
+| Partial | Contents | Consumers |
+|---|---|---|
+| `shared/load-config.md` | Read and validate the plugin config | All commands that need config |
+| `shared/discover-files.md` | Find target files by pattern/extension | Repo-scanning commands |
+| `shared/validate-prereqs.md` | Tool availability and environment checks | Commands with external dependencies |
+| `shared/format-report.md` | Report header/footer and severity colors | Report-emitting commands |
+
+### Partial File Structure
+
+```markdown
+---
+user-invocable: false
+description: Load and validate the plugin configuration.
+---
+
+1. Look for `.config.md` in the project root.
+2. If it is absent, fall back to `.config.yaml`.
+3. If neither exists, stop with an error telling the user to run
+   `/vibe-suite:init`.
+4. Parse the file.
+5. Validate the required fields.
+6. Return the validated config.
+```
+
+## 3. Cost Gates
+
+Expensive pipelines insert a cost-estimation step between the mechanical prep
+phase and the AI processing phase.
+
+Flow: Phase 1 (haiku) parses or discovers → count the items → estimate the cost
+(items × per-item model cost) → display the estimate → the user confirms or
+adjusts the scope → Phase 2 (sonnet/opus) processes only the confirmed scope.
+
+### Cost Estimation Table
+
+| Model | ~Cost per item | 10 items | 100 items | 1000 items |
+|---|---|---|---|---|
+| haiku | $0.001 | $0.01 | $0.10 | $1.00 |
+| sonnet | $0.01 | $0.10 | $1.00 | $10.00 |
+| opus | $0.03 | $0.30 | $3.00 | $30.00 |
+
+An "item" means a single agent invocation applied to a single unit of work: a
+file, a chunk, or a component.
+
+### User Confirmation Pattern
+
+After Phase 1, display the item count, the model that will run, the approximate
+dollar amount, and the approximate minutes. Then ask whether to proceed, offering
+scope reduction via a `--filter` flag.
+
+## 4. Pipeline State
+
+Resumable pipelines — long, expensive, or failure-prone ones — persist their
+state to a JSON file.
+
+### State File Schema
+
+```json
+{
+  "pipeline": "summarize-docs",
+  "startedAt": "2026-07-29T08:00:00Z",
+  "configFingerprint": "sha256:3f9a1c...",
+  "phases": {
+    "parse": {
+      "status": "completed",
+      "startedAt": "2026-07-29T08:00:05Z",
+      "completedAt": "2026-07-29T08:01:12Z",
+      "itemsProcessed": 42,
+      "itemsTotal": 42,
+      "output": "parse-output.json"
+    }
+  },
+  "lock": {
+    "pid": 12345,
+    "acquiredAt": "2026-07-29T08:00:00Z"
+  }
+}
+```
+
+### State Transitions
+
+```
+pending → running → completed | failed | skipped
+```
+
+`skipped` means a previous phase failed, so this one never ran.
+
+### Resumability Rules
+
+1. At startup, look for a state file left by a previous run.
+2. When one is found and its `configFingerprint` matches, resume from the last
+   incomplete phase.
+3. If the fingerprint differs, warn the user and offer a fresh start or a
+   resume anyway.
+4. When a lock exists, test whether its PID is still running: a dead PID means
+   clear the stale lock and continue; a live PID means abort.
+
+## 5. Model Tier Allocation
+
+Match each phase's model to the cognitive load of its work rather than to how
+important the phase feels.
+
+- **haiku** — mechanical/IO work: parser, scanner, formatter, counter.
+- **sonnet** — reasoning/AI work: summarizer, extractor, reviewer, linter.
+- **opus** — judgment/QC work: coordinator, architect, final reviewer.
+
+### Pipeline Model Assignment Example
+
+| Phase | Model | Why |
+|---|---|---|
+| Discover files | haiku | glob + read |
+| Parse/chunk | haiku | mechanical |
+| Analyze chunks | sonnet | judgment |
+| QC the analyses | sonnet | verifying, not creating |
+| Synthesize report | opus | cross-reference and prioritize |
+
+### Cost Optimization
+
+| Optimization | How | Savings |
+|---|---|---|
+| Batch mechanical work | One haiku call over all files, not one per file | 5-10x |
+| Pre-filter | Narrow with grep/glob before sonnet sees anything | 2-5x |
+| Cache phase outputs | Completed phases are never re-run on retry | 1-3x |
+| Scope reduction | User filters to a subset before the expensive phases | variable |
+
+## 6. Error Propagation
+
+### Rules
+
+1. A phase fails → STOP: set its status to `"failed"` with the error message in
+   the state file, and do not start the next phase.
+2. An agent fails during parallel dispatch → report it and continue; one failure
+   must not block the others.
+3. A retry fails → once max retries are spent, hand the problem back to the
+   user with the complete context attached.
+4. Errors are never swallowed silently — the final output must surface every
+   failure.
+
+### Error Report Format
+
+```
+## Phase: {phase name}
+Status: FAILED
+Error: {error message}
+
+Context:
+- Items processed: N of M
+- Last successful item: {id}
+- Elapsed time: {duration}
+
+Recovery options:
+- /vibe-suite:<command> --resume              — continue from this phase
+- /vibe-suite:<command> --restart             — start fresh
+- /vibe-suite:<command> --skip-phase {phase}  — not recommended
+```
+
+### Fallback Paths
+
+Always offer a manual fallback when automation fails. Example: after 3 failed
+retries, output every item that succeeded, list the failed items with their
+error context, and suggest manual analysis for the failures.
+
+## 7. Pattern Selection Guide
+
+| Situation | Pattern | Why |
+|---|---|---|
+| Multiple independent analyses of the same input | A — Parallel | No dependencies, maximum throughput |
+| Each step needs the prior step's output | B — Sequential | One-direction data flow |
+| AI output must be verified before delivery | C — QC Gate | Catch errors before the user sees them |
+| Recoverable quality failures with feedback | D — Retry | Cheaper than a manual re-run |
+| Complex multi-stage work plus verification | B + C | QC gates between the expensive phases |
+| Multiple analyses plus a quality bar | A + C | Run in parallel, then QC all results |

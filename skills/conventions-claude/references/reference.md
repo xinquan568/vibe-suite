@@ -1,0 +1,149 @@
+# Claude Code Overlay — Reference Detail
+
+Companion to [../SKILL.md](../SKILL.md). Loaded on demand.
+
+## Hook event context fields
+
+| Event | Context fields |
+|---|---|
+| SessionStart | `source` (startup / resume / clear / compact), `model` |
+| UserPromptSubmit | `prompt` |
+| PreToolUse | `tool_name`, `tool_input` |
+| PostToolUse | PreToolUse fields plus `tool_output` |
+| PermissionRequest | PreToolUse fields plus `permission_mode` |
+| Stop | `reason`; the hook may respond with `decision: block` |
+| StopFailure | `reason` |
+| FileChanged | `filename`, `watcher_path` |
+
+## Settings field table
+
+| Key | Purpose |
+|---|---|
+| `permissions` | permission rules; includes `additionalDirectories` |
+| `hooks` | hook registrations |
+| `model` | session model |
+| `disableSkillShellExecution` | turns off dynamic-context shell injection in command/skill bodies |
+| `env` | environment variables |
+| `statusLine` | status line configuration |
+| `agent` | agent configuration (the only key, with `subagentStatusLine`, allowed in a plugin's settings.json) |
+| `effortLevel` | default effort |
+| `language` | response language |
+| `outputStyle` | output style |
+| `enabledPlugins` | plugin enablement |
+| `claudeMd` | memory-file behavior |
+| `claudeMdExcludes` | paths excluded from CLAUDE.md loading |
+| `autoMemoryEnabled` | toggles auto memory |
+| `autoMemoryDirectory` | relocates the auto-memory directory |
+| `sandbox.enabled` | sandboxing |
+| `extraKnownMarketplaces` | additional marketplaces |
+| `strictKnownMarketplaces` | restricts marketplaces to the known set |
+
+Notes: `theme` is NOT documented (removed 2026-06-07). The table is
+representative, not exhaustive — plausible unknown keys are advisory
+findings only. NEVER commit `bypassPermissions: true` in a shared file.
+
+## Auto memory details
+
+- Introduced v2.1.59+; lives at `~/.claude/projects/<slug>/memory/`;
+  controlled by `autoMemoryEnabled` / `autoMemoryDirectory`.
+- MEMORY.md is loaded at startup only up to ~200 lines / 25 KB; topic
+  files load alongside it.
+- MEMORY.md: frontmatter-less, one line per entry, an index only — it is
+  not scored.
+- Topic files MUST carry frontmatter `name`, `description`, `type`.
+- `type` enum and meanings:
+  - `user` — user preferences and habits
+  - `feedback` — corrections from past sessions
+  - `project` — project facts
+  - `reference` — copied external references
+- Every topic file must be indexed in MEMORY.md (orphans are flagged), and
+  no index entry may reference a removed file.
+
+## LSP servers (`.lsp.json` or plugin.json `lspServers`)
+
+- STABLE in 2026 (experimental in 2025).
+- Required per server: `command`; `extensionToLanguage` (map of file
+  extension → language id).
+- Optional: `args`, `transport` (`stdio` | `socket`, default `stdio`),
+  `env`, `initializationOptions`, `settings`, `workspaceFolder`,
+  `startupTimeout` (ms), `maxRestarts`.
+- `${CLAUDE_PLUGIN_ROOT}` substitution is supported.
+
+## Monitors (`monitors/monitors.json` or `experimental.monitors`)
+
+- STABLE in 2026; requires v2.1.105+.
+- A JSON array; required per entry: `name`, `command`, `description`.
+- `when` takes `"always"` — the default — or the form
+  `"on-skill-invoke:<skill-name>"`.
+- Substitution tokens: `${CLAUDE_PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_DATA}`,
+  plus `${CLAUDE_PROJECT_DIR}` and `${user_config.*}`.
+
+## Built-in tool catalog
+
+Names are case-sensitive. Never flag a well-formed unknown tool name — the
+catalog grows; the authoritative list is the tools-reference docs page.
+
+Renames and removals:
+
+- Task → Agent (the alias is kept).
+- Removed: MultiEdit (use Edit with `replace_all`), BashOutput, KillBash.
+- TodoWrite default-off since ~v2.1.142, superseded by TaskCreate /
+  TaskGet / TaskList / TaskUpdate.
+- SlashCommand folded into Skill.
+
+Current builtins by group:
+
+| Group | Tools |
+|---|---|
+| Files | Read, Write, Edit, NotebookEdit |
+| Search | Glob, Grep |
+| Shell | Bash, PowerShell |
+| Agents / teams | Agent, SendMessage, TeamCreate, TeamDelete, Workflow |
+| Tasks | TaskCreate, TaskGet, TaskList, TaskUpdate, TaskStop |
+| Modes / worktrees | EnterPlanMode, ExitPlanMode, EnterWorktree, ExitWorktree |
+| Scheduling | ScheduleWakeup, CronCreate, CronDelete, CronList |
+| Web | WebFetch, WebSearch |
+| User interaction | AskUserQuestion, PushNotification |
+| Skills / tools | Skill, ToolSearch |
+| Diagnostics | Monitor, LSP |
+| MCP | ListMcpResourcesTool, ReadMcpResourceTool, WaitForMcpServers |
+| Remote | RemoteTrigger |
+
+MCP tools follow `mcp__<server>__<tool>`.
+
+## Plugin directory layout
+
+```
+my-plugin/
+├── .claude-plugin/
+│   ├── plugin.json          # manifest — optional; name required if present
+│   └── marketplace.json     # marketplace listing (marketplace repos only)
+├── commands/
+│   ├── my-command.md
+│   └── shared/              # partials: user-invocable: false + description
+├── agents/
+│   └── my-agent.md
+├── skills/
+│   └── my-skill/
+│       ├── SKILL.md
+│       ├── references/
+│       ├── examples/
+│       └── scripts/
+├── hooks/
+│   ├── hooks.json           # hooks may be split across multiple files
+│   └── security-hooks.json
+├── scripts/                 # executables for hooks and monitors
+├── .mcp.json
+├── .lsp.json
+├── settings.json            # shipped defaults (agent + subagentStatusLine only)
+└── LICENSE
+```
+
+## Reference syntax recap
+
+- Shared-partial include: a comment or prose instruction naming the full
+  relative path.
+- An agent's `skills:` array preloads skills at startup.
+- Hook commands resolve scripts via `${CLAUDE_PLUGIN_ROOT}`.
+- Cross-plugin `plugin:skill` references require that plugin to be
+  installed.

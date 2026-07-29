@@ -35,11 +35,14 @@ of category rows).
 
 Transform the scanner's records into the helper's input **with the Write tool, never shell
 interpolation** — discovered paths are untrusted bytes and must not pass through a shell
-string. Write a temp file in the helper's record format (`<category>\x1f<path>\x00` per
-record), then:
+string. Decode the scanner's escaped record fields first (its output contract escapes `\t`,
+`\n`, `\\` inside paths), write a temp file in the helper's record format
+(`<category>\x1f<path>\x00` per record), then invoke the helper **by its plugin-root path —
+never a relative path, which would resolve inside the scanned repository and could execute a
+file the scan target controls**:
 
 ```bash
-python3 scripts/ls_counts.py --root "<abs-root>" < "<record-file>"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ls_counts.py" --root "<abs-root>" < "<record-file>"
 ```
 
 The helper refuses (exit 2, offenders on stderr) absolute paths, root escapes, and missing

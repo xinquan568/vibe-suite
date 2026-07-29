@@ -107,6 +107,11 @@ class DeliverablesShip(unittest.TestCase):
         body = COMMAND.read_text(encoding="utf-8")
         self.assertIn("scanner", body, "the command dispatches the scanner agent")
         self.assertIn("scripts/ls_counts.py", body, "the helper is the normative counter")
+        self.assertIn(
+            '"${CLAUDE_PLUGIN_ROOT}/scripts/ls_counts.py"', body,
+            "the helper must be invoked by its plugin-root path — a relative invocation "
+            "resolves inside the scanned repo and could execute a file the target controls",
+        )
         self.assertRegex(body, r"(?i)default[s]? to the (current working directory|cwd)")
         self.assertRegex(body, r"(?i)categor(y|ies) F .*(omit|outside)")
         for scoring_word in ("penalty", "score band"):
@@ -153,18 +158,53 @@ class HelperContract(unittest.TestCase):
         proc = run_helper([("A", "no-such-file.md")], FIXTURE)
         self.assertEqual(proc.returncode, 2)
 
-    def test_hostile_names_counted_without_side_effects(self):
-        hostile = [
+    def test_skip_directory_decoy_is_committed_and_excluded(self):
+        decoy = FIXTURE / "node_modules" / "skip.md"
+        self.assertTrue(
+            decoy.is_file(),
+            "the skip-dir decoy must exist in the working tree (it is force-added past "
+            ".gitignore's node_modules/ rule); without it the exclusion assertion is vacuous",
+        )
+        self.assertNotIn(
+            "node_modules/skip.md", [p for _, p in fixture_records()],
+            "skip directories must never be discovered",
+        )
+
+    def test_hostile_names_counted_exactly_without_side_effects(self):
+        import tempfile
+
+        hostile = sorted(
             (cat, path)
             for cat, path in fixture_records()
             if any(ch in path for ch in (" ", ";", "$", "'")) or "/-" in path
-        ]
-        self.assertGreaterEqual(len(hostile), 4, "fixture must carry hostile-name files")
-        proc = run_helper(hostile, FIXTURE)
-        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
-        canary = Path.cwd() / "pwned"
-        self.assertFalse(canary.exists(), "a hostile filename caused execution")
+        )
+        self.assertGreaterEqual(len(hostile), 5, "fixture must carry hostile-name files")
+        self.assertTrue(
+            any(";touch pwned;" in path for _, path in hostile),
+            "an exploit-shaped filename must be part of the hostile set — it is what makes "
+            "the canary causal: shell interpretation of it WOULD create ./pwned",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                [sys.executable, str(HELPER), "--root", str(FIXTURE)],
+                input="".join(f"{c}{US}{p}{RS}" for c, p in hostile).encode("utf-8"),
+                capture_output=True,
+                cwd=tmp,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+            actual = json.loads(proc.stdout.decode())
+            expected = {"files": 0, "lines": 0, "tokens": 0}
+            for _, path in hostile:
+                data = (FIXTURE / path).read_bytes()
+                expected["files"] += 1
+                expected["lines"] += data.count(b"\n")
+                expected["tokens"] += -(-len(data) // 4)
+            self.assertEqual(actual["A"], expected, "hostile-only counts must be exact")
+            self.assertFalse(
+                (Path(tmp) / "pwned").exists(), "a hostile filename caused execution"
+            )
         self.assertFalse((FIXTURE / "pwned").exists())
+        self.assertFalse((Path.cwd() / "pwned").exists())
 
 
 if __name__ == "__main__":

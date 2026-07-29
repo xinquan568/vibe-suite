@@ -17,6 +17,8 @@ about a decision is persisted between runs.
 """
 
 import json
+import stat
+import base64
 import os
 import shutil
 import subprocess
@@ -598,3 +600,38 @@ class TestRound6Regressions(InitCase):
         subprocess.run(["bash", "-c", script], capture_output=True, text=True)
         mode = (self.ws / ".gitignore").stat().st_mode & 0o777
         self.assertEqual(mode & 0o077, 0, f"umask 077 was overridden: got {oct(mode)}")
+
+
+class ProvenanceDoesNotPublishSecrets(unittest.TestCase):
+    """The record holds complete pre-images — every byte of every file it replaced. A `0600`
+    `.mcp.json` with credentials therefore lives inside it, so writing it at the usual `0644`
+    published exactly what the user had protected."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-prov-mode-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_the_record_is_no_looser_than_what_it_records(self):
+        secrets = self.ws / ".mcp.json"
+        secrets.write_text(json.dumps(
+            {"mcpServers": {"s": {"command": "x", "env": {"TOKEN": "s3cret-value"}}}}))
+        os.chmod(secrets, 0o600)
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        record_path = self.ws / ".vibe-suite-state" / "install-provenance.json"
+        record = json.loads(record_path.read_text())
+        carried = [t for t in record["targets"]
+                   if t["path"].endswith(".mcp.json") and t.get("content_b64")]
+        self.assertTrue(carried, "the fixture does not exercise the leak: no pre-image was recorded")
+        self.assertIn("s3cret-value",
+                      base64.b64decode(carried[0]["content_b64"]).decode("utf-8"),
+                      "the fixture does not exercise the leak: the secret is not in the record")
+
+        mode = stat.S_IMODE(record_path.lstat().st_mode)
+        self.assertEqual(mode & 0o077, 0, f"the record is group/world readable at {oct(mode)}")
+        dir_mode = stat.S_IMODE((self.ws / ".vibe-suite-state").lstat().st_mode)
+        self.assertEqual(dir_mode & 0o077, 0,
+                         f"the directory holding it is traversable at {oct(dir_mode)}")

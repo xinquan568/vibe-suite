@@ -122,7 +122,7 @@ if step not in data.setdefault("steps", []):
 # pre-images, so that scratch file was a world-readable copy of a `0600` `.mcp.json`: the very leak
 # `c2112ac` closed on the record itself, reopened one path over.
 target = Path(path)
-bridge.write_atomic(target.parent, target,
+bridge.write_atomic(target.parent.parent, target,
                     json.dumps(data, indent=2, sort_keys=True) + "\n",
                     mode=(target.lstat().st_mode & 0o7777) if target.is_file() else 0o600)
 PY

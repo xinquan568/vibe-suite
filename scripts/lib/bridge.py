@@ -47,6 +47,19 @@ class BridgeError(Exception):
 # Containment and atomicity
 # --------------------------------------------------------------------------------------------
 
+def assert_root(root):
+    """Refuse a root that is itself a symlink.
+
+    Containment compares the destination against `root`, so when a caller passes the destination's
+    own parent — and that parent is a symlink out of the workspace — the check compares the escape
+    against itself and passes it. Refusing here makes the mistake impossible to make quietly rather
+    than relying on every caller choosing the right anchor.
+    """
+    if Path(root).is_symlink():
+        raise BridgeError(
+            f"{root} is a symlink and cannot be the containment root; pass the workspace")
+
+
 def assert_inside(root, candidate):
     """Refuse a destination that escapes the workspace.
 
@@ -226,6 +239,7 @@ def publish_new(root, dest, content, mode=0o644):
     made from a fully written inode, so a reader never sees a partial file.
     """
     dest = Path(dest)
+    assert_root(root)
     assert_inside(root, dest)
     if dest.is_symlink():
         # `lstat`, never `exists`: a dangling symlink reports False from `exists()`, and publishing
@@ -338,6 +352,7 @@ def write_atomic(root, dest, content, mode=None):
     `O_DIRECTORY|O_NOFOLLOW` and then working relative to that descriptor removes the window: every
     subsequent operation names the directory by handle, not by path.
     """
+    assert_root(root)
     assert_inside(root, dest)
     dest = Path(dest)
     kind = classify(dest)

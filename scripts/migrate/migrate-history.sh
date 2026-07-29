@@ -33,8 +33,12 @@ if [ -e "$target" ]; then
 fi
 
 mkdir -p "$(dirname "$target")"
-python3 - "$legacy" "$target" <<'PY'
-import json, os, sys, hashlib, datetime, tempfile
+lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+python3 - "$legacy" "$target" "$lib" <<'PY'
+import json, os, sys, hashlib, datetime
+from pathlib import Path
+sys.path.insert(0, sys.argv[3])
+import bridge  # noqa: E402
 
 legacy_path, target_path = sys.argv[1], sys.argv[2]
 raw = open(legacy_path, "rb").read()
@@ -95,39 +99,16 @@ if len(markers_in(check)) != 1:
     sys.stderr.write("error: row 3: the copy does not carry exactly one migrated_from marker\n")
     raise SystemExit(1)
 
-# mkstemp, not a predictable "<target>.vibe-tmp": that name is guessable, and `open(path, "wb")`
-# follows a symlink, so anyone able to plant one could have this migration overwrite a file of
-# their choosing. mkstemp creates with O_CREAT|O_EXCL, which fails on an existing path of any kind.
-directory = os.path.dirname(target_path) or "."
-handle, tmp_path = tempfile.mkstemp(dir=directory, prefix=".vibe-history-", suffix=".tmp")
-try:
-    with os.fdopen(handle, "wb") as out:
-        out.write(body)
-        out.flush()
-        # fchmod on the descriptor, never chmod on the path: a path-based operation after the
-        # descriptor closes can be redirected by swapping the name for a symlink, which would both
-        # chmod someone else's file and publish the substituted one.
-        os.fchmod(out.fileno(), 0o644)
-        os.fsync(out.fileno())
-    try:
-        # link, not replace: it fails if the target exists, so a new store that appeared while
-        # this ran still wins. Publication is a single atomic step over a fully written inode.
-        os.link(tmp_path, target_path)
-    except FileExistsError:
-        sys.stderr.write("note: row 3: .claude/vibe-history.json appeared concurrently — left as "
-                         "it is (new store wins)\n")
-        raise SystemExit(0)
-finally:
-    try:
-        os.unlink(tmp_path)
-    except FileNotFoundError:
-        pass
+# Through the primitive. `publish_new` is create-only by construction: it writes a scratch file
+# with an unpredictable `O_EXCL` name at the destination's mode from the start, fsyncs it, and links
+# it into place — so a store that appeared while this ran still wins, which is row 3's rule.
+if not bridge.publish_new(Path(target_path).parent, Path(target_path), body):
+    sys.stderr.write("note: row 3: .claude/vibe-history.json appeared concurrently — left as "
+                     "it is (new store wins)\n")
+    raise SystemExit(0)
 
-fd = os.open(directory, os.O_RDONLY)
-try:
-    os.fsync(fd)
-finally:
-    os.close(fd)
+# The directory fsync is `publish_new`'s job now — it fsyncs both the file and its parent before
+# returning, so a second one here would be duplicating the primitive's guarantee.
 PY
 
 vibe_note "row 3: copied .claude/nlpm-history.json → .claude/vibe-history.json with one marker"

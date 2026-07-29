@@ -105,7 +105,24 @@ def provenance_open(ws):
                 parents.append(parent)
     record["parents_created"] = parents
     out.parent.mkdir(parents=True, exist_ok=True)
-    bridge.write_atomic(ws, out, json.dumps(record, indent=2, sort_keys=True) + "\n")
+    # The record holds complete pre-images — every byte of every file it replaced, `.mcp.json`
+    # among them. A `0600` file's contents therefore end up inside this one, so writing it at the
+    # usual `0644` publishes whatever the user had protected. It is written at the **tightest** mode
+    # of anything it records, never looser than `0600`.
+    strictest = 0o600
+    for entry in record["targets"]:
+        mode = entry.get("mode")
+        if isinstance(mode, str):
+            try:
+                strictest &= int(mode, 8)
+            except ValueError:
+                strictest = 0o600
+                break
+    bridge.write_atomic(ws, out, json.dumps(record, indent=2, sort_keys=True) + "\n",
+                        mode=strictest or 0o600)
+    # The directory holding it is traversable by default, so a pre-existing looser mode would
+    # undo the file's own protection.
+    bridge.secure_dir(ws, Path(PROVENANCE).parent)
 
 
 def set_gate(ws, value):
@@ -156,40 +173,20 @@ def _verify_config(ws, text):  # noqa: D401
 
     `parse_frontmatter` only checks the grammar: it accepts `effort: sonnet` happily, while
     `config.py`'s value checks reject it because the enum is `low|medium|high`. Parsing alone would
-    have shipped exactly the invalid config this check exists to prevent, so the candidate is written
-    to a scratch workspace and loaded the way every downstream consumer loads it.
+    have shipped exactly the invalid config this check exists to prevent.
+
+    **Nothing is written.** This used to stage the candidate over the live config, load, and put the
+    original back — so the user's file was replaced for the duration of a validation, and the restore
+    had to carry bytes *and* mode back. Every defect this function accumulated (a `0600` config
+    world-readable through the window, a mode lost on restore, a fixed scratch path) came from that
+    swap, and none of it was ever necessary: only containment needs the workspace root, and it takes
+    the root as an argument.
     """
-    # Validated against the **real** workspace: `config.py` resolves path-valued keys against the
-    # root and refuses ones that escape it, so a scratch directory would clear a config the actual
-    # project rejects. The candidate is staged beside the target and removed either way.
-    ws = Path(ws)
-    # A fixed scratch name is a path the user may already own. `write_atomic` would overwrite it,
-    # `os.replace` would move it away, and the `finally` below would delete it.
-    staged = ws / f".{config_mod.CONFIG_FILENAME}.vibe-candidate"
-    if staged.exists() or staged.is_symlink():
-        raise bridge.BridgeError(
-            f"{staged} already exists; refusing to use an occupied path as scratch space")
-    real = ws / config_mod.CONFIG_FILENAME
-    bridge.refuse_if_symlink(real, "config write")
-    keep = real.read_bytes() if real.is_file() else None
-    # The mode is the user's too. Restoring only the bytes left a 0600 config world-readable at the
-    # 0644 the scratch file was created with — a leak, not merely a cosmetic change.
-    keep_mode = (real.lstat().st_mode & 0o7777) if real.is_file() else None
     try:
-        bridge.write_atomic(ws, staged, text)
-        os.replace(staged, real)
-        config_mod.load(str(ws))
+        config_mod.resolve_text(text, str(ws))
     except Exception as exc:
         raise bridge.BridgeError(
             f"refusing to write a config the canonical loader rejects: {exc}") from exc
-    finally:
-        if keep is None:
-            real.unlink(missing_ok=True)
-        else:
-            real.write_bytes(keep)
-            if keep_mode is not None:
-                os.chmod(real, keep_mode)
-        staged.unlink(missing_ok=True)
 
 
 def _upsert_text(ws, rel, name, body, markdown=False):
@@ -273,15 +270,13 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
     bom, sep = (newline[:1], newline[1:]) if newline.startswith("\ufeff") else ("", newline)
     rendered = bom + sep.join(["---", *front, "---", ""]) + rest
     if not dest.exists():
-        # Creating it, not merging into one the user already had — so this marker only ever lands in
-        # a file we made. It is what lets `/vibe-suite:unbridge` *prove* the file is ours before
-        # deleting it: without it, teardown had to take the provenance record's unauthenticated word,
-        # and a record edited to say `absent` would delete a config that predated the install.
+        # An ownership marker, written only when init *creates* the file — never when merging into
+        # one the user already had. It is what lets `/vibe-suite:unbridge` prove the file is ours
+        # before deleting it: otherwise teardown takes the provenance record's unauthenticated word,
+        # and a record edited to say `absent` deletes a config that predated the install.
         #
-        # If the user later removes this line, the file stops being recognisably ours and teardown
-        # leaves it alone. That is the correct outcome, not a failure.
-        # Keyed on the path not existing, not on empty content: a pre-existing zero-byte file is
-        # still the user's, and marking it would claim something we did not create.
+        # Remove the block and the file stops being recognisably ours, so teardown leaves it alone.
+        # That is the intended outcome — the marker is the claim, so deleting it withdraws the claim.
         rendered = bridge.md_block_upsert(
             rendered, "config",
             "Created by /vibe-suite:init. Remove this block to keep the file on teardown.")
@@ -337,8 +332,8 @@ def _history_baseline(ws, threshold):
         container = history
     elif history is None and not dest.is_file():
         # Created by us, so stamped as ours. Teardown needs on-disk proof before deleting a whole
-        # file; without it, an edited provenance record was the only evidence, and that is not
-        # evidence. A pre-existing history is never stamped, so it is never deleted.
+        # file; an edited provenance record is not proof. A pre-existing history is never stamped,
+        # so it is never deleted.
         snapshots = []
         container = {"vibe_suite_owned": True, "snapshots": snapshots}
     else:

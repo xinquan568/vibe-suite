@@ -183,14 +183,11 @@ def mirror_hooks(ws, report):
                       "(the target holds your own entries)")
     else:
         side = ws / SIDE_FILE
-        if side.is_file() and _side_file_is_ours(side) and bridge.load_json(side):
+        if side.is_file() and _side_file_is_ours(side):
             # The fallback existed because the target was the user's; it no longer is. Leaving it
-            # behind would let two mirrors drift apart with nothing saying which one is live. Only
-            # ever our own file: a same-named file we did not write is the user's.
+            # behind would let two mirrors drift apart with nothing saying which one is live.
             bridge.unlink_at(ws, SIDE_FILE)
             report.append(f"hooks: removed {SIDE_FILE} — the target is no longer user-owned")
-        elif side.exists() or side.is_symlink():
-            report.append(f"hooks: {SIDE_FILE} is not ours — left alone")
         merged = dict(marked)
         for entries in hooks.values():
             for entry in entries or []:
@@ -209,36 +206,12 @@ def mirror_hooks(ws, report):
 
 
 def _open_parent(ws, rel):
-    """Open `rel`'s parent by walking one component at a time, each with `O_NOFOLLOW`.
+    """The audited descent, from the module that owns it.
 
-    Checking a path and then using it validates a different moment than the one that matters. Every
-    step here is relative to a descriptor already proven to be a real directory, so a symlink
-    anywhere along the way fails the step that would have followed it.
+    This was a second copy of `bridge._open_dir_chain` — and a copy of a safety rule drifts from the
+    original, which is how this codebase kept guarding one writer while another went unguarded.
     """
-    for flag in ("O_DIRECTORY", "O_NOFOLLOW"):
-        if not hasattr(os, flag):
-            raise bridge.BridgeError(f"this platform lacks os.{flag}")
-    fd = os.open(ws, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in Path(rel).parent.parts:
-            if part in ("", "."):
-                continue
-            if part == "..":
-                raise bridge.BridgeError("'..' in a bridge target path")
-            try:
-                os.mkdir(part, 0o777, dir_fd=fd)
-            except FileExistsError:
-                pass
-            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = nxt
-    except OSError as exc:
-        os.close(fd)
-        raise bridge.BridgeError(f"{ws}/{rel}: parent could not be opened safely ({exc})")
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
+    return bridge.open_dir_chain(ws, Path(rel).parent.parts)
 
 
 def link_skills(ws, report, plugin_root):
@@ -266,15 +239,14 @@ def link_skills(ws, report, plugin_root):
             report.append(f"skills: {rel} is a real path — left alone")
             os.close(parent_fd)
             continue
+        os.close(parent_fd)
         try:
-            os.symlink(str(target), Path(rel).name, dir_fd=parent_fd)
-            report.append(f"skills: {rel} → {target}")
-        except FileExistsError:
-            report.append(f"skills: {rel} appeared concurrently — left as it is")
-        except OSError as exc:
+            if bridge.symlink_at(ws, rel, target):
+                report.append(f"skills: {rel} → {target}")
+            else:
+                report.append(f"skills: {rel} appeared concurrently — left as it is")
+        except (OSError, bridge.BridgeError) as exc:
             report.append(f"skills: {rel} could not be linked ({exc})")
-        finally:
-            os.close(parent_fd)
 
 
 def main(argv=None):

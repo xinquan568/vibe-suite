@@ -20,6 +20,9 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bridge  # noqa: E402
+
 STATE_DIRNAME = ".vibe-suite-state"
 STATE_FILENAME = "state.json"
 
@@ -107,14 +110,15 @@ class Store:
             raise StoreFormatError(f"config.{section}: expected an object")
         config[section][leaf] = value
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Write to a temporary file and rename, so an interrupted write cannot truncate the state.
-        temporary = self.path.with_suffix(".json.tmp")
-        # A fixed scratch name is a path the user may own; writing it destroys their file.
-        if temporary.is_symlink() or temporary.exists():
-            raise RuntimeError(
-                f"{temporary} already exists; refusing to use an occupied path as scratch space")
-        temporary.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        temporary.replace(self.path)
+        # Through the audited primitive, not a hand-rolled tmp-and-rename. That version wrote a
+        # **fixed** scratch name — `state.json.tmp`, a path the user may own — replaced a symlinked
+        # `state.json` without noticing, and published an existing `0600` file at the default mode.
+        #
+        # State records can hold private content, so a *fresh* one is created `0600`; an existing
+        # one keeps whatever mode the user gave it.
+        fresh_mode = None if self.path.is_file() else 0o600
+        bridge.write_atomic(self.path.parent, self.path,
+                            json.dumps(raw, indent=2, sort_keys=True) + "\n", mode=fresh_mode)
 
     def overrides(self):
         """The shadowed values actually stored, validated on the way out.

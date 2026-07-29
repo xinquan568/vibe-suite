@@ -17,6 +17,8 @@ about a decision is persisted between runs.
 """
 
 import json
+import stat
+import base64
 import os
 import shutil
 import subprocess
@@ -26,6 +28,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INIT = REPO_ROOT / "scripts" / "init.sh"
+import sys
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+import bridge        # noqa: E402
+import init_bridge   # noqa: E402
 
 #: Everything an install may add while reporting a decision, and nothing more. `migrate-*` writes its
 #: report into the state dir by contract (`common.sh:11`), and init writes provenance before its
@@ -598,3 +604,79 @@ class TestRound6Regressions(InitCase):
         subprocess.run(["bash", "-c", script], capture_output=True, text=True)
         mode = (self.ws / ".gitignore").stat().st_mode & 0o777
         self.assertEqual(mode & 0o077, 0, f"umask 077 was overridden: got {oct(mode)}")
+
+
+class ProvenanceDoesNotPublishSecrets(unittest.TestCase):
+    """The record holds complete pre-images — every byte of every file it replaced. A `0600`
+    `.mcp.json` with credentials therefore lives inside it, so writing it at the usual `0644`
+    published exactly what the user had protected."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-prov-mode-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_the_record_is_no_looser_than_what_it_records(self):
+        secrets = self.ws / ".mcp.json"
+        secrets.write_text(json.dumps(
+            {"mcpServers": {"s": {"command": "x", "env": {"TOKEN": "s3cret-value"}}}}))
+        os.chmod(secrets, 0o600)
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        record_path = self.ws / ".vibe-suite-state" / "install-provenance.json"
+        record = json.loads(record_path.read_text())
+        carried = [t for t in record["targets"]
+                   if t["path"].endswith(".mcp.json") and t.get("content_b64")]
+        self.assertTrue(carried, "the fixture does not exercise the leak: no pre-image was recorded")
+        self.assertIn("s3cret-value",
+                      base64.b64decode(carried[0]["content_b64"]).decode("utf-8"),
+                      "the fixture does not exercise the leak: the secret is not in the record")
+
+        mode = stat.S_IMODE(record_path.lstat().st_mode)
+        self.assertEqual(mode & 0o077, 0, f"the record is group/world readable at {oct(mode)}")
+        dir_mode = stat.S_IMODE((self.ws / ".vibe-suite-state").lstat().st_mode)
+        self.assertEqual(dir_mode & 0o077, 0,
+                         f"the directory holding it is traversable at {oct(dir_mode)}")
+
+
+class ConfigValidationDoesNotWidenTheWindow(unittest.TestCase):
+    """`_verify_config` swaps a candidate over the real config while the canonical loader validates
+    it. Writing that candidate at the default mode and correcting it afterwards leaves a window in
+    which a `0600` config is world-readable — and the window *is* the leak."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-cfgwindow-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_a_private_config_keeps_its_mode_through_init(self):
+        cfg = self.ws / ".vibe-suite.md"
+        cfg.write_text("---\neffort: high\n---\nsomething private\n")
+        os.chmod(cfg, 0o600)
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        mode = stat.S_IMODE(cfg.lstat().st_mode)
+        self.assertEqual(mode & 0o077, 0, f"a 0600 config ended up at {oct(mode)}")
+
+    def test_validation_writes_nothing_at_all(self):
+        """Stronger than the mode check this replaces. `_verify_config` used to stage a candidate
+        over the live config and put the original back — every defect it accumulated (a `0600`
+        config readable through the window, a mode lost on restore, a fixed scratch path) came from
+        that swap. With nothing written there is no window to get wrong."""
+        cfg = self.ws / ".vibe-suite.md"
+        cfg.write_text("---\neffort: high\n---\nprivate\n")
+        os.chmod(cfg, 0o600)
+        before = {p.name: (p.read_bytes(), stat.S_IMODE(p.lstat().st_mode))
+                  for p in self.ws.iterdir() if p.is_file()}
+        init_bridge._verify_config(self.ws, "---\neffort: low\n---\nprivate\n")
+        after = {p.name: (p.read_bytes(), stat.S_IMODE(p.lstat().st_mode))
+                 for p in self.ws.iterdir() if p.is_file()}
+        self.assertEqual(after, before, "validation touched the workspace")
+
+    def test_an_invalid_candidate_is_still_rejected(self):
+        """Removing the swap must not remove the validation."""
+        with self.assertRaises(bridge.BridgeError):
+            init_bridge._verify_config(self.ws, "---\neffort: sonnet\n---\n")

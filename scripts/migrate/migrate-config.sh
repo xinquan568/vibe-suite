@@ -34,6 +34,8 @@ lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 set +e
 python3 - "$workspace" "$lib" "$resolution" <<'PY'
 import importlib.util, json, re, sys
+sys.path.insert(0, sys.argv[2])
+import bridge  # noqa: E402
 from pathlib import Path
 
 workspace, lib, resolution = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -111,18 +113,22 @@ conflicts = {
 chosen = {}
 if conflicts:
     report = ws / ".vibe-suite-state" / "migration-conflicts.json"
-    if report.is_symlink() or (report.exists() and "vibe_suite_owned" not in
-                               report.read_text(encoding="utf-8", errors="replace")):
-        sys.stderr.write("error: rows 1-2: migration-conflicts.json exists and is not ours; "
-                         "refusing to overwrite it\n")
-        raise SystemExit(1)
     if not resolution:
         report.parent.mkdir(parents=True, exist_ok=True)
-        # Stamped, so a re-run recognises its own report and a user's same-named file is not
-        # mistaken for one.
-        report.write_text(json.dumps({"rows": [1, 2], "conflicts": conflicts,
-                                      "vibe_suite_owned": True}, indent=2,
-                                     sort_keys=True) + "\n", encoding="utf-8")
+        # A fixed path is a path the user may own, and the stamp lets a re-run recognise its own
+        # report instead of truncating whatever is there.
+        if report.is_symlink():
+            sys.stderr.write(f"error: rows 1-2: {report} is a symlink; refusing\n")
+            raise SystemExit(1)
+        if report.is_file():
+            prior = bridge.load_json(report)
+            if not (isinstance(prior, dict) and prior.get("vibe_suite_owned") is True):
+                sys.stderr.write(f"error: rows 1-2: {report} exists and is not ours; refusing\n")
+                raise SystemExit(1)
+        bridge.write_atomic(ws, report,
+                            json.dumps({"rows": [1, 2], "conflicts": conflicts,
+                                        "vibe_suite_owned": True},
+                                       indent=2, sort_keys=True) + "\n")
         sys.stderr.write(f"decision required — {len(conflicts)} conflicting key(s); see {report}\n")
         sys.stderr.write("Re-run with --resolution FILE mapping each key to 'cc-suite' or 'nlpm'.\n")
         raise SystemExit(3)
@@ -163,19 +169,11 @@ except config.ConfigValueError as exc:
     sys.stderr.write(f"error: rows 1-2: legacy value is not valid in the new schema: {exc}\n")
     raise SystemExit(1)
 
-# `lstat`, not `exists`: a dangling symlink reports False from `exists()`, so an existence guard
-# lets `replace()` destroy the user's link. This is the earliest writer of this path — guarding a
-# later one is not guarding the path.
-if target.is_symlink():
-    sys.stderr.write(f"error: rows 1-2: {config.CONFIG_FILENAME} is a symlink; replacing it would "
-                     f"destroy the link. Remove or re-point it and re-run\n")
-    raise SystemExit(1)
-tmp = target.with_suffix(target.suffix + ".tmp")
-if tmp.exists() or tmp.is_symlink():
-    sys.stderr.write(f"error: rows 1-2: scratch path {tmp.name} is occupied; refusing\n")
-    raise SystemExit(1)
-tmp.write_text(rendered, encoding="utf-8")
-tmp.replace(target)
+# Through the primitive: it refuses a symlinked target (a dangling one reports False from
+# `exists()`), picks a scratch name that cannot collide with a user's file, and carries the
+# destination's prior mode.
+bridge.write_atomic(ws, target, rendered,
+                    mode=(target.lstat().st_mode & 0o7777) if target.is_file() else None)
 sys.stderr.write(f"note: rows 1-2: wrote {config.CONFIG_FILENAME} from "
                  f"{len(merged)} legacy value(s); originals untouched\n")
 PY

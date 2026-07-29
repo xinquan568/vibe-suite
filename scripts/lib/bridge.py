@@ -27,9 +27,16 @@ from pathlib import Path
 SCHEMA = 1
 MARKER = "vibe-suite"
 
+#: `O_NOFOLLOW` where the platform has it; 0 elsewhere, so the flag composes unconditionally.
+O_NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
+
 #: Literal sentinel names, plus the prefix whose members are discovered at runtime.
 SENTINEL_LITERALS = ("vibe-mcp", "vibe-claude-mcp")
 SENTINEL_PREFIX = "vibe-agent:"
+
+OWNED_BLOCKS = (("AGENTS.md", "memory", "md"), ("CLAUDE.md", "import", "md"),
+                ("GEMINI.md", "import", "md"), (".gitignore", "ignore", "text"),
+                (".codex/config.toml", "server:vibe-mcp", "text"))
 
 
 class BridgeError(Exception):
@@ -69,49 +76,6 @@ def classify(path):
     if p.is_file():
         return "file"
     return "other"
-
-
-def open_dir_chain(root, relative):
-    """Public alias — deletion needs the same one-resolution guarantee writing does."""
-    return _open_dir_chain(root, relative)
-
-
-def lstat_at(root, rel):
-    """`lstat` a workspace-relative path without resolving any component by path."""
-    rel = Path(rel)
-    fd = _open_dir_chain(root, rel.parent.parts)
-    try:
-        return os.lstat(rel.name, dir_fd=fd)
-    except FileNotFoundError:
-        return None
-    finally:
-        os.close(fd)
-
-
-def unlink_at(root, rel):
-    """Remove a workspace-relative entry, never following a symlink in its path.
-
-    Deleting by path re-resolves every component at call time, so a symlink planted anywhere along it
-    redirects the removal — which is how a teardown deletes a user's file. Resolving the parent once
-    and unlinking relative to that descriptor removes the window.
-    """
-    import stat as _stat
-    rel = Path(rel)
-    fd = _open_dir_chain(root, rel.parent.parts)
-    try:
-        try:
-            info = os.lstat(rel.name, dir_fd=fd)
-        except FileNotFoundError:
-            return False
-        # A directory needs rmdir, and which error unlink raises on one is platform-dependent —
-        # macOS says PermissionError where Linux says IsADirectoryError. The node type is not.
-        if _stat.S_ISDIR(info.st_mode):
-            os.rmdir(rel.name, dir_fd=fd)
-        else:
-            os.unlink(rel.name, dir_fd=fd)
-        return True
-    finally:
-        os.close(fd)
 
 
 #: Identity of each workspace root this process has opened, so a mid-run replacement is detected
@@ -190,18 +154,179 @@ def _open_dir_chain(root, relative):
     return fd
 
 
-def refuse_if_symlink(path, what="write"):
-    """Refuse when the final component is a symlink. `lstat`, never `exists`.
+def open_dir_chain(root, relative):
+    """Public name for the component-wise `O_NOFOLLOW` descent.
 
-    `exists()` follows the link, so a **dangling** symlink reports False and every "is it already
-    there?" guard waves it through — which is precisely how a user's link got replaced by three
-    different writers in turn. The link itself is the thing being asked about, so the question has to
-    be asked with `lstat`.
+    `bridge_cli` carried its own copy of this, which is the pattern this module exists to end: a
+    second implementation of a safety rule drifts from the first, and the copy had none of the
+    refusals added here since. One descent, one place.
     """
-    if Path(path).is_symlink():
-        raise BridgeError(
-            f"{path} is a symlink; a {what} here would replace the user's link with a regular file "
-            f"and could not be undone by /vibe-suite:unbridge. Remove or re-point it and re-run")
+    return _open_dir_chain(root, relative)
+
+
+def unlink_at(root, rel):
+    """Remove a workspace-relative entry, never following a symlink in its path.
+
+    Deleting by path re-resolves every component at call time, so a symlink planted anywhere along it
+    redirects the removal — which is how a teardown deletes a user's file. Resolving the parent once
+    and unlinking relative to that descriptor removes the window.
+    """
+    import stat as _stat
+    rel = Path(rel)
+    assert_inside(root, Path(root) / rel)
+    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        try:
+            info = os.lstat(rel.name, dir_fd=fd)
+        except FileNotFoundError:
+            return False
+        # A directory needs rmdir, and which error unlink raises on one is platform-dependent —
+        # macOS says PermissionError where Linux says IsADirectoryError. The node type is not.
+        if _stat.S_ISDIR(info.st_mode):
+            os.rmdir(rel.name, dir_fd=fd)
+        else:
+            os.unlink(rel.name, dir_fd=fd)
+        return True
+    finally:
+        os.close(fd)
+
+
+#: Identity of each workspace root this process has opened, so a mid-run replacement is detected
+#: rather than silently followed. Keyed by the **caller-supplied** path — keying by the resolved path
+#: would mint a fresh pin for a swapped-in directory and never notice the swap.
+_ROOT_PIN = {}
+
+
+def symlink_at(root, rel, target):
+    """Create `root/rel` -> `target`, relative to the audited descent.
+
+    Returns True when the link was created, False when something was already there — a caller must
+    never learn "it exists" by having clobbered it.
+    """
+    rel = Path(rel)
+    assert_inside(root, Path(root) / rel)
+    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        os.symlink(str(target), rel.name, dir_fd=fd)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def publish_new(root, dest, content, mode=0o644):
+    """Create `dest` with `content`, or report that something is already there. Never overwrites.
+
+    The other half of the write surface. `write_atomic` *replaces*; this one *publishes*, and the
+    distinction is the whole safety argument for row 3's history migration: a store that appeared
+    while the migration ran must win, so the publication step has to fail rather than clobber.
+
+    Returns True when it created the file, False when the destination already existed. The link is
+    made from a fully written inode, so a reader never sees a partial file.
+    """
+    dest = Path(dest)
+    assert_inside(root, dest)
+    if dest.is_symlink():
+        # `lstat`, never `exists`: a dangling symlink reports False from `exists()`, and publishing
+        # through it would write to wherever it points.
+        raise BridgeError(f"{dest} is a symlink; refusing to publish through it")
+    rel = dest.relative_to(Path(root))
+    fd = _open_dir_chain(root, rel.parent.parts)
+    data = content if isinstance(content, bytes) else content.encode("utf-8")
+    tmp_name = None
+    try:
+        handle, tmp_name = _scratch(fd, dest.name, mode)
+        with os.fdopen(handle, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        try:
+            os.link(tmp_name, dest.name, src_dir_fd=fd, dst_dir_fd=fd)
+        except FileExistsError:
+            return False
+        _fsync_dir(fd)
+        return True
+    finally:
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+        os.close(fd)
+
+
+def _scratch(dir_fd, name, mode):
+    """An `O_EXCL` scratch file with an unpredictable name, created at `mode` from the start.
+
+    Both properties matter: a fixed name is a path the user may own, and creating at the default and
+    chmod-ing afterwards leaves a window in which a private file is readable — the window *is* the
+    leak.
+    """
+    import binascii
+    for _ in range(64):
+        suffix = binascii.hexlify(os.urandom(6)).decode("ascii")
+        candidate = f".{name}.{suffix}.vibe-tmp"
+        try:
+            return os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW_FLAG,
+                           mode, dir_fd=dir_fd), candidate
+        except FileExistsError:
+            continue
+    raise BridgeError("could not create a scratch file after 64 attempts")
+
+
+def _fsync_dir(dir_fd):
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+
+
+def secure_dir(root, rel, mode=0o700):
+    """Tighten a directory we own, through the audited descent.
+
+    A directory mode is not a file write, so it needs its own entry point rather than being inlined
+    at the one call site that wanted it — the same reasoning that gave `unlink_at` and `symlink_at`
+    a home. `fchmod` on the descriptor, never `chmod` on the path: a path-based call after the
+    descent can be redirected by swapping the name.
+    """
+    rel = Path(rel)
+    assert_inside(root, Path(root) / rel)
+    fd = _open_dir_chain(root, rel.parts)
+    try:
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
+def lstat_at(root, rel):
+    """`lstat` a workspace-relative path without resolving any component by path."""
+    rel = Path(rel)
+    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        return os.lstat(rel.name, dir_fd=fd)
+    except FileNotFoundError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def pin_root(root):
+    """Establish the root's identity **before** anything reads or writes through it.
+
+    The pin used to be created lazily, on the first descriptor operation — which happens after
+    provenance validation and after path-based reads. A workspace swapped before that point simply
+    became the pinned one, and the record was then applied to it. A command that will delete calls
+    this at entry, so every later step is checked against the directory the decisions were made
+    about.
+    """
+    fd = os.open(os.path.realpath(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
+    _ROOT_PIN[str(root)] = (st.st_dev, st.st_ino)
+    return _ROOT_PIN[str(root)]
 
 
 def write_atomic(root, dest, content, mode=None):
@@ -222,15 +347,15 @@ def write_atomic(root, dest, content, mode=None):
     if kind == "other":
         raise BridgeError(f"{dest} is neither a file nor a symlink; the install refuses")
     if kind == "symlink":
-        # Replacing it would turn the user's link into a regular 0644 *copy* of its target. Teardown
-        # cannot undo that: it removes what it owns and never writes a pre-image, so the copy stays
-        # and the original link target is lost with the provenance. That also widens exposure —
-        # content reachable only through a link the user controlled becomes an independent file.
+        # `classify()` has always returned "symlink"; nothing acted on it, so `os.replace` below
+        # converted the user's link into a regular file. The bytes at the far end survive, but the
+        # link does not — and teardown records `kind: symlink` while never restoring one, so the
+        # conversion is permanent.
         #
-        # Refusing here is the fix, rather than restoring at teardown: the destructive step is the
-        # conversion, and a step never taken needs no undo.
+        # Refusing is the fix rather than restoring later: the destructive step is the conversion,
+        # and a step never taken needs no undo.
         raise BridgeError(
-            f"{dest} is a symlink; replacing it would convert the user's link into a regular copy "
+            f"{dest} is a symlink; replacing it would convert the user's link into a regular file "
             f"and could not be undone by /vibe-suite:unbridge. Remove or re-point it and re-run")
 
     # A file's existing mode is the user's, not ours. An earlier revision created the temp at 0600
@@ -463,9 +588,6 @@ def toml_server_upsert(existing, name, body):
 
 
 def toml_server_remove(existing, name):
-    # Through `text_block_remove`, not `_block_re` directly — otherwise this caller removes without
-    # the marker validation every other caller gets, which is exactly how `.codex/config.toml`
-    # stayed exposed after the guard was added.
     return text_block_remove(existing, f"server:{name}")
 
 
@@ -520,14 +642,6 @@ def json_hook_entry_remove(doc, event):
 def json_hook_entry_has(doc, event):
     return any(isinstance(e, dict) and e.get(f"_{MARKER}_owned") is not None
                for e in (doc.get("hooks") or {}).get(event) or [])
-
-
-#: Every owned text/markdown region: (relative path, block name, codec). This lives beside the
-#: sentinel names because it is the same inventory — F1.4 requires teardown to iterate *one* source,
-#: and a consumer keeping its own copy is exactly the cc-suite W4 defect.
-OWNED_BLOCKS = (("AGENTS.md", "memory", "md"), ("CLAUDE.md", "import", "md"),
-                ("GEMINI.md", "import", "md"), (".gitignore", "ignore", "text"),
-                (".codex/config.toml", "server:vibe-mcp", "text"))
 
 
 def inventory_enumerate(root):

@@ -36,8 +36,11 @@ while [ $# -gt 0 ]; do
 done
 
 set +e
-VIBE_FAIL_AFTER="${VIBE_FAIL_AFTER:-}" python3 - "$workspace" "$confirm" <<'PY'
-import json, os, re, sys, tempfile
+lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+VIBE_FAIL_AFTER="${VIBE_FAIL_AFTER:-}" python3 - "$workspace" "$confirm" "$lib" <<'PY'
+import json, os, re, sys
+sys.path.insert(0, sys.argv[3])
+import bridge  # noqa: E402
 from pathlib import Path
 
 ws, confirm = Path(sys.argv[1]), sys.argv[2] == "1"
@@ -56,29 +59,20 @@ def vibe_name(legacy):
 mcp_path, toml_path = ws / ".mcp.json", ws / ".codex" / "config.toml"
 
 def write_atomically(path, text):
-    """Write through a temporary file in the same directory, then fsync file and directory.
+    """Publish live configuration through the audited primitive.
 
-    Row 6 mutates live configuration. A truncating write that is interrupted leaves the user with a
-    half-written `.mcp.json` or `config.toml` — which is worse than either outcome this row is
-    allowed to produce, because it is not a registration state at all.
+    Row 6 mutates the user's real `.mcp.json` / `config.toml`, so every rule the primitive enforces
+    applies here at full strength: refuse a symlinked destination (a *dangling* one reports False
+    from `exists()`), carry the destination's prior mode rather than forcing `0644` over a `0600`
+    config, use an unpredictable `O_EXCL` scratch name, and fsync the file and its parent so an
+    interrupted run cannot leave a half-written registration.
+
+    This was a hand-rolled copy of all of that. It had the rules right after two rounds of fixes —
+    and being right twice is exactly what a shared primitive makes unnecessary.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    # mkstemp rather than a predictable sibling name: `open()` follows a symlink, so a guessable
-    # temporary path lets anyone who can plant one redirect this write. mkstemp uses
-    # O_CREAT|O_EXCL, which fails on an existing path of any kind.
-    handle, tmp = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + ".", suffix=".tmp")
-    with os.fdopen(handle, "w", encoding="utf-8") as out:
-        out.write(text)
-        out.flush()
-        # fchmod on the descriptor, never chmod on the path — see the note in migrate-history.sh.
-        os.fchmod(out.fileno(), 0o644)
-        os.fsync(out.fileno())
-    os.replace(tmp, path)
-    fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    bridge.write_atomic(path.parent, path, text,
+                        mode=(path.lstat().st_mode & 0o7777) if path.is_file() else None)
 
 def read_json(path):
     if not path.is_file():

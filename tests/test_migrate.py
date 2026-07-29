@@ -605,3 +605,133 @@ class TestSurvey(MigrationCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FixedReportPathsAreNotTruncated(unittest.TestCase):
+    """A fixed path is a path the user may own. Row 5's conflicts report truncated whatever sat
+    there; row 6 replaced the live config through a symlink and forced it to 0644."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-fixedpath-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        (self.ws / ".vibe-suite-state").mkdir(parents=True)
+
+    def _state_dirs_disagreeing(self):
+        for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+            d = self.ws / name
+            d.mkdir()
+            (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+
+    def test_a_users_conflicts_report_is_not_overwritten(self):
+        self._state_dirs_disagreeing()
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.txt"
+        report.write_text("notes I keep here")
+        proc = subprocess.run(["bash", str(REPO_ROOT / "scripts/migrate/migrate-state.sh"),
+                               "--workspace", str(self.ws)], capture_output=True, text=True)
+        self.assertEqual(report.read_text(), "notes I keep here",
+                         "a user's file at the report path was truncated")
+        self.assertEqual(proc.returncode, 1)
+
+    def test_row_six_preserves_the_live_configs_mode(self):
+        mcp = self.ws / ".mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": {"cc-suite-mcp": {"command": "x"}}}))
+        os.chmod(mcp, 0o600)
+        subprocess.run(["bash", str(REPO_ROOT / "scripts/migrate/migrate-sentinels.sh"),
+                        "--workspace", str(self.ws), "--confirm"], capture_output=True, text=True)
+        mode = stat.S_IMODE(mcp.lstat().st_mode)
+        self.assertEqual(mode & 0o077, 0,
+                         f"a 0600 config was republished group/world readable at {oct(mode)}")
+
+    def test_row_six_refuses_a_symlinked_live_config(self):
+        real = self.ws / "elsewhere.json"
+        real.write_text(json.dumps({"mcpServers": {"cc-suite-mcp": {"command": "x"}}}))
+        (self.ws / ".mcp.json").symlink_to(real)
+        subprocess.run(["bash", str(REPO_ROOT / "scripts/migrate/migrate-sentinels.sh"),
+                        "--workspace", str(self.ws), "--confirm"], capture_output=True, text=True)
+        self.assertTrue((self.ws / ".mcp.json").is_symlink(),
+                        "the user's link was converted to a regular file")
+
+
+class ProvenanceStepDoesNotLeakThroughScratch(unittest.TestCase):
+    """`vibe_provenance_step` wrote a **fixed** `.tmp` sibling with `open(..., "w")`. The provenance
+    record holds complete pre-images, so that scratch file was a world-readable copy of a `0600`
+    `.mcp.json` — the leak `c2112ac` closed on the record itself, reopened one path over."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-provstep-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        self.prov = self.ws / "install-provenance.json"
+        self.prov.write_text(json.dumps(
+            {"steps": [], "targets": [{"path": "/x/.mcp.json", "content_b64": "czNjcmV0"}]}))
+        os.chmod(self.prov, 0o600)
+
+    def _step(self, name):
+        script = (f'source "{REPO_ROOT}/scripts/migrate/common.sh"\n'
+                  f'vibe_provenance_step "{self.prov}" "{name}"\n')
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    def test_the_record_keeps_its_mode_and_no_readable_copy_survives(self):
+        proc = self._step("config")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("config", json.loads(self.prov.read_text())["steps"])
+        mode = stat.S_IMODE(self.prov.lstat().st_mode)
+        self.assertEqual(mode & 0o077, 0, f"the record ended up at {oct(mode)}")
+        leftovers = [p for p in self.ws.iterdir() if p != self.prov]
+        for leftover in leftovers:
+            left_mode = stat.S_IMODE(leftover.lstat().st_mode)
+            self.assertEqual(left_mode & 0o077, 0,
+                             f"{leftover.name} is a readable copy at {oct(left_mode)}")
+
+    def test_a_symlinked_record_is_refused(self):
+        real = self.ws / "elsewhere.json"
+        real.write_text(json.dumps({"steps": []}))
+        link = self.ws / "linked-provenance.json"
+        link.symlink_to(real)
+        script = (f'source "{REPO_ROOT}/scripts/migrate/common.sh"\n'
+                  f'vibe_provenance_step "{link}" "config"\n')
+        subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertTrue(link.is_symlink(), "the user's link was converted to a regular file")
+
+
+class ConfigMigrationUsesThePrimitive(unittest.TestCase):
+    """Rows 1-2 wrote `.vibe-suite.md` through a fixed `.tmp` sibling and truncated
+    `migration-conflicts.json` at a fixed path."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-cfgmig-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        (self.ws / ".cc-suite.md").write_text("- **Default effort**: high\n")
+
+    def run_migrate(self):
+        return subprocess.run(["bash", str(REPO_ROOT / "scripts/migrate/migrate-config.sh"),
+                               "--workspace", str(self.ws)], capture_output=True, text=True)
+
+    def _conflicting_nlpm(self):
+        """`.cc-suite.md` is prose, not frontmatter — the shape the real migration reads."""
+        (self.ws / ".claude").mkdir(exist_ok=True)
+        (self.ws / ".claude" / "nlpm.local.md").write_text(
+            "---\neffort: low\nscore_threshold: 90\n---\n")
+
+    def test_a_users_conflicts_report_is_not_truncated(self):
+        self._conflicting_nlpm()
+        (self.ws / ".vibe-suite-state").mkdir()
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.json"
+        report.write_text(json.dumps({"mine": True}))
+        self.run_migrate()
+        self.assertEqual(json.loads(report.read_text()), {"mine": True},
+                         "a user's file at the report path was truncated")
+
+    def test_our_own_stamped_report_is_not_refused(self):
+        """The ownership guard must let a re-run replace its **own** output. A guard that refuses
+        everything, including what we wrote, breaks the feature instead of protecting it."""
+        (self.ws / ".vibe-suite-state").mkdir()
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.json"
+        report.write_text(json.dumps({"rows": [1, 2], "conflicts": {}, "vibe_suite_owned": True}))
+        proc = self.run_migrate()
+        self.assertNotIn("exists and is not ours", proc.stderr,
+                         "the guard refused a report this tool wrote")
+
+    def test_no_fixed_scratch_file_is_left_behind(self):
+        self.run_migrate()
+        leftovers = [p.name for p in self.ws.iterdir() if p.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [], f"scratch files survived: {leftovers}")

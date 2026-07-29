@@ -35,6 +35,8 @@ lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 set +e
 python3 - "$workspace" "$lib" "$report" "${legacy_dirs[@]}" <<'PY'
 import importlib.util, json, os, sys
+sys.path.insert(0, sys.argv[2])
+import bridge  # noqa: E402
 from pathlib import Path
 
 workspace, lib, report = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -80,7 +82,19 @@ if len(distinct) > 1:
     lines += [f"  {path}: {value}" for path, value in sorted(found.items())]
     lines += ["", "Choose one and re-run with the value set in the new store."]
     Path(report).parent.mkdir(parents=True, exist_ok=True)
-    Path(report).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # A fixed path is a path the user may own. `lstat`, not `exists` — a dangling symlink reports
+    # False and would be followed. The report carries an ownership line so a re-run recognises its
+    # own output instead of truncating whatever is there.
+    stamp = "# vibe-suite-owned: migration-conflicts\n"
+    existing = Path(report)
+    if existing.is_symlink():
+        sys.stderr.write(f"error: row 5: {report} is a symlink; refusing to write through it\n")
+        raise SystemExit(1)
+    if existing.is_file() and not existing.read_text(
+            encoding="utf-8", errors="replace").startswith(stamp):
+        sys.stderr.write(f"error: row 5: {report} exists and is not ours; refusing to overwrite\n")
+        raise SystemExit(1)
+    bridge.write_atomic(Path(report).parent, Path(report), stamp + "\n".join(lines) + "\n")
     sys.stderr.write(f"decision required — see {report}\n")
     raise SystemExit(3)
 

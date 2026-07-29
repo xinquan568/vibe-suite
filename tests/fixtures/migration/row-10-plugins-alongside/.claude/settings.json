@@ -1,0 +1,7 @@
+{
+  "enabledPlugins": [
+    "cc-suite",
+    "nlpm",
+    "grill"
+  ]
+}

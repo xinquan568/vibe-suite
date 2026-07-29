@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "cc-suite-mcp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "cc-suite-mcp"
+      ]
+    },
+    "theirs": {
+      "command": "their-server"
+    }
+  }
+}

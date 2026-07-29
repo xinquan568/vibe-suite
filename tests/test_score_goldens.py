@@ -686,12 +686,38 @@ class DegenerateInputs(unittest.TestCase):
         multiline_nested = ("---\nname: probe\n"
                             "description: Concrete probe; use when testing spans.\n"
                             "metadata: {tags: [a,\n  b], author: x}\n---\n# probe\n\nBody.\n")
-        for body in (flow, nested, block, multiline_map, multiline_seq, multiline_nested):
+        # A quoted scalar may close on a later line (review finding 5, iter-3 residue):
+        # the newline is content, the value parses clean.
+        multiline_quoted = ("---\nname: probe\n"
+                            "description: \"Concrete probe; use when testing\n"
+                            "  multiline quoted scalars.\"\n---\n# probe\n\nBody.\n")
+        # An apostrophe inside a trailing comment is not an open quote — the next line
+        # must survive un-swallowed by the multiline merger.
+        comment_apostrophe = ("---\nname: probe  # don't merge past this\n"
+                              "description: Concrete probe; use when testing comments.\n"
+                              "---\n# probe\n\nBody.\n")
+        for body in (flow, nested, block, multiline_map, multiline_seq,
+                     multiline_nested, multiline_quoted, comment_apostrophe):
             with self.subTest(head=body.splitlines()[3]):
                 f = score_one(body)
                 self.assertEqual(
                     [x for x in f["findings"] if "parse" in x["check"].lower()], [])
                 self.assertEqual(f["score"], 100, f["findings"])
+
+    def test_quoted_scalar_trailing_garbage_and_eof_are_minus_25(self):
+        # The other direction of the same residue: text after a CLOSED quoted scalar has
+        # no reading, and EOF inside a quote is unterminated — both true failures.
+        trailing = ("---\nname: \"probe\" garbage\n"
+                    "description: Concrete probe; use when testing.\n---\n# probe\nBody.\n")
+        unterminated = ("---\nname: probe\n"
+                        "description: \"never closed anywhere\n---\n# probe\nBody.\n")
+        for body in (trailing, unterminated):
+            with self.subTest(head=body.splitlines()[1]):
+                f = score_one(body)
+                self.assertEqual(
+                    [x["penalty"] for x in f["findings"] if "parse" in x["check"].lower()],
+                    [-25],
+                )
 
     def test_true_structural_failures_still_minus_25(self):
         # -25 fires ONLY on true structural failure: unbalanced quotes/brackets,

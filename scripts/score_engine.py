@@ -559,10 +559,10 @@ def _flow_depth(text):
 
 
 def _fm_value(rest, line_no):
-    """One already-stripped inline value. Trailing text after a closed QUOTED scalar is
-    tolerated (permissive); trailing text after a closed FLOW COLLECTION is a structural
-    failure — `key: {a: b} garbage` has no reading under the schema space. An
-    unterminated quote or flow raises."""
+    """One already-stripped inline value. Trailing text after a closed QUOTED scalar or a
+    closed FLOW COLLECTION is a structural failure — `name: "probe" garbage` and
+    `key: {a: b} garbage` have no reading under the schema space. An unterminated quote
+    or flow raises."""
     char = rest[0]
     if char in "{[":
         if char == "{":
@@ -574,21 +574,68 @@ def _fm_value(rest, line_no):
                 f"line {line_no}: trailing text after a closed flow collection")
         return value
     if char in "\"'":
-        return _fm_quoted(rest, 0, line_no)[0]
+        value, end = _fm_quoted(rest, 0, line_no)
+        if rest[end:].strip():
+            raise _FrontmatterError(
+                f"line {line_no}: trailing text after a closed quoted scalar")
+        return value
     return _fm_scalar_convert(rest)
+
+
+def _fm_open_quote(text):
+    """The quote character left open at the end of `text`, or None. Same scan discipline as
+    the comment stripper — including the comment rule itself, so an apostrophe inside a
+    ` #` comment (`# don't`) never reads as an opened quote and can never trigger a bogus
+    line merge. Backslash escapes honored inside double quotes; `''` in a single-quoted
+    scalar reads as close-then-reopen, which is equivalent for openness."""
+    inside, depth, index = None, 0, 0
+    while index < len(text):
+        char = text[index]
+        if inside:
+            if char == "\\" and inside == '"':
+                index += 2
+                continue
+            if char == inside:
+                inside = None
+        elif char in "\"'":
+            inside = char
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+        elif char == "#" and depth == 0 and (index == 0 or text[index - 1] in " \t"):
+            return None
+        index += 1
+    return inside
 
 
 class _FrontmatterParser:
     """Block-structure walker over the fenced lines (fences excluded)."""
 
     def __init__(self, lines):
+        # A quoted scalar may close on a later physical line (YAML multiline quoted
+        # scalar): merge such runs first, preserving the newline as content, so the
+        # per-line walk below only ever sees quote-balanced logical lines. EOF with a
+        # quote still open is a structural failure.
+        merged, index = [], 0
+        while index < len(lines):
+            logical, first = lines[index], index
+            while _fm_open_quote(logical) is not None:
+                index += 1
+                if index >= len(lines):
+                    raise _FrontmatterError(
+                        f"line {first + 2}: unterminated quoted scalar")
+                logical += "\n" + lines[index]
+            merged.append((logical, first))
+            index += 1
+
         self.lines = lines
         self.tokens = []          # (indent, comment-stripped content, source line index)
-        for line_index, raw in enumerate(lines):
-            content = _fm_strip_comment(raw).strip()
+        for logical, line_index in merged:
+            content = _fm_strip_comment(logical).strip()
             if not content:
                 continue
-            leading = raw[:len(raw) - len(raw.lstrip())]
+            leading = logical[:len(logical) - len(logical.lstrip())]
             if "\t" in leading:
                 raise _FrontmatterError(f"line {line_index + 2}: tab in indentation")
             self.tokens.append((len(leading), content, line_index))

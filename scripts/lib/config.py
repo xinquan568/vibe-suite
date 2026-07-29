@@ -539,12 +539,35 @@ def render(mapping):
     return "---\n" + "".join(line + "\n" for line in out) + "---\n"
 
 
+def resolve_text(text, root="."):
+    """Validate config *source* against a real `root`, without it being on disk there.
+
+    Callers that need to check a candidate before publishing it used to write it over the live
+    config, load, then put the original back — a swap that left the user's file replaced for the
+    duration and had to restore bytes *and* mode afterwards. The validation never needed the file to
+    be at that path; only `_check_containment` needs the root, and it takes it as an argument.
+
+    Returns `(config, warnings)`, exactly like `load_with_warnings`.
+    """
+    # Universal newlines, because that is what `Path.read_text()` does and this must agree with
+    # `load_with_warnings` exactly. Reading through the filesystem silently translated `\r\n`, so a
+    # CRLF config that loads fine on disk would otherwise be rejected here as unterminated
+    # frontmatter — a difference in validation that depends on how the bytes arrived.
+    normalised = text.replace("\r\n", "\n").replace("\r", "\n")
+    return _resolve(parse_frontmatter(normalised, CONFIG_FILENAME), root)
+
+
 def load_with_warnings(root="."):
     """Return `(config, warnings)`. Never writes to stdout."""
-    warnings, data = [], {}
+    data = {}
     path = Path(root) / CONFIG_FILENAME
     if path.exists():
         data = parse_frontmatter(path.read_text(encoding="utf-8"), CONFIG_FILENAME)
+    return _resolve(data, root)
+
+
+def _resolve(data, root):
+    warnings = []
     resolved = {}
     for key, value in data.items():
         row = SCHEMA.get(key)

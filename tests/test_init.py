@@ -661,23 +661,22 @@ class ConfigValidationDoesNotWidenTheWindow(unittest.TestCase):
         mode = stat.S_IMODE(cfg.lstat().st_mode)
         self.assertEqual(mode & 0o077, 0, f"a 0600 config ended up at {oct(mode)}")
 
-    def test_the_staged_candidate_is_never_looser_than_the_real_config(self):
-        """Asserted on the candidate itself, so the check covers the window and not just the end
-        state — a test that only reads the final mode passes even while the window is open."""
+    def test_validation_writes_nothing_at_all(self):
+        """Stronger than the mode check this replaces. `_verify_config` used to stage a candidate
+        over the live config and put the original back — every defect it accumulated (a `0600`
+        config readable through the window, a mode lost on restore, a fixed scratch path) came from
+        that swap. With nothing written there is no window to get wrong."""
         cfg = self.ws / ".vibe-suite.md"
         cfg.write_text("---\neffort: high\n---\nprivate\n")
         os.chmod(cfg, 0o600)
-        seen = []
-        real_write = bridge.write_atomic
-
-        def spy(root, dest, content, mode=None):
-            if ".vibe-candidate" in str(dest):
-                seen.append(mode)
-            return real_write(root, dest, content, mode)
-
-        bridge.write_atomic = spy
-        self.addCleanup(setattr, bridge, "write_atomic", real_write)
+        before = {p.name: (p.read_bytes(), stat.S_IMODE(p.lstat().st_mode))
+                  for p in self.ws.iterdir() if p.is_file()}
         init_bridge._verify_config(self.ws, "---\neffort: low\n---\nprivate\n")
-        self.assertTrue(seen, "the candidate was not written through the primitive")
-        self.assertEqual(seen[0], 0o600,
-                         f"candidate staged at {seen[0] and oct(seen[0])}, not the config's 0600")
+        after = {p.name: (p.read_bytes(), stat.S_IMODE(p.lstat().st_mode))
+                 for p in self.ws.iterdir() if p.is_file()}
+        self.assertEqual(after, before, "validation touched the workspace")
+
+    def test_an_invalid_candidate_is_still_rejected(self):
+        """Removing the swap must not remove the validation."""
+        with self.assertRaises(bridge.BridgeError):
+            init_bridge._verify_config(self.ws, "---\neffort: sonnet\n---\n")

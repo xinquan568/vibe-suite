@@ -69,11 +69,6 @@ EXEMPT = {
 #: surface at once — each fix addressed the writer in front of it while an earlier one stayed open.
 KNOWN = {
     "scripts/lib/init_bridge.py:125 os.chmod()",
-    "scripts/lib/init_bridge.py:192 os.replace()",
-    "scripts/lib/init_bridge.py:199 .unlink()",
-    "scripts/lib/init_bridge.py:201 .write_bytes()",
-    "scripts/lib/init_bridge.py:203 os.chmod()",
-    "scripts/lib/init_bridge.py:204 .unlink()",
     "scripts/migrate/migrate-history.sh#heredoc0:69 .write()",
     "scripts/migrate/migrate-history.sh#heredoc0:79 os.link()",
     "scripts/migrate/migrate-history.sh#heredoc0:86 os.unlink()",

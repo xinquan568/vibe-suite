@@ -664,15 +664,18 @@ class StateOwnershipIsCorroborated(unittest.TestCase):
     def test_a_users_state_json_is_not_deleted_for_having_our_name(self):
         (self.ws / ".vibe-suite-state").mkdir()
         theirs = self.ws / ".vibe-suite-state" / "state.json"
-        theirs.write_text(json.dumps({"notes": "mine"}))
+        # Carries a `schema` key too: a generic field a user's own JSON may well have, which is why
+        # ownership needs an explicit stamp rather than a plausible-looking one.
+        theirs.write_text(json.dumps({"schema": 1, "notes": "mine"}))
         r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
                             "--audit-depth", "mini", "--strictness", "standard"],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         subprocess.run(["bash", str(UNBRIDGE), "--workspace", str(self.ws), "--confirm"],
                        capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        if theirs.exists():
-            self.assertEqual(json.loads(theirs.read_text()), {"notes": "mine"})
+        # Unconditional: `if theirs.exists()` made this test incapable of failing.
+        self.assertTrue(theirs.is_file(), "a user's state.json was deleted for having our name")
+        self.assertEqual(json.loads(theirs.read_text()), {"schema": 1, "notes": "mine"})
 
 
 class ExclusiveFilesAreCorroborated(unittest.TestCase):
@@ -719,3 +722,61 @@ class ExclusiveFilesAreCorroborated(unittest.TestCase):
         self.unbridge()
         self.assertFalse((self.ws / ".vibe-suite.md").exists(),
                          "the suite's own config survived teardown")
+
+
+class OwnershipNeedsAnExplicitStamp(unittest.TestCase):
+    """Three ways a coincidence was mistaken for ownership, each now closed."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-stamp-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def init(self):
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def unbridge(self):
+        return subprocess.run(["bash", str(UNBRIDGE), "--workspace", str(self.ws), "--confirm"],
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
+
+    def test_the_word_vibe_suite_in_a_config_is_not_ownership(self):
+        """`bridge.MARKER in text` was a substring test, which a migrated
+        `skip_patterns: [vibe-suite]` satisfies — deleting an unmarked config on a coincidence."""
+        self.assertFalse(unbridge._is_recognisably_ours(
+            ".vibe-suite.md", self._write(".vibe-suite.md",
+                                          "---\nskip_patterns:\n  - vibe-suite\n---\nmine\n")))
+
+    def test_a_generic_schema_key_is_not_ownership(self):
+        self.assertFalse(unbridge._is_suite_state(
+            Path("state.json"), self._write("state.json", json.dumps({"schema": 1, "n": "mine"}))))
+
+    def test_a_users_file_under_a_directory_we_use_is_not_ours(self):
+        """A path prefix is not ownership: `jobs/` is a directory we happen to write into."""
+        self.assertFalse(unbridge._is_suite_state(Path("jobs/notes.txt"), None))
+
+    def test_a_pre_existing_history_is_not_deleted(self):
+        """The exclusive-JSON check used to be unreachable — `json_is_only_ours` returned True for
+        this path unconditionally, so the corroboration below it never ran."""
+        (self.ws / ".claude").mkdir(parents=True, exist_ok=True)
+        theirs = self.ws / ".claude" / "vibe-history.json"
+        theirs.write_text(json.dumps({"snapshots": [{"score": 91}], "mine": True}))
+        self.init()
+        record_path = self.ws / init_bridge.PROVENANCE
+        record = json.loads(record_path.read_text())
+        for entry in record["targets"]:
+            if entry["path"].endswith("vibe-history.json"):
+                entry["kind"] = "absent"
+                for field in ("mode", "sha256", "content_b64", "link_target"):
+                    entry.pop(field, None)
+        record_path.write_text(json.dumps(record, indent=2))
+        self.unbridge()
+        self.assertTrue(theirs.is_file(), "a pre-existing history was deleted on a forged record")
+        self.assertTrue(json.loads(theirs.read_text()).get("mine"))
+
+    def _write(self, name, text):
+        path = self.ws / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path

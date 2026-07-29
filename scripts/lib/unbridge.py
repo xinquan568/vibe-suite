@@ -176,7 +176,14 @@ def restore(ws, entry, report):
     # Not a block target: JSON handled by json_targets(), everything else is ours only if init
     # created it and nothing has been added since.
     if entry["kind"] == "absent":
-        if rel.endswith(".json"):
+        if rel in EXCLUSIVE_FILES:
+            # Checked here, before the shared-store branch. `json_is_only_ours` returns True
+            # unconditionally for an exclusive file, so routing these through it made the
+            # corroboration below unreachable — a guard that never ran.
+            if not _is_recognisably_ours(rel, path):
+                report.append(f"{rel}: kept — nothing identifies it as ours; remove it by hand")
+                return
+        elif rel.endswith(".json"):
             if not json_is_only_ours(rel, bridge.load_json(path)):
                 report.append(f"{rel}: kept — it holds content that is not ours")
                 return
@@ -249,7 +256,12 @@ EXCLUSIVE_FILES = (".vibe-suite.md", ".claude/vibe-history.json")
 #: What the suite writes into `.vibe-suite-state/`. Anything else in there is the user's.
 SUITE_STATE = ("install-provenance.json", "state.json", "config.json", "jobs.json", "history.json",
                "config-resolution.json", "row6-decision.json", "row6-provenance.json",
-               "migration-conflicts.json", "migration-conflicts.md")
+               "migration-conflicts.json", "migration-conflicts.txt")
+#: `migrate-state.sh:32` writes `.txt`; the earlier entry said `.md` and matched nothing.
+#:
+#: These migration artefacts carry no `vibe_suite_owned` stamp, so they are *left behind* rather than
+#: removed — recorded residue, and the safe direction: an artefact of ours surviving teardown costs
+#: the user nothing, while deleting a file we cannot prove is ours costs them everything.
 
 
 def _is_suite_state(relative, path=None):
@@ -264,16 +276,17 @@ def _is_suite_state(relative, path=None):
     parts = relative.parts
     if not parts:
         return False
-    if parts[0] in ("jobs", "runs", "cache"):
-        return True   # suite-owned subtrees, created wholesale
     if len(parts) != 1 or path is None:
+        # A directory prefix is not ownership either: `.vibe-suite-state/jobs/notes.txt` is the
+        # user's file in a directory we happen to use.
         return False
     if parts[0] == "install-provenance.json":
         return True   # we are reading it right now; nothing else writes it
     if parts[0] not in SUITE_STATE:
         return False
     doc = bridge.load_json(path)
-    return isinstance(doc, dict) and doc.get("schema") == bridge.SCHEMA
+    # An explicit ownership stamp, not a generic `schema` key a user's own JSON may also carry.
+    return isinstance(doc, dict) and doc.get("vibe_suite_owned") is True
 
 
 def _is_recognisably_ours(rel, path):
@@ -292,12 +305,13 @@ def _is_recognisably_ours(rel, path):
         # init writes an owned marker into these when it *creates* them, which is what makes the
         # proof possible — and F1.4's two clauses then both hold, instead of trading one for the
         # other. A user who deletes the marker keeps their file; that is the intended outcome.
-        text = bridge.read_text_verbatim(path)
         if rel.endswith(".json"):
             doc = bridge.load_json(path)
-            return isinstance(doc, dict) and (
-                doc.get("schema") == bridge.SCHEMA or any("migrated" in k for k in doc))
-        return bridge.MARKER in text
+            return isinstance(doc, dict) and doc.get("vibe_suite_owned") is True
+        # The exact well-formed block through the shared codec. `bridge.MARKER in text` was a
+        # substring test for "vibe-suite", which a migrated `skip_patterns: [vibe-suite]` satisfies —
+        # so an unmarked config would have been deleted wholesale on a coincidence.
+        return bridge.md_block_has(bridge.read_text_verbatim(path), "config")
     text = bridge.read_text_verbatim(path)
     if not text.strip():
         return True  # created and since emptied; nothing of anyone's is in it

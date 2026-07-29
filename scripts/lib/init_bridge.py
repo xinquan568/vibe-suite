@@ -261,7 +261,7 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
         front.extend(f"  - {pattern}" for pattern in patterns)
     bom, sep = (newline[:1], newline[1:]) if newline.startswith("\ufeff") else ("", newline)
     rendered = bom + sep.join(["---", *front, "---", ""]) + rest
-    if not existing:
+    if not dest.exists():
         # Creating it, not merging into one the user already had — so this marker only ever lands in
         # a file we made. It is what lets `/vibe-suite:unbridge` *prove* the file is ours before
         # deleting it: without it, teardown had to take the provenance record's unauthenticated word,
@@ -269,6 +269,8 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
         #
         # If the user later removes this line, the file stops being recognisably ours and teardown
         # leaves it alone. That is the correct outcome, not a failure.
+        # Keyed on the path not existing, not on empty content: a pre-existing zero-byte file is
+        # still the user's, and marking it would claim something we did not create.
         rendered = bridge.md_block_upsert(
             rendered, "config",
             "Created by /vibe-suite:init. Remove this block to keep the file on teardown.")
@@ -323,8 +325,11 @@ def _history_baseline(ws, threshold):
                 f"{dest}: 'snapshots' is {type(snapshots).__name__}, not a list; refusing to append")
         container = history
     elif history is None and not dest.is_file():
+        # Created by us, so stamped as ours. Teardown needs on-disk proof before deleting a whole
+        # file; without it, an edited provenance record was the only evidence, and that is not
+        # evidence. A pre-existing history is never stamped, so it is never deleted.
         snapshots = []
-        container = {"snapshots": snapshots}
+        container = {"vibe_suite_owned": True, "snapshots": snapshots}
     else:
         # Valid JSON of an unexpected shape. Replacing it would discard a file the user may care
         # about, and this command has no mandate to decide that.

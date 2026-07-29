@@ -68,18 +68,12 @@ EXEMPT = {
 #: Listing them is the point. Fourteen passes on #21 failed because nobody could see the whole
 #: surface at once — each fix addressed the writer in front of it while an earlier one stayed open.
 KNOWN = {
-    "scripts/bridge_cli.py:169 .unlink()",
-    "scripts/bridge_cli.py:206 os.mkdir()",
-    "scripts/bridge_cli.py:247 os.symlink()",
     "scripts/lib/init_bridge.py:125 os.chmod()",
     "scripts/lib/init_bridge.py:192 os.replace()",
     "scripts/lib/init_bridge.py:199 .unlink()",
     "scripts/lib/init_bridge.py:201 .write_bytes()",
     "scripts/lib/init_bridge.py:203 os.chmod()",
     "scripts/lib/init_bridge.py:204 .unlink()",
-    "scripts/migrate/common.sh#heredoc0:11 os.replace()",
-    "scripts/migrate/common.sh#heredoc0:7 open(..., 'w')",
-    "scripts/migrate/common.sh#heredoc0:9 .write()",
     "scripts/migrate/migrate-config.sh#heredoc0:124 .write_text()",
     "scripts/migrate/migrate-config.sh#heredoc0:125 .replace()",
     "scripts/migrate/migrate-config.sh#heredoc0:81 .write_text()",

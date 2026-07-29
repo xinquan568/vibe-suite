@@ -129,7 +129,11 @@ elif [ -n "$resolve_config" ]; then
     existing_resolution=""
     [ -f "$resolution_file" ] && existing_resolution="$(cat "$resolution_file")"
     if [ "$existing_resolution" != "$(printf '%s' "$resolve_config")" ]; then
-        printf '%s\n' "$resolve_config" > "$resolution_file"
+        # Through the primitive, not a redirection: `>` follows a symlink, so a link planted at
+        # this fixed path redirected the write onto whatever it pointed at.
+        printf '%s\n' "$resolve_config" |
+            python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)/bridge.py" \
+                write "$workspace" "$resolution_file" 600
     fi
     run_helper migrate-config.sh --resolution "$resolution_file"
 else

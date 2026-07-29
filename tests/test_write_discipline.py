@@ -131,6 +131,46 @@ def _mutations(tree):
     return found
 
 
+#: Shell redirections and mutating shell commands. **A redirection follows a symlink**, so `> path`
+#: writes through a link planted at a fixed path — and none of it is visible to an AST sweep, which
+#: is how one survived the pass that routed every Python write.
+_SHELL_WRITE = re.compile(
+    r"(?<![0-9<>])>>?\s*[\"']?\$?[A-Za-z_./{]"     # > path / >> path, not 2>&1 or a heredoc
+    r"|^\s*(mv|cp|rm|ln|install|truncate|chmod|chown|touch|mkfifo)\s",
+    re.M)
+
+#: Redirections to a throwaway destination mutate nothing the user owns.
+_SHELL_SAFE = re.compile(r">\s*(&[0-9-]|/dev/null|\$?\{?tmp|\$\(mktemp)")
+
+
+SHELL_KNOWN = set()
+
+
+def _shell_writes(text):
+    """`(lineno, line)` for shell lines that mutate the filesystem outside the primitive.
+
+    Heredoc bodies are skipped: they are Python, and the AST sweep already covers them. Scanning
+    them as shell reports every `re.compile(r"...>...")` as a redirection, and a lint that cries
+    wolf gets switched off.
+    """
+    hits = []
+    in_heredoc = False
+    for number, line in enumerate(text.split("\n"), 1):
+        if in_heredoc:
+            if line.strip() == "PY":
+                in_heredoc = False
+            continue
+        if "<<'PY'" in line:
+            in_heredoc = True
+            continue
+        bare = line.split("#", 1)[0]
+        if not bare.strip() or "bridge.py" in bare and "write" in bare:
+            continue
+        if _SHELL_WRITE.search(bare) and not _SHELL_SAFE.search(bare):
+            hits.append((number, bare.strip()[:90]))
+    return hits
+
+
 class NoDirectFilesystemMutation(unittest.TestCase):
     def test_every_python_source_parses(self):
         """A heredoc that stopped parsing would silently drop out of the sweep — which is exactly
@@ -159,6 +199,29 @@ class NoDirectFilesystemMutation(unittest.TestCase):
         self.assertFalse(_mutations(ast.parse("sys.stderr.write('note\\n')")))
         self.assertFalse(_mutations(ast.parse("open(p)")))
         self.assertFalse(_mutations(ast.parse("open(p, 'r')")))
+
+    def test_the_shell_detector_recognises_a_redirection(self):
+        self.assertTrue(_shell_writes('printf x > "$target"'))
+        self.assertTrue(_shell_writes('mv a b'))
+        self.assertFalse(_shell_writes("printf x > /dev/null"))
+        self.assertFalse(_shell_writes("cmd 2>&1"))
+        # A quoted `"$tmp"` is *not* exempted: the name says scratch, the value may not be. With
+        # no sites left to accommodate, strictness costs nothing.
+        self.assertTrue(_shell_writes('printf x > "$tmp"'))
+
+    def test_no_shell_redirection_writes_a_real_path(self):
+        """The gap that let `init.sh` write `config-resolution.json` with `> path` survive the sweep
+        that routed every Python write. A redirection follows a symlink; an AST lint cannot see it."""
+        offenders = []
+        for path in sorted(SCRIPTS.rglob("*.sh")):
+            rel = str(path.relative_to(REPO_ROOT))
+            for number, line in _shell_writes(path.read_text(encoding="utf-8")):
+                entry = f"{rel}:{number} {line}"
+                if entry not in SHELL_KNOWN:
+                    offenders.append(entry)
+        self.assertEqual(offenders, [], "shell redirection writing a real path — pipe it through "
+                                        "`bridge.py write` instead:\n"
+                                        + "\n".join(f"  - {o}" for o in offenders))
 
     def test_no_direct_mutation_outside_the_primitive(self):
         offenders = []

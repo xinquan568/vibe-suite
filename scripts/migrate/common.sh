@@ -52,10 +52,11 @@ vibe_safe_write() {
         cat > /dev/null
         return 0
     fi
+    # `publish` is create-only by construction — an `O_EXCL` scratch at the destination's mode,
+    # fsynced, then linked into place. The old `mktemp` + `mv -f` followed a symlink at `$dest` and
+    # `mv -f` would clobber whatever was there.
     mkdir -p "$(dirname "$dest")"
-    tmp="$(mktemp "${dest}.XXXXXX")"
-    cat > "$tmp"
-    mv -f "$tmp" "$dest"
+    cat | python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/bridge.py" publish "$(dirname "$dest")" "$dest"
 }
 
 vibe_exists() { [ -e "$1" ]; }
@@ -74,8 +75,7 @@ vibe_provenance_write() {
         printf '  "schema": 1,\n'
         printf '  "steps": [%s]\n' "$(vibe_json_list "$@")"
         printf '}\n'
-    } > "$path.tmp"
-    mv -f "$path.tmp" "$path"
+    } | python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/bridge.py" write "$(dirname "$path")" "$path" 600
     vibe_fsync_dir "$(dirname "$path")"
 }
 
@@ -172,6 +172,6 @@ vibe_sha256() {
 vibe_decision_report() {
     local path="$1"; shift
     mkdir -p "$(dirname "$path")"
-    printf '%s\n' "$@" > "$path"
+    printf '%s\n' "$@" | python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/bridge.py" write "$(dirname "$path")" "$path"
     vibe_log "decision required — see $path"
 }

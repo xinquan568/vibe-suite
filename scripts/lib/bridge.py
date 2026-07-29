@@ -687,6 +687,20 @@ def load_json(path):
 
 
 def main(argv):
+    if len(argv) >= 4 and argv[1] == "write":
+        # For shell callers. A native redirection (`printf ... > path`) **follows a symlink**, so a
+        # link planted at a fixed path redirects the write onto whatever it points at — and
+        # redirections are invisible to the AST lint, which is how one survived the sweep that
+        # routed every Python write. Content arrives on stdin so no argv limit applies.
+        root, dest = Path(argv[2]), Path(argv[3])
+        mode = int(argv[4], 8) if len(argv) >= 5 else None
+        write_atomic(root, dest, sys.stdin.read(), mode=mode)
+        return 0
+    if len(argv) >= 4 and argv[1] == "publish":
+        # Create-only, for shell callers. `mv -f` clobbers; this refuses, which is what "a store
+        # that appeared while we ran still wins" requires.
+        root, dest = Path(argv[2]), Path(argv[3])
+        return 0 if publish_new(root, dest, sys.stdin.read()) else 0
     if len(argv) >= 3 and argv[1] == "list-owned":
         for name in inventory_enumerate(argv[2]):
             print(name)

@@ -527,3 +527,66 @@ class SymlinkTargetsAreRefused(unittest.TestCase):
         bridge.write_atomic(self.ws, target, "after\n")
         self.assertEqual(target.read_text(), "after\n")
         self.assertFalse(target.is_symlink())
+
+
+class OneGrammarNotTwo(unittest.TestCase):
+    """The recurring defect: a guard beside one caller, or a validator that does not share the
+    grammar of the thing it guards."""
+
+    def test_a_prefixed_marker_is_not_a_marker_to_either_parser(self):
+        """The exact input the previous round's fix made *worse*: anchoring the validator while
+        leaving the remover unanchored made this validate as well-formed and then be removed
+        through. Both now agree it is not our marker at all, so the user's line survives."""
+        text = ("prefix # >>> vibe-suite:ignore v1 >>>\n"
+                "USER DATA\n"
+                "prefix # <<< vibe-suite:ignore <<<\n")
+        self.assertTrue(bridge.markers_wellformed(text, "ignore"))
+        self.assertIn("USER DATA", bridge.text_block_remove(text, "ignore"))
+        self.assertFalse(bridge.text_block_has(text, "ignore"))
+
+    def test_a_clean_block_still_round_trips(self):
+        body = "ours\n"
+        built = bridge.text_block_upsert("", "ignore", body)
+        self.assertTrue(bridge.text_block_has(built, "ignore"))
+        self.assertEqual(bridge.text_block_remove(built, "ignore"), "")
+
+
+class ProvenanceKindIsNotAuthority(unittest.TestCase):
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-kind-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.record_path = self.ws / init_bridge.PROVENANCE
+
+    def rewrite(self, mutate):
+        record = json.loads(self.record_path.read_text())
+        mutate(record)
+        self.record_path.write_text(json.dumps(record, indent=2))
+
+    def unbridge(self):
+        return subprocess.run(["bash", str(UNBRIDGE), "--workspace", str(self.ws), "--confirm"],
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
+
+    def test_a_duplicate_entry_for_one_target_is_refused(self):
+        """Two entries naming one path with different kinds meant two meanings, and the destructive
+        one won."""
+        def dup(record):
+            first = dict(record["targets"][0])
+            first["kind"] = "absent"
+            record["targets"].append(first)
+        self.rewrite(dup)
+        self.assertEqual(self.unbridge().returncode, 1)
+
+    def test_flipping_a_shared_file_to_absent_does_not_delete_it(self):
+        """`.gitignore` carries an owned block, so its content can corroborate the record. With the
+        block already gone, `kind: absent` alone must not authorise deleting the user's file."""
+        gitignore = self.ws / ".gitignore"
+        gitignore.write_text("node_modules/\nmine.log\n")
+        self.rewrite(lambda r: [e.__setitem__("kind", "absent")
+                                for e in r["targets"] if e["path"].endswith(".gitignore")])
+        self.unbridge()
+        self.assertTrue(gitignore.is_file(), "the user's .gitignore was deleted on the record's word")
+        self.assertIn("mine.log", gitignore.read_text())

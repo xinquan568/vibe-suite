@@ -115,8 +115,27 @@ def unlink_at(root, rel):
 
 
 #: Identity of each workspace root this process has opened, so a mid-run replacement is detected
-#: rather than silently followed. Keyed by resolved path; values are `(st_dev, st_ino)`.
+#: rather than silently followed. Keyed by the **caller-supplied** path — keying by the resolved path
+#: would mint a fresh pin for a swapped-in directory and never notice the swap.
 _ROOT_PIN = {}
+
+
+def pin_root(root):
+    """Establish the root's identity **before** anything reads or writes through it.
+
+    The pin used to be created lazily, on the first descriptor operation — which happens after
+    provenance validation and after path-based reads. A workspace swapped before that point simply
+    became the pinned one, and the record was then applied to it. A command that will delete calls
+    this at entry, so every later step is checked against the directory the decisions were made
+    about.
+    """
+    fd = os.open(os.path.realpath(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
+    _ROOT_PIN[str(root)] = (st.st_dev, st.st_ino)
+    return _ROOT_PIN[str(root)]
 
 
 def _open_dir_chain(root, relative):
@@ -288,13 +307,31 @@ def _block(name, body, open_delim, close_delim):
             f"{open_delim} <<< {MARKER}:{name} <<<{close_delim}\n")
 
 
+def _marker_open(name, open_delim, close_delim):
+    """The opening marker, anchored to a whole line."""
+    return (rf"^{re.escape(open_delim)} >>> {re.escape(MARKER)}:{re.escape(name)} v\d+ >>>"
+            rf"{re.escape(close_delim)}$")
+
+
+def _marker_close(name, open_delim, close_delim):
+    """The closing marker, anchored to a whole line."""
+    return (rf"^{re.escape(open_delim)} <<< {re.escape(MARKER)}:{re.escape(name)} <<<"
+            rf"{re.escape(close_delim)}$")
+
+
 def _block_re(name, open_delim, close_delim):
+    """Detection and removal, built from the **same** anchored markers the validator uses.
+
+    This was two regexes: an unanchored one here and an anchored one in `markers_wellformed`. A line
+    like `prefix # >>> vibe-suite:x v1 >>>` therefore counted as zero markers to the validator — so
+    the document passed as well-formed — while still matching here, and removal deleted through the
+    user's content between it and the next close. Two parsers for one grammar is the defect; the
+    parity is now structural rather than a thing to keep in step by hand.
+    """
     return re.compile(
-        rf"{re.escape(open_delim)} >>> {re.escape(MARKER)}:{re.escape(name)} v\d+ >>>"
-        rf"{re.escape(close_delim)}\n.*?"
-        rf"{re.escape(open_delim)} <<< {re.escape(MARKER)}:{re.escape(name)} <<<"
-        rf"{re.escape(close_delim)}\n",
-        re.S)
+        _marker_open(name, open_delim, close_delim) + r"\n.*?"
+        + _marker_close(name, open_delim, close_delim) + r"\n",
+        re.S | re.M)
 
 
 def text_block_upsert(existing, name, body, open_delim="#", close_delim=""):
@@ -354,16 +391,14 @@ def markers_wellformed(existing, name, open_delim="#", close_delim=""):
     removal it guards: a check in one caller left every other caller (`toml_server_remove` among
     them) removing unvalidated.
 
-    The grammar is deliberately identical to `_block_re`'s, anchored to whole lines. A validator that
-    accepted a marker the remover rejects (a closer with trailing text, say) would pass a document
-    whose removal still spans user data.
+    The grammar is not merely *like* `_block_re`'s — it is built from the same two functions, so the
+    two cannot drift. A validator that recognised a marker the remover did not (or the reverse) would
+    pass a document whose removal still spans user data.
     """
-    marker = re.escape(MARKER)
-    od, cd = re.escape(open_delim), re.escape(close_delim)
     opens = [m.start() for m in re.finditer(
-        rf"^{od} >>> {marker}:{re.escape(name)} v\d+ >>>{cd}$", existing, re.M)]
+        _marker_open(name, open_delim, close_delim), existing, re.M)]
     closes = [m.start() for m in re.finditer(
-        rf"^{od} <<< {marker}:{re.escape(name)} <<<{cd}$", existing, re.M)]
+        _marker_close(name, open_delim, close_delim), existing, re.M)]
     if len(opens) != len(closes):
         return False
     expect = "o"

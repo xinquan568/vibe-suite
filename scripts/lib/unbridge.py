@@ -180,6 +180,12 @@ def restore(ws, entry, report):
             if not json_is_only_ours(rel, bridge.load_json(path)):
                 report.append(f"{rel}: kept — it holds content that is not ours")
                 return
+        elif not _is_recognisably_ours(rel, path):
+            # `kind: absent` says the installer created this file, and the record is not
+            # authenticated — so on its own it cannot authorise deleting a whole file. A file the
+            # installer created is one it can still recognise; anything else stays, as residue.
+            report.append(f"{rel}: kept — nothing identifies it as ours; remove it by hand")
+            return
         bridge.unlink_at(ws, rel)
         report.append(f"{rel}: removed")
         return
@@ -229,6 +235,36 @@ def prune(ws, record, report):
             report.append(f"{path.relative_to(ws)}/: removed")
 
 
+#: Files init creates **whole**, with no shared shape and no owned block to look for. Their content
+#: cannot corroborate ownership because all of it is ours, so `kind` is the only signal available.
+#:
+#: That is a real limit, and it is bounded rather than closed: the provenance record lives inside
+#: `.vibe-suite-state/`, so forging it needs write access to the workspace — the same access needed
+#: to delete these files outright. Corroboration buys nothing against an attacker who already has it,
+#: and for the accidental-corruption case the duplicate and allowed-path checks in `validate_record`
+#: are what catch a record that has drifted.
+EXCLUSIVE_FILES = (".vibe-suite.md", ".claude/vibe-history.json")
+
+
+def _is_recognisably_ours(rel, path):
+    """Whether a file's *content* still identifies it as the installer's own.
+
+    Independent corroboration for `kind: absent`, which is otherwise an unauthenticated record's
+    unsupported word. A file init only *contributes a block to* is ours only while that block is
+    present; once it is gone the file is the user's, whatever the record says.
+    """
+    if rel in EXCLUSIVE_FILES:
+        return True
+    text = bridge.read_text_verbatim(path)
+    if not text.strip():
+        return True  # created and since emptied; nothing of anyone's is in it
+    for owned_rel, name, style in BLOCKS:
+        if owned_rel == rel:
+            return (bridge.md_block_has(text, name) if style == "md"
+                    else bridge.text_block_has(text, name))
+    return bridge.MARKER in text
+
+
 def validate_record(ws, record):
     """Every mutation this command performs is directed by the provenance record, so the record is
     authority — and authority that is only shape-checked is authority a tampered file inherits.
@@ -252,7 +288,7 @@ def validate_record(ws, record):
     # `main` resolves the workspace, so on macOS an honest record reads `/var/...` against an
     # expected `/private/var/...`. Comparing raw strings rejects every real install.
     allowed = {os.path.realpath(ws / rel) for rel in init_bridge.TARGETS}
-    seen = set()
+    seen = []
     for entry in targets:
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
             problems.append("a target entry is not an object with a path")
@@ -262,8 +298,13 @@ def validate_record(ws, record):
         resolved = os.path.realpath(entry["path"])
         if resolved not in allowed:
             problems.append(f"{entry['path']}: not a path this installer writes")
-        seen.add(resolved)
-    missing = allowed - seen
+        seen.append(resolved)
+    # Exactly one entry per target. A duplicate `absent` entry appended beside an honest `file` one
+    # named the same path twice with two different meanings, and the destructive reading won.
+    for path in sorted(set(seen)):
+        if seen.count(path) > 1:
+            problems.append(f"{path}: named by {seen.count(path)} entries; expected exactly one")
+    missing = allowed - set(seen)
     if missing:
         problems.append(f"the record is missing {len(missing)} of the installer's own targets")
 
@@ -287,6 +328,13 @@ def validate_record(ws, record):
 def main(argv):
     ws = Path(argv[1]).resolve()
     confirm = argv[2] == "1"
+    # Before the record is read, before anything is validated, before any path-based read: fix what
+    # "this workspace" means. Everything after is checked against this directory.
+    try:
+        bridge.pin_root(ws)
+    except OSError as exc:
+        print(f"error: {ws} could not be opened safely ({exc})", file=sys.stderr)
+        return 1
     provenance = ws / init_bridge.PROVENANCE
     if not provenance.is_file() and not bridge.inventory_enumerate(ws):
         print("nothing to remove: no vibe-suite artefacts are registered here")

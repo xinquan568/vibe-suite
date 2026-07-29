@@ -1,0 +1,32 @@
+{
+  "A": {
+    "files": 9,
+    "lines": 16,
+    "tokens": 72
+  },
+  "B": {
+    "files": 2,
+    "lines": 2,
+    "tokens": 11
+  },
+  "C": {
+    "files": 1,
+    "lines": 1,
+    "tokens": 5
+  },
+  "D": {
+    "files": 1,
+    "lines": 1,
+    "tokens": 5
+  },
+  "E": {
+    "files": 2,
+    "lines": 2,
+    "tokens": 4
+  },
+  "total": {
+    "files": 15,
+    "lines": 22,
+    "tokens": 97
+  }
+}

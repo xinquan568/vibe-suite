@@ -77,13 +77,15 @@ class FrontmatterError(ValueError):
     """The frontmatter block is malformed."""
 
 
-def parse_frontmatter(text):
-    """Parse the strict frontmatter subset vibe-suite skills use.
+def parse_frontmatter(text, required=("name", "description")):
+    """Parse the strict frontmatter subset vibe-suite artifacts use.
 
     Grammar: line 1 is exactly ``---``; a closing ``---`` must follow; every line between
     is a single ``key: value`` pair (lowercase key, one space, non-empty value); no tabs,
     no continuations, no nesting, no duplicate keys; a value that opens with a quote must
-    close it. Returns the field dict; raises FrontmatterError otherwise.
+    close it. ``required`` names the mandatory keys — skills demand name+description (the
+    default); other artifact kinds pass their own set. Returns the field dict; raises
+    FrontmatterError otherwise.
     """
     lines = text.split("\n")
     if not lines or lines[0] != "---":
@@ -93,9 +95,9 @@ def parse_frontmatter(text):
         if line == "---":
             if not fields:
                 raise FrontmatterError("empty frontmatter block")
-            for required in ("name", "description"):
-                if required not in fields:
-                    raise FrontmatterError("missing mandatory key %r" % required)
+            for key in required:
+                if key not in fields:
+                    raise FrontmatterError("missing mandatory key %r" % key)
             return fields
         if "\t" in line:
             raise FrontmatterError("tab character on line %d" % lineno)

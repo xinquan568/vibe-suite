@@ -24,13 +24,16 @@
     "./commands/doctor.md",
     "./commands/init.md",
     "./commands/jobs.md",
+    "./commands/ls.md",
     "./commands/preflight.md",
     "./commands/repair.md",
     "./commands/unbridge.md",
     "./commands/update.md"
   ],
   "hooks": "./hooks/hooks.json",
-  "agents": [],
+  "agents": [
+    "./agents/scanner.md"
+  ],
   "skills": [
     "./skills/agent-design",
     "./skills/conventions",

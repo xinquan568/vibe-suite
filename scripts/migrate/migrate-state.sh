@@ -35,6 +35,8 @@ lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 set +e
 python3 - "$workspace" "$lib" "$report" "${legacy_dirs[@]}" <<'PY'
 import importlib.util, json, os, sys
+sys.path.insert(0, sys.argv[2])
+import bridge  # noqa: E402
 from pathlib import Path
 
 workspace, lib, report = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -92,7 +94,7 @@ if len(distinct) > 1:
             encoding="utf-8", errors="replace").startswith(stamp):
         sys.stderr.write(f"error: row 5: {report} exists and is not ours; refusing to overwrite\n")
         raise SystemExit(1)
-    Path(report).write_text(stamp + "\n".join(lines) + "\n", encoding="utf-8")
+    bridge.write_atomic(Path(report).parent, Path(report), stamp + "\n".join(lines) + "\n")
     sys.stderr.write(f"decision required — see {report}\n")
     raise SystemExit(3)
 

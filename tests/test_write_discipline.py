@@ -61,21 +61,13 @@ EXEMPT = {
     "scripts/lib/bridge.py": "the audited primitive itself",
 }
 
-#: **A ratchet, not an allow-list.** Every entry is a site still to be routed through the primitive,
-#: recorded so the sweep can run in CI today rather than waiting for all of them. A *new* violation
-#: fails immediately; this set may only shrink, which `test_the_baseline_only_shrinks` enforces.
+#: **Empty, and it stays empty.** This began as a ratchet with 37 recorded sites so the sweep could
+#: run in CI while they were routed one at a time. They are all routed now, so the exception list is
+#: the strongest statement it can be: there are no exceptions.
 #:
-#: Listing them is the point. Fourteen passes on #21 failed because nobody could see the whole
-#: surface at once — each fix addressed the writer in front of it while an earlier one stayed open.
-KNOWN = {
-    "scripts/lib/init_bridge.py:125 os.chmod()",
-    "scripts/migrate/migrate-history.sh#heredoc0:69 .write()",
-    "scripts/migrate/migrate-history.sh#heredoc0:79 os.link()",
-    "scripts/migrate/migrate-history.sh#heredoc0:86 os.unlink()",
-    "scripts/migrate/migrate-sentinels.sh#heredoc0:42 .write()",
-    "scripts/migrate/migrate-sentinels.sh#heredoc0:47 os.replace()",
-    "scripts/migrate/migrate-state.sh#heredoc0:59 .write_text()",
-}
+#: A new entry here is a claim that some mutation cannot go through the primitive. That claim needs
+#: a reason next to it, and it should be rare enough to argue about.
+KNOWN = set()
 
 
 def _python_sources():
@@ -182,8 +174,9 @@ class NoDirectFilesystemMutation(unittest.TestCase):
                 entry = f"{name}:{lineno} {what}"
                 if entry not in KNOWN:
                     offenders.append(entry)
-        self.assertEqual(offenders, [], "NEW direct filesystem mutation outside the audited "
-                                        "primitive — route it through bridge.write_atomic:\n"
+        self.assertEqual(offenders, [], "direct filesystem mutation outside the audited primitive "
+                                        "— route it through bridge.write_atomic / publish_new / "
+                                        "unlink_at / symlink_at / secure_dir:\n"
                                         + "\n".join(f"  - {o}" for o in offenders))
 
     def test_the_baseline_only_shrinks(self):

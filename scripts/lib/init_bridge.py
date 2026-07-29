@@ -172,6 +172,9 @@ def _verify_config(ws, text):  # noqa: D401
     real = ws / config_mod.CONFIG_FILENAME
     bridge.refuse_if_symlink(real, "config write")
     keep = real.read_bytes() if real.is_file() else None
+    # The mode is the user's too. Restoring only the bytes left a 0600 config world-readable at the
+    # 0644 the scratch file was created with — a leak, not merely a cosmetic change.
+    keep_mode = (real.lstat().st_mode & 0o7777) if real.is_file() else None
     try:
         bridge.write_atomic(ws, staged, text)
         os.replace(staged, real)
@@ -184,6 +187,8 @@ def _verify_config(ws, text):  # noqa: D401
             real.unlink(missing_ok=True)
         else:
             real.write_bytes(keep)
+            if keep_mode is not None:
+                os.chmod(real, keep_mode)
         staged.unlink(missing_ok=True)
 
 

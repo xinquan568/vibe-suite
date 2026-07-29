@@ -280,6 +280,8 @@ def _is_suite_state(relative, path=None):
         # A directory prefix is not ownership either: `.vibe-suite-state/jobs/notes.txt` is the
         # user's file in a directory we happen to use.
         return False
+    if Path(path).is_symlink():
+        return False  # judged before any name shortcut: the link is what would be deleted
     if parts[0] == "install-provenance.json":
         return True   # we are reading it right now; nothing else writes it
     if parts[0] not in SUITE_STATE:
@@ -287,8 +289,6 @@ def _is_suite_state(relative, path=None):
     # `load_json` follows a symlink, so the *destination's* stamp was being read as ownership of the
     # *link* — and a user's link pointing at any stamped file of ours was unlinked. The link is what
     # would be deleted, so the link is what must be judged.
-    if Path(path).is_symlink():
-        return False
     doc = bridge.load_json(path)
     # An explicit ownership stamp, not a generic `schema` key a user's own JSON may also carry.
     return isinstance(doc, dict) and doc.get("vibe_suite_owned") is True

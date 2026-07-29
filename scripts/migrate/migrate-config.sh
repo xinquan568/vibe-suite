@@ -111,9 +111,17 @@ conflicts = {
 chosen = {}
 if conflicts:
     report = ws / ".vibe-suite-state" / "migration-conflicts.json"
+    if report.is_symlink() or (report.exists() and "vibe_suite_owned" not in
+                               report.read_text(encoding="utf-8", errors="replace")):
+        sys.stderr.write("error: rows 1-2: migration-conflicts.json exists and is not ours; "
+                         "refusing to overwrite it\n")
+        raise SystemExit(1)
     if not resolution:
         report.parent.mkdir(parents=True, exist_ok=True)
-        report.write_text(json.dumps({"rows": [1, 2], "conflicts": conflicts}, indent=2,
+        # Stamped, so a re-run recognises its own report and a user's same-named file is not
+        # mistaken for one.
+        report.write_text(json.dumps({"rows": [1, 2], "conflicts": conflicts,
+                                      "vibe_suite_owned": True}, indent=2,
                                      sort_keys=True) + "\n", encoding="utf-8")
         sys.stderr.write(f"decision required — {len(conflicts)} conflicting key(s); see {report}\n")
         sys.stderr.write("Re-run with --resolution FILE mapping each key to 'cc-suite' or 'nlpm'.\n")

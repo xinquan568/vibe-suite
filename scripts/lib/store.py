@@ -109,6 +109,10 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Write to a temporary file and rename, so an interrupted write cannot truncate the state.
         temporary = self.path.with_suffix(".json.tmp")
+        # A fixed scratch name is a path the user may own; writing it destroys their file.
+        if temporary.is_symlink() or temporary.exists():
+            raise RuntimeError(
+                f"{temporary} already exists; refusing to use an occupied path as scratch space")
         temporary.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         temporary.replace(self.path)
 

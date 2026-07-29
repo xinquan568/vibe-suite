@@ -105,7 +105,24 @@ def provenance_open(ws):
                 parents.append(parent)
     record["parents_created"] = parents
     out.parent.mkdir(parents=True, exist_ok=True)
-    bridge.write_atomic(ws, out, json.dumps(record, indent=2, sort_keys=True) + "\n")
+    # The record holds complete pre-images — every byte of every file it replaced, `.mcp.json`
+    # among them. A `0600` file's contents therefore end up inside this one, so writing it at the
+    # usual `0644` publishes whatever the user had protected. It is written at the **tightest** mode
+    # of anything it records, never looser than `0600`.
+    strictest = 0o600
+    for entry in record["targets"]:
+        mode = entry.get("mode")
+        if isinstance(mode, str):
+            try:
+                strictest &= int(mode, 8)
+            except ValueError:
+                strictest = 0o600
+                break
+    bridge.write_atomic(ws, out, json.dumps(record, indent=2, sort_keys=True) + "\n",
+                        mode=strictest or 0o600)
+    # The directory holding it is traversable by default, so a pre-existing looser mode would
+    # undo the file's own protection.
+    os.chmod(out.parent, 0o700)
 
 
 def set_gate(ws, value):

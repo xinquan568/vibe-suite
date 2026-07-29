@@ -165,6 +165,14 @@ def _verify_config(ws, text):  # noqa: D401
     ws = Path(ws)
     staged = ws / f".{config_mod.CONFIG_FILENAME}.vibe-candidate"
     real = ws / config_mod.CONFIG_FILENAME
+    if real.is_symlink():
+        # `os.replace` below is a direct rename: it does not go through `write_atomic`, so the
+        # symlink refusal there never sees this path. Replacing the link would convert the user's
+        # link into a regular copy of its target — the exact conversion teardown cannot undo, since
+        # it records `kind: symlink` and never restores one.
+        raise bridge.BridgeError(
+            f"{real} is a symlink; replacing it would convert the user's link into a regular copy "
+            f"and could not be undone by /vibe-suite:unbridge. Remove or re-point it and re-run")
     keep = real.read_bytes() if real.is_file() else None
     try:
         bridge.write_atomic(ws, staged, text)

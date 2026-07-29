@@ -780,3 +780,35 @@ class OwnershipNeedsAnExplicitStamp(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
         return path
+
+
+class OwnershipOfThingsInitTouches(unittest.TestCase):
+    """Two paths that claimed ownership by filename alone."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-touch-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_a_symlinked_config_is_refused_not_replaced(self):
+        """`_verify_config` used `os.replace`, a direct rename that never reaches `write_atomic` —
+        so the symlink refusal there did not see this path. Replacing the link would convert it to a
+        regular copy, and teardown records `kind: symlink` but never restores one."""
+        real = self.ws / "elsewhere.md"
+        real.write_text("---\neffort: high\n---\ntheirs\n")
+        (self.ws / ".vibe-suite.md").symlink_to(real)
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0, "init replaced a symlinked config instead of refusing")
+        self.assertTrue((self.ws / ".vibe-suite.md").is_symlink(), "the user's link was replaced")
+        self.assertEqual(real.read_text(), "---\neffort: high\n---\ntheirs\n")
+
+    def test_a_foreign_hook_side_file_is_not_overwritten_or_deleted(self):
+        (self.ws / ".codex").mkdir(parents=True)
+        side = self.ws / ".codex" / "hooks.vibe-suite.json"
+        side.write_text(json.dumps({"hooks": {"Stop": [{"command": "theirs"}]}}))
+        subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                        "--audit-depth", "mini", "--strictness", "standard"],
+                       capture_output=True, text=True)
+        self.assertTrue(side.is_file(), "a foreign hook side file was deleted")
+        self.assertEqual(json.loads(side.read_text())["hooks"]["Stop"][0]["command"], "theirs")

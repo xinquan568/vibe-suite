@@ -199,7 +199,10 @@ class HelperContract(unittest.TestCase):
                 expected["files"] += 1
                 expected["lines"] += data.count(b"\n")
                 expected["tokens"] += -(-len(data) // 4)
-            self.assertEqual(actual["A"], expected, "hostile-only counts must be exact")
+            self.assertEqual(
+                actual, {"A": expected, "total": expected},
+                "hostile-only output must be the exact full JSON, total row included",
+            )
             self.assertFalse(
                 (Path(tmp) / "pwned").exists(), "a hostile filename caused execution"
             )

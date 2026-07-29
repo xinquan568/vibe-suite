@@ -691,13 +691,20 @@ class DegenerateInputs(unittest.TestCase):
         multiline_quoted = ("---\nname: probe\n"
                             "description: \"Concrete probe; use when testing\n"
                             "  multiline quoted scalars.\"\n---\n# probe\n\nBody.\n")
-        # An apostrophe inside a trailing comment is not an open quote — the next line
-        # must survive un-swallowed by the multiline merger.
+        # Apostrophes in inert contexts must never trigger the multiline merger: in a
+        # trailing comment, in a PLAIN scalar value, and inside block-scalar content.
         comment_apostrophe = ("---\nname: probe  # don't merge past this\n"
                               "description: Concrete probe; use when testing comments.\n"
                               "---\n# probe\n\nBody.\n")
+        plain_apostrophe = ("---\nname: probe\n"
+                            "description: Don't merge this; use when testing plains.\n"
+                            "---\n# probe\n\nBody.\n")
+        block_apostrophe = ("---\nname: probe\n"
+                            "description: |\n  Bob's valid block text; use when\n"
+                            "  testing block scalars.\n---\n# probe\n\nBody.\n")
         for body in (flow, nested, block, multiline_map, multiline_seq,
-                     multiline_nested, multiline_quoted, comment_apostrophe):
+                     multiline_nested, multiline_quoted, comment_apostrophe,
+                     plain_apostrophe, block_apostrophe):
             with self.subTest(head=body.splitlines()[3]):
                 f = score_one(body)
                 self.assertEqual(

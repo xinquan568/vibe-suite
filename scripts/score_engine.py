@@ -582,6 +582,26 @@ def _fm_value(rest, line_no):
     return _fm_scalar_convert(rest)
 
 
+#: A line whose VALUE position syntactically begins a quoted scalar — the only context in
+#: which multiline quote merging may engage. Plain scalars (`description: Don't merge`),
+#: block-scalar content, and comments never match, so their apostrophes stay inert.
+#: DOTALL so a partially merged logical line (already containing newlines) re-matches.
+_QUOTED_VALUE_START = re.compile(
+    r"^\s*(?:-\s+)?(?:\"[^\"\n]*\"|'[^'\n]*'|[A-Za-z0-9_.-]+)\s*:\s*([\"'].*)\Z"
+    r"|^\s*-\s+([\"'].*)\Z",
+    re.DOTALL,
+)
+
+
+def _fm_quoted_value_rest(logical):
+    """The value text from its opening quote onward, when this logical line's value
+    position begins with a quote; None otherwise (no merging context)."""
+    match = _QUOTED_VALUE_START.match(logical)
+    if match is None:
+        return None
+    return match.group(1) if match.group(1) is not None else match.group(2)
+
+
 def _fm_open_quote(text):
     """The quote character left open at the end of `text`, or None. Same scan discipline as
     the comment stripper — including the comment rule itself, so an apostrophe inside a
@@ -615,12 +635,18 @@ class _FrontmatterParser:
     def __init__(self, lines):
         # A quoted scalar may close on a later physical line (YAML multiline quoted
         # scalar): merge such runs first, preserving the newline as content, so the
-        # per-line walk below only ever sees quote-balanced logical lines. EOF with a
-        # quote still open is a structural failure.
+        # per-line walk below only ever sees quote-balanced logical lines. Merging is
+        # CONTEXT-AWARE: it engages only when a value position syntactically begins with
+        # a quote that the scan finds still open — a plain scalar's or block scalar's
+        # apostrophe is never a merge trigger. EOF with a value quote still open is a
+        # structural failure.
         merged, index = [], 0
         while index < len(lines):
             logical, first = lines[index], index
-            while _fm_open_quote(logical) is not None:
+            while True:
+                rest = _fm_quoted_value_rest(logical)
+                if rest is None or _fm_open_quote(rest) is None:
+                    break
                 index += 1
                 if index >= len(lines):
                     raise _FrontmatterError(

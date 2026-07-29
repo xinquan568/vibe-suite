@@ -261,6 +261,17 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
         front.extend(f"  - {pattern}" for pattern in patterns)
     bom, sep = (newline[:1], newline[1:]) if newline.startswith("\ufeff") else ("", newline)
     rendered = bom + sep.join(["---", *front, "---", ""]) + rest
+    if not existing:
+        # Creating it, not merging into one the user already had — so this marker only ever lands in
+        # a file we made. It is what lets `/vibe-suite:unbridge` *prove* the file is ours before
+        # deleting it: without it, teardown had to take the provenance record's unauthenticated word,
+        # and a record edited to say `absent` would delete a config that predated the install.
+        #
+        # If the user later removes this line, the file stops being recognisably ours and teardown
+        # leaves it alone. That is the correct outcome, not a failure.
+        rendered = bridge.md_block_upsert(
+            rendered, "config",
+            "Created by /vibe-suite:init. Remove this block to keep the file on teardown.")
     if rendered != existing:
         _verify_config(ws, rendered)
         bridge.write_atomic(ws, dest, rendered)

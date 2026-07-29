@@ -673,3 +673,49 @@ class StateOwnershipIsCorroborated(unittest.TestCase):
                        capture_output=True, text=True, stdin=subprocess.DEVNULL)
         if theirs.exists():
             self.assertEqual(json.loads(theirs.read_text()), {"notes": "mine"})
+
+
+class ExclusiveFilesAreCorroborated(unittest.TestCase):
+    """The last open hole: `.vibe-suite.md` carried no ownership evidence, so teardown deleted it on
+    the record's unauthenticated word. init now marks the file when it *creates* it, which lets
+    teardown prove ownership — so byte-identity and never-delete-what-we-cannot-prove both hold."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-excl-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def init(self):
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def unbridge(self):
+        return subprocess.run(["bash", str(UNBRIDGE), "--workspace", str(self.ws), "--confirm"],
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
+
+    def test_a_consistent_absent_forgery_no_longer_deletes_a_pre_existing_config(self):
+        """The reviewer's input: flip `file` to `absent` AND strip the pre-image, so the record is
+        internally consistent and validation cannot object. Ownership must come from the disk."""
+        (self.ws / ".vibe-suite.md").write_text("---\neffort: high\n---\nmine, from before init\n")
+        self.init()
+        record_path = self.ws / init_bridge.PROVENANCE
+        record = json.loads(record_path.read_text())
+        for entry in record["targets"]:
+            if entry["path"].endswith(".vibe-suite.md"):
+                entry["kind"] = "absent"
+                for field in ("mode", "sha256", "content_b64", "link_target"):
+                    entry.pop(field, None)
+        record_path.write_text(json.dumps(record, indent=2))
+        self.unbridge()
+        self.assertTrue((self.ws / ".vibe-suite.md").is_file(),
+                        "a pre-existing config was deleted on a self-consistent forged record")
+        self.assertIn("mine, from before init", (self.ws / ".vibe-suite.md").read_text())
+
+    def test_a_config_init_created_is_still_removed(self):
+        """And the other clause still holds: what init made, teardown takes away."""
+        self.init()
+        self.assertIn(bridge.MARKER, (self.ws / ".vibe-suite.md").read_text())
+        self.unbridge()
+        self.assertFalse((self.ws / ".vibe-suite.md").exists(),
+                         "the suite's own config survived teardown")

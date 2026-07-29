@@ -284,16 +284,20 @@ def _is_recognisably_ours(rel, path):
     present; once it is gone the file is the user's, whatever the record says.
     """
     if rel in EXCLUSIVE_FILES:
-        # OPEN, and recorded as such on the PR: these carry no owned block, so nothing on disk
-        # corroborates `kind`. A record edited to say `absent` *and* stripped of its pre-image fields
-        # is internally consistent, and teardown would delete a file that predated the install.
+        # Corroborated on disk, not taken from the record. `kind: absent` is mutable, unauthenticated
+        # metadata: an entry edited to say `absent` *and* stripped of its pre-image fields is
+        # internally consistent, so validation cannot catch it and a file that predated the install
+        # would be deleted.
         #
-        # Requiring corroboration here is a one-line change and it was tried: it makes
-        # `test_init_then_unbridge_is_byte_identical_to_pre_init` fail, because a file init created
-        # then survives teardown. That is F1.4's two clauses colliding — *byte-identical to pre-init*
-        # versus *never delete what we cannot prove is ours* — and choosing between them is a spec
-        # decision, not an implementation one.
-        return True
+        # init writes an owned marker into these when it *creates* them, which is what makes the
+        # proof possible — and F1.4's two clauses then both hold, instead of trading one for the
+        # other. A user who deletes the marker keeps their file; that is the intended outcome.
+        text = bridge.read_text_verbatim(path)
+        if rel.endswith(".json"):
+            doc = bridge.load_json(path)
+            return isinstance(doc, dict) and (
+                doc.get("schema") == bridge.SCHEMA or any("migrated" in k for k in doc))
+        return bridge.MARKER in text
     text = bridge.read_text_verbatim(path)
     if not text.strip():
         return True  # created and since emptied; nothing of anyone's is in it

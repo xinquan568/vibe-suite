@@ -30,6 +30,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 
 import bridge  # noqa: E402
+import mcp_pin  # noqa: E402
+import retired_names  # noqa: E402
 import config as config_mod  # noqa: E402
 import init_bridge  # noqa: E402
 
@@ -110,6 +112,10 @@ def detect_state(ws):
     return "installed"
 
 
+#: Sentinels that legitimately live in one store only. Everything else must appear in both.
+TOML_ONLY_SENTINELS = (mcp_pin.SERVER_NAME,)
+
+
 def check_bridge(ws, out):
     try:
         names = bridge.inventory_enumerate(ws)
@@ -125,6 +131,11 @@ def check_bridge(ws, out):
         # other is invisible unless both are asked separately.
         in_json = bridge.json_server_has(mcp, name)
         in_toml = name in bridge.toml_owned_names(toml)
+        # Not every sentinel is bidirectional. `vibe-claude-mcp` is the *reverse* server — the pinned
+        # package through which Codex delegates back to Claude — so it lives in `.codex/config.toml`
+        # alone. Requiring symmetry here would make a successful `/vibe-suite:update` report a defect.
+        if name in TOML_ONLY_SENTINELS:
+            continue
         if in_json != in_toml:
             where = ".mcp.json" if in_json else ".codex/config.toml"
             out.append(finding("[MEDIUM]", "sentinels",
@@ -229,6 +240,17 @@ def check_legacy(ws, out):
                            f"confirmation, so /vibe-suite:init migrates them", False))
 
 
+def check_retired_names(plugin_root, out):
+    """F1.7: no retired command name may appear in any runtime string.
+
+    Read-only, and scoped to the surface E2.6 ships — the sweep over the whole corpus, plus its CI
+    enforcement, is E7.3's. A predicate nothing calls is not a delivered check, so this runs here.
+    """
+    for rel, names in retired_names.scan_update_surface(plugin_root):
+        out.append(finding("[MEDIUM]", "retired-names",
+                           f"{rel} carries retired namespaces: {', '.join(names)}", False))
+
+
 def check_provenance(ws, state, out):
     if state != "partial":
         return
@@ -276,6 +298,7 @@ def diagnose(ws):
         pin_status = check_pins(ws, findings)
         check_config(ws, findings)
         check_provenance(ws, state, findings)
+    check_retired_names(HERE.parent, findings)
 
     if state != "uninitialised" and pin_status == "no-version-recorded":
         capabilities.append({"check": "pins", "status": "unavailable",

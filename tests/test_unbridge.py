@@ -21,6 +21,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UNBRIDGE = REPO_ROOT / "scripts" / "unbridge.sh"
+import sys
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+import bridge      # noqa: E402
+import unbridge    # noqa: E402
 INIT = REPO_ROOT / "scripts" / "init.sh"
 
 
@@ -351,3 +355,66 @@ class TestRemoveOnly(UnbridgeCase):
         self.unbridge("--confirm")
         self.assertTrue((self.ws / ".gitignore").is_file())
         self.assertEqual((self.ws / ".gitignore").read_text(encoding="utf-8"), "node_modules/\n")
+
+
+class ContentLossPaths(unittest.TestCase):
+    """The two paths on which teardown could destroy user data.
+
+    Both are *reproductions first*. Each seeds the exact shape the reviewer named, runs the real
+    teardown, and asserts the user's bytes survive — so each fails against the implementation that
+    preceded this class rather than merely exercising the new guard.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ws = Path(self.tmp.name)
+
+    # -- a stray opening marker makes the non-greedy match start early ---------------------------
+    def test_a_duplicated_opening_marker_does_not_consume_user_content(self):
+        text = ("# >>> vibe-suite:ignore v1 >>>\n"
+                "USER DATA THEY CARE ABOUT\n"
+                "# >>> vibe-suite:ignore v1 >>>\n"
+                "ours\n"
+                "# <<< vibe-suite:ignore <<<\n")
+        self.assertFalse(unbridge.markers_sane(text, "ignore", "text"))
+        # Proof the guard is not theatre: without it, removal eats the line between the markers.
+        self.assertNotIn("USER DATA", bridge.text_block_remove(text, "ignore"))
+
+    def test_a_lone_closing_marker_is_malformed(self):
+        self.assertFalse(unbridge.markers_sane(
+            "# <<< vibe-suite:ignore <<<\nmine\n", "ignore", "text"))
+
+    def test_a_clean_pair_is_still_removed(self):
+        text = "# >>> vibe-suite:ignore v1 >>>\nours\n# <<< vibe-suite:ignore <<<\n"
+        self.assertTrue(unbridge.markers_sane(text, "ignore", "text"))
+
+    def test_markers_sane_handles_the_markdown_delimiters(self):
+        text = ("<!-- >>> vibe-suite:memory v1 -->\nours\n<!-- <<< vibe-suite:memory -->\n")
+        self.assertTrue(unbridge.markers_sane(text, "memory", "md"))
+
+    # -- an init-created JSON that has since become the user's ------------------------------------
+    def test_an_unrelated_top_level_key_keeps_the_file(self):
+        """`mcpServers` being empty was taken as "nothing of theirs is left", which was only ever
+        true of that one key."""
+        self.assertFalse(unbridge.json_is_only_ours(
+            ".mcp.json", {"mcpServers": {}, "theirIntegration": {"token_env": "X"}}))
+
+    def test_an_empty_owned_document_is_still_deletable(self):
+        self.assertTrue(unbridge.json_is_only_ours(".mcp.json", {"mcpServers": {}}))
+        self.assertTrue(unbridge.json_is_only_ours(".codex/hooks.json", {"hooks": {"Stop": []}}))
+
+    def test_remaining_owned_entries_keep_the_file(self):
+        self.assertFalse(unbridge.json_is_only_ours(
+            ".codex/hooks.json", {"hooks": {"Stop": [{"command": "x"}]}}))
+
+    def test_a_json_path_we_never_created_is_never_deleted(self):
+        self.assertFalse(unbridge.json_is_only_ours(".their-config.json", {}))
+
+    def test_a_non_object_document_is_never_deleted(self):
+        self.assertFalse(unbridge.json_is_only_ours(".mcp.json", ["a list"]))
+
+    def test_a_file_the_suite_owns_end_to_end_is_removable(self):
+        """The shared rule must not reach exclusive files, or teardown strands its own state."""
+        self.assertTrue(unbridge.json_is_only_ours(
+            ".claude/vibe-history.json", {"entries": [{"anything": 1}]}))

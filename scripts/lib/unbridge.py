@@ -14,6 +14,7 @@ is not what the record claims, before anything is deleted.
 """
 
 import json
+import re
 import os
 import stat
 import sys
@@ -45,6 +46,67 @@ def recorded_path(ws, raw):
     except (ValueError, OSError):
         return None
     return anchored
+
+
+#: **Shared** JSON stores: the tool contributes named keys to a document the user also uses, so only
+#: those keys are ours and any foreign key means the file has become theirs.
+OWNED_JSON_KEYS = {".mcp.json": ("mcpServers",), ".codex/hooks.json": ("hooks",)}
+
+#: **Exclusive** JSON files: created by the suite, for the suite, with no shared shape. The whole
+#: document is ours, so an init-created one is removable whatever it now contains.
+EXCLUSIVE_JSON = (".claude/vibe-history.json",)
+
+
+def markers_sane(text, name, style):
+    """Whether this file's owned markers are a clean sequence of non-overlapping pairs.
+
+    `_block_re` matches non-greedily from an opening marker to the *next* closing one. A stray or
+    duplicated opening marker therefore makes the match start early and swallow everything up to the
+    real block's close — user content included — and the result is then written back. Counting the
+    markers first is what turns that from silent data loss into a refusal.
+    """
+    od, cd = ("<!--", " -->") if style == "md" else ("#", "")
+    marker = re.escape(bridge.MARKER)
+    opens = [m.start() for m in re.finditer(
+        rf"{re.escape(od)} >>> {marker}:{re.escape(name)} v\d+ >>>{re.escape(cd)}", text)]
+    closes = [m.start() for m in re.finditer(
+        rf"{re.escape(od)} <<< {marker}:{re.escape(name)} <<<{re.escape(cd)}", text)]
+    if len(opens) != len(closes):
+        return False
+    expect = "o"
+    for _, kind in sorted([(p, "o") for p in opens] + [(p, "c") for p in closes]):
+        if kind != expect:
+            return False
+        expect = "c" if expect == "o" else "o"
+    return True
+
+
+def json_is_only_ours(rel, doc):
+    """Whether a JSON file init created still holds nothing but our own (now empty) structures.
+
+    Checking one known key was not enough: a file whose `mcpServers` we had just emptied could carry
+    an unrelated top-level key the user added, and deleting the file took that with it. Any foreign
+    key means a *shared* file has become theirs.
+
+    The distinction that matters is shared versus exclusive. `.mcp.json` is a document the user also
+    writes; `.claude/vibe-history.json` is ours end to end. Applying the shared rule to an exclusive
+    file would strand our own state forever.
+    """
+    if rel in EXCLUSIVE_JSON:
+        return True
+    if not isinstance(doc, dict):
+        return False
+    owned = OWNED_JSON_KEYS.get(rel)
+    if owned is None or any(key not in owned for key in doc):
+        return False
+    for key in owned:
+        value = doc.get(key)
+        if isinstance(value, dict):
+            if any(value.values()):
+                return False
+        elif value:
+            return False
+    return True
 
 
 def restore(ws, entry, report):
@@ -80,6 +142,9 @@ def restore(ws, entry, report):
     owned = next(((r, n, c) for r, n, c in BLOCKS if r == rel), None)
     if owned:
         text = bridge.read_text_verbatim(path)
+        if not markers_sane(text, owned[1], owned[2]):
+            report.append(f"{rel}: owned markers are malformed — left alone, remove the block by hand")
+            return
         stripped = (bridge.md_block_remove(text, owned[1]) if owned[2] == "md"
                     else bridge.text_block_remove(text, owned[1]))
         if entry["kind"] == "absent" and not stripped.strip():
@@ -98,12 +163,9 @@ def restore(ws, entry, report):
     # Not a block target: JSON handled by json_targets(), everything else is ours only if init
     # created it and nothing has been added since.
     if entry["kind"] == "absent":
-        if rel in (".mcp.json", ".codex/hooks.json"):
-            doc = bridge.load_json(path)
-            leftover = (doc.get("mcpServers") if rel == ".mcp.json"
-                        else {k: v for k, v in (doc.get("hooks") or {}).items() if v})
-            if leftover:
-                report.append(f"{rel}: kept — it still holds entries that are not ours")
+        if rel.endswith(".json"):
+            if not json_is_only_ours(rel, bridge.load_json(path)):
+                report.append(f"{rel}: kept — it holds content that is not ours")
                 return
         bridge.unlink_at(ws, rel)
         report.append(f"{rel}: removed")

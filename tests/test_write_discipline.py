@@ -135,8 +135,10 @@ def _mutations(tree):
 #: writes through a link planted at a fixed path — and none of it is visible to an AST sweep, which
 #: is how one survived the pass that routed every Python write.
 _SHELL_WRITE = re.compile(
-    r"(?<![0-9<>])>>?\s*[\"']?\$?[A-Za-z_./{]"     # > path / >> path, not 2>&1 or a heredoc
-    r"|^\s*(mv|cp|rm|ln|install|truncate|chmod|chown|touch|mkfifo)\s",
+    r"(?<![0-9<>])>>?\s*[\"']?\$?[A-Za-z_./{]"      # > path / >> path — not 2>&1, not a heredoc
+    r"|(?<![0-9<>])1>>?\s*[\"']?\$?[A-Za-z_./{]"    # explicit `1>` is the same write
+    r"|\btee\s+(-[a-z]+\s+)*[\"']?\$?[A-Za-z_./{]"  # tee truncates and follows a symlink too
+    r"|^\s*(mv|cp|rm|ln|install|truncate|chmod|chown|touch|mkfifo|dd|sed\s+-i)\s",
     re.M)
 
 #: Redirections to a throwaway destination mutate nothing the user owns.
@@ -208,6 +210,12 @@ class NoDirectFilesystemMutation(unittest.TestCase):
         # A quoted `"$tmp"` is *not* exempted: the name says scratch, the value may not be. With
         # no sites left to accommodate, strictness costs nothing.
         self.assertTrue(_shell_writes('printf x > "$tmp"'))
+        # Forms the first cut missed. Both truncate and both follow a destination symlink; neither
+        # appeared at a live site, which is exactly why a sweep has to cover what nobody wrote yet.
+        self.assertTrue(_shell_writes('printf x 1>"$target"'))
+        self.assertTrue(_shell_writes('printf x | tee "$target"'))
+        self.assertTrue(_shell_writes('sed -i s/a/b/ "$target"'))
+        self.assertFalse(_shell_writes("cmd 1>&2"))
 
     def test_no_shell_redirection_writes_a_real_path(self):
         """The gap that let `init.sh` write `config-resolution.json` with `> path` survive the sweep

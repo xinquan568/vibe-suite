@@ -14,6 +14,7 @@ owned region first and comparing the remainder is the test that actually disting
 import json
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -853,3 +854,50 @@ class LstatNotExists(unittest.TestCase):
         link = self.ws / ".vibe-suite-state" / "config.json"
         link.symlink_to(stamped)
         self.assertFalse(unbridge._is_suite_state(Path("config.json"), link))
+
+
+class TheRootIsTheWorkspaceNotTheParent(unittest.TestCase):
+    """Passing the destination's own parent as the primitive's root makes a **symlinked parent the
+    trusted anchor** — `assert_inside` then compares the escape against itself and passes it."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-root-"))
+        self.outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self.outside, ignore_errors=True)
+
+    def test_a_symlinked_state_dir_cannot_redirect_a_write_outside(self):
+        theirs = self.outside / "state.json"
+        theirs.write_text(json.dumps({"config": {"gate": {"fail_policy": "open"}}}))
+        (self.ws / ".vibe-suite-state").symlink_to(self.outside)
+        subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "config_cli.py"),
+                        "--workspace", str(self.ws), "--set", "gate.fail_policy=closed"],
+                       capture_output=True, text=True)
+        self.assertEqual(json.loads(theirs.read_text())["config"]["gate"]["fail_policy"], "open",
+                         "a write escaped the workspace through a symlinked state directory")
+
+
+class RowSixProvenanceDoesNotPublishSecrets(unittest.TestCase):
+    """Row 6's record holds complete `.mcp.json` pre-images — and `.mcp.json` is where credentials
+    live. Writing it at the default mode is the `c2112ac` leak in the row that migrates the very
+    file the secrets are in."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-row6-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_the_record_is_not_group_or_world_readable(self):
+        mcp = self.ws / ".mcp.json"
+        mcp.write_text(json.dumps(
+            {"mcpServers": {"cc-suite-mcp": {"command": "x", "env": {"TOKEN": "s3cret"}}}}))
+        os.chmod(mcp, 0o600)
+        subprocess.run(["bash", str(REPO_ROOT / "scripts/migrate/migrate-sentinels.sh"),
+                        "--workspace", str(self.ws), "--confirm"], capture_output=True, text=True)
+        record = self.ws / ".vibe-suite-state" / "row6-provenance.json"
+        self.assertTrue(record.is_file(), "row 6 wrote no provenance — the fixture proves nothing")
+        self.assertIn("s3cret", record.read_text(),
+                      "the fixture does not exercise the leak: no secret reached the record")
+        mode = stat.S_IMODE(record.lstat().st_mode)
+        dir_mode = stat.S_IMODE(record.parent.lstat().st_mode)
+        self.assertEqual(mode & 0o077, 0, f"the record is readable at {oct(mode)}")
+        self.assertEqual(dir_mode & 0o077, 0, f"its directory is traversable at {oct(dir_mode)}")

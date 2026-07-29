@@ -691,3 +691,47 @@ class ProvenanceStepDoesNotLeakThroughScratch(unittest.TestCase):
                   f'vibe_provenance_step "{link}" "config"\n')
         subprocess.run(["bash", "-c", script], capture_output=True, text=True)
         self.assertTrue(link.is_symlink(), "the user's link was converted to a regular file")
+
+
+class ConfigMigrationUsesThePrimitive(unittest.TestCase):
+    """Rows 1-2 wrote `.vibe-suite.md` through a fixed `.tmp` sibling and truncated
+    `migration-conflicts.json` at a fixed path."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-cfgmig-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        (self.ws / ".cc-suite.md").write_text("- **Default effort**: high\n")
+
+    def run_migrate(self):
+        return subprocess.run(["bash", str(REPO_ROOT / "scripts/migrate/migrate-config.sh"),
+                               "--workspace", str(self.ws)], capture_output=True, text=True)
+
+    def _conflicting_nlpm(self):
+        """`.cc-suite.md` is prose, not frontmatter — the shape the real migration reads."""
+        (self.ws / ".claude").mkdir(exist_ok=True)
+        (self.ws / ".claude" / "nlpm.local.md").write_text(
+            "---\neffort: low\nscore_threshold: 90\n---\n")
+
+    def test_a_users_conflicts_report_is_not_truncated(self):
+        self._conflicting_nlpm()
+        (self.ws / ".vibe-suite-state").mkdir()
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.json"
+        report.write_text(json.dumps({"mine": True}))
+        self.run_migrate()
+        self.assertEqual(json.loads(report.read_text()), {"mine": True},
+                         "a user's file at the report path was truncated")
+
+    def test_our_own_stamped_report_is_not_refused(self):
+        """The ownership guard must let a re-run replace its **own** output. A guard that refuses
+        everything, including what we wrote, breaks the feature instead of protecting it."""
+        (self.ws / ".vibe-suite-state").mkdir()
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.json"
+        report.write_text(json.dumps({"rows": [1, 2], "conflicts": {}, "vibe_suite_owned": True}))
+        proc = self.run_migrate()
+        self.assertNotIn("exists and is not ours", proc.stderr,
+                         "the guard refused a report this tool wrote")
+
+    def test_no_fixed_scratch_file_is_left_behind(self):
+        self.run_migrate()
+        leftovers = [p.name for p in self.ws.iterdir() if p.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [], f"scratch files survived: {leftovers}")

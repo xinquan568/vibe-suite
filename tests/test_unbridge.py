@@ -651,3 +651,25 @@ class KindAndPreImageMustAgree(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertTrue((self.ws / ".vibe-suite.md").is_file(),
                         "a pre-existing config was deleted on a self-contradicting record")
+
+
+class StateOwnershipIsCorroborated(unittest.TestCase):
+    """A matching *name* is not proof of ownership — that was the allowlist's own mistake, one level
+    down. A user's `state.json` sitting in this directory before install has the same name as ours."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-stateown-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_a_users_state_json_is_not_deleted_for_having_our_name(self):
+        (self.ws / ".vibe-suite-state").mkdir()
+        theirs = self.ws / ".vibe-suite-state" / "state.json"
+        theirs.write_text(json.dumps({"notes": "mine"}))
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        subprocess.run(["bash", str(UNBRIDGE), "--workspace", str(self.ws), "--confirm"],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if theirs.exists():
+            self.assertEqual(json.loads(theirs.read_text()), {"notes": "mine"})

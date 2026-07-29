@@ -247,17 +247,33 @@ EXCLUSIVE_FILES = (".vibe-suite.md", ".claude/vibe-history.json")
 
 
 #: What the suite writes into `.vibe-suite-state/`. Anything else in there is the user's.
-SUITE_STATE = ("install-provenance.json", "state.json", "config.json", "jobs.json", "history.json")
+SUITE_STATE = ("install-provenance.json", "state.json", "config.json", "jobs.json", "history.json",
+               "config-resolution.json", "row6-decision.json", "row6-provenance.json",
+               "migration-conflicts.json", "migration-conflicts.md")
 
 
-def _is_suite_state(relative):
-    """Whether a path inside `.vibe-suite-state/` is one the suite wrote."""
+def _is_suite_state(relative, path=None):
+    """Whether a path inside `.vibe-suite-state/` is one the suite wrote.
+
+    **A matching name is not proof of ownership.** A user's own `state.json` sitting here before
+    install has the same name as ours, and deleting it on the name alone is the very mistake the
+    allowlist was added to fix, one level down. So the file's *content* has to carry our schema.
+    Anything we cannot recognise is left behind — a suite artefact surviving teardown is a
+    reduction; a user's file not surviving it is not.
+    """
     parts = relative.parts
     if not parts:
         return False
     if parts[0] in ("jobs", "runs", "cache"):
-        return True   # suite-owned subtrees
-    return len(parts) == 1 and parts[0] in SUITE_STATE
+        return True   # suite-owned subtrees, created wholesale
+    if len(parts) != 1 or path is None:
+        return False
+    if parts[0] == "install-provenance.json":
+        return True   # we are reading it right now; nothing else writes it
+    if parts[0] not in SUITE_STATE:
+        return False
+    doc = bridge.load_json(path)
+    return isinstance(doc, dict) and doc.get("schema") == bridge.SCHEMA
 
 
 def _is_recognisably_ours(rel, path):
@@ -268,6 +284,15 @@ def _is_recognisably_ours(rel, path):
     present; once it is gone the file is the user's, whatever the record says.
     """
     if rel in EXCLUSIVE_FILES:
+        # OPEN, and recorded as such on the PR: these carry no owned block, so nothing on disk
+        # corroborates `kind`. A record edited to say `absent` *and* stripped of its pre-image fields
+        # is internally consistent, and teardown would delete a file that predated the install.
+        #
+        # Requiring corroboration here is a one-line change and it was tried: it makes
+        # `test_init_then_unbridge_is_byte_identical_to_pre_init` fail, because a file init created
+        # then survives teardown. That is F1.4's two clauses colliding — *byte-identical to pre-init*
+        # versus *never delete what we cannot prove is ours* — and choosing between them is a spec
+        # decision, not an implementation one.
         return True
     text = bridge.read_text_verbatim(path)
     if not text.strip():
@@ -402,7 +427,7 @@ def main(argv):
         # was destroyed by a command that is supposed to remove only what it owns.
         for child in sorted(state.rglob("*"), key=lambda c: len(str(c)), reverse=True):
             rel = str(child.relative_to(ws))
-            if _is_suite_state(child.relative_to(state)):
+            if _is_suite_state(child.relative_to(state), child):
                 bridge.unlink_at(ws, rel)
             else:
                 report.append(f"{rel}: not a suite state file — left alone")

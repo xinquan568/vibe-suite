@@ -359,6 +359,114 @@ class TestFailureModes(unittest.TestCase):
                 config.load(root)
 
 
+class TestRuleOverridesPerRule(unittest.TestCase):
+    """`rule_overrides` opened per-rule for the scoring engine (E3.3 / vibe-28).
+
+    Any `R<n>` key accepts the closed leaf set {suppress, enabled, max_penalty, threshold};
+    R51 keeps its `vocabulary_skill` extra. The map stays closed: unknown leaves and
+    non-rule keys are still rejected.
+    """
+
+    def test_per_rule_override_leaves_round_trip(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "rule_overrides:\n"
+                               "  R01:\n    suppress: true\n    max_penalty: -4\n"
+                               "  R05:\n    enabled: false\n    threshold: 300\n")
+            cfg = config.load(root)
+            self.assertEqual(cfg["rule_overrides"]["R01"],
+                             {"suppress": True, "max_penalty": -4})
+            self.assertEqual(cfg["rule_overrides"]["R05"],
+                             {"enabled": False, "threshold": 300})
+
+    def test_r51_keeps_enabled_and_vocabulary_skill(self):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "vocab.md").write_text("x", encoding="utf-8")
+            write_config(root, "rule_overrides:\n  R51:\n    enabled: true\n"
+                               "    vocabulary_skill: vocab.md\n    suppress: true\n")
+            cfg = config.load(root)
+            self.assertIs(cfg["rule_overrides"]["R51"]["enabled"], True)
+            self.assertEqual(cfg["rule_overrides"]["R51"]["vocabulary_skill"], "vocab.md")
+
+    def test_unknown_leaf_under_a_rule_is_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "rule_overrides:\n  R01:\n    nonsense: true\n")
+            with self.assertRaises(config.ConfigValueError):
+                config.load(root)
+
+    def test_vocabulary_skill_stays_r51_only(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "rule_overrides:\n  R01:\n    vocabulary_skill: vocab.md\n")
+            with self.assertRaises(config.ConfigValueError):
+                config.load(root)
+
+    def test_non_rule_key_is_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "rule_overrides:\n  bogus:\n    suppress: true\n")
+            with self.assertRaises(config.ConfigValueError):
+                config.load(root)
+
+    def test_leaf_types_are_enforced(self):
+        for bad in ("rule_overrides:\n  R01:\n    suppress: 3\n",
+                    "rule_overrides:\n  R01:\n    max_penalty: true\n",
+                    "rule_overrides:\n  R01:\n    threshold: soft\n"):
+            with self.subTest(fragment=bad):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, bad)
+                    with self.assertRaises(config.ConfigValueError):
+                        config.load(root)
+
+    def test_top_level_score_threshold_still_defaults_to_70(self):
+        # The engine's pass threshold lives beside the overrides; opening the map must not
+        # disturb it.
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "rule_overrides:\n  R01:\n    suppress: true\n")
+            self.assertEqual(config.load(root)["score_threshold"], 70)
+
+    def test_rule_ids_outside_r01_to_r51_are_rejected(self):
+        # The defined rule ids are exactly R01-R51; R52 or R99 is a typo that must refuse,
+        # not a silently inert override (review finding 6).
+        for bad in ("R52", "R99", "R00", "R1", "R510"):
+            with self.subTest(rule=bad):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, f"rule_overrides:\n  {bad}:\n    suppress: true\n")
+                    with self.assertRaises(config.ConfigValueError):
+                        config.load(root)
+
+    def test_rule_ids_across_the_valid_range_are_accepted(self):
+        for good in ("R01", "R09", "R23", "R49", "R51"):
+            with self.subTest(rule=good):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, f"rule_overrides:\n  {good}:\n    suppress: true\n")
+                    self.assertIs(config.load(root)["rule_overrides"][good]["suppress"], True)
+
+    def test_max_penalty_must_be_a_negative_int_within_minus_100(self):
+        # Penalties are negative and the score floors at 0 from a base of 100, so the only
+        # meaningful cap values are -1..-100; anything else is a config error.
+        for bad in ("0", "5", "-101", "-1000"):
+            with self.subTest(value=bad):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, f"rule_overrides:\n  R01:\n    max_penalty: {bad}\n")
+                    with self.assertRaises(config.ConfigValueError):
+                        config.load(root)
+        for good in ("-1", "-20", "-100"):
+            with self.subTest(value=good):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, f"rule_overrides:\n  R01:\n    max_penalty: {good}\n")
+                    self.assertEqual(
+                        config.load(root)["rule_overrides"]["R01"]["max_penalty"], int(good))
+
+    def test_threshold_must_be_a_positive_int(self):
+        for bad in ("0", "-5"):
+            with self.subTest(value=bad):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, f"rule_overrides:\n  R05:\n    threshold: {bad}\n")
+                    with self.assertRaises(config.ConfigValueError):
+                        config.load(root)
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "rule_overrides:\n  R05:\n    threshold: 600\n")
+            self.assertEqual(config.load(root)["rule_overrides"]["R05"]["threshold"], 600)
+
+
 class TestContainment(unittest.TestCase):
     """Component-wise, after canonicalising both sides."""
 

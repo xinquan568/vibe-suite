@@ -1,0 +1,25 @@
+{
+  "path": "skills/defective/SKILL.md",
+  "tier": "1",
+  "score": 45,
+  "band": "Rewrite",
+  "verdict": "fail",
+  "findings": [
+    {"rule": "--", "check": "name present", "line": 1, "penalty": -25},
+    {"rule": "R05", "check": "body length", "line": 1, "penalty": -10},
+    {"rule": "R01", "check": "vague quantifier", "line": 11, "penalty": -20}
+  ],
+  "advisories": [
+    {"rule": "R01", "note": "R01 counted; carve-out forms absent -- if this is measurable-in-context, suppress via rule_overrides.R01"},
+    {"rule": "R04", "note": "advisory-zero: trigger quality; no objective predicate for the engine"},
+    {"rule": "R06", "note": "advisory-zero: code examples (complex concepts but no examples); no objective predicate for the engine"},
+    {"rule": "R06", "note": "advisory-zero: code examples (no examples at all in a technical skill); no objective predicate for the engine"},
+    {"rule": "R07", "note": "advisory-zero: scope note; no objective predicate for the engine"},
+    {"rule": "--", "note": "advisory-zero: broken references link; no objective predicate for the engine"},
+    {"rule": "--", "note": "advisory-zero: pseudocode example; no objective predicate for the engine"},
+    {"rule": "--", "note": "advisory-zero: domain mixing; no objective predicate for the engine"},
+    {"rule": "--", "note": "advisory-zero: redundant content; no objective predicate for the engine"},
+    {"rule": "--", "note": "advisory-zero: orphaned registration; no objective predicate for the engine"},
+    {"rule": "--", "note": "tier boundary: emitted 1 (open-spec artifact); Tier 1.5 (open-spec corpora) is a collection property with no per-file predicate, so whether this file belongs to an open-spec corpus stays with the narrating agent"}
+  ]
+}

@@ -271,7 +271,7 @@ Recognized as a distinct artifact type on 2026-05-28 (see conventions §2). It i
 
 ### All types: vocabulary drift (R51) — opt-in, disabled by default
 
-Active only when the local config `.claude/vibe-suite.local.md` contains `R51: { enabled: true, vocabulary_skill: <path> }`; otherwise the penalty is always zero. A `registry.yaml` holding canonical + deprecated terms has to exist inside the configured vocabulary skill; when that file is absent, findings drop to advisory with zero penalty.
+Active only when the local config `.vibe-suite.md` contains `R51: { enabled: true, vocabulary_skill: <path> }`; otherwise the penalty is always zero. A `registry.yaml` holding canonical + deprecated terms has to exist inside the configured vocabulary skill; when that file is absent, findings drop to advisory with zero penalty.
 
 | Rule | Check | Condition | Penalty |
 |------|-------|-----------|---------|
@@ -301,7 +301,7 @@ Why opt-in: vocabulary discipline is high-leverage after drift accumulates but p
 | 60–69 | Weak | below threshold; significant issues |
 | <60 | Rewrite | fundamental problems; rewrite from scratch |
 
-Default pass threshold: **70**, configurable in `.claude/vibe-suite.local.md`.
+Default pass threshold: **70**, configurable in `.vibe-suite.md`.
 
 ## Calibration Examples
 

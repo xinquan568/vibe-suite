@@ -1,0 +1,8 @@
+{
+  "name": "defective-skill-fixture",
+  "version": "1.0.0",
+  "description": "Fixture plugin that ships one defective skill and registers a skill directory absent from disk.",
+  "skills": [
+    "./skills/ghost"
+  ]
+}

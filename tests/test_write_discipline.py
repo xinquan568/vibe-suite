@@ -31,8 +31,19 @@ PRIMITIVE = {"scripts/lib/bridge.py"}
 #: whatever `p` is called; bare names are matched only when they resolve to the `os` module.
 MUTATING_METHODS = {
     "write_text", "write_bytes", "unlink", "rmdir", "touch", "symlink_to", "hardlink_to",
-    "chmod", "rename", "replace", "mkdir", "makedirs", "lchmod",
+    "chmod", "rename", "lchmod",
 }
+
+#: `mkdir` is deliberately absent. It creates or (with `exist_ok`) no-ops — it cannot overwrite a
+#: file or destroy content, and this rule is about destroying or exposing what the user owns.
+#: Including it produced fourteen findings that had no defect behind them, and a lint whose findings
+#: are mostly noise is a lint that gets switched off.
+
+#: `.replace()` is the one name shared by a path mutator and a string method, and the arity tells
+#: them apart: `Path.replace(target)` takes exactly one argument, `str.replace(old, new)` takes two.
+#: Without this, every `cell.replace("**", "")` in `config.py` was reported as a filesystem write.
+def _is_path_replace(node):
+    return len(node.args) == 1 and not node.keywords
 MUTATING_OS = {
     "remove", "unlink", "rmdir", "removedirs", "rename", "renames", "replace", "mkdir",
     "makedirs", "symlink", "link", "chmod", "chown", "truncate", "mkfifo", "mknod",
@@ -60,40 +71,23 @@ KNOWN = {
     "scripts/bridge_cli.py:169 .unlink()",
     "scripts/bridge_cli.py:206 os.mkdir()",
     "scripts/bridge_cli.py:247 os.symlink()",
-    "scripts/lib/config.py:395 .replace()",
-    "scripts/lib/config.py:406 .replace()",
-    "scripts/lib/config.py:413 .replace()",
-    "scripts/lib/config.py:448 .replace()",
-    "scripts/lib/config.py:483 .replace()",
-    "scripts/lib/config.py:483 .replace()",
-    "scripts/lib/config.py:483 .replace()",
-    "scripts/lib/init_bridge.py:107 .mkdir()",
     "scripts/lib/init_bridge.py:125 os.chmod()",
     "scripts/lib/init_bridge.py:188 os.replace()",
     "scripts/lib/init_bridge.py:195 .unlink()",
     "scripts/lib/init_bridge.py:197 .write_bytes()",
     "scripts/lib/init_bridge.py:198 .unlink()",
-    "scripts/lib/store.py:112 .mkdir()",
     "scripts/migrate/common.sh#heredoc0:11 os.replace()",
     "scripts/migrate/common.sh#heredoc0:7 open(..., 'w')",
     "scripts/migrate/common.sh#heredoc0:9 .write()",
     "scripts/migrate/migrate-config.sh#heredoc0:124 .write_text()",
     "scripts/migrate/migrate-config.sh#heredoc0:125 .replace()",
-    "scripts/migrate/migrate-config.sh#heredoc0:80 .mkdir()",
     "scripts/migrate/migrate-config.sh#heredoc0:81 .write_text()",
     "scripts/migrate/migrate-history.sh#heredoc0:69 .write()",
     "scripts/migrate/migrate-history.sh#heredoc0:79 os.link()",
     "scripts/migrate/migrate-history.sh#heredoc0:86 os.unlink()",
-    "scripts/migrate/migrate-sentinels.sh#heredoc0:153 .mkdir()",
-    "scripts/migrate/migrate-sentinels.sh#heredoc0:181 .mkdir()",
-    "scripts/migrate/migrate-sentinels.sh#heredoc0:228 .replace()",
-    "scripts/migrate/migrate-sentinels.sh#heredoc0:26 .mkdir()",
-    "scripts/migrate/migrate-sentinels.sh#heredoc0:32 .write()",
-    "scripts/migrate/migrate-sentinels.sh#heredoc0:37 os.replace()",
-    "scripts/migrate/migrate-state.sh#heredoc0:46 .mkdir()",
-    "scripts/migrate/migrate-state.sh#heredoc0:47 .write_text()",
-    "scripts/update.py:123 .replace()",
-    "scripts/update.py:142 .mkdir()",
+    "scripts/migrate/migrate-sentinels.sh#heredoc0:42 .write()",
+    "scripts/migrate/migrate-sentinels.sh#heredoc0:47 os.replace()",
+    "scripts/migrate/migrate-state.sh#heredoc0:59 .write_text()",
 }
 
 
@@ -126,6 +120,14 @@ def _mutations(tree):
                 if isinstance(receiver, ast.Name) and receiver.id in ("sys", "stdout", "stderr"):
                     continue
                 found.append((node.lineno, f".{func.attr}()"))
+                continue
+            if func.attr == "replace":
+                # `os.replace(src, dst)` takes two arguments and is a rename — it must be checked
+                # before the arity rule below, which would otherwise read it as `str.replace`.
+                if isinstance(func.value, ast.Name) and func.value.id == "os":
+                    found.append((node.lineno, "os.replace()"))
+                elif _is_path_replace(node) and not isinstance(func.value, SAFE_RECEIVER_TYPES):
+                    found.append((node.lineno, ".replace()"))
                 continue
             if func.attr in MUTATING_METHODS:
                 if isinstance(func.value, SAFE_RECEIVER_TYPES):
@@ -172,6 +174,9 @@ class NoDirectFilesystemMutation(unittest.TestCase):
         self.assertTrue(_mutations(ast.parse("os.replace(a, b)")))
         self.assertTrue(_mutations(ast.parse("open(p, 'w')")))
         self.assertFalse(_mutations(ast.parse("'a-b'.replace('-', '_')")))
+        self.assertFalse(_mutations(ast.parse("s.strip().replace('a', 'b')")))   # str, two args
+        self.assertTrue(_mutations(ast.parse("tmp.replace(target)")))            # Path, one arg
+        self.assertFalse(_mutations(ast.parse("d.mkdir(parents=True, exist_ok=True)")))
         self.assertFalse(_mutations(ast.parse("sys.stderr.write('note\\n')")))
         self.assertFalse(_mutations(ast.parse("open(p)")))
         self.assertFalse(_mutations(ast.parse("open(p, 'r')")))

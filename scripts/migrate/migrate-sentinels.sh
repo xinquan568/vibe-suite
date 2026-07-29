@@ -63,6 +63,16 @@ def write_atomically(path, text):
     allowed to produce, because it is not a registration state at all.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    # `lstat`, not `exists`: a dangling symlink reports False from `exists()`, which is how every
+    # "is it already there?" guard waves one through. Replacing a link converts it to a regular
+    # file, and row 6 has no way to undo that.
+    if path.is_symlink():
+        sys.stderr.write(f"error: row 6: {path} is a symlink; replacing it would destroy the "
+                         f"link. Remove or re-point it and re-run\n")
+        raise SystemExit(1)
+    # The user's mode is theirs. Forcing 0644 republished a 0600 config — credentials in
+    # `.mcp.json` among them — at world-readable.
+    prior_mode = (path.lstat().st_mode & 0o7777) if path.is_file() else 0o644
     # mkstemp rather than a predictable sibling name: `open()` follows a symlink, so a guessable
     # temporary path lets anyone who can plant one redirect this write. mkstemp uses
     # O_CREAT|O_EXCL, which fails on an existing path of any kind.
@@ -71,7 +81,7 @@ def write_atomically(path, text):
         out.write(text)
         out.flush()
         # fchmod on the descriptor, never chmod on the path — see the note in migrate-history.sh.
-        os.fchmod(out.fileno(), 0o644)
+        os.fchmod(out.fileno(), prior_mode)
         os.fsync(out.fileno())
     os.replace(tmp, path)
     fd = os.open(path.parent, os.O_RDONLY)

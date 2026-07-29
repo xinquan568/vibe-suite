@@ -46,7 +46,7 @@ vibe_report_url() { printf '%s\n' "$(vibe_redact "$1")"; }
 # nothing to say about it. Returns 0 whether it wrote or skipped; callers that need to know check
 # vibe_exists first.
 vibe_safe_write() {
-    local dest="$1" tmp
+    local dest="$1"
     if [ -e "$dest" ]; then
         vibe_note "$dest already exists — left as it is (new store wins)"
         cat > /dev/null

@@ -183,8 +183,12 @@ def _verify_config(ws, text):  # noqa: D401
     staged = ws / f".{config_mod.CONFIG_FILENAME}.vibe-candidate"
     real = ws / config_mod.CONFIG_FILENAME
     keep = real.read_bytes() if real.is_file() else None
+    # The candidate stands in for the real config while the loader validates it, so it must be no
+    # looser than what it replaces. Writing it at the default and fixing the mode afterwards leaves
+    # a window in which a `0600` config is world-readable — the window *is* the leak.
+    keep_mode = (real.lstat().st_mode & 0o7777) if real.is_file() else None
     try:
-        bridge.write_atomic(ws, staged, text)
+        bridge.write_atomic(ws, staged, text, mode=keep_mode)
         os.replace(staged, real)
         config_mod.load(str(ws))
     except Exception as exc:
@@ -195,6 +199,8 @@ def _verify_config(ws, text):  # noqa: D401
             real.unlink(missing_ok=True)
         else:
             real.write_bytes(keep)
+            if keep_mode is not None:
+                os.chmod(real, keep_mode)
         staged.unlink(missing_ok=True)
 
 

@@ -28,6 +28,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INIT = REPO_ROOT / "scripts" / "init.sh"
+import sys
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+import bridge        # noqa: E402
+import init_bridge   # noqa: E402
 
 #: Everything an install may add while reporting a decision, and nothing more. `migrate-*` writes its
 #: report into the state dir by contract (`common.sh:11`), and init writes provenance before its
@@ -635,3 +639,45 @@ class ProvenanceDoesNotPublishSecrets(unittest.TestCase):
         dir_mode = stat.S_IMODE((self.ws / ".vibe-suite-state").lstat().st_mode)
         self.assertEqual(dir_mode & 0o077, 0,
                          f"the directory holding it is traversable at {oct(dir_mode)}")
+
+
+class ConfigValidationDoesNotWidenTheWindow(unittest.TestCase):
+    """`_verify_config` swaps a candidate over the real config while the canonical loader validates
+    it. Writing that candidate at the default mode and correcting it afterwards leaves a window in
+    which a `0600` config is world-readable — and the window *is* the leak."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-cfgwindow-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_a_private_config_keeps_its_mode_through_init(self):
+        cfg = self.ws / ".vibe-suite.md"
+        cfg.write_text("---\neffort: high\n---\nsomething private\n")
+        os.chmod(cfg, 0o600)
+        r = subprocess.run(["bash", str(INIT), "--workspace", str(self.ws), "--effort", "medium",
+                            "--audit-depth", "mini", "--strictness", "standard"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        mode = stat.S_IMODE(cfg.lstat().st_mode)
+        self.assertEqual(mode & 0o077, 0, f"a 0600 config ended up at {oct(mode)}")
+
+    def test_the_staged_candidate_is_never_looser_than_the_real_config(self):
+        """Asserted on the candidate itself, so the check covers the window and not just the end
+        state — a test that only reads the final mode passes even while the window is open."""
+        cfg = self.ws / ".vibe-suite.md"
+        cfg.write_text("---\neffort: high\n---\nprivate\n")
+        os.chmod(cfg, 0o600)
+        seen = []
+        real_write = bridge.write_atomic
+
+        def spy(root, dest, content, mode=None):
+            if ".vibe-candidate" in str(dest):
+                seen.append(mode)
+            return real_write(root, dest, content, mode)
+
+        bridge.write_atomic = spy
+        self.addCleanup(setattr, bridge, "write_atomic", real_write)
+        init_bridge._verify_config(self.ws, "---\neffort: low\n---\nprivate\n")
+        self.assertTrue(seen, "the candidate was not written through the primitive")
+        self.assertEqual(seen[0], 0o600,
+                         f"candidate staged at {seen[0] and oct(seen[0])}, not the config's 0600")

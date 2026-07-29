@@ -702,9 +702,15 @@ class DegenerateInputs(unittest.TestCase):
         block_apostrophe = ("---\nname: probe\n"
                             "description: |\n  Bob's valid block text; use when\n"
                             "  testing block scalars.\n---\n# probe\n\nBody.\n")
+        # Block content may itself LOOK like `key: 'open-quote...` — it is opaque bytes
+        # and must never engage the merger (R2 step-9 residue case).
+        block_keylike = ("---\nname: probe\n"
+                         "description: Concrete probe; use when testing block opacity.\n"
+                         "metadata: |\n  example: 'arbitrary block text\n"
+                         "  still arbitrary block text\n---\n# probe\n\nBody.\n")
         for body in (flow, nested, block, multiline_map, multiline_seq,
                      multiline_nested, multiline_quoted, comment_apostrophe,
-                     plain_apostrophe, block_apostrophe):
+                     plain_apostrophe, block_apostrophe, block_keylike):
             with self.subTest(head=body.splitlines()[3]):
                 f = score_one(body)
                 self.assertEqual(

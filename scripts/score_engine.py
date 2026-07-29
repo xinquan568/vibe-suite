@@ -602,6 +602,29 @@ def _fm_quoted_value_rest(logical):
     return match.group(1) if match.group(1) is not None else match.group(2)
 
 
+#: `key: |` / `key: >` (chomping indicators allowed, trailing comment allowed) — the line
+#: that opens a block scalar. Everything more-indented after it is opaque content.
+_BLOCK_SCALAR_OPEN = re.compile(
+    r"^(\s*)(?:-\s+)?(?:\"[^\"\n]*\"|'[^'\n]*'|[A-Za-z0-9_.-]+)\s*:\s*[|>][+-]?\s*(?:#.*)?$"
+)
+
+
+def _fm_block_content_lines(lines):
+    """Indices of lines that are block-scalar CONTENT — opaque bytes the multiline quote
+    merger must never evaluate, whatever key-and-quote shapes they resemble."""
+    inside, block_indent = set(), None
+    for index, raw in enumerate(lines):
+        if block_indent is not None:
+            if not raw.strip() or (len(raw) - len(raw.lstrip())) > block_indent:
+                inside.add(index)
+                continue
+            block_indent = None
+        match = _BLOCK_SCALAR_OPEN.match(raw)
+        if match is not None:
+            block_indent = len(match.group(1))
+    return inside
+
+
 def _fm_open_quote(text):
     """The quote character left open at the end of `text`, or None. Same scan discipline as
     the comment stripper — including the comment rule itself, so an apostrophe inside a
@@ -640,10 +663,11 @@ class _FrontmatterParser:
         # a quote that the scan finds still open — a plain scalar's or block scalar's
         # apostrophe is never a merge trigger. EOF with a value quote still open is a
         # structural failure.
+        block_content = _fm_block_content_lines(lines)
         merged, index = [], 0
         while index < len(lines):
             logical, first = lines[index], index
-            while True:
+            while first not in block_content:
                 rest = _fm_quoted_value_rest(logical)
                 if rest is None or _fm_open_quote(rest) is None:
                     break

@@ -1,0 +1,20 @@
+{
+  "file": "skills/defective/SKILL.md",
+  "score": 42,
+  "band": "Rewrite",
+  "total_penalty": -58,
+  "findings": [
+    {"rule": "--", "check": "name present", "penalty": -25},
+    {"rule": "R05", "check": "body length", "penalty": -10},
+    {"rule": "R07", "check": "scope note", "penalty": -3},
+    {"rule": "R01", "check": "vague quantifier", "penalty": -20}
+  ],
+  "advisories": [
+    {"class": "generic description", "reason": "no objective predicate"},
+    {"class": "broken references link", "reason": "no objective predicate"},
+    {"class": "pseudocode example", "reason": "no objective predicate"},
+    {"class": "domain mixing", "reason": "no objective predicate"},
+    {"class": "redundant content", "reason": "no objective predicate"},
+    {"class": "orphaned registration", "reason": "no objective predicate"}
+  ]
+}

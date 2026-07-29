@@ -75,8 +75,16 @@ SCHEMA = {
     "gate":                     Row("map",    "closed",                None),
 }
 
+#: The per-rule override leaves every `R<n>` key under `rule_overrides` accepts (E3.3 / vibe-28).
+#: `suppress`/`enabled: false` zero a rule, `max_penalty` caps its summed penalty, `threshold`
+#: re-parameterizes its numeric trigger. R51 additionally keeps its `vocabulary_skill` path.
+RULE_OVERRIDE_LEAVES = {
+    "suppress": "bool", "enabled": "bool", "max_penalty": "int", "threshold": "int",
+}
+_RULE_ID = re.compile(r"R[0-9]+")
+
 CLOSED_MAPS = {
-    "rule_overrides": {"R51": {"enabled": "bool", "vocabulary_skill": "string"}},
+    "rule_overrides": {"R51": {**RULE_OVERRIDE_LEAVES, "vocabulary_skill": "string"}},
     "gate": {"stop_review_gate": "bool", "model": "string", "fail_policy": "open|closed"},
 }
 OPEN_MAPS = {"model_overrides": ("codex", "agy")}
@@ -331,6 +339,8 @@ def _check_leaf(label, value, expected):
         raise ConfigValueError(f"{label}: expected true or false")
     if expected == "string" and not isinstance(value, str):
         raise ConfigValueError(f"{label}: expected a string")
+    if expected == "int" and (not isinstance(value, int) or isinstance(value, bool)):
+        raise ConfigValueError(f"{label}: expected an integer")
     if "|" in expected and value not in expected.split("|"):
         raise ConfigValueError(f"{label}: expected one of {expected}")
 
@@ -347,9 +357,13 @@ def _check_map(key, value):
         return
     allowed = CLOSED_MAPS[key]
     for sub, sub_value in value.items():
-        if sub not in allowed:
+        if sub in allowed:
+            expected = allowed[sub]
+        elif key == "rule_overrides" and _RULE_ID.fullmatch(sub):
+            # Any rule id takes the shared override leaves; only R51 (above) carries extras.
+            expected = RULE_OVERRIDE_LEAVES
+        else:
             raise ConfigValueError(f"{key}.{sub}: not a known key of the closed map {key!r}")
-        expected = allowed[sub]
         if isinstance(expected, dict):
             if not isinstance(sub_value, dict):
                 raise ConfigValueError(f"{key}.{sub}: expected a mapping")

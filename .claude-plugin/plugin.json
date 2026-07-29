@@ -27,12 +27,15 @@
     "./commands/ls.md",
     "./commands/preflight.md",
     "./commands/repair.md",
+    "./commands/score.md",
     "./commands/unbridge.md",
     "./commands/update.md"
   ],
   "hooks": "./hooks/hooks.json",
   "agents": [
-    "./agents/scanner.md"
+    "./agents/scanner.md",
+    "./agents/scorer.md",
+    "./agents/vague-scanner.md"
   ],
   "skills": [
     "./skills/agent-design",

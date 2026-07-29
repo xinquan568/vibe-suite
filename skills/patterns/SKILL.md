@@ -140,7 +140,7 @@ A catalog of best practices and anti-patterns for natural-language programming a
 ### A5. Monolithic Prompts (R13, R40)
 
 - **Problem.** A single unstructured block — no headings, no sections, no numbered steps — yields inconsistent output.
-- **Fix.** Add headings and numbered steps, group related instructions together, and put the output format specification at the END of the body, not the beginning.
+- **Fix.** Impose structure — headings, numbered steps, related instructions grouped — with the output-format specification placed at the END of the body rather than up front.
 
 ### A6. Rules Duplicating Linters (R24)
 

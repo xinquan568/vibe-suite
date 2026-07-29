@@ -21,8 +21,8 @@ final_score  = max(0, min(100, base_score + adjustments))
 ### File-level semantics
 
 - Malformed frontmatter or config (YAML/JSON/TOML that fails to parse) takes the parse-failure penalty for that artifact type: **-25**.
-- An empty file scores **0** — there is nothing to assess.
-- An unreadable file (permissions, binary, I/O error) is **skipped**: no score is recorded, and the skip is noted in the report rather than counted as a failure.
+- How the scorer treats files it cannot assess at all (empty, unreadable, binary) is runtime
+  behavior owned by the `/vibe-suite:score` command's own specification, not by this rubric.
 
 ## Penalty Tables
 

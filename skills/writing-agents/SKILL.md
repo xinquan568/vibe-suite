@@ -130,8 +130,8 @@ Rule: start with haiku and upgrade only when output quality demands it.
 
 ## 3. Tool Least-Privilege
 
-List only the tools the body actually references. Every extra tool is a
-potential misuse vector.
+The tools array should name nothing the body never uses — each unused grant
+widens the surface an agent can misuse.
 
 ### Common Mistakes
 
@@ -157,8 +157,8 @@ potential misuse vector.
 
 ## 4. Output Format
 
-Every agent MUST define its output format in the body. Without one, output
-varies per invocation and parent agents cannot parse the results.
+An agent body MUST pin down its output format: leave it undefined and each
+invocation renders differently, giving parent agents nothing stable to parse.
 
 ### Pattern 1: Structured Report
 
@@ -212,8 +212,8 @@ front-loaded. Use five sections, in this order:
 | Output Format | 5-15 | More than 3 output sections |
 | Error Handling | 3-5 | More than 5 error cases |
 
-Aim for a total body of 25-45 lines. Over 60 lines means the agent is doing too
-much — split it.
+Target 25-45 body lines in total; an agent that crosses 60 is carrying too many
+jobs and should be split.
 
 ## 6. Worked Example
 

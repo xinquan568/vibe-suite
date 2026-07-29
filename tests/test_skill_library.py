@@ -22,8 +22,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO_ROOT / "skills"
 
 #: The F4.8 roster: nlpm's 17 knowledge skills + cc-suite's 2, minus the conventions-claude
-#: merge, plus vibe-core (E0.2). Later stages add skills; this list is the E3.1 floor, so
-#: membership is asserted as a subset of what is on disk, never as equality.
+#: merge, plus vibe-core (E0.2). Asserted as EXACT equality with what is on disk — a later
+#: stage that ships a new skill extends this tuple in the same PR, which keeps the roster an
+#: explicit, reviewed fact rather than a drifting side effect.
 ROSTER = (
     "agent-design",
     "conventions",
@@ -92,6 +93,9 @@ def parse_frontmatter(text):
         if line == "---":
             if not fields:
                 raise FrontmatterError("empty frontmatter block")
+            for required in ("name", "description"):
+                if required not in fields:
+                    raise FrontmatterError("missing mandatory key %r" % required)
             return fields
         if "\t" in line:
             raise FrontmatterError("tab character on line %d" % lineno)
@@ -143,6 +147,12 @@ class FrontmatterParserSelfTest(unittest.TestCase):
         with self.assertRaises(FrontmatterError):
             parse_frontmatter("---\n---\nbody")
 
+    def test_rejects_missing_mandatory_key(self):
+        with self.assertRaises(FrontmatterError):
+            parse_frontmatter("---\nname: a\n---\nbody")
+        with self.assertRaises(FrontmatterError):
+            parse_frontmatter("---\ndescription: x\n---\nbody")
+
 
 def _skill_md_files():
     return sorted(SKILLS_DIR.glob("*/SKILL.md"))
@@ -162,6 +172,14 @@ class SkillLibraryAcceptance(unittest.TestCase):
         self.assertEqual(
             missing, [],
             "E3.1 roster directories missing a SKILL.md: %s" % ", ".join(missing),
+        )
+
+    def test_on_disk_skills_match_roster_exactly(self):
+        on_disk = sorted(d.name for d in SKILLS_DIR.iterdir() if d.is_dir())
+        self.assertEqual(
+            on_disk, sorted(ROSTER),
+            "skills/ diverges from the declared roster; a new skill extends "
+            "ROSTER in the same PR",
         )
 
     def test_every_skill_frontmatter_parses(self):
@@ -206,7 +224,7 @@ class SkillLibraryAcceptance(unittest.TestCase):
                 )
 
     def test_citation_placeholders_are_link_free(self):
-        for path in _skill_md_files():
+        for path in _skill_tree_files():
             for lineno, line in enumerate(
                 path.read_text(encoding="utf-8").splitlines(), start=1
             ):

@@ -21,8 +21,8 @@ here; they live in overlay skills layered on top of this floor.
 | Overlay | Canonical paths governed |
 |---|---|
 | [conventions-claude](../conventions-claude/SKILL.md) | `.claude/`, `plugin.json` |
-| conventions-codex *(planned, not yet shipped in this suite)* | `.codex/`, `.agents/`, `AGENTS.md` |
-| conventions-antigravity *(planned, not yet shipped in this suite)* | `.gemini/`, `.agent/` |
+| [conventions-codex](../conventions-codex/SKILL.md) | `.codex/`, `.agents/`, `AGENTS.md` |
+| [conventions-antigravity](../conventions-antigravity/SKILL.md) | `.gemini/`, `.agent/` |
 
 ## 1. SKILL.md — the cross-tool open standard
 

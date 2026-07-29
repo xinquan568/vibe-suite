@@ -291,8 +291,7 @@ This skill covers advisor agents only. It does not cover:
 
 - **Claude Code native subagents** (`.claude/agents/`, dispatched via the Task
   tool) — a different mechanism: one-shot, isolated, no timeline. See
-  [claude-architecture](../claude-architecture/SKILL.md) for how native pieces fit
-  together and [writing-agents](../writing-agents/SKILL.md) for authoring them.
+  [writing-agents](../writing-agents/SKILL.md) for authoring them.
 - **Skill authoring** — a separate discipline with its own conventions.
 - **Writing an MCP server from scratch** — the advisor backend *is* the server; this
   skill only configures it per advisor.

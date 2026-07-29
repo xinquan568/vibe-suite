@@ -115,7 +115,10 @@ def _nested_is_ours(container, nested, inner):
     if container == "mcpServers":
         return nested in bridge.SENTINEL_LITERALS or nested.startswith(bridge.SENTINEL_PREFIX)
     if container == "hooks":
-        return nested == "Stop" and not inner
+        # An actual empty list, not anything falsey. `not inner` classified `{"Stop": false}` as
+        # ours and unlinked the file — the same truthiness mistake this function was written to fix,
+        # one level down.
+        return nested == "Stop" and isinstance(inner, list) and len(inner) == 0
     return False
 
 

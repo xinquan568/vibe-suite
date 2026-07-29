@@ -414,6 +414,13 @@ class ContentLossPaths(unittest.TestCase):
     def test_a_non_object_document_is_never_deleted(self):
         self.assertFalse(unbridge.json_is_only_ours(".mcp.json", ["a list"]))
 
+    def test_a_users_entry_keeps_the_file_even_when_its_value_is_empty(self):
+        """Truthiness was the wrong test: an empty dict is falsey, so a user's server whose config
+        happened to be blank did not keep its own file alive."""
+        self.assertFalse(unbridge.json_is_only_ours(".mcp.json", {"mcpServers": {"mine": {}}}))
+        self.assertFalse(unbridge.json_is_only_ours(
+            ".codex/hooks.json", {"hooks": {"PreToolUse": []}}))
+
     def test_a_file_the_suite_owns_end_to_end_is_removable(self):
         """The shared rule must not reach exclusive files, or teardown strands its own state."""
         self.assertTrue(unbridge.json_is_only_ours(

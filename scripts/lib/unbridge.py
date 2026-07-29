@@ -101,12 +101,36 @@ def json_is_only_ours(rel, doc):
         return False
     for key in owned:
         value = doc.get(key)
-        if isinstance(value, dict):
-            if any(value.values()):
-                return False
-        elif value:
+        if value is None:
+            continue
+        if not isinstance(value, dict):
             return False
+        # Presence, not truthiness, and *whose* key rather than whether it is empty.
+        # `any(value.values())` read `{"mcpServers": {"mine": {}}}` as empty because an empty dict
+        # is falsey, so a user server with blank config did not keep its own file alive. But the
+        # inverse — any key at all keeps the file — would strand the empty `{"Stop": []}` we leave
+        # behind ourselves. So each nested key is attributed.
+        for nested, inner in value.items():
+            if not _nested_is_ours(key, nested, inner):
+                return False
     return True
+
+
+def _nested_is_ours(container, nested, inner):
+    """Whether an entry inside a shared container is still only ours.
+
+    `.mcp.json` holds server names, which the sentinel vocabulary already decides — a surviving
+    foreign name is the user's.
+
+    `.codex/hooks.json` is subtler: `Stop` is an event we *share* with the user, not one we own.
+    Our entries are removed by marker, so a `Stop` list that is still populated holds **their**
+    hooks. The key is ours only once it is empty.
+    """
+    if container == "mcpServers":
+        return nested in bridge.SENTINEL_LITERALS or nested.startswith(bridge.SENTINEL_PREFIX)
+    if container == "hooks":
+        return nested == "Stop" and not inner
+    return False
 
 
 def restore(ws, entry, report):

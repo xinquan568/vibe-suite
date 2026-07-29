@@ -108,6 +108,53 @@ def _open_dir_chain(root, relative):
     return fd
 
 
+def open_dir_chain(root, relative):
+    """Public name for the component-wise `O_NOFOLLOW` descent.
+
+    `bridge_cli` carried its own copy of this, which is the pattern this module exists to end: a
+    second implementation of a safety rule drifts from the first, and the copy had none of the
+    refusals added here since. One descent, one place.
+    """
+    return _open_dir_chain(root, relative)
+
+
+def unlink_at(root, rel):
+    """Remove `root/rel` relative to a descriptor opened by the audited descent.
+
+    A path-based `unlink` re-resolves every ancestor at the moment of the call, so a directory
+    swapped for a symlink between the check and the removal takes the deletion somewhere else.
+    """
+    rel = Path(rel)
+    assert_inside(root, Path(root) / rel)
+    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        target = Path(root) / rel
+        if target.is_dir() and not target.is_symlink():
+            os.rmdir(rel.name, dir_fd=fd)
+        else:
+            os.unlink(rel.name, dir_fd=fd)
+    finally:
+        os.close(fd)
+
+
+def symlink_at(root, rel, target):
+    """Create `root/rel` -> `target`, relative to the audited descent.
+
+    Returns True when the link was created, False when something was already there — a caller must
+    never learn "it exists" by having clobbered it.
+    """
+    rel = Path(rel)
+    assert_inside(root, Path(root) / rel)
+    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        os.symlink(str(target), rel.name, dir_fd=fd)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        os.close(fd)
+
+
 def write_atomic(root, dest, content, mode=None):
     """Replace a file atomically, without ever resolving its parent path twice.
 

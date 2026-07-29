@@ -650,3 +650,44 @@ class FixedReportPathsAreNotTruncated(unittest.TestCase):
                         "--workspace", str(self.ws), "--confirm"], capture_output=True, text=True)
         self.assertTrue((self.ws / ".mcp.json").is_symlink(),
                         "the user's link was converted to a regular file")
+
+
+class ProvenanceStepDoesNotLeakThroughScratch(unittest.TestCase):
+    """`vibe_provenance_step` wrote a **fixed** `.tmp` sibling with `open(..., "w")`. The provenance
+    record holds complete pre-images, so that scratch file was a world-readable copy of a `0600`
+    `.mcp.json` — the leak `c2112ac` closed on the record itself, reopened one path over."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-provstep-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        self.prov = self.ws / "install-provenance.json"
+        self.prov.write_text(json.dumps(
+            {"steps": [], "targets": [{"path": "/x/.mcp.json", "content_b64": "czNjcmV0"}]}))
+        os.chmod(self.prov, 0o600)
+
+    def _step(self, name):
+        script = (f'source "{REPO_ROOT}/scripts/migrate/common.sh"\n'
+                  f'vibe_provenance_step "{self.prov}" "{name}"\n')
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    def test_the_record_keeps_its_mode_and_no_readable_copy_survives(self):
+        proc = self._step("config")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("config", json.loads(self.prov.read_text())["steps"])
+        mode = stat.S_IMODE(self.prov.lstat().st_mode)
+        self.assertEqual(mode & 0o077, 0, f"the record ended up at {oct(mode)}")
+        leftovers = [p for p in self.ws.iterdir() if p != self.prov]
+        for leftover in leftovers:
+            left_mode = stat.S_IMODE(leftover.lstat().st_mode)
+            self.assertEqual(left_mode & 0o077, 0,
+                             f"{leftover.name} is a readable copy at {oct(left_mode)}")
+
+    def test_a_symlinked_record_is_refused(self):
+        real = self.ws / "elsewhere.json"
+        real.write_text(json.dumps({"steps": []}))
+        link = self.ws / "linked-provenance.json"
+        link.symlink_to(real)
+        script = (f'source "{REPO_ROOT}/scripts/migrate/common.sh"\n'
+                  f'vibe_provenance_step "{link}" "config"\n')
+        subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertTrue(link.is_symlink(), "the user's link was converted to a regular file")

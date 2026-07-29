@@ -104,18 +104,27 @@ vibe_json_list() {
 vibe_provenance_step() {
     local path="$1" step="$2"
     [ -f "$path" ] || vibe_die "no provenance at $path"
-    python3 - "$path" "$step" <<'PY'
+    python3 - "$path" "$step" "${BASH_SOURCE[0]%/*}/../lib" <<'PY'
 import json, sys
-path, step = sys.argv[1], sys.argv[2]
+from pathlib import Path
+
+path, step, lib = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, lib)
+import bridge  # noqa: E402
+
 with open(path, encoding="utf-8") as handle:
     data = json.load(handle)
 if step not in data.setdefault("steps", []):
     data["steps"].append(step)
-with open(path + ".tmp", "w", encoding="utf-8") as handle:
-    json.dump(data, handle, indent=2, sort_keys=True)
-    handle.write("\n")
-import os
-os.replace(path + ".tmp", path)
+
+# Through the primitive. The hand-rolled version wrote a **fixed** `.tmp` sibling with `open(...,
+# "w")` — no symlink check, and created at the default mode. The provenance record holds complete
+# pre-images, so that scratch file was a world-readable copy of a `0600` `.mcp.json`: the very leak
+# `c2112ac` closed on the record itself, reopened one path over.
+target = Path(path)
+bridge.write_atomic(target.parent, target,
+                    json.dumps(data, indent=2, sort_keys=True) + "\n",
+                    mode=(target.lstat().st_mode & 0o7777) if target.is_file() else 0o600)
 PY
 }
 

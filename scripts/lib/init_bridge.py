@@ -173,35 +173,20 @@ def _verify_config(ws, text):  # noqa: D401
 
     `parse_frontmatter` only checks the grammar: it accepts `effort: sonnet` happily, while
     `config.py`'s value checks reject it because the enum is `low|medium|high`. Parsing alone would
-    have shipped exactly the invalid config this check exists to prevent, so the candidate is written
-    to a scratch workspace and loaded the way every downstream consumer loads it.
+    have shipped exactly the invalid config this check exists to prevent.
+
+    **Nothing is written.** This used to stage the candidate over the live config, load, and put the
+    original back — so the user's file was replaced for the duration of a validation, and the restore
+    had to carry bytes *and* mode back. Every defect this function accumulated (a `0600` config
+    world-readable through the window, a mode lost on restore, a fixed scratch path) came from that
+    swap, and none of it was ever necessary: only containment needs the workspace root, and it takes
+    the root as an argument.
     """
-    # Validated against the **real** workspace: `config.py` resolves path-valued keys against the
-    # root and refuses ones that escape it, so a scratch directory would clear a config the actual
-    # project rejects. The candidate is staged beside the target and removed either way.
-    ws = Path(ws)
-    staged = ws / f".{config_mod.CONFIG_FILENAME}.vibe-candidate"
-    real = ws / config_mod.CONFIG_FILENAME
-    keep = real.read_bytes() if real.is_file() else None
-    # The candidate stands in for the real config while the loader validates it, so it must be no
-    # looser than what it replaces. Writing it at the default and fixing the mode afterwards leaves
-    # a window in which a `0600` config is world-readable — the window *is* the leak.
-    keep_mode = (real.lstat().st_mode & 0o7777) if real.is_file() else None
     try:
-        bridge.write_atomic(ws, staged, text, mode=keep_mode)
-        os.replace(staged, real)
-        config_mod.load(str(ws))
+        config_mod.resolve_text(text, str(ws))
     except Exception as exc:
         raise bridge.BridgeError(
             f"refusing to write a config the canonical loader rejects: {exc}") from exc
-    finally:
-        if keep is None:
-            real.unlink(missing_ok=True)
-        else:
-            real.write_bytes(keep)
-            if keep_mode is not None:
-                os.chmod(real, keep_mode)
-        staged.unlink(missing_ok=True)
 
 
 def _upsert_text(ws, rel, name, body, markdown=False):

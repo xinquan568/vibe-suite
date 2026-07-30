@@ -1,0 +1,75 @@
+{
+  "verdict": "9 issues",
+  "issues": [
+    {
+      "class": "reference-integrity",
+      "direction": "command-partial",
+      "source": "commands/go.md",
+      "target": "commands/shared/missing-partial.md",
+      "detail": "referenced shared partial does not exist"
+    },
+    {
+      "class": "reference-integrity",
+      "direction": "agent-skills",
+      "source": "agents/helper.md",
+      "target": "skills/absent-skill/SKILL.md",
+      "detail": "skills: entry resolves to no SKILL.md"
+    },
+    {
+      "class": "reference-integrity",
+      "direction": "hook-script",
+      "source": "hooks/hooks.json",
+      "target": "scripts/missing-hook.sh",
+      "detail": "hook command names a script that does not exist"
+    },
+    {
+      "class": "reference-integrity",
+      "direction": "claude-md-listing",
+      "source": "CLAUDE.md",
+      "target": "docs/missing-doc.md",
+      "detail": "listed path does not resolve"
+    },
+    {
+      "class": "reference-integrity",
+      "direction": "claude-md-listing",
+      "source": "CLAUDE.md",
+      "target": "fixture-broken:absent",
+      "detail": "listed plugin component token does not resolve"
+    },
+    {
+      "class": "orphan",
+      "source": "skills/orphaned/SKILL.md",
+      "detail": "zero inbound reference edges"
+    },
+    {
+      "class": "r51-drift",
+      "source": "commands/go.md",
+      "detail": "deprecated term 'utilize' (canonical: 'use'), 1 occurrence"
+    },
+    {
+      "class": "behavioral-contradiction",
+      "detail": "commands/go.md requires the checks to always run before committing; agents/helper.md forbids exactly that",
+      "sources": [
+        "commands/go.md",
+        "agents/helper.md"
+      ]
+    },
+    {
+      "class": "terminology-drift",
+      "detail": "one report artifact under two names: 'the audit report' (commands/go.md) vs 'the review dossier' (agents/helper.md)",
+      "sources": [
+        "commands/go.md",
+        "agents/helper.md"
+      ]
+    }
+  ],
+  "checked": {
+    "agent": 1,
+    "claude-md": 1,
+    "command": 1,
+    "hook-config": 1,
+    "partial": 0,
+    "script": 1,
+    "skill": 2
+  }
+}

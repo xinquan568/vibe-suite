@@ -1,0 +1,12 @@
+[
+  {
+    "class": "behavioral-contradiction",
+    "detail": "commands/go.md requires the checks to always run before committing; agents/helper.md forbids exactly that",
+    "sources": ["commands/go.md", "agents/helper.md"]
+  },
+  {
+    "class": "terminology-drift",
+    "detail": "one report artifact under two names: 'the audit report' (commands/go.md) vs 'the review dossier' (agents/helper.md)",
+    "sources": ["commands/go.md", "agents/helper.md"]
+  }
+]

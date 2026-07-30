@@ -350,6 +350,30 @@ class RegistryFailClosed(unittest.TestCase):
         proc = self._run(registry)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
 
+    def test_list_item_mapping_heads_disambiguated(self):
+        # A list item containing ':' + whitespace is YAML mapping syntax, never a silent
+        # string: TAB-separated heads and phrase keys refuse inside string lists; a
+        # colon-space STRING item takes the quoted spelling.
+        proc = self._run(REGISTRY_OK.replace(
+            "      - commands/**\n", "      - commands:\tfoo\n"))
+        self.assertEqual(proc.returncode, 2, "tab-separated mapping head")
+        proc = self._run(REGISTRY_OK.replace(
+            "      - commands/**\n", "      - some phrase: x\n"))
+        self.assertEqual(proc.returncode, 2, "phrase mapping head")
+        proc = self._run(REGISTRY_OK.replace(
+            "      - commands/**\n", '      - "with: colon"\n'))
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        proc = self._run(REGISTRY_OK.replace(
+            "      - commands/**\n", '      - "x" y\n'))
+        self.assertEqual(proc.returncode, 2, "trailing junk after quoted item")
+
+    def test_quoted_list_head_key_accepted(self):
+        # Quoted keys work on the list-head surface too, symmetrically with map keys.
+        registry = REGISTRY_OK.replace('  - id: s\n', '  - "id": "y"\n').replace(
+            "verbs:\n  s: []\n", 'verbs:\n  "y": []\n')
+        proc = self._run(registry)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

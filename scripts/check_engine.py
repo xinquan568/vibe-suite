@@ -374,6 +374,47 @@ def _reg_key(key, line_no, source):
     return key
 
 
+def _reg_quote_end(text, line_no, source):
+    """Index of the terminating quote of a quoted scalar that starts `text`."""
+    quote = text[0]
+    index = 1
+    while index < len(text):
+        char = text[index]
+        if quote == '"' and char == "\\":
+            index += 2
+            continue
+        if char == quote:
+            if quote == "'" and text[index + 1:index + 2] == "'":
+                index += 2
+                continue
+            return index
+        index += 1
+    raise RegistryError(f"{source}:{line_no}: unterminated quoted scalar")
+
+
+def _reg_item_head(rest, line_no, source):
+    """(key, value_text) when a list item is a mapping head, (None, None) for a scalar.
+
+    Any ':' followed by whitespace (or ending the item) is YAML mapping syntax and must be
+    treated as a head — a tab-separated or phrase-keyed head is never a silent string. A
+    quoted token followed by ':' is a quoted head key; a fully quoted item is a scalar;
+    anything else after a quoted item is trailing junk. Colon-space STRING items take the
+    quoted spelling.
+    """
+    if rest[:1] in ("\"", "'"):
+        end = _reg_quote_end(rest, line_no, source)
+        after = rest[end + 1:]
+        if after == "":
+            return None, None
+        if after[:1] == ":" and (len(after) == 1 or after[1] in " \t"):
+            return _reg_key(rest[:end + 1], line_no, source), after[2:].strip()
+        raise RegistryError(f"{source}:{line_no}: trailing text after a quoted scalar")
+    key, sep, value = rest.partition(":")
+    if sep and (not value or value[0] in " \t"):
+        return _reg_key(key.strip(), line_no, source), value.strip()
+    return None, None
+
+
 def _reg_block(lines, index, indent, source):
     """Parse a mapping or list block whose entries sit at exactly `indent` spaces."""
     entries_list, entries_map = None, None
@@ -393,10 +434,8 @@ def _reg_block(lines, index, indent, source):
                 raise RegistryError(f"{source}:{index + 1}: list item inside a mapping")
             entries_list = [] if entries_list is None else entries_list
             rest = content[2:].strip()
-            key, sep, value = rest.partition(":")
-            if sep and _REG_KEY.match(key.strip()) and (not value or value[0] == " "):
-                head = value.strip()
-                head_key = _reg_key(key.strip(), index + 1, source)
+            head_key, head = _reg_item_head(rest, index + 1, source)
+            if head_key is not None:
                 item = {head_key:
                         _reg_scalar(head, index + 1, source) if head else None}
                 sub, index = _reg_block(lines, index + 1, indent + 2, source)

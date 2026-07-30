@@ -29,7 +29,7 @@ inference). Insufficient evidence is NOT a grade: `UNCLASSIFIED` with reason
 
 ## D5 correction notes
 
-`<!-- spec-sync <run-date>: <tag> — <source label> (confidence: high|medium) -->`
+`<!-- spec-sync <run-date>: <tag> — <source label>, <URL> (confidence: high|medium) -->`
 Body claims: line immediately after. Frontmatter claims: first entry of a
 `## Correction notes` body section naming the key — NOT inside the YAML block (an HTML
 comment is not valid YAML for conforming parsers; `bin/vibe-check`'s `frontmatter_keys`

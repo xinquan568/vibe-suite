@@ -253,6 +253,72 @@ class CommandContract(unittest.TestCase):
         self.assertRegex(self.flat, r"(?i)exit status")
 
 
+#: Every binding rule from the frozen plan, each pinned to an EXACT phrase in the
+#: artifact that owns it. Adding a rule to the plan means adding a row here; deleting a
+#: rule from an artifact fails the corresponding case. Phrases are matched against
+#: whitespace-squashed text so line wrapping cannot mask a deletion.
+REQUIRED_CLAUSES = [
+    # (rule, file-key, exact phrase)
+    ("D1 default", "command", "`all` (the default)"),
+    ("D1 floor excluded", "command", "`skills/conventions/` floor is never a target"),
+    ("D2 dry-run default", "command", "`--dry-run` (the default)"),
+    ("D2 actionable set", "command", "FIX, REMOVE, ADD, or RESOLVED"),
+    ("D2 retiring CONFIRM", "command", "CONFIRM that retires a correction note"),
+    ("D4 high grade", "command", "`high` is an explicit first-party statement"),
+    ("D4 medium grade", "command", "`medium` is first-party but indirect"),
+    ("D4 orthogonality", "command", "grade the evidence, never the tag"),
+    ("D4 not-a-grade", "command", "Insufficient evidence is not a grade"),
+    ("D4 threshold default", "command", "**default `medium`**"),
+    ("D5 every correction", "command", "Every applied correction carries a note"),
+    ("D5 run-date semantics", "command",
+     "is the ISO date of the run that writes it"),
+    ("D5 body placement", "command",
+     "the line immediately following the corrected or added claim"),
+    ("D5 frontmatter placement", "command",
+     "the note never goes inside the YAML block"),
+    ("D5 retirement condition", "command",
+     "`CONFIRM` at `high` confidence against a source dated at or after the note's own"),
+    ("D5 one note per claim", "command", "one note per claim, never accumulating"),
+    ("D6 label-only distinction", "command", "not full URLs"),
+    ("D7 case sensitivity", "command", "case-sensitively"),
+    ("D7 scope", "command",
+     "every file in `git ls-files` EXCLUDING the `tests/`, `docs/`, and `.github/` trees"),
+    ("D7 required targets", "command",
+     "reported as REQUIRED targets, with the citing line quoted"),
+    ("D7 never edited", "command", "**never edited** by this command"),
+    ("D8 verify target", "command",
+     'python3 "${CLAUDE_PLUGIN_ROOT}/bin/vibe-check" "${CLAUDE_PLUGIN_ROOT}"'),
+    ("D9 first-party only", "agent", "**First-party only.**"),
+    ("D9 page date", "agent", "plus the page's own date when it carries one"),
+    ("D9 graded quote+URL", "agent",
+     "Every graded row (`high` or `medium`) must quote the source statement it relied "
+     "on together with that URL"),
+    ("D9 unclassified routing", "agent",
+     "a row without a quotable statement and URL is not graded evidence and belongs in "
+     "`UNCLASSIFIED`"),
+    ("D9 research not apply", "agent",
+     "You research and report; applying corrections belongs to"),
+]
+
+
+class RequiredClauses(unittest.TestCase):
+    """One case per binding rule — the table above is the contract's inventory."""
+
+    def test_every_rule_is_present(self):
+        sources = {"command": squash(COMMAND.read_text(encoding="utf-8")),
+                   "agent": squash(AGENT.read_text(encoding="utf-8"))}
+        for rule, key, phrase in REQUIRED_CLAUSES:
+            with self.subTest(rule=rule):
+                self.assertIn(phrase, sources[key],
+                              f"{rule}: required clause missing from {key}")
+
+    def test_worksheet_note_schema_matches_the_command(self):
+        # the worksheet must not document a superseded schema (step-9 finding 2)
+        worksheet = (FIX / "README.md").read_text(encoding="utf-8")
+        self.assertIn("<source label>, <URL> (confidence: high|medium)", worksheet)
+        self.assertNotIn("<tag> — <source label> (confidence", worksheet)
+
+
 class FreshnessNormalization(unittest.TestCase):
     def test_exact_canonical_lines(self):
         for name, path in OVERLAYS.items():

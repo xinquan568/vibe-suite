@@ -1,0 +1,8 @@
+nouns:
+  report:
+    canonical: report
+verbs:
+  use:
+    canonical: use
+    deprecated:
+      - utilize

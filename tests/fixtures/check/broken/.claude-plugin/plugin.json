@@ -1,0 +1,8 @@
+{
+  "name": "fixture-broken",
+  "version": "0.0.1",
+  "commands": ["./commands/go.md"],
+  "agents": ["./agents/helper.md"],
+  "skills": ["./skills/util", "./skills/orphaned"],
+  "hooks": "./hooks/hooks.json"
+}

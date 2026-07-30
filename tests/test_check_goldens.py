@@ -421,6 +421,14 @@ class RegistryFailClosed(unittest.TestCase):
             "    description: scope\n", "    description:\tscope\n"))
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
 
+    def test_tab_in_indentation_refused(self):
+        # YAML forbids tabs in indentation; a TAB hiding after (or before) the indent
+        # spaces must refuse, never be silently stripped into a valid line.
+        proc = self._run(REGISTRY_OK.replace("  - id: s\n", "  \t- id: s\n"))
+        self.assertEqual(proc.returncode, 2, "tab after indent spaces")
+        proc = self._run(REGISTRY_OK.replace("verbs:\n  s: []\n", "verbs:\n\ts: []\n"))
+        self.assertEqual(proc.returncode, 2, "tab as indentation")
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

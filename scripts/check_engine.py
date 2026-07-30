@@ -437,6 +437,8 @@ def _reg_block(lines, index, indent, source):
             index += 1
             continue
         current = len(raw) - len(raw.lstrip(" "))
+        if raw[current:current + 1] == "\t":
+            raise RegistryError(f"{source}:{index + 1}: tab in indentation — spaces only")
         if current < indent:
             break
         if current > indent:

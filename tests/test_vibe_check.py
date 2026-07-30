@@ -353,6 +353,30 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertEqual(out.count("escapes the plugin root"), 1, out)
         self.assertIn("manifest-vs-disk: skills/esc: escapes the plugin root", out)
 
+    def test_alias_to_the_escaping_artifact_is_one_finding(self):
+        # A symlink pointing AT the escaping in-root artifact: boundary search must
+        # step one link at a time, landing on the in-root spelling — not realpath
+        # through the artifact's own escape.
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (outside / "SKILL.md").write_text("---\nname: outside\n---\n# o\n",
+                                              encoding="utf-8")
+            root = Path(tmp) / "plugin"
+            (root / ".claude-plugin").mkdir(parents=True)
+            (root / "skills").mkdir()
+            (root / "skills" / "esc").symlink_to(outside, target_is_directory=True)
+            shortcut = Path(tmp) / "shortcut"
+            shortcut.symlink_to(root / "skills" / "esc", target_is_directory=True)
+            (root / ".claude-plugin" / "plugin.json").write_text(
+                json.dumps({"name": "x", "skills": [str(shortcut)]}),
+                encoding="utf-8")
+            proc = run_check(str(root))
+        out = proc.stdout.decode()
+        self.assertEqual(proc.returncode, 1, out + proc.stderr.decode())
+        self.assertEqual(out.count("escapes the plugin root"), 1, out)
+        self.assertIn("manifest-vs-disk: skills/esc: escapes the plugin root", out)
+
     def test_manifest_paths_are_contained(self):
         # Absolute and traversal entries are findings and are never read/registered.
         for entry_json in ('{"name": "x", "commands": ["../outside.md"]}',

@@ -131,13 +131,24 @@ def _canonical_rel(root, entry):
     if not path.is_absolute():
         return rel
     root_real = root.resolve()
-    parts = path.parts
-    for cut in range(1, len(parts) + 1):
-        try:
-            base = Path(os.path.realpath(Path(*parts[:cut]))).relative_to(root_real)
-        except ValueError:
-            continue
-        return posixpath.normpath("/".join([base.as_posix(), *parts[cut:]]))
+    for _ in range(8):   # single-link steps; the cap breaks symlink cycles
+        parts = path.parts
+        # boundary search over PROPER prefixes (never realpathing the final
+        # component, whose own escape must stay unresolved); the full path joins
+        # the walk only when it is not itself a symlink
+        limit = len(parts) + (0 if path.is_symlink() else 1)
+        for cut in range(1, limit):
+            try:
+                base = Path(os.path.realpath(Path(*parts[:cut]))).relative_to(root_real)
+            except ValueError:
+                continue
+            return posixpath.normpath("/".join([base.as_posix(), *parts[cut:]]))
+        if not path.is_symlink():
+            break
+        target = Path(os.readlink(path))
+        if not target.is_absolute():
+            target = path.parent / target
+        path = Path(posixpath.normpath(str(target)))
     return rel
 
 

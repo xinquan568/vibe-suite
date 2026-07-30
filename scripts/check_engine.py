@@ -338,7 +338,12 @@ def _reg_scalar(text, line_no, source):
         # plain scalar and passes through.
         raise RegistryError(f"{source}:{line_no}: complex-key indicator '?' is outside "
                             "the accepted registry grammar")
-    if _KEYWORD_LOOKALIKE.fullmatch(text) or text[:1] in tuple("+-.0123456789"):
+    if _KEYWORD_LOOKALIKE.fullmatch(text) or text[:1] in tuple("+-.0123456789") \
+            or text == "=":
+        # The '=' arm completes the YAML 1.1 special-resolution space: bare '=' is
+        # tag:yaml.org,2002:value; every other non-string plain-scalar resolution is a
+        # keyword variant, starts with a sign/digit/dot, or is indicator-led — all
+        # refused above/below.
         raise RegistryError(f"{source}:{line_no}: ambiguous scalar {text!r}; "
                             "quote it if a string is meant")
     if re.search(r":(?=[ \t]|$)", text):

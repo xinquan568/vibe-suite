@@ -429,6 +429,13 @@ class RegistryFailClosed(unittest.TestCase):
         proc = self._run(REGISTRY_OK.replace("verbs:\n  s: []\n", "verbs:\n\ts: []\n"))
         self.assertEqual(proc.returncode, 2, "tab as indentation")
 
+    def test_bare_equals_value_special_refused(self):
+        # YAML 1.1 resolves a bare '=' as tag:yaml.org,2002:value, not a string;
+        # '=x' is an ordinary plain scalar and the quoted spelling round-trips.
+        self.assertEqual(self._description("=").returncode, 2)
+        self.assertEqual(self._description("=x").returncode, 0)
+        self.assertEqual(self._description('"="').returncode, 0)
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

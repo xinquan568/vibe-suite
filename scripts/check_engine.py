@@ -266,10 +266,55 @@ REGISTRY_KEYS = {"scopes", "cross_scope_homonyms", "verbs",
                  "deferred_pending_warrant", "rejected_by_higher_principle", "nouns"}
 
 
+#: YAML's null/bool spelling family beyond the canonical lowercase forms decoded above.
+_KEYWORD_LOOKALIKE = re.compile(r"(?i)(null|true|false|yes|no|on|off)")
+
+
+def _reg_quoted(text, line_no, source):
+    """Decode a quoted scalar syntax-aware: escapes honored, closure must be terminal."""
+    if text[0] == '"':
+        index, out = 1, []
+        while index < len(text):
+            char = text[index]
+            if char == "\\":
+                if index + 1 >= len(text):
+                    raise RegistryError(f"{source}:{line_no}: trailing escape character")
+                mapped = {"\\": "\\", '"': '"', "n": "\n", "t": "\t"}.get(text[index + 1])
+                if mapped is None:
+                    raise RegistryError(f"{source}:{line_no}: unsupported escape sequence")
+                out.append(mapped)
+                index += 2
+                continue
+            if char == '"':
+                if index != len(text) - 1:
+                    raise RegistryError(
+                        f"{source}:{line_no}: trailing text after a quoted scalar")
+                return "".join(out)
+            out.append(char)
+            index += 1
+        raise RegistryError(f"{source}:{line_no}: unterminated quoted scalar")
+    index, out = 1, []
+    while index < len(text):
+        if text[index] == "'":
+            if text[index + 1:index + 2] == "'":
+                out.append("'")
+                index += 2
+                continue
+            if index != len(text) - 1:
+                raise RegistryError(
+                    f"{source}:{line_no}: trailing text after a quoted scalar")
+            return "".join(out)
+        out.append(text[index])
+        index += 1
+    raise RegistryError(f"{source}:{line_no}: unterminated quoted scalar")
+
+
 def _reg_scalar(text, line_no, source):
-    """Decode one scalar fail-closed: YAML's null/bool/number forms decode to their types
-    (so a string-typed leaf refuses them later), quotes must terminate, and flow/tag/anchor
-    constructs are outside the accepted grammar — never silently strings."""
+    """Decode one scalar fail-closed. The canonical lowercase typed forms decode to their
+    types (so a string-typed leaf refuses them by type); quoting is the one spelling for
+    exotic strings; everything ambiguous — case-variant keywords, exponent/sign/dot/radix
+    numeric forms, flow/tag/anchor/block constructs — refuses rather than passing as a
+    silent string."""
     if text == "[]":
         return []
     if text in ("null", "~"):
@@ -281,12 +326,13 @@ def _reg_scalar(text, line_no, source):
     if re.fullmatch(r"-?[0-9]+\.[0-9]+", text):
         return float(text)
     if text[:1] in ("\"", "'"):
-        if len(text) >= 2 and text[-1] == text[0]:
-            return text[1:-1]
-        raise RegistryError(f"{source}:{line_no}: unterminated quoted scalar")
+        return _reg_quoted(text, line_no, source)
     if text[:1] in ("{", "[", "!", "&", "*", "|", ">") or text.startswith("<<"):
         raise RegistryError(
             f"{source}:{line_no}: construct outside the accepted registry grammar")
+    if _KEYWORD_LOOKALIKE.fullmatch(text) or text[:1] in tuple("+-.0123456789"):
+        raise RegistryError(f"{source}:{line_no}: ambiguous scalar {text!r}; "
+                            "quote it if a string is meant")
     return text
 
 

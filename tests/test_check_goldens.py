@@ -305,6 +305,34 @@ class RegistryFailClosed(unittest.TestCase):
                 f"cross_scope_homonyms:\n  verbs:\n    - {member}\n"))
             self.assertEqual(proc.returncode, 2, f"member {member!r} must refuse")
 
+    def _description(self, value):
+        return self._run(REGISTRY_OK.replace(
+            "    description: scope\n", f"    description: {value}\n"))
+
+    def test_keyword_lookalikes_refused(self):
+        # YAML's case-variant null/bool spellings are typed forms, never silent strings.
+        for lookalike in ("Null", "NULL", "TRUE", "Yes", "off"):
+            self.assertEqual(self._description(lookalike).returncode, 2, lookalike)
+
+    def test_numeric_lookalikes_refused(self):
+        # Exponents, signs, bare dots, inf/nan, and radix forms are ambiguous unquoted.
+        for form in ("1e3", "-2E-4", "+2", ".5", "1.", ".inf", ".NaN", "0x1F", "0.0.1"):
+            self.assertEqual(self._description(form).returncode, 2, form)
+
+    def test_quote_syntax_refusals(self):
+        # Escaped terminal double quote, doubled terminal single quote, trailing junk,
+        # and unsupported escapes are all unterminated/off-grammar, not accepted strings.
+        for value in ('"foo\\"', "'foo''", '"foo" bar', '"a\\qb"'):
+            self.assertEqual(self._description(value).returncode, 2, value)
+
+    def test_quoted_strings_accepted(self):
+        # Quoting is the documented spelling for anything exotic: keywords, numbers,
+        # colons, and escaped quotes all parse to plain strings.
+        for value in ('"TRUE"', '"1e3"', '"with: colon"', "'it''s a scope'",
+                      '"a \\"quoted\\" word"'):
+            proc = self._description(value)
+            self.assertEqual(proc.returncode, 0, f"{value}: {proc.stderr.decode()}")
+
 
 class Composition(unittest.TestCase):
     def test_whole_object_composed_golden(self):

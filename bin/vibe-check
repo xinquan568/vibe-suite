@@ -110,7 +110,9 @@ def _contained(root, entry):
             return Path(rel).resolve().relative_to(root.resolve()).as_posix()
         except ValueError:
             return None
-    resolved = (root / rel).resolve()
+    resolved = _safe_resolve(root / rel)
+    if resolved is None:
+        return None
     try:
         resolved.relative_to(root.resolve())
     except ValueError:
@@ -152,11 +154,24 @@ def _canonical_rel(root, entry):
     return rel
 
 
+def _safe_resolve(path):
+    """Path.resolve that treats symlink cycles and OS errors as unresolvable (None) —
+    a cycle can never validate as contained, and must never crash the tool."""
+    try:
+        return path.resolve()
+    except (RuntimeError, OSError):
+        return None
+
+
 def _disk_contained(root, path):
     """True when a globbed disk artifact RESOLVES inside the root — a symlink whose
-    target escapes is excluded from every check surface and never opened."""
+    target escapes (or cannot resolve at all) is excluded from every check surface and
+    never opened."""
+    resolved = _safe_resolve(path)
+    if resolved is None:
+        return False
     try:
-        path.resolve().relative_to(root.resolve())
+        resolved.relative_to(root.resolve())
     except ValueError:
         return False
     return True
@@ -216,6 +231,33 @@ def frontmatter_keys(text):
     return None
 
 
+def _chain_canonical(root, rel):
+    """The LAST in-root spelling on a repo-local symlink chain before it leaves the
+    root (or `rel` itself for non-symlinks/cycles). One escaping target reached through
+    author-controlled in-root aliases gets ONE canonical escape name — the link that
+    actually crosses the boundary."""
+    current = rel
+    for _ in range(8):
+        link = root / current
+        try:
+            if not link.is_symlink():
+                return current
+            target = Path(os.readlink(link))
+        except OSError:
+            return current
+        if target.is_absolute():
+            candidate = _canonical_rel(root, str(target))
+            if Path(candidate).is_absolute():
+                return current          # next hop leaves the root
+        else:
+            candidate = posixpath.normpath(
+                posixpath.join(posixpath.dirname(current), str(target)))
+            if candidate.startswith(".."):
+                return current          # next hop leaves the root
+        current = candidate
+    return current
+
+
 def _skill_escape_base(rel):
     """The ONE canonical escape path for a skill suffix-tower family: /SKILL.md
     suffixes strip to a fixed point (floored at "/"), so directory and file spellings
@@ -236,6 +278,8 @@ def registered_by_class(root, manifest, findings=None):
             if rel is None:
                 if findings is not None:
                     escape_rel = _canonical_rel(root, entry)
+                    if not Path(escape_rel).is_absolute():
+                        escape_rel = _chain_canonical(root, escape_rel)
                     if key == "skills":
                         escape_rel = _skill_escape_base(escape_rel)
                     findings.append(finding("manifest-vs-disk", escape_rel,
@@ -261,7 +305,10 @@ def check_manifest_vs_disk(root, manifest):
     if isinstance(hooks, str):
         hooks_rel = _contained(root, hooks)
         if hooks_rel is None:
-            findings.append(finding("manifest-vs-disk", _canonical_rel(root, hooks),
+            hooks_escape = _canonical_rel(root, hooks)
+            if not Path(hooks_escape).is_absolute():
+                hooks_escape = _chain_canonical(root, hooks_escape)
+            findings.append(finding("manifest-vs-disk", hooks_escape,
                                     "escapes the plugin root"))
         elif not (root / hooks_rel).is_file():
             findings.append(finding("manifest-vs-disk", hooks_rel,
@@ -274,6 +321,7 @@ def check_manifest_vs_disk(root, manifest):
         escapes = []
         contained[pattern] = _contained_glob(root, pattern, escapes)
         for rel in escapes:
+            rel = _chain_canonical(root, rel)
             if pattern == "skills/*/SKILL.md":
                 # same canonical family name as the registration escape site
                 rel = _skill_escape_base(rel)
@@ -329,7 +377,15 @@ def check_frontmatter(root, _manifest):
     for pattern, required in surfaces:
         for path in _contained_glob(root, pattern):
             rel = path.relative_to(root).as_posix()
-            keys = frontmatter_keys(path.read_text(encoding="utf-8", errors="replace"))
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as err:
+                # e.g. a symlink cycle: containment passes (non-strict resolve stops
+                # at the loop) but the artifact cannot be read — a finding, not a crash
+                findings.append(finding("frontmatter", rel,
+                                        f"unreadable: {err.strerror}"))
+                continue
+            keys = frontmatter_keys(content)
             _require_keys(rel, keys, required, findings)
     return findings
 
@@ -337,7 +393,11 @@ def check_frontmatter(root, _manifest):
 def check_name_dir(root, _manifest):
     findings = []
     for skill_md in _contained_glob(root, "skills/*/SKILL.md"):
-        keys = frontmatter_keys(skill_md.read_text(encoding="utf-8", errors="replace"))
+        try:
+            content = skill_md.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue   # the frontmatter class reports unreadable artifacts
+        keys = frontmatter_keys(content)
         declared = (keys or {}).get("name")
         directory = skill_md.parent.name
         if declared is not None and declared != directory:

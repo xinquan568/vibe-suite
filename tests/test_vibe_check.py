@@ -377,6 +377,40 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertEqual(out.count("escapes the plugin root"), 1, out)
         self.assertIn("manifest-vs-disk: skills/esc: escapes the plugin root", out)
 
+    def test_relative_alias_chain_collapses_to_last_in_root_link(self):
+        # Repo-local chain: aliases/a.md -> b.md -> ../commands/esc.md -> /etc/passwd,
+        # registered as commands: ["aliases/a.md"]. The canonical escape name is the
+        # LAST in-root link (commands/esc.md) — one finding with the disk sweep.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            (root / ".claude-plugin").mkdir(parents=True)
+            (root / "commands").mkdir()
+            (root / "commands" / "esc.md").symlink_to("/etc/passwd")
+            (root / "aliases").mkdir()
+            (root / "aliases" / "b.md").symlink_to("../commands/esc.md")
+            (root / "aliases" / "a.md").symlink_to("b.md")
+            (root / ".claude-plugin" / "plugin.json").write_text(
+                '{"name": "x", "commands": ["aliases/a.md"]}', encoding="utf-8")
+            proc = run_check(str(root))
+        out = proc.stdout.decode()
+        self.assertEqual(proc.returncode, 1, out + proc.stderr.decode())
+        self.assertEqual(out.count("escapes the plugin root"), 1, out)
+        self.assertIn("manifest-vs-disk: commands/esc.md: escapes the plugin root", out)
+
+    def test_symlink_cycle_is_handled_not_crashed(self):
+        # A repo-local cycle must degrade to a refusal or finding — never a traceback.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            (root / ".claude-plugin").mkdir(parents=True)
+            (root / "commands").mkdir()
+            (root / "commands" / "loop.md").symlink_to("loop2.md")
+            (root / "commands" / "loop2.md").symlink_to("loop.md")
+            (root / ".claude-plugin" / "plugin.json").write_text(
+                '{"name": "x", "commands": ["commands/loop.md"]}', encoding="utf-8")
+            proc = run_check(str(root))
+        self.assertIn(proc.returncode, (1, 2), proc.stderr.decode())
+        self.assertNotIn("Traceback", proc.stderr.decode())
+
     def test_manifest_paths_are_contained(self):
         # Absolute and traversal entries are findings and are never read/registered.
         for entry_json in ('{"name": "x", "commands": ["../outside.md"]}',

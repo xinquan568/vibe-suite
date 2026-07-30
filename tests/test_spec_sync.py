@@ -83,10 +83,10 @@ class Deliverables(unittest.TestCase):
         body = AGENT.read_text(encoding="utf-8")
         self.assertRegex(body, r"(?m)^description: Use when")
         self.assertRegex(body, r"(?m)^model: (haiku|sonnet|opus)$")
-        self.assertRegex(body, r"(?m)^tools: .*WebFetch.*WebSearch")
+        # exact allowlist — adding Write (or any tool) is a contract change
+        self.assertRegex(body, r"(?m)^tools: WebFetch, WebSearch, Read$")
         spec = SPEC.read_text(encoding="utf-8")
         self.assertIn("FIX/REMOVE/ADD/CONFIRM/RESOLVED", spec)
-        self.assertRegex(body, r"(?m)^tools: .*\bRead\b")
         flat = squash(body)
         self.assertIn("first-party", flat.lower())
         self.assertRegex(flat, r"(?i)one dispatch per overlay|per-overlay dispatch")
@@ -134,15 +134,19 @@ class CommandContract(unittest.TestCase):
         self.assertIn("FIX, REMOVE, ADD, or RESOLVED", self.flat)
         self.assertIn("CONFIRM that retires a correction note", self.flat)
 
-    #: D3's five rows, each (order, tag, overlay-state fragment, source-state fragment).
-    #: Deleting any row — or altering its evidence condition — fails this test.
-    D3_ROWS = [
-        ("1", "RESOLVED", "explicit hedge", "now settles X"),
-        ("2", "REMOVE", "states X", "no replacement"),
-        ("3", "FIX", "states X", "with a replacement"),
-        ("4", "ADD", "silent on X", "states X"),
-        ("5", "CONFIRM", "no hedge", "states X"),
-    ]
+    #: D3's five rows, EXACTLY as the shipped table must read (all five columns).
+    #: Fragment matching let a semantics swap pass; equality does not.
+    D3_TABLE = {
+        "1": ["1", "`RESOLVED`", "carries an explicit hedge about X", "now settles X",
+              "retire the hedge, state the settled fact"],
+        "2": ["2", "`REMOVE`", "states X", "X withdrawn/absent, no replacement",
+              "delete the claim"],
+        "3": ["3", "`FIX`", "states X", "states not-X, with a replacement",
+              "correct the claim in place"],
+        "4": ["4", "`ADD`", "silent on X, X in scope", "states X", "add the claim"],
+        "5": ["5", "`CONFIRM`", "states X definitely (no hedge)", "states X",
+              "none, except note retirement (below)"],
+    }
 
     def test_tag_precedence_rows_field_complete(self):
         rows = {}
@@ -153,11 +157,9 @@ class CommandContract(unittest.TestCase):
                     rows[cells[0]] = cells
         self.assertEqual(sorted(rows), ["1", "2", "3", "4", "5"],
                          "D3 must state exactly five precedence rows")
-        for order, tag, overlay_state, source_state in self.D3_ROWS:
-            cells = rows[order]
-            self.assertIn(tag, cells[1], f"rule {order}: wrong tag")
-            self.assertIn(overlay_state, cells[2], f"rule {order}: overlay condition")
-            self.assertIn(source_state, cells[3], f"rule {order}: source condition")
+        for order, expected in self.D3_TABLE.items():
+            self.assertEqual(rows[order], expected,
+                             f"D3 rule {order} differs from the frozen semantics")
 
     def test_disjointness_rules_stated(self):
         self.assertIn("requires a replacement fact", self.flat)
@@ -260,6 +262,7 @@ class CommandContract(unittest.TestCase):
 REQUIRED_CLAUSES = [
     # (rule, file-key, exact phrase)
     ("D1 default", "command", "`all` (the default)"),
+    ("D1 all selects three", "command", "selects those three"),
     ("D1 floor excluded", "command", "`skills/conventions/` floor is never a target"),
     ("D2 dry-run default", "command", "`--dry-run` (the default)"),
     ("D2 actionable set", "command", "FIX, REMOVE, ADD, or RESOLVED"),

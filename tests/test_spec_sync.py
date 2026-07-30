@@ -51,6 +51,54 @@ SUPERSEDED = ["Freshness: refreshed 2026-06-07", "Refresh state: verified 2026-0
 TAGS = ["RESOLVED", "REMOVE", "FIX", "ADD", "CONFIRM"]
 
 
+#: Every sentence in each overlay that makes a freshness or verification claim. D6's
+#: deliverable is that exactly ONE dated marker exists per overlay, and a presence check
+#: on the canonical line cannot see a second sentence appended elsewhere saying the
+#: opposite — "this overlay is not verified" contradicts the canonical state while the
+#: canonical line itself still matches.
+#:
+#: The overlays are deliberately NOT sealed whole: they are living documents, and
+#: `/vibe-suite:spec-sync` exists to edit them. Only the freshness-claim surface is
+#: closed, so unrelated overlay content stays free to change.
+FRESHNESS_STATEMENTS = {
+    "claude": [
+        "**Spec freshness:** verified 2026-06-07 against the official Claude "
+        "Code docs map dated 2026-06-05 (code.claude.com/docs/en/)",
+        "where earlier notes conflicted with this refresh, the newer facts "
+        "below are canonical.",
+    ],
+    "codex": [
+        "**Spec freshness:** verified 2026-06-07 against Codex CLI 0.137.0, "
+        "released 2026-06-04 (developers.openai.com/codex)",
+        "Pre-releases existed up to 0.138.0-alpha.6 at refresh time.",
+        "Resolved at the 2026-06-07 refresh:",
+    ],
+    "antigravity": [
+        "**Spec freshness:** UNVERIFIED \u2014 research written 2026-05-25, six days "
+        "after the Antigravity 2.0 announcement of 2026-05-19;",
+        "What sets GEMINI.md apart from AGENTS.md/CLAUDE.md is `@file.md` "
+        "import support through the Memory Import Processor \u2014 checked against "
+        "geminicli.com/docs/reference/memport/ on 2026-05-26.",
+    ],
+}
+
+FRESHNESS_VOCAB = re.compile(
+    r"(?i)\b(verified|unverified|freshness|refresh\w*|checked)\b")
+
+
+def freshness_claims(text):
+    """Every sentence making a freshness or verification claim, in document order."""
+    found = []
+    for para in re.split(r"\n\s*\n", text):
+        flat = re.sub(r"\s+", " ", para).strip()
+        for sentence in re.split(r"(?<=[.;])\s+", flat):
+            if FRESHNESS_VOCAB.search(sentence):
+                found.append(sentence)
+    return found
+
+
+
+
 def squash(text):
     return re.sub(r"\s+", " ", text)
 
@@ -1027,6 +1075,20 @@ class ClosedSets(unittest.TestCase):
 
 
 class FreshnessNormalization(unittest.TestCase):
+    def test_freshness_claims_are_a_closed_set(self):
+        """D6 promises exactly one dated marker per overlay. Asserting the canonical
+        line is PRESENT cannot keep that promise: a sentence appended anywhere else in
+        the overlay denying the verified state contradicts it while the canonical line
+        still matches. So the whole freshness-claim surface is compared by equality."""
+        for name, path in OVERLAYS.items():
+            with self.subTest(overlay=name):
+                claims = freshness_claims(path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    claims, FRESHNESS_STATEMENTS[name],
+                    f"{name}: the freshness-claim surface changed. Exactly one dated "
+                    "marker may exist per overlay, and no other sentence may assert or "
+                    "deny a verification state.")
+
     def test_exact_canonical_lines(self):
         for name, path in OVERLAYS.items():
             with self.subTest(overlay=name):

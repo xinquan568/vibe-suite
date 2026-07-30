@@ -540,7 +540,12 @@ def registry_terms(path):
     are not synonyms); canonical terms are never flagged.
     """
     source = path.name
-    stream = read_text(path)
+    try:
+        stream = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as err:
+        # Undecodable bytes are a reader-level refusal (YAML raises), never a silent
+        # U+FFFD substitution into an accepted document.
+        raise RegistryError(f"{source}: not valid UTF-8: {err}") from None
     bad = _FORBIDDEN_STREAM.search(stream)
     if bad:
         raise RegistryError(f"{source}: forbidden character U+{ord(bad.group()):04X} "
@@ -638,7 +643,7 @@ def load_config(root, config_arg):
         path = Path(config_arg)
         if not path.is_file():
             return config.resolve_text("---\n---\n", str(root))[0]
-        return config.resolve_text(read_text(path), str(root))[0]
+        return config.resolve_text(path.read_text(encoding="utf-8"), str(root))[0]
     return config.load_with_warnings(str(root))[0]
 
 
@@ -694,6 +699,8 @@ def main(argv=None):
     try:
         resolved_config = load_config(root, args.config)
         deprecated_terms = r51_deprecated_terms(root, resolved_config)
+    except UnicodeDecodeError as err:
+        return fail(f"config: not valid UTF-8: {err}")
     except (config.ConfigSyntaxError, config.ConfigValueError,
             config.ConfigContainmentError) as err:
         return fail(f"config: {err}")

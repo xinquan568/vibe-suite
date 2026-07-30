@@ -452,6 +452,24 @@ class RegistryFailClosed(unittest.TestCase):
             "    description: scope\n", "    description: \xa0scope\n"))
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
 
+    def test_invalid_utf8_registry_refused(self):
+        # Undecodable bytes are a reader-level refusal (YAML raises), never a silent
+        # U+FFFD substitution into an accepted document.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = registry_root(tmp, REGISTRY_OK)
+            reg = Path(root) / "skills" / "vocab" / "registry.yaml"
+            reg.write_bytes(REGISTRY_OK.encode("utf-8").replace(
+                b"description: scope", b"description: sc\xffpe"))
+            proc = run_engine(root)
+        self.assertEqual(proc.returncode, 2)
+
+    def test_invalid_utf8_config_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "variant.md"
+            cfg.write_bytes(b"---\nfocus_instructions: sc\xffpe\n---\n")
+            proc = run_engine(BROKEN, extra=("--config", str(cfg)))
+        self.assertEqual(proc.returncode, 2)
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

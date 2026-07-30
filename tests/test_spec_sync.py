@@ -97,6 +97,13 @@ class Deliverables(unittest.TestCase):
             self.assertIn(tag, body, f"agent must state tag {tag}")
         for reason in ("source-silent", "source-conflict"):
             self.assertIn(reason, body)
+        # D4/D5 evidence rules, each bound: per-row label AND URL; a quoted statement
+        # with its URL for every graded row; deficient evidence routed to UNCLASSIFIED
+        self.assertIn("and the full page URL", flat)
+        self.assertIn("Every graded row (`high` or `medium`) must quote the source "
+                      "statement it relied on together with that URL", flat)
+        self.assertIn("a row without a quotable statement and URL is not graded "
+                      "evidence and belongs in `UNCLASSIFIED`", flat)
 
     def test_no_deprecated_vocabulary(self):
         # R51 is enforced on commands/** and agents/** (E3.7).
@@ -169,6 +176,15 @@ class CommandContract(unittest.TestCase):
         self.assertIn("grade the evidence, never the tag", self.flat)
         self.assertIn("Insufficient evidence is not a grade", self.flat)
 
+    def test_evidence_contract_command_side(self):
+        # the note carries BOTH label and URL, and the freshness line's label-only
+        # convention is stated as a DISTINCTION, not a conflation
+        self.assertIn("`<source label>` is the overlay-style bare domain path and "
+                      "`<URL>` is the full first-party page URL", self.flat)
+        self.assertIn("the note records BOTH", self.flat)
+        self.assertIn("follows the overlays' existing label-only convention", self.flat)
+        self.assertIn("not full URLs", self.flat)
+
     def test_correction_notes(self):
         self.assertIn(
             "<!-- spec-sync <run-date>: <tag> — <source label>, <URL> "
@@ -195,13 +211,31 @@ class CommandContract(unittest.TestCase):
         "PreCompact", "UserPromptSubmit", "gemini-extension",
     ]
 
-    def test_sweep_definition_is_shipped(self):
-        self.assertEqual(len(self.SWEEP_TOKENS), 23)
-        for token in self.SWEEP_TOKENS:
-            self.assertIn(token, self.body, f"sweep token not shipped: {token}")
-        for excluded in ("tests/", "docs/", "`.github/`"):
-            self.assertIn(excluded, self.body, f"exclusion not stated: {excluded}")
-        self.assertIn("git ls-files", self.body)
+    def _token_block(self):
+        """The fenced token block itself — not the whole document, so a token that
+        also appears elsewhere (CLAUDE_PLUGIN_ROOT is in the verify command) cannot
+        satisfy the sweep definition by accident."""
+        m = re.search(r"\*Tokens \((\d+) alternatives[^)]*\):\*\s*\n```\n(.*?)```",
+                      self.body, re.S)
+        self.assertIsNotNone(m, "the sweep's token block is missing")
+        declared = int(m.group(1))
+        tokens = m.group(2).split()
+        return declared, tokens
+
+    def test_sweep_token_block_is_exact(self):
+        declared, tokens = self._token_block()
+        # the declared count, the actual count, and the frozen set must all agree —
+        # a removed token, an added token, or a stale count each fails
+        self.assertEqual(declared, 23, "declared alternative count drifted")
+        self.assertEqual(len(tokens), 23, f"token block holds {len(tokens)} tokens")
+        self.assertEqual(sorted(tokens), sorted(self.SWEEP_TOKENS),
+                         "token block differs from the frozen sweep set")
+
+    def test_sweep_scope_is_exact(self):
+        # the scope sentence, verbatim: EXCLUDING (not INCLUDING) those three trees
+        self.assertIn(
+            "every file in `git ls-files` EXCLUDING the `tests/`, `docs/`, and "
+            "`.github/` trees", self.flat)
 
     def test_propagation_rules(self):
         for kind in ("SOURCE", "DOCUMENTARY", "ENCODED", "OPERATIONAL"):

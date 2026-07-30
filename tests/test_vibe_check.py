@@ -439,6 +439,23 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertIn("manifest-vs-disk: commands/esc.md: escapes the plugin root", out)
         self.assertNotIn("real.md", out)
 
+    def test_symlinked_component_dir_registration_matches(self):
+        # commands -> actual-commands: lexical and physical spellings of the same
+        # registered file must match — no false "unregistered" finding either way.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            (root / ".claude-plugin").mkdir(parents=True)
+            (root / "actual-commands").mkdir()
+            (root / "actual-commands" / "real.md").write_text(
+                "---\ndescription: d.\n---\n# real\n", encoding="utf-8")
+            (root / "commands").symlink_to("actual-commands",
+                                           target_is_directory=True)
+            (root / ".claude-plugin" / "plugin.json").write_text(
+                '{"name": "x", "commands": ["commands/real.md"]}', encoding="utf-8")
+            proc = run_check(str(root))
+        self.assertEqual(proc.returncode, 0,
+                         proc.stdout.decode() + proc.stderr.decode())
+
     def test_symlink_cycle_is_handled_not_crashed(self):
         # A repo-local cycle must degrade to a refusal or finding — never a traceback.
         with tempfile.TemporaryDirectory() as tmp:

@@ -363,6 +363,9 @@ def check_manifest_vs_disk(root, manifest):
     for pattern, key in (("commands/*.md", "commands"), ("agents/*.md", "agents")):
         for path in contained[pattern]:
             rel = path.relative_to(root).as_posix()
+            # the glob rel is lexical; registration spellings are dir-canonical —
+            # compare in ONE space so a symlinked component dir cannot split them
+            rel = _dir_canonical(root, rel) or rel
             if rel not in classes[key]:
                 findings.append(finding("manifest-vs-disk", rel,
                                         "on disk but not registered in plugin.json"))
@@ -378,6 +381,7 @@ def check_unregistered_skills(root, manifest):
     findings = []
     for skill_md in _contained_glob(root, "skills/*/SKILL.md"):
         rel_dir = skill_md.parent.relative_to(root).as_posix()
+        rel_dir = _dir_canonical(root, rel_dir) or rel_dir
         if rel_dir not in registered:
             findings.append(finding("unregistered-skill", rel_dir,
                                     "SKILL.md present but not in plugin.json skills[]"))

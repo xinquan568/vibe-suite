@@ -1,0 +1,637 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: ISC
+"""bin/vibe-check — deterministic CI validator (F4.4, amended by ADR-0001).
+
+Stdlib-only; no Claude Code required. Usage:
+
+    bin/vibe-check [dir] [--json] [--report PATH] [--mirrors]
+
+Modes: with no options, the structural checks run on the working directory; an explicit
+[dir] targets that root. `--report PATH` alone (no dir, no --mirrors) is REPORT-ONLY —
+no structural checks run and no plugin root is required. An explicit dir plus --report
+runs both. `--mirrors` always engages directory mode; before E7.2 ships the mirror hash
+manifest it refuses (exit 2) naming the dependency.
+
+Check classes (root component surfaces only — nested plugin roots are other plugins):
+manifest-vs-disk, unregistered-skill, frontmatter (presence of the block and each
+class's required keys per plugin-discover.md's inventory table), name-dir, hook-case
+(a wrong-case variant of a known event, per conventions-claude §6; unknown exact names
+are NOT findings — §6's open-world policy), monorepo (the root is not a plugin but
+sub-plugin roots exist below), version (manifests that declare a version for the same
+plugin must agree), mirrors (deferred; refusal pre-E7.2), report (fail-closed subset
+validation against the CANONICAL schema — ADR-0001; the subset lives in
+scripts/validate_audit_output.py and is stated only there).
+
+Exit codes: 0 = every requested check ran, zero findings. 1 = findings (including a
+parsed report the canonical schema rejects). 2 = a requested check could not run: bad
+dir; root neither plugin nor monorepo; unparsable or structurally unusable plugin.json;
+unparsable configured hooks file or marketplace.json; unreadable or non-JSON report;
+UnsupportedSchemaError (the schema outran the checker — ADR-0001's loud halt);
+--mirrors without its manifest; usage errors.
+"""
+
+import argparse
+import json
+import os
+import posixpath
+import re
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent / "scripts"))
+
+import validate_audit_output as _vao   # noqa: E402  (the one statement of the subset)
+
+CANONICAL_SCHEMA = _HERE.parent / "schemas" / "audit-output.schema.json"
+
+CLASS_ORDER = ["manifest-vs-disk", "unregistered-skill", "frontmatter", "name-dir",
+               "hook-case", "monorepo", "version", "mirrors", "report"]
+
+#: conventions-claude SKILL §6's event tables (core + additional documented). The check
+#: is a CASING check against these; §6's open-world policy means an exact name absent
+#: from this list is never a finding. This list follows §6 by hand — see that skill.
+KNOWN_EVENTS = [
+    "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest",
+    "UserPromptSubmit", "Stop", "SubagentStop", "SessionStart", "SessionEnd",
+    "PreCompact", "Notification", "InstructionsLoaded",
+    "StopFailure", "FileChanged", "TaskCompleted", "Setup", "SubagentStart",
+    "UserPromptExpansion", "PermissionDenied", "PostToolBatch", "MessageDisplay",
+    "TaskCreated", "TeammateIdle", "ConfigChange", "CwdChanged", "WorktreeCreate",
+    "WorktreeRemove", "PostCompact", "Elicitation", "ElicitationResult",
+]
+_KNOWN_BY_LOWER = {event.lower(): event for event in KNOWN_EVENTS}
+
+_FM_KEY = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
+
+
+class CheckError(Exception):
+    """A requested check could not run — the exit-2 class."""
+
+
+def finding(check, path, detail):
+    return {"check": check, "path": path, "detail": detail}
+
+
+def _read_json(path, what):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as err:
+        raise CheckError(f"cannot read {what} {path}: {err.strerror}") from None
+    except UnicodeDecodeError as err:
+        raise CheckError(f"{what} {path} is not valid UTF-8: {err}") from None
+    try:
+        return json.loads(text)
+    except ValueError as err:
+        raise CheckError(f"unparsable {what} {path}: {err}") from None
+
+
+def _norm(entry):
+    """One spelling per target: posix-normalize the entry (./ prefixes, trailing
+    slashes, internal // and /./ segments), so every registration spelling of one
+    artifact yields ONE canonical relative path on every surface — registration sets,
+    containment, escape findings, and dedupe alike. POSIX lets normpath keep exactly two
+    leading slashes; //x and /x are one artifact here, so leading slashes collapse."""
+    rel = posixpath.normpath(entry)
+    if rel.startswith("//"):
+        rel = "/" + rel.lstrip("/")
+    return rel
+
+
+def _contained(root, entry):
+    """The normalized, root-contained relative path for a manifest entry, or None when
+    the entry ESCAPES the plugin root (symlinks resolved) — an escaping entry is a
+    finding and its target is never read or registered. An absolute entry that RESOLVES
+    inside the root does not escape: it is converted to its root-relative canonical
+    form, so every spelling of one in-root artifact shares one path."""
+    rel = _canonical_rel(root, entry)
+    if Path(rel).is_absolute():
+        try:
+            return Path(rel).resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return None
+    resolved = _safe_resolve(root / rel)
+    if resolved is None:
+        return None
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return None
+    canonical = _dir_canonical(root, rel)
+    return canonical if canonical is not None else rel
+
+
+def _canonical_rel(root, entry):
+    """The best canonical spelling of an entry. Absolute entries may spell the root
+    through ANY directory-symlink alias (/var vs /private/var, either orientation):
+    the SHORTEST path prefix whose realpath lands under the resolved root is the
+    spelling boundary, and the remainder is taken LEXICALLY from there — the entry's
+    own trailing symlinks are never traversed, so every spelling of one artifact
+    yields one finding path across both emit sites. Entries genuinely outside the
+    root keep their normalized absolute spelling."""
+    rel = _norm(entry)
+    path = Path(rel)
+    if not path.is_absolute():
+        return rel
+    root_real = root.resolve()
+    seen = set()
+    while str(path) not in seen:   # finite real entries; a revisit is a cycle
+        seen.add(str(path))
+        parts = path.parts
+        # boundary search over PROPER prefixes (never realpathing the final
+        # component, whose own escape must stay unresolved); the full path joins
+        # the walk only when it is not itself a symlink
+        limit = len(parts) + (0 if path.is_symlink() else 1)
+        for cut in range(1, limit):
+            try:
+                base = Path(os.path.realpath(Path(*parts[:cut]))).relative_to(root_real)
+            except ValueError:
+                continue
+            return posixpath.normpath("/".join([base.as_posix(), *parts[cut:]]))
+        if not path.is_symlink():
+            break
+        target = Path(os.readlink(path))
+        if not target.is_absolute():
+            target = path.parent / target
+        path = Path(posixpath.normpath(str(target)))
+    return rel
+
+
+def _safe_resolve(path):
+    """Path.resolve that treats symlink cycles and OS errors as unresolvable (None) —
+    a cycle can never validate as contained, and must never crash the tool."""
+    try:
+        return path.resolve()
+    except (RuntimeError, OSError):
+        return None
+
+
+def _disk_contained(root, path):
+    """True when a globbed disk artifact RESOLVES inside the root — a symlink whose
+    target escapes (or cannot resolve at all) is excluded from every check surface and
+    never opened."""
+    resolved = _safe_resolve(path)
+    if resolved is None:
+        return False
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _contained_glob(root, pattern, escapes=None):
+    """Globbed paths that resolve inside the root; escapers optionally collected."""
+    kept = []
+    for path in sorted(root.glob(pattern)):
+        if _disk_contained(root, path):
+            kept.append(path)
+        elif escapes is not None:
+            escapes.append(path.relative_to(root).as_posix())
+    return kept
+
+
+def _read_grammar(root, path, what):
+    """A grammar input (manifest, hooks config, marketplace) must RESOLVE inside the
+    root — a symlink escaping it cannot be parsed safely (could-not-run, exit 2)."""
+    if not _disk_contained(root, path):
+        rel = path.relative_to(root).as_posix()
+        raise CheckError(f"{what} {rel} escapes the plugin root")
+    return _read_json(path, what)
+
+
+def load_manifest(root):
+    """The parsed, structurally USABLE plugin.json, or None when absent."""
+    path = root / ".claude-plugin" / "plugin.json"
+    if not path.is_file():
+        return None
+    data = _read_grammar(root, path, "plugin.json")
+    if not isinstance(data, dict):
+        raise CheckError("plugin.json is not a JSON object")
+    for key in ("commands", "agents", "skills"):
+        value = data.get(key)
+        if value is not None and (not isinstance(value, list)
+                                  or any(not isinstance(item, str) for item in value)):
+            raise CheckError(f"plugin.json {key!r} must be a list of strings")
+    hooks = data.get("hooks")
+    if hooks is not None and not isinstance(hooks, (str, dict)):
+        raise CheckError("plugin.json 'hooks' must be a path string or an inline object")
+    return data
+
+
+def frontmatter_keys(text):
+    """{key: value} of a leading frontmatter block, or None when there is no block."""
+    lines = text.split("\n")
+    if not lines or lines[0] != "---":
+        return None
+    keys = {}
+    for line in lines[1:]:
+        if line == "---":
+            return keys
+        match = _FM_KEY.match(line)
+        if match:
+            keys[match.group(1)] = match.group(2).strip()
+    return None
+
+
+def _dir_canonical(root, rel):
+    """`rel` with its DIRNAME canonicalized physically (realpath of the parent — the
+    final component is never resolved), or None when the parent chain leaves the root.
+    This collapses middle-segment directory aliases (d→. spellings) and bounds the
+    walk's candidate space by real directories."""
+    parent = posixpath.dirname(rel)
+    try:
+        parent_real = Path(os.path.realpath(root / parent)) if parent else root.resolve()
+    except OSError:
+        return None
+    try:
+        base = parent_real.relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
+    name = posixpath.basename(rel)
+    return name if base == "." else posixpath.normpath(posixpath.join(base, name))
+
+
+def _chain_canonical(root, rel):
+    """The LAST in-root spelling on a repo-local symlink chain before it leaves the
+    root (or `rel` itself for non-symlinks/cycles). One escaping target reached through
+    author-controlled in-root aliases gets ONE canonical escape name — the link that
+    actually crosses the boundary."""
+    current = _dir_canonical(root, rel)
+    if current is None:
+        return rel
+    trail = [current]
+    while True:   # dir-canonical spellings are backed by real directories: finite
+        link = root / current
+        try:
+            if not link.is_symlink():
+                return current
+            target = Path(os.readlink(link))
+        except OSError:
+            return current
+        if target.is_absolute():
+            candidate = _canonical_rel(root, str(target))
+            if Path(candidate).is_absolute():
+                return current          # next hop leaves the root
+        else:
+            candidate = posixpath.normpath(
+                posixpath.join(posixpath.dirname(current), str(target)))
+            if candidate.startswith(".."):
+                return current          # next hop leaves the root
+        candidate = _dir_canonical(root, candidate)
+        if candidate is None:
+            return current              # next hop's parent chain leaves the root
+        if candidate in trail:
+            # a cycle: return its lexicographically smallest member, identical for
+            # every entry point into the same cycle
+            return min(trail[trail.index(candidate):])
+        trail.append(candidate)
+        current = candidate
+
+
+def _skill_escape_base(rel):
+    """The ONE canonical escape path for a skill suffix-tower family: /SKILL.md
+    suffixes strip to a fixed point (floored at "/"), so directory and file spellings
+    of every tower level — from BOTH escape sites — share one name."""
+    while rel.endswith("/SKILL.md"):
+        rel = rel[:-len("/SKILL.md")] or "/"
+    return rel
+
+
+def registered_by_class(root, manifest, findings=None):
+    """{class: set of contained, normalized entries}; escaping entries become findings
+    (when a findings list is given) and are never registered."""
+    classes = {}
+    for key in ("commands", "agents", "skills"):
+        contained = set()
+        for entry in manifest.get(key) or []:
+            rel = _contained(root, entry)
+            if rel is None:
+                if findings is not None:
+                    escape_rel = _canonical_rel(root, entry)
+                    if not Path(escape_rel).is_absolute():
+                        escape_rel = _chain_canonical(root, escape_rel)
+                    if key == "skills":
+                        escape_rel = _skill_escape_base(escape_rel)
+                    findings.append(finding("manifest-vs-disk", escape_rel,
+                                            "escapes the plugin root"))
+                continue
+            contained.add(rel)
+        classes[key] = contained
+    return classes
+
+
+def check_manifest_vs_disk(root, manifest):
+    findings = []
+    if "name" not in manifest:
+        findings.append(finding("manifest-vs-disk", ".claude-plugin/plugin.json",
+                                "missing required 'name'"))
+    classes = registered_by_class(root, manifest, findings)
+    for key, contained in classes.items():
+        for rel in sorted(contained):
+            if not (root / rel).exists():
+                findings.append(finding("manifest-vs-disk", rel,
+                                        "registered in plugin.json but absent on disk"))
+    hooks = manifest.get("hooks")
+    if isinstance(hooks, str):
+        hooks_rel = _contained(root, hooks)
+        if hooks_rel is None:
+            hooks_escape = _canonical_rel(root, hooks)
+            if not Path(hooks_escape).is_absolute():
+                hooks_escape = _chain_canonical(root, hooks_escape)
+            findings.append(finding("manifest-vs-disk", hooks_escape,
+                                    "escapes the plugin root"))
+        elif not (root / hooks_rel).is_file():
+            findings.append(finding("manifest-vs-disk", hooks_rel,
+                                    "registered in plugin.json but absent on disk"))
+    # disk-side containment sweep: symlinked components resolving outside the root
+    # are one finding each and are excluded from every check surface
+    contained = {}
+    for pattern in ("commands/*.md", "commands/shared/*.md", "agents/*.md",
+                    "skills/*/SKILL.md"):
+        escapes = []
+        contained[pattern] = _contained_glob(root, pattern, escapes)
+        for rel in escapes:
+            rel = _chain_canonical(root, rel)
+            if pattern == "skills/*/SKILL.md":
+                # same canonical family name as the registration escape site
+                rel = _skill_escape_base(rel)
+            findings.append(finding("manifest-vs-disk", rel,
+                                    "escapes the plugin root"))
+    # registration is PER COMPONENT CLASS: a commands file listed under agents[] is
+    # not a registered command
+    for pattern, key in (("commands/*.md", "commands"), ("agents/*.md", "agents")):
+        for path in contained[pattern]:
+            rel = path.relative_to(root).as_posix()
+            # the glob rel is lexical; registration spellings are dir-canonical —
+            # compare in ONE space so a symlinked component dir cannot split them
+            rel = _dir_canonical(root, rel) or rel
+            if rel not in classes[key]:
+                findings.append(finding("manifest-vs-disk", rel,
+                                        "on disk but not registered in plugin.json"))
+    return findings
+
+
+def check_unregistered_skills(root, manifest):
+    registered = set()
+    for entry in registered_by_class(root, manifest)["skills"]:
+        # a skills[] entry may name the directory or its SKILL.md file
+        registered.add(entry[:-len("/SKILL.md")] if entry.endswith("/SKILL.md")
+                       else entry)
+    findings = []
+    for skill_md in _contained_glob(root, "skills/*/SKILL.md"):
+        rel_dir = skill_md.parent.relative_to(root).as_posix()
+        rel_dir = _dir_canonical(root, rel_dir) or rel_dir
+        if rel_dir not in registered:
+            findings.append(finding("unregistered-skill", rel_dir,
+                                    "SKILL.md present but not in plugin.json skills[]"))
+    return findings
+
+
+def _require_keys(rel, keys, required, findings):
+    if keys is None:
+        findings.append(finding("frontmatter", rel, "missing frontmatter block"))
+        return
+    for key in required:
+        if key not in keys:
+            findings.append(finding("frontmatter", rel,
+                                    f"missing required key '{key}'"))
+        elif key == "user-invocable" and keys[key] != "false":
+            findings.append(finding("frontmatter", rel,
+                                    "key 'user-invocable' must be false"))
+
+
+def check_frontmatter(root, _manifest):
+    findings = []
+    surfaces = (
+        ("commands/*.md", ("description",)),
+        ("commands/shared/*.md", ("description", "user-invocable")),
+        ("agents/*.md", ("description",)),
+        ("skills/*/SKILL.md", ("name", "description")),
+    )
+    for pattern, required in surfaces:
+        for path in _contained_glob(root, pattern):
+            rel = path.relative_to(root).as_posix()
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as err:
+                # e.g. a symlink cycle: containment passes (non-strict resolve stops
+                # at the loop) but the artifact cannot be read — a finding, not a crash
+                findings.append(finding("frontmatter", rel,
+                                        f"unreadable: {err.strerror}"))
+                continue
+            keys = frontmatter_keys(content)
+            _require_keys(rel, keys, required, findings)
+    return findings
+
+
+def check_name_dir(root, _manifest):
+    findings = []
+    for skill_md in _contained_glob(root, "skills/*/SKILL.md"):
+        try:
+            content = skill_md.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue   # the frontmatter class reports unreadable artifacts
+        keys = frontmatter_keys(content)
+        declared = (keys or {}).get("name")
+        directory = skill_md.parent.name
+        if declared is not None and declared != directory:
+            rel = skill_md.relative_to(root).as_posix()
+            findings.append(finding("name-dir", rel,
+                                    f"name '{declared}' does not match directory "
+                                    f"'{directory}'"))
+    return findings
+
+
+def check_hook_case(root, manifest):
+    hooks_value = manifest.get("hooks")
+    if isinstance(hooks_value, str):
+        rel = _contained(root, hooks_value)
+        if rel is None:
+            return []   # the escaping registration is manifest-vs-disk's finding
+        path = root / rel
+        if not path.is_file():
+            return []   # the dangling registration is manifest-vs-disk's finding
+        config = _read_grammar(root, path, "hooks config")
+    elif isinstance(hooks_value, dict):
+        rel = ".claude-plugin/plugin.json"
+        config = hooks_value
+    else:
+        path = root / "hooks" / "hooks.json"
+        if not path.is_file():
+            return []
+        rel = "hooks/hooks.json"
+        config = _read_grammar(root, path, "hooks config")
+    events = config.get("hooks") if isinstance(config, dict) else None
+    if not isinstance(events, dict):
+        return []
+    findings = []
+    for event in sorted(events):
+        canonical = _KNOWN_BY_LOWER.get(event.lower())
+        if canonical is not None and event != canonical:
+            findings.append(finding("hook-case", rel,
+                                    f"event '{event}' should be '{canonical}'"))
+    return findings
+
+
+def check_monorepo(root):
+    findings = []
+    for marker in sorted(root.rglob(".claude-plugin")):
+        if not _disk_contained(root, marker):
+            continue   # a symlinked marker resolving outside is not a sub-plugin here
+        if marker.is_dir() and (marker / "plugin.json").is_file():
+            sub = marker.parent
+            if sub != root:
+                rel = sub.relative_to(root).as_posix()
+                findings.append(finding("monorepo", rel,
+                                        "sub-plugin root (run vibe-check per sub-plugin)"))
+    return findings
+
+
+def check_version(root, manifest):
+    marketplace = root / ".claude-plugin" / "marketplace.json"
+    if not marketplace.is_file():
+        return []
+    data = _read_grammar(root, marketplace, "marketplace.json")
+    if not isinstance(data, dict):
+        raise CheckError("marketplace.json is not a JSON object")
+    own_name = manifest.get("name")
+    own_version = manifest.get("version")
+    findings = []
+    for entry in data.get("plugins") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("name") == own_name and own_version is not None:
+            declared = entry.get("version")
+            if declared is not None and declared != own_version:
+                findings.append(finding(
+                    "version", ".claude-plugin/marketplace.json",
+                    f"plugin '{own_name}' version '{declared}' != plugin.json "
+                    f"version '{own_version}'"))
+    return findings
+
+
+STRUCTURAL_CHECKS = [
+    ("manifest-vs-disk", check_manifest_vs_disk),
+    ("unregistered-skill", check_unregistered_skills),
+    ("frontmatter", check_frontmatter),
+    ("name-dir", check_name_dir),
+    ("hook-case", check_hook_case),
+    ("version", check_version),
+]
+
+
+def validate_report(report_path, schema_path=None):
+    """(exit_class, findings) for --report. 0 = conforms; 1 = a PARSED document the
+    schema rejects (findings carry the validator's message); 2 = the check could not run
+    (unreadable, non-JSON, or the schema outran the checker). Production always uses the
+    canonical installation schema; `schema_path` exists for the test seam only and is
+    not reachable from the CLI (ADR-0001 binds --report to the canonical schema)."""
+    report_path = Path(report_path)
+    try:
+        text = report_path.read_text(encoding="utf-8")
+    except OSError as err:
+        print(f"vibe-check: cannot read report {report_path}: {err.strerror}",
+              file=sys.stderr)
+        return 2, []
+    except UnicodeDecodeError as err:
+        print(f"vibe-check: report {report_path} is not valid UTF-8: {err}",
+              file=sys.stderr)
+        return 2, []
+    try:
+        report = json.loads(text)
+    except ValueError as err:
+        print(f"vibe-check: report {report_path} is not JSON: {err}", file=sys.stderr)
+        return 2, []
+    schema_file = Path(schema_path) if schema_path else CANONICAL_SCHEMA
+    try:
+        schema = json.loads(schema_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        print(f"vibe-check: cannot load schema {schema_file}: {err}", file=sys.stderr)
+        return 2, []
+    try:
+        _vao.validate(report, schema)
+    except _vao.ValidationError as err:
+        return 1, [finding("report", str(report_path), str(err))]
+    except _vao.UnsupportedSchemaError as err:
+        print(f"vibe-check: UnsupportedSchemaError: {err}", file=sys.stderr)
+        return 2, []
+    return 0, []
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="vibe-check",
+                                     description=__doc__.splitlines()[2])
+    parser.add_argument("dir", nargs="?", default=None)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--report")
+    parser.add_argument("--mirrors", action="store_true")
+    args = parser.parse_args(argv)
+
+    report_only = args.report is not None and args.dir is None and not args.mirrors
+    findings = []
+    checked = {name: False for name in CLASS_ORDER}
+    root_display = None
+
+    if not report_only:
+        if args.mirrors:
+            # the deferred class refuses before anything else pre-E7.2 — its refusal
+            # governs every composition that engages directory mode
+            print("vibe-check: mirror hash manifest not found; ships with E7.2/F9.6",
+                  file=sys.stderr)
+            return 2
+        root_display = args.dir if args.dir is not None else "."
+        root = Path(root_display)
+        if not root.is_dir():
+            print(f"vibe-check: {root_display!r} is not a directory", file=sys.stderr)
+            return 2
+        try:
+            manifest = load_manifest(root)
+            if manifest is None:
+                sub_findings = check_monorepo(root)
+                if not sub_findings:
+                    print(f"vibe-check: {root_display!r} is not a Claude Code plugin "
+                          "directory (and holds no sub-plugins)", file=sys.stderr)
+                    return 2
+                checked["monorepo"] = True
+                findings.extend(sub_findings)
+            else:
+                for name, check in STRUCTURAL_CHECKS:
+                    findings.extend(check(root, manifest))
+                    checked[name] = True
+                checked["monorepo"] = True   # ran vacuously: the root IS the plugin
+        except CheckError as err:
+            print(f"vibe-check: {err}", file=sys.stderr)
+            return 2
+    if args.report is not None:
+        checked["report"] = True
+        report_rc, report_findings = validate_report(args.report)
+        if report_rc == 2:
+            return 2
+        findings.extend(report_findings)
+
+    unique, seen = [], set()
+    for entry in findings:
+        key = (entry["check"], entry["path"], entry["detail"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(entry)
+    findings = unique
+    findings.sort(key=lambda f: (CLASS_ORDER.index(f["check"]), f["path"], f["detail"]))
+    verdict = "clean" if not findings else \
+        f"{len(findings)} finding" + ("s" if len(findings) != 1 else "")
+
+    if args.json:
+        json.dump({"root": root_display, "verdict": verdict, "findings": findings,
+                   "checked": {name: checked[name] for name in sorted(checked)}},
+                  sys.stdout, indent=2)
+        print()
+    else:
+        for entry in findings:
+            print(f"{entry['check']}: {entry['path']}: {entry['detail']}")
+        print(f"vibe-check: {verdict}")
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

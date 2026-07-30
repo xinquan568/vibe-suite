@@ -1,0 +1,7 @@
+{
+  "name": "fixture-mirrors",
+  "version": "0.0.1",
+  "commands": ["./commands/hello.md"],
+  "agents": [],
+  "skills": []
+}

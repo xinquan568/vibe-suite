@@ -1,0 +1,7 @@
+{
+  "name": "fixture-frontmatter",
+  "version": "0.0.1",
+  "commands": ["./commands/noblock.md"],
+  "agents": ["./agents/nodesc.md"],
+  "skills": []
+}

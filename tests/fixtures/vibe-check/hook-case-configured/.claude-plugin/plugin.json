@@ -1,0 +1,8 @@
+{
+  "name": "fixture-hook-configured",
+  "version": "0.0.1",
+  "commands": [],
+  "agents": [],
+  "skills": [],
+  "hooks": "./config/custom-hooks.json"
+}

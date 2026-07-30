@@ -1,0 +1,27 @@
+{
+  "root": "tests/fixtures/vibe-check/manifest-vs-disk",
+  "verdict": "2 findings",
+  "findings": [
+    {
+      "check": "manifest-vs-disk",
+      "path": "agents/stray.md",
+      "detail": "on disk but not registered in plugin.json"
+    },
+    {
+      "check": "manifest-vs-disk",
+      "path": "commands/ghost.md",
+      "detail": "registered in plugin.json but absent on disk"
+    }
+  ],
+  "checked": {
+    "frontmatter": true,
+    "hook-case": true,
+    "manifest-vs-disk": true,
+    "mirrors": false,
+    "monorepo": true,
+    "name-dir": true,
+    "report": false,
+    "unregistered-skill": true,
+    "version": true
+  }
+}

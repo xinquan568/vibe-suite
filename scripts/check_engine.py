@@ -357,6 +357,23 @@ def _reg_strip_comment(line):
     return line
 
 
+def _reg_key(key, line_no, source):
+    """A mapping key under the same discipline as values: a quoted key decodes to an
+    explicit string key; an unquoted key must be an identifier that is not a YAML keyword
+    spelling — the key surface must not accept what the value surface refuses."""
+    if key[:1] in ("\"", "'"):
+        decoded = _reg_quoted(key, line_no, source)
+        if not decoded:
+            raise RegistryError(f"{source}:{line_no}: empty mapping key")
+        return decoded
+    if not _REG_KEY.match(key):
+        raise RegistryError(f"{source}:{line_no}: expected 'key:' or 'key: value'")
+    if _KEYWORD_LOOKALIKE.fullmatch(key):
+        raise RegistryError(f"{source}:{line_no}: ambiguous mapping key {key!r}; "
+                            "quote it if a string key is meant")
+    return key
+
+
 def _reg_block(lines, index, indent, source):
     """Parse a mapping or list block whose entries sit at exactly `indent` spaces."""
     entries_list, entries_map = None, None
@@ -379,7 +396,8 @@ def _reg_block(lines, index, indent, source):
             key, sep, value = rest.partition(":")
             if sep and _REG_KEY.match(key.strip()) and (not value or value[0] == " "):
                 head = value.strip()
-                item = {key.strip():
+                head_key = _reg_key(key.strip(), index + 1, source)
+                item = {head_key:
                         _reg_scalar(head, index + 1, source) if head else None}
                 sub, index = _reg_block(lines, index + 1, indent + 2, source)
                 if isinstance(sub, dict):
@@ -399,8 +417,9 @@ def _reg_block(lines, index, indent, source):
             raise RegistryError(f"{source}:{index + 1}: mapping key inside a list")
         key, sep, value = content.partition(":")
         key, value = key.strip(), value.strip()
-        if not sep or not _REG_KEY.match(key):
+        if not sep:
             raise RegistryError(f"{source}:{index + 1}: expected 'key:' or 'key: value'")
+        key = _reg_key(key, index + 1, source)
         entries_map = {} if entries_map is None else entries_map
         if key in entries_map:
             raise RegistryError(f"{source}:{index + 1}: duplicate key {key!r}")

@@ -335,6 +335,21 @@ class RegistryFailClosed(unittest.TestCase):
             proc = self._description(value)
             self.assertEqual(proc.returncode, 0, f"{value}: {proc.stderr.decode()}")
 
+    def test_ambiguous_mapping_keys_refused(self):
+        # Keys get the same discipline as values: even with the scope id declared (as a
+        # quoted string), an UNQUOTED YAML keyword spelling is ambiguous as a dynamic
+        # verbs key; quoting is the explicit string-key spelling.
+        for key in ("y", "NULL", "on"):
+            registry = REGISTRY_OK.replace("  - id: s\n", f'  - id: "{key}"\n').replace(
+                "verbs:\n  s: []\n", f"verbs:\n  {key}: []\n")
+            self.assertEqual(self._run(registry).returncode, 2, key)
+
+    def test_quoted_mapping_key_accepted(self):
+        registry = REGISTRY_OK.replace("  - id: s\n", '  - id: "y"\n').replace(
+            "verbs:\n  s: []\n", 'verbs:\n  "y": []\n')
+        proc = self._run(registry)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

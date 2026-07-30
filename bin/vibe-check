@@ -176,6 +176,15 @@ def frontmatter_keys(text):
     return None
 
 
+def _skill_escape_base(rel):
+    """The ONE canonical escape path for a skill suffix-tower family: /SKILL.md
+    suffixes strip to a fixed point (floored at "/"), so directory and file spellings
+    of every tower level — from BOTH escape sites — share one name."""
+    while rel.endswith("/SKILL.md"):
+        rel = rel[:-len("/SKILL.md")] or "/"
+    return rel
+
+
 def registered_by_class(root, manifest, findings=None):
     """{class: set of contained, normalized entries}; escaping entries become findings
     (when a findings list is given) and are never registered."""
@@ -188,13 +197,7 @@ def registered_by_class(root, manifest, findings=None):
                 if findings is not None:
                     escape_rel = _norm(entry)
                     if key == "skills":
-                        # canonical escape path: collapse the WHOLE /SKILL.md suffix
-                        # tower to its base (an escaping entry's structure is
-                        # unknowable, so directory-vs-file spellings of any level all
-                        # reduce to one fixed point); floor at "/" — the result never
-                        # ends in /SKILL.md, so the map is idempotent
-                        while escape_rel.endswith("/SKILL.md"):
-                            escape_rel = escape_rel[:-len("/SKILL.md")] or "/"
+                        escape_rel = _skill_escape_base(escape_rel)
                     findings.append(finding("manifest-vs-disk", escape_rel,
                                             "escapes the plugin root"))
                 continue
@@ -232,9 +235,8 @@ def check_manifest_vs_disk(root, manifest):
         contained[pattern] = _contained_glob(root, pattern, escapes)
         for rel in escapes:
             if pattern == "skills/*/SKILL.md":
-                # canonical escape path is the skill DIRECTORY — the same form the
-                # registration side reports, so the two collapse in dedupe
-                rel = rel[:-len("/SKILL.md")]
+                # same canonical family name as the registration escape site
+                rel = _skill_escape_base(rel)
             findings.append(finding("manifest-vs-disk", rel,
                                     "escapes the plugin root"))
     # registration is PER COMPONENT CLASS: a commands file listed under agents[] is

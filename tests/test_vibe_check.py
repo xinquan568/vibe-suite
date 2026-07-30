@@ -280,6 +280,30 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertEqual(out.count("escapes the plugin root"), 1, out)
         self.assertIn("manifest-vs-disk: /skills/x: escapes the plugin root", out)
 
+    def test_cross_site_tower_escape_is_one_finding(self):
+        # An IN-ROOT skill dir named SKILL.md, symlinked outside, registered in both
+        # spellings: the registration escape site and the disk sweep must agree on the
+        # family's ONE canonical path.
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (outside / "SKILL.md").write_text("---\nname: outside\n---\n# o\n",
+                                              encoding="utf-8")
+            root = Path(tmp) / "plugin"
+            (root / ".claude-plugin").mkdir(parents=True)
+            (root / ".claude-plugin" / "plugin.json").write_text(
+                '{"name": "x", "skills": ["skills/SKILL.md",'
+                ' "skills/SKILL.md/SKILL.md"]}', encoding="utf-8")
+            (root / "skills").mkdir()
+            (root / "skills" / "SKILL.md").symlink_to(outside,
+                                                      target_is_directory=True)
+            proc = run_check(str(root))
+        out = proc.stdout.decode()
+        self.assertEqual(proc.returncode, 1, out + proc.stderr.decode())
+        self.assertEqual(out.count("escapes the plugin root"), 1, out)
+        self.assertNotIn("frontmatter", out)
+        self.assertNotIn("name-dir", out)
+
     def test_manifest_paths_are_contained(self):
         # Absolute and traversal entries are findings and are never read/registered.
         for entry_json in ('{"name": "x", "commands": ["../outside.md"]}',

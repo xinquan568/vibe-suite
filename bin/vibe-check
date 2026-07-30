@@ -32,6 +32,7 @@ UnsupportedSchemaError (the schema outran the checker — ADR-0001's loud halt);
 
 import argparse
 import json
+import posixpath
 import re
 import sys
 from pathlib import Path
@@ -85,10 +86,11 @@ def _read_json(path, what):
 
 
 def _norm(entry):
-    """One spelling per target: strip the ./ prefix and any trailing slashes, so every
-    registration form of one artifact yields one canonical relative path."""
-    rel = entry[2:] if entry.startswith("./") else entry
-    return rel.rstrip("/") or rel
+    """One spelling per target: posix-normalize the entry (./ prefixes, trailing
+    slashes, internal // and /./ segments), so every registration spelling of one
+    artifact yields ONE canonical relative path on every surface — registration sets,
+    containment, escape findings, and dedupe alike."""
+    return posixpath.normpath(entry)
 
 
 def _contained(root, entry):

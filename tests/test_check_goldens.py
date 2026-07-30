@@ -480,6 +480,25 @@ class RegistryFailClosed(unittest.TestCase):
             "    description: scope\n", '    description: "a\tb"\n'))
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
 
+    def test_whitespace_only_lines_with_tabs_refused(self):
+        # A TAB on a whitespace-only line (bare, or left behind by comment stripping)
+        # is still a tab in block structure — PyYAML raises ScannerError; the blank-line
+        # skip must not bypass the tab guard.
+        proc = self._run(REGISTRY_OK.replace("verbs:\n", "verbs:\n\t\n", 1))
+        self.assertEqual(proc.returncode, 2, "TAB-only line")
+        proc = self._run(REGISTRY_OK.replace("verbs:\n", "verbs:\n  \t# note\n", 1))
+        self.assertEqual(proc.returncode, 2, "spaces+TAB before a comment")
+
+    def test_crlf_registry_accepted(self):
+        # CRLF line endings are translated by universal-newline decoding before any
+        # guard runs — a CRLF registry is the same document.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = registry_root(tmp, REGISTRY_OK)
+            reg = Path(root) / "skills" / "vocab" / "registry.yaml"
+            reg.write_bytes(REGISTRY_OK.replace("\n", "\r\n").encode("utf-8"))
+            proc = run_engine(root)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

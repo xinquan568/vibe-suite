@@ -467,10 +467,10 @@ def _reg_block(lines, index, indent, source):
     entries_list, entries_map = None, None
     while index < len(lines):
         raw = _reg_strip_comment(lines[index])
-        if not raw.strip(" \t"):
+        _reg_tab_guard(raw, index + 1, source)
+        if not raw.strip(" "):
             index += 1
             continue
-        _reg_tab_guard(raw, index + 1, source)
         current = len(raw) - len(raw.lstrip(" "))
         if raw[current:current + 1] == "\t":
             raise RegistryError(f"{source}:{index + 1}: tab in indentation — spaces only")

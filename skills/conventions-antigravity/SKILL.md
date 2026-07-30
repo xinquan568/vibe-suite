@@ -1,9 +1,11 @@
 ---
 name: conventions-antigravity
-description: Overlay of Antigravity (plus legacy Gemini CLI) conventions — workspace skills under .agent/, the .gemini/ paths, gemini-extension.json, GEMINI.md imports, slash commands in TOML, and the Gemini-lineage hook events; the spec has not settled since Antigravity 2.0 (2026-05-19), so most tool-specific checks stay advisory.
+description: Overlay of Antigravity (plus legacy Gemini CLI) conventions — workspace skills under .agent/, the .gemini/ paths, gemini-extension.json, GEMINI.md imports, slash commands in TOML, and the Gemini-lineage hook events; the spec has not settled since Antigravity 2.0, so most tool-specific checks stay advisory.
 ---
 
 # Antigravity conventions overlay
+
+**Spec freshness:** UNVERIFIED — research written 2026-05-25, six days after the Antigravity 2.0 announcement of 2026-05-19; the verification pass described in §10 has not landed (developers.googleblog.com)
 
 This skill is the Tier 2-Antigravity overlay in the vibe-suite knowledge
 library. The universal [conventions](../conventions/SKILL.md) floor covers

@@ -1,6 +1,6 @@
 ---
 name: conventions-codex
-description: Overlay of Codex CLI conventions — the config.toml grammar, the .codex-plugin/plugin.json manifest, the .agents/skills/ layout, the agents/openai.yaml sidecar, hook events, the AGENTS.md hierarchy, and marketplace.json; facts checked 2026-06-07 versus Codex 0.137.0 (a 2026-06-04 release).
+description: Overlay of Codex CLI conventions — the config.toml grammar, the .codex-plugin/plugin.json manifest, the .agents/skills/ layout, the agents/openai.yaml sidecar, hook events, the AGENTS.md hierarchy, and marketplace.json.
 ---
 
 # Codex CLI conventions overlay
@@ -15,8 +15,9 @@ its classification step (step 3) labels an artifact Tier 2-Codex, and the suite
 checker loads it for cross-component validation. Penalty weights are not
 defined here — they live with the suite scoring rules; this file records facts.
 
-Refresh state: verified 2026-06-07 against Codex CLI 0.137.0 (released
-2026-06-04; pre-releases existed up to 0.138.0-alpha.6 at refresh time).
+**Spec freshness:** verified 2026-06-07 against Codex CLI 0.137.0, released 2026-06-04 (developers.openai.com/codex)
+
+Pre-releases existed up to 0.138.0-alpha.6 at refresh time.
 
 Authoritative sources (7):
 

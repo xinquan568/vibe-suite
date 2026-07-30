@@ -220,8 +220,9 @@ class CommandContract(unittest.TestCase):
             (REPO_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         self.assertIn("./commands/vocab.md", manifest["commands"])
         self.assertIn("./agents/vocab-drift-scanner.md", manifest["agents"])
-        self.assertEqual(len(manifest["commands"]), 17)
-        self.assertEqual(len(manifest["agents"]), 6)
+        # at least the E3.7 state; later items add more (membership above pins ours)
+        self.assertGreaterEqual(len(manifest["commands"]), 17)
+        self.assertGreaterEqual(len(manifest["agents"]), 6)
 
 
 class AgentVsSpec(unittest.TestCase):

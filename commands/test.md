@@ -22,7 +22,8 @@ the skill leaves open, and any divergence from the skill is a bug in this comman
 ## Step 2 — dispatch
 
 Sort specs by filename; dispatch the **tester** agent (`agents/tester.md`) in batches
-of up to 3 (≤3 per batch, sorted order preserved). The tester checks artifact existence
+of up to 3 (≤3 per batch, sorted order preserved) — one tester dispatch per batch, and
+the report aggregates in the same sorted order. The tester checks artifact existence
 first — a missing artifact is that spec's RED — then runs its five lanes, invoking the
 score engine per artifact by its plugin-root path.
 
@@ -36,14 +37,29 @@ Vibe Suite Test Report
 | <spec>.spec.md | <artifact> | PASS|FAIL | N/M checks |
 ```
 
-FAIL rows expand with ✗ sub-lines:
+FAIL rows expand with ✗ sub-lines. The two skill-canonical instances, reproduced
+verbatim from `skills/testing/SKILL.md`:
 
-- Trigger miss (skill-canonical, either polarity):
-  `✗ "<query>" → predicted <YES|NO> trigger (expected <YES|NO>)`
-  followed by the command-defined indented line `confidence: high|medium|low`.
-- Score miss (skill-canonical): `✗ score <n>/100 (min: <m>)`.
+```
+✗ "check my migration for destructive changes" → predicted NO trigger (expected YES)
+✗ score 68/100 (min: 85)
+```
+
+Their generalized schemas, and the command-defined lines for every other failure case:
+
+- Trigger miss (either polarity):
+  `✗ "<query>" → predicted <YES|NO> trigger (expected <YES|NO>)`, followed by the
+  command-defined confidence line, indented exactly four spaces:
+
+```
+    confidence: high|medium|low
+```
+
+- Score miss: `✗ score <n>/100 (min: <m>)`.
 - Command-defined: `✗ frontmatter: missing '<key>'` ·
   `✗ frontmatter: '<key>' not <requirement>` · `✗ output: missing "<element>"` ·
+  `✗ output: format element "<item>" not stated` ·
+  `✗ input: "<input>" behavior not stated` ·
   `✗ rule: violation sample not flagged` · `✗ rule: compliant sample flagged` ·
   `✗ artifact missing (RED): <artifact-path>`.
 

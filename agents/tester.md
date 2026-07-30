@@ -30,8 +30,13 @@ call is made for it (existence is checked BEFORE delegation).
    renders `✗ "<query>" → predicted <YES|NO> trigger (expected <YES|NO>)` with
    `    confidence: high|medium|low` on the following indented line. Confidence is
    your own calibration of the prediction.
-3. **Output-format expectations** — every `Output Contains` element must appear in the
-   artifact's stated output contract; a gap renders `✗ output: missing "<element>"`.
+3. **Output and input expectations** — every `Output Contains` element must appear in
+   the artifact's stated output contract (`✗ output: missing "<element>"`); every
+   `Output Format` numbered item must be stated by the artifact's format section
+   (`✗ output: format element "<item>" not stated`); and for command artifacts, every
+   `Handles Input` row's behavior must be stated by the artifact
+   (`✗ input: "<input>" behavior not stated`) — a broken input row is a RED-class
+   failure per the testing skill.
 4. **Rule compliance** — for `Follows Rules` pairs, the compliant sample must pass and
    the violation sample must be flagged: misses render
    `✗ rule: violation sample not flagged` or `✗ rule: compliant sample flagged`.

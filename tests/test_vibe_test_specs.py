@@ -30,6 +30,24 @@ STAGE_DELIVERED = ["scanner", "scorer", "vague-scanner", "checker", "tester"]
 
 SECTIONS = ["Triggers On", "Does Not Trigger On", "Output Contains", "Frontmatter Valid"]
 
+#: Frozen per-spec provenance (frozen plan D8): each spec's Source line must carry its
+#: normative token.
+SOURCE_TOKENS = {
+    "recon": "F3", "architecture": "F3", "error-handling": "F3", "security": "F3",
+    "testing": "F3", "edge-cases": "F3",
+    "scanner": "shipped", "scorer": "shipped", "vague-scanner": "shipped",
+    "checker": "shipped",
+    "tester": "F4.5", "vocab-drift-scanner": "F4.6",
+    "security-scanner": "F5.1", "spec-researcher": "F4.7",
+}
+
+SKILL = REPO_ROOT / "skills" / "testing" / "SKILL.md"
+
+
+def squash(text):
+    """Whitespace-normalized text for whole-sentence, wrap-tolerant assertions."""
+    return re.sub(r"\s+", " ", text)
+
 
 def spec_frontmatter(text):
     lines = text.split("\n")
@@ -78,8 +96,10 @@ class SpecCoverage(unittest.TestCase):
                 headings = re.findall(r"^## (.+)$", text, re.M)
                 self.assertTrue(set(headings) <= set(SECTIONS),
                                 f"{name}: headings outside the skill vocabulary")
-                self.assertIn("Source:", text,
-                              f"{name}: missing the source-spec provenance line")
+                source_line = next(l for l in text.splitlines()
+                                   if l.startswith("Source:"))
+                self.assertIn(SOURCE_TOKENS[name], source_line,
+                              f"{name}: Source line lacks its frozen token")
 
     def test_stage_delivered_artifacts_resolve(self):
         for name in STAGE_DELIVERED:
@@ -98,12 +118,24 @@ class CommandContract(unittest.TestCase):
         self.assertIn("RED items (fix these):", body)
         self.assertIn("N passed, N failed (percent%)", body)
 
+    def test_skill_canonical_lines_verbatim(self):
+        # The two ✗ example lines in skills/testing are the canonical instances; the
+        # command must reproduce them character-for-character (D1/D3).
+        skill = SKILL.read_text(encoding="utf-8")
+        canonical = re.findall(r"`(✗ [^`]+)`", skill)
+        self.assertEqual(len(canonical), 2, canonical)
+        body = self._body()
+        for line in canonical:
+            self.assertIn(line, body, f"canonical line not verbatim: {line}")
+
     def test_failure_line_formats(self):
         body = self._body()
         self.assertIn('✗ "<query>" → predicted <YES|NO> trigger (expected <YES|NO>)',
                       body)
-        self.assertIn("confidence: high|medium|low", body)
+        self.assertIn("    confidence: high|medium|low", body)
         self.assertIn("✗ score <n>/100 (min: <m>)", body)
+        self.assertIn('✗ output: format element "<item>" not stated', body)
+        self.assertIn('✗ input: "<input>" behavior not stated', body)
         self.assertIn("✗ frontmatter: missing '<key>'", body)
         self.assertIn("✗ frontmatter: '<key>' not <requirement>", body)
         self.assertIn('✗ output: missing "<element>"', body)
@@ -113,13 +145,17 @@ class CommandContract(unittest.TestCase):
 
     def test_discovery_and_batching(self):
         body = self._body()
+        flat = squash(body)
         self.assertIn(".vibe-test/", body)
         self.assertIn(".nlpm-test/", body)
         self.assertRegex(body, r"(?i)never renamed|run as-is|no rename")
         self.assertRegex(body, r"(?i)new specs .*\.vibe-test")
-        self.assertRegex(body, r"(?i)collision.*new dir|new directory wins")
+        self.assertIn("the new directory wins and the legacy copy is reported as "
+                      "skipped", flat)
+        self.assertIn("run exactly that file", flat)
         self.assertRegex(body, r"(?i)batches of (up to )?3|≤3")
-        self.assertRegex(body, r"(?i)sorted")
+        self.assertIn("one tester dispatch per batch", flat)
+        self.assertIn("the report aggregates in the same sorted order", flat)
         self.assertIn("skills/testing/SKILL.md", body)
 
     def test_registered(self):
@@ -135,25 +171,35 @@ class TesterContract(unittest.TestCase):
     def _body(self):
         return TESTER.read_text(encoding="utf-8")
 
-    def test_five_lanes_and_prediction_rule(self):
-        body = self._body().lower()
-        for lane in ("frontmatter", "trigger", "output", "rule", "min_score"):
-            self.assertIn(lane, body)
-        self.assertRegex(body, r"predict")
-        self.assertRegex(body, r"(?i)never (executed|invoked)|not executed")
+    def test_five_numbered_lanes_parsed(self):
+        # The five lanes are parsed as NUMBERED bold headings, in F4.5's order —
+        # deleting a lane, not just a keyword, fails this.
+        body = self._body()
+        lanes = re.findall(r"^\d+\. \*\*(.+?)\*\*", body, re.M)
+        self.assertEqual(len(lanes), 5, lanes)
+        for i, expected in enumerate(("Frontmatter validity", "Trigger prediction",
+                                      "Output and input expectations",
+                                      "Rule compliance", "Score vs min_score")):
+            self.assertIn(expected.split()[0].lower(), lanes[i].lower(), lanes)
+        self.assertRegex(body, r"(?i)predict")
+        self.assertRegex(body, r"(?i)never executed or invoked")
+
+    def test_output_and_input_lane_covers_all_three_sections(self):
+        flat = squash(self._body())
+        for section in ("Output Contains", "Output Format", "Handles Input"):
+            self.assertIn(section, flat, f"lane 3 must cover {section}")
 
     def test_score_engine_invocation_contract(self):
         body = self._body()
-        self.assertIn('"${CLAUDE_PLUGIN_ROOT}/scripts/score_engine.py"', body)
-        self.assertIn("--root", body)
-        self.assertIn("\\x1f", body)
-        self.assertIn("\\x00", body)
+        flat = squash(body)
+        self.assertIn("printf 'agent\\x1f<relative-path>\\x00'", body)
+        self.assertIn('"${CLAUDE_PLUGIN_ROOT}/scripts/score_engine.py" --root', flat)
         self.assertIn("files[0].score", body)
-        self.assertRegex(body, r"(?i)ignore.*files\[0\]\.verdict|verdict.*ignored")
-        self.assertRegex(body, r"(?i)exist(ence|s) .*before|checked? first")
-        self.assertRegex(body, r"(?i)no positional")
-        self.assertRegex(body, r"(?is)exits? 2.*(that spec|alone)")
-        self.assertRegex(body, r"(?i)batch continues")
+        self.assertIn("IGNORE `files[0].verdict`", body)
+        self.assertIn("existence is checked BEFORE delegation", flat)
+        self.assertIn("NO positional artifact form", flat)
+        self.assertIn("If the engine exits 2, that spec alone fails with the "
+                      "engine's message as its detail and the batch continues", flat)
 
     def test_missing_artifact_red(self):
         self.assertIn("artifact missing (RED)", self._body())

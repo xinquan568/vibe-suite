@@ -467,11 +467,14 @@ def _reg_block(lines, index, indent, source):
             continue
         if entries_list is not None:
             raise RegistryError(f"{source}:{index + 1}: mapping key inside a list")
-        key, sep, value = content.partition(":")
-        key, value = key.strip(), value.strip()
-        if not sep:
+        # The mapping separator is ':' followed by whitespace or line end — a colon
+        # glued to the next character is plain-scalar content per YAML, and a map-level
+        # line without a real separator is malformed, never a charitable {key: value}.
+        separator = re.search(r":(?=[ \t]|$)", content)
+        if not separator:
             raise RegistryError(f"{source}:{index + 1}: expected 'key:' or 'key: value'")
-        key = _reg_key(key, index + 1, source)
+        key = _reg_key(content[:separator.start()].strip(), index + 1, source)
+        value = content[separator.start() + 1:].strip()
         entries_map = {} if entries_map is None else entries_map
         if key in entries_map:
             raise RegistryError(f"{source}:{index + 1}: duplicate key {key!r}")

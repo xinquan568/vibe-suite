@@ -410,6 +410,17 @@ class RegistryFailClosed(unittest.TestCase):
         self.assertEqual(self._description(":x").returncode, 0)
         self.assertEqual(self._description('"? quoted"').returncode, 0)
 
+    def test_colon_without_whitespace_is_not_a_map_separator(self):
+        # YAML's mapping separator is ':'+whitespace (or line end). description:scope is
+        # malformed YAML, not a {description: scope} entry — it must refuse, while a TAB
+        # separator and end-of-line ':' remain valid separators.
+        proc = self._run(REGISTRY_OK.replace(
+            "    description: scope\n", "    description:scope\n"))
+        self.assertEqual(proc.returncode, 2, "colon without whitespace at map level")
+        proc = self._run(REGISTRY_OK.replace(
+            "    description: scope\n", "    description:\tscope\n"))
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

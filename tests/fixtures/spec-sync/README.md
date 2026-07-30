@@ -61,19 +61,27 @@ Four freshness statements existed across three overlays (two of them in
 `2bbcef5`; post-state is the shipped canonical line, which is the first content after
 each H1.
 
-| # | Overlay | Placement | Pre | Post |
-|---|---|---|---|---|
-| 1 | claude | body | `Freshness: refreshed 2026-06-07 against the official docs map dated 2026-06-05, which tracks Claude Code ≥ v2.1.16x.` | `**Spec freshness:** verified 2026-06-07 against the official Claude Code docs map dated 2026-06-05 (code.claude.com/docs/en/)` |
-| 2 | codex | body | `Refresh state: verified 2026-06-07 against Codex CLI 0.137.0 (released 2026-06-04; pre-releases existed up to 0.138.0-alpha.6 at refresh time).` | `**Spec freshness:** verified 2026-06-07 against Codex CLI 0.137.0, released 2026-06-04 (developers.openai.com/codex)` |
-| 3 | codex | `description:` | `facts checked 2026-06-07 versus Codex 0.137.0 (a 2026-06-04 release)` | date claim removed; the version pairing survives in the body line above |
-| 4 | antigravity | `description:` | `the spec has not settled since Antigravity 2.0 (2026-05-19), so most tool-specific checks stay advisory` | `**Spec freshness:** UNVERIFIED — research written 2026-05-25, six days after the Antigravity 2.0 announcement of 2026-05-19; the verification pass described in §10 has not landed (developers.googleblog.com)` |
+Each PRE cell is the complete statement as it stood at `2bbcef5`, not a fragment of it —
+the qualifying second sentence is where the content that must survive normalization
+lives, so truncating it would hide exactly what this table exists to check.
 
-Two content qualifications are PRESERVED rather than normalized away: Claude's
-`≥ v2.1.16x` canonicality note, and Codex's prerelease parenthetical. Antigravity reads
-`UNVERIFIED` rather than a date because its own STATUS block says the verification pass
-has not landed — writing a verified date there would assert something the overlay denies.
-Exactly one dated marker exists per overlay after normalization; that is what makes a
+| # | Overlay | Placement | Pre (complete, @2bbcef5) | Post (canonical line + where the qualification went) |
+|---|---|---|---|---|
+| 1 | claude | body | `Freshness: refreshed 2026-06-07 against the official docs map dated 2026-06-05, which tracks Claude Code ≥ v2.1.16x. Where earlier notes conflicted with that refresh, the newer facts below are canonical.` | `**Spec freshness:** verified 2026-06-07 against the official Claude Code docs map dated 2026-06-05 (code.claude.com/docs/en/)` — and the qualification is PRESERVED as its own body sentence: `That map tracks Claude Code ≥ v2.1.16x; where earlier notes conflicted with this refresh, the newer facts below are canonical.` |
+| 2 | codex | body | `Refresh state: verified 2026-06-07 against Codex CLI 0.137.0 (released 2026-06-04; pre-releases existed up to 0.138.0-alpha.6 at refresh time).` | `**Spec freshness:** verified 2026-06-07 against Codex CLI 0.137.0, released 2026-06-04 (developers.openai.com/codex)` — and the parenthetical is PRESERVED as its own sentence: `Pre-releases existed up to 0.138.0-alpha.6 at refresh time.` |
+| 3 | codex | `description:` | `facts checked 2026-06-07 versus Codex 0.137.0 (a 2026-06-04 release)` | clause removed from the description; its version pairing survives in row 2's canonical line, leaving the description undated |
+| 4 | antigravity | `description:` | `the spec has not settled since Antigravity 2.0 (2026-05-19), so most tool-specific checks stay advisory` | the DATE is dropped and the clause is RETAINED, undated: `the spec has not settled since Antigravity 2.0, so most tool-specific checks stay advisory`. The dated statement moves to the canonical line: `**Spec freshness:** UNVERIFIED — research written 2026-05-25, six days after the Antigravity 2.0 announcement of 2026-05-19; the verification pass described in §10 has not landed (developers.googleblog.com)` |
+
+Nothing is normalized away. Rows 1 and 2 preserve their qualifications as body sentences;
+row 3's clause is removed only because row 2 already carries the same fact; row 4's clause
+is retained verbatim minus its date. What normalization removes is the DUPLICATE DATE, not
+the content — after it, exactly one dated marker exists per overlay, which is what makes an
 `--apply` bump a single unambiguous edit.
+
+Antigravity reads `UNVERIFIED` rather than a verified date because its own STATUS block
+says the verification pass has not landed. Writing a date there would assert something the
+overlay itself denies — the one place in this item where the honest value is the absence
+of a value.
 
 ## D7 anchor measurement and the four-kind classification
 

@@ -8,6 +8,7 @@ hand-authored expectation — the recording's provenance header states when and 
 was produced.
 """
 
+import hashlib
 import json
 import re
 import unittest
@@ -400,114 +401,163 @@ class RequiredClauses(unittest.TestCase):
 #: equality tables above are what bind meaning.
 LEXICON = {
     "command": {
-        'a', 'able', 'about', 'absence', 'absent', 'accumulating', 'action', 'add',
-        'added', 'adding', 'after', 'against', 'agent', "agent's", 'agents', 'all',
-        'all-medium', 'alone', 'alternatives', 'an', "anchor's", 'and', 'antigravity',
-        'any', 'application', 'applied', 'applies', 'apply', 'are', 'argument-hint',
-        'arguments', 'artifacts', 'as', 'at', 'audit', 'bar', 'bare', 'basis', 'be',
-        'because', 'becomes', 'been', 'below', 'bin', 'block', 'body', 'both', 'bound',
-        'boundaries', 'branch', 'bridge', 'bump', 'bumps', 'but', 'by', 'caller', 'can',
-        'candidate', 'canonical', 'carries', 'carry', 'carrying', 'case-sensitively',
-        'change', 'changed', 'changes', 'check', 'citation', 'cited', 'citing', 'claim',
-        'classified', 'classify', 'claude', 'code', 'code-change-required', 'codex',
-        'com', 'command', "command's", 'comment', 'commit', 'commits', 'committed',
-        'confidence', 'config', 'confirm', 'conforming', 'consumers', 'convention',
-        'conventions', 'conventions-', 'correct', 'corrected', 'correcting',
-        'correction', 'corrections', 'count', 'counts', 'coverage', 'create', 'data',
-        'date', 'dated', 'declares', 'default', 'defaulting', 'defined', 'definitely',
-        'delete', 'deleted', 'dependency', 'description', 'developers', 'disagree',
-        'disjoint', 'dispatch', 'dispatches', 'do', 'docs', 'doctor', 'documentary',
-        'documentation', 'documented', 'does', 'domain', 'dry-run', 'each', 'edit',
-        'edited', 'either', 'encoded', 'engine', 'entry', 'events', 'every', 'evidence',
-        'exactly', 'except', 'excluding', 'existing', 'exit', 'explicit', 'explicitly',
-        'fact', 'family', 'fault', 'fetched', 'file', 'files', 'first', 'first-party',
-        'fix', 'flags', 'floor', 'follow', 'following', 'follows', 'for', 'freshness',
-        'frontmatter', 'full', 'function', 'gap', 'gemini', 'gemini-extension', 'git',
-        'github', 'goes', 'grade', 'grades', 'h', 'has', 'hedge', 'hedged', 'here',
-        'high', 'hook', 'hook-config', 'hooks', 'how', 'html', 'immediately', 'in',
-        'independently', 'indirect', 'inline', 'input', 'inside', 'instructions',
-        'insufficient', 'into', 'invocation', 'is', 'iso', 'it', 'its', 'json', 'keeps',
-        'key', 'known', 'label', 'label-only', 'labels', 'later', 'least', 'left',
-        'line', "line's", 'link', 'longer', 'ls-files', 'machine-readable', 'many',
-        'markdown', 'marketplace', 'matched', 'matching', 'mcp', 'mcpservers', 'md',
-        'medium', 'meets', 'migration', 'min-confidence', 'mode', 'modes', 'much',
-        'must', 'n', 'named', 'naming', 'never', 'no', 'no-change', 'no-op', 'non-zero',
-        'none', 'not', 'not-x', 'note', "note's", 'notes', 'nothing', 'now', 'number',
-        'observation', 'occurrence', 'occurrences', 'occurs', 'of', 'on', 'one', 'only',
-        'openai', 'operational', 'optional', 'or', 'order', 'other', 'overlay',
-        'overlay-root', 'overlay-style', "overlays'", 'own', 'owning', 'page', 'pages',
-        'parser', 'path', 'paths', 'per', 'per-row', 'per-tool', 'place', 'placement',
-        'plugin', 'plus', 'posttooluse', 'precedence', 'precompact', 'predicate',
-        'pretooluse', 'printing', 'prints', 'propagate', 'propagates', 'propagation',
-        'prose', 'provenance', 'py', 'python', 'quoted', 'raise', 'rather',
-        're-touches', 're-verified', 'reader', 'reading', 'reason', 'records',
-        'reference', 'refuses', 'regardless', 'remain', 'remains', 'remove', 'renders',
+        'A', 'ADD', 'AGENTS', 'Action', 'Arguments', 'BOTH', 'Because', 'Boundaries',
+        'CHANGES', 'CLAUDE', 'CONFIRM', 'Classify', 'Consumers', 'Correction',
+        'DOCUMENTARY', 'Dispatch', 'ENCODED', 'EVENTS', 'EXCLUDING', 'Each', 'Every',
+        'FIRST', 'FIX', 'Fetched', 'For', 'GEMINI', 'H', 'HTML', 'ISO', 'Insufficient',
+        'It', 'KNOWN', 'Markdown', 'Modes', 'N', 'Never', 'No', 'Nothing', 'ONLY',
+        'OPERATIONAL', 'On', 'Order', 'Overlay', 'PATH', 'PLUGIN', 'Placement',
+        'PostToolUse', 'PreCompact', 'PreToolUse', 'Printing', 'REMOVE', 'REQUIRED',
+        'REQUIRES', 'RESOLVED', 'ROOT', 'Report', 'Research', 'Researches',
+        'Retirement', 'Rows', 'Run', 'SOURCE', 'Scope', 'SessionEnd', 'SessionStart',
+        'Skipped', 'So', 'Source', 'Spec', 'Step', 'Step-', 'SubagentStop', 'Sync',
+        'Tag', 'Targets', 'The', 'These', 'Tokens', 'UNCLASSIFIED', 'UNVERIFIED', 'URL',
+        'URLs', 'Untrusted', 'UserPromptSubmit', 'Verify', 'When', 'X', 'YAML', 'a',
+        'able', 'about', 'absence', 'absent', 'accumulating', 'add', 'added', 'adding',
+        'after', 'against', 'agent', "agent's", 'agents', 'all', 'all-medium', 'alone',
+        'alternatives', 'an', "anchor's", 'and', 'antigravity', 'any', 'application',
+        'applied', 'applies', 'apply', 'are', 'argument-hint', 'artifacts', 'as', 'at',
+        'audit', 'bar', 'bare', 'basis', 'be', 'because', 'becomes', 'been', 'below',
+        'bin', 'block', 'body', 'both', 'bound', 'branch', 'bridge', 'bump', 'bumps',
+        'but', 'by', 'caller', 'can', 'candidate', 'canonical', 'carries', 'carry',
+        'carrying', 'case-sensitively', 'change', 'changed', 'changes', 'check',
+        'citation', 'cited', 'citing', 'claim', 'classified', 'classify', 'claude',
+        'code', 'code-change-required', 'codex', 'com', 'command', "command's",
+        'comment', 'commit', 'commits', 'committed', 'confidence', 'config',
+        'conforming', 'consumers', 'convention', 'conventions', 'conventions-',
+        'correct', 'corrected', 'correcting', 'correction', 'corrections', 'count',
+        'counts', 'coverage', 'create', 'data', 'date', 'dated', 'declares', 'default',
+        'defaulting', 'defined', 'definitely', 'delete', 'deleted', 'dependency',
+        'description', 'developers', 'disagree', 'disjoint', 'dispatch', 'dispatches',
+        'do', 'docs', 'doctor', 'documentary', 'documentation', 'documented', 'does',
+        'domain', 'dry-run', 'each', 'edit', 'edited', 'either', 'engine', 'entry',
+        'every', 'evidence', 'exactly', 'except', 'existing', 'exit', 'explicit',
+        'explicitly', 'fact', 'family', 'fault', 'file', 'files', 'first',
+        'first-party', 'flags', 'floor', 'follow', 'following', 'follows', 'for',
+        'freshness', 'frontmatter', 'full', 'function', 'gap', 'gemini',
+        'gemini-extension', 'git', 'github', 'goes', 'grade', 'grades', 'has', 'hedge',
+        'hedged', 'here', 'high', 'hook', 'hook-config', 'hooks', 'how', 'immediately',
+        'in', 'independently', 'indirect', 'inline', 'input', 'inside', 'instructions',
+        'into', 'invocation', 'is', 'it', 'its', 'json', 'keeps', 'key', 'label',
+        'label-only', 'labels', 'later', 'least', 'left', 'line', "line's", 'link',
+        'longer', 'ls-files', 'machine-readable', 'many', 'marketplace', 'matched',
+        'matching', 'mcp', 'mcpServers', 'md', 'medium', 'meets', 'migration',
+        'min-confidence', 'mode', 'much', 'must', 'named', 'naming', 'never', 'no',
+        'no-change', 'no-op', 'non-zero', 'none', 'not', 'not-X', 'note', "note's",
+        'notes', 'nothing', 'now', 'number', 'observation', 'occurrence', 'occurrences',
+        'occurs', 'of', 'on', 'one', 'only', 'openai', 'optional', 'or', 'other',
+        'overlay', 'overlay-root', 'overlay-style', "overlays'", 'own', 'owning',
+        'page', 'pages', 'parser', 'path', 'paths', 'per', 'per-row', 'per-tool',
+        'place', 'plugin', 'plus', 'precedence', 'predicate', 'prints', 'propagate',
+        'propagates', 'propagation', 'prose', 'provenance', 'py', 'python', 'quoted',
+        'raise', 'rather', 're-touches', 're-verified', 'reader', 'reading', 'reason',
+        'records', 'reference', 'refuses', 'regardless', 'remain', 'remains', 'renders',
         'replacement', 'replaces', 'report', "report's", 'reported', 'reports',
-        'reproduce', 'required', 'requires', 'research', 'researcher', 'researches',
-        'resolved', 'restates', 'restating', 'retire', 'retirement', 'retires',
-        'returns', 'review', 'rewrites', 'root', 'rooted', 'row', 'rows', 'rule',
-        'rules', 'run', 'run-date', 's', 'same', 'scanned', 'schema', 'scope', 'score',
-        'scripts', 'section', 'select', 'selected', 'selects', 'sessionend',
-        'sessionstart', 'set', 'settings', 'settled', 'settles', 'silent', 'single',
-        'single-overlay', 'skill', 'skills', 'skipped', 'so', 'source',
+        'reproduce', 'requires', 'research', 'researcher', 'restates', 'restating',
+        'retire', 'retirement', 'retires', 'returns', 'review', 'rewrites', 'root',
+        'rooted', 'row', 'rows', 'rule', 'rules', 'run', 'run-date', 's', 'same',
+        'scanned', 'schema', 'scope', 'score', 'scripts', 'section', 'select',
+        'selected', 'selects', 'set', 'settings', 'settled', 'settles', 'silent',
+        'single', 'single-overlay', 'skill', 'skills', 'so', 'source',
         'source-conflict', 'source-silent', 'sources', 'spec', 'spec-researcher',
         'spec-sync', 'staged', 'state', 'stated', 'statement', 'states', 'status',
-        'step', 'step-', 'still', 'stops', 'subagentstop', 'such', 'summarises',
-        'surfaced', 'swallowed', 'sweep', 'sync', 'table', 'tag', 'tagged', 'tags',
-        'takes', 'target', 'targets', 'tests', 'than', 'that', 'the', 'their', 'them',
-        'themselves', 'these', 'this', 'those', 'three', 'threshold', 'to', 'together',
-        'token', 'tokens', 'toml', 'tool', "tool's", 'tool-agnostic', 'tool-convention',
-        'toward', 'transcription', 'tree', 'trees', 'two', 'un-hedged', 'unclassified',
-        'under', 'unless', 'untouched', 'untrusted', 'unverified', 'update', 'updated',
-        'url', 'urls', 'userpromptsubmit', 'uses', 'valid', 'value', 'verified',
-        'verifies', 'verify', 'vibe-check', 'vibe-suite', 'visible', 'when', 'where',
-        'whereas', 'which', 'whole', 'whose', 'with', 'withdrawal', 'withdrawn',
-        'withheld', 'without', 'working', 'would', 'writable', 'write', 'writes',
-        'writing', 'written', 'x', 'yaml', 'you', 'yourself', 'zero',
+        'still', 'stops', 'such', 'summarises', 'surfaced', 'swallowed', 'sweep',
+        'sync', 'table', 'tag', 'tagged', 'tags', 'takes', 'target', 'targets', 'tests',
+        'than', 'that', 'the', 'their', 'them', 'themselves', 'this', 'those', 'three',
+        'threshold', 'to', 'together', 'token', 'toml', 'tool', "tool's",
+        'tool-agnostic', 'tool-convention', 'toward', 'transcription', 'tree', 'trees',
+        'two', 'un-hedged', 'under', 'unless', 'untouched', 'update', 'updated', 'uses',
+        'valid', 'value', 'verified', 'verifies', 'verify', 'vibe-check', 'vibe-suite',
+        'visible', 'when', 'where', 'whereas', 'which', 'whole', 'whose', 'with',
+        'withdrawal', 'withdrawn', 'withheld', 'without', 'working', 'would',
+        'writable', 'write', 'writes', 'writing', 'written', 'you', 'yourself', 'zero',
     },
     "agent": {
-        'a', 'about', 'absent', 'actionable', 'add', 'adjacent', 'advisory', 'against',
-        'aggregators', 'an', 'and', 'answers', 'any', 'applying', 'are', 'as', 'assign',
-        'at', 'bare', 'because', 'before', 'belongs', 'beneath', 'blog', 'both', 'but',
-        'by', 'carries', 'caveat', 'changelog', 'changelogs', 'citations', 'cite',
-        'claim', 'classifiable', 'codex', 'com', 'command', 'confidence', 'confirm',
+        'ADD', 'BOTH', 'Blog', 'CONFIRM', 'Cite', 'Confidence', 'Every', 'FIRST', 'FIX',
+        'Fetched', 'First-party', 'Insufficient', 'NO', 'NOT', 'Never', 'ONE', 'One',
+        'Order', 'Output', 'Overflow', 'Overlay', 'Quote', 'REMOVE', 'RESOLVED', 'Read',
+        'Report', 'SKILL', 'Section', 'Seed', 'Source', 'Sources', 'Stack', 'Tag',
+        'The', 'UNCLASSIFIED', 'URL', 'Untrusted', 'Use', 'Vendor', 'WITH', 'WebFetch',
+        'WebSearch', 'When', 'X', 'You', 'a', 'about', 'absent', 'actionable',
+        'adjacent', 'advisory', 'against', 'aggregators', 'an', 'and', 'answers', 'any',
+        'applying', 'are', 'as', 'assign', 'at', 'bare', 'because', 'before', 'belongs',
+        'beneath', 'but', 'by', 'carries', 'caveat', 'changelog', 'changelogs',
+        'citations', 'claim', 'classifiable', 'codex', 'com', 'command', 'confidence',
         'corrections', 'data', 'date', 'decides', 'declared', 'definitely',
         'definitively', 'description', 'developers', 'disagree', 'disjoint', 'dispatch',
         'documentation', 'documented', 'documents', 'domain', 'each', 'emit', 'every',
-        'evidence', 'examined', 'example', 'excluded', 'explicit', 'fact', 'fetched',
-        'first', 'first-party', 'fix', 'for', 'form', 'format', 'from', 'full', 'gap',
-        'grade', 'graded', 'grades', 'hedge', 'hedged', 'high', 'hooks', 'in',
-        'including', 'indirect', 'inference', 'input', 'inside', 'instructions',
-        'insufficient', 'is', 'it', 'its', 'label', 'line', 'low', 'matching', 'md',
-        'medium', 'model', 'must', 'name', 'never', 'no', 'not', 'not-x', 'notes',
-        'now', 'observation', 'on', 'one', 'only', 'openai', 'or', 'order', 'ordered',
-        'output', 'overflow', 'overlay', "overlay's", 'overlays', 'own', 'page',
-        "page's", 'pages', 'path', 'per', 'per-row', 'plus', 'precedence', 'produces',
-        'quotable', 'quote', 'quoted', 'read', 'reason', 'recollection', 'release',
-        'relied', 'remove', 'replacement', 'report', 'repository', 'requires',
-        'research', 'researching', 'resolved', 'return', 'row', "row's", 'rows', 'rule',
-        'rules', 'scope', 'section', 'seed', 'sends', 'settled', 'settles', 'silent',
-        'skill', 'skills', 'sonnet', 'source', 'source-conflict', 'source-silent',
-        'sources', 'spec-researcher', 'spec-sync', 'stabilizes', 'stack', 'state',
-        'statement', 'states', 'stops', 'such', 'table', 'tag', 'tagged', 'tagging',
-        'text', 'that', 'the', 'then', 'to', 'together', 'tool-convention', 'tools',
-        'tutorials', 'two', 'un-hedged', 'unclassified', 'unsettled', 'until',
-        'untrusted', 'url', 'use', 'vendor', "vendor's", 'vibe-core', 'vibe-suite',
-        'webfetch', 'websearch', 'what', 'when', 'with', 'withdrawal', 'withdrawn',
-        'without', 'write', 'x', 'you',
+        'evidence', 'examined', 'example', 'excluded', 'explicit', 'fact',
+        'first-party', 'for', 'form', 'format', 'from', 'full', 'gap', 'grade',
+        'graded', 'grades', 'hedge', 'hedged', 'high', 'hooks', 'in', 'including',
+        'indirect', 'inference', 'input', 'inside', 'instructions', 'is', 'it', 'its',
+        'label', 'line', 'low', 'matching', 'md', 'medium', 'model', 'must', 'name',
+        'never', 'no', 'not', 'not-X', 'notes', 'now', 'observation', 'on', 'one',
+        'only', 'openai', 'or', 'ordered', 'overlay', "overlay's", 'overlays', 'own',
+        'page', "page's", 'pages', 'path', 'per', 'per-row', 'plus', 'precedence',
+        'produces', 'quotable', 'quote', 'quoted', 'reason', 'recollection', 'release',
+        'relied', 'replacement', 'report', 'repository', 'requires', 'research',
+        'researching', 'return', 'row', "row's", 'rows', 'rule', 'rules', 'scope',
+        'section', 'sends', 'settled', 'settles', 'silent', 'skills', 'sonnet',
+        'source', 'source-conflict', 'source-silent', 'spec-researcher', 'spec-sync',
+        'stabilizes', 'state', 'statement', 'states', 'stops', 'such', 'table', 'tag',
+        'tagged', 'tagging', 'text', 'that', 'the', 'then', 'to', 'together',
+        'tool-convention', 'tools', 'tutorials', 'two', 'un-hedged', 'unsettled',
+        'until', 'use', 'vendor', "vendor's", 'vibe-core', 'vibe-suite', 'what', 'when',
+        'with', 'withdrawal', 'withdrawn', 'without', 'write', 'you',
     },
 }
 
 
+#: SHA-256 of each artifact as shipped. The lexicon closes the VOCABULARY; this closes
+#: the TEXT. It exists because vocabulary is not meaning: a reviewer defeated the lexicon
+#: without adding a single new word, by recasing existing ones (`Source` as a fifth class
+#: name lowercases into the set) and by composing contradicting sentences entirely out of
+#: words the contract already used — "a claim the source is silent on is written" inverts
+#: D4 using nothing new. No lexical check can see that; only the text can.
+#:
+#: Both this and LEXICON live in test code rather than a fixture on purpose. The golden
+#: under tests/fixtures closes the same set, but a mutation that re-blesses the golden
+#: still fails here, so defeating the contract requires editing the test suite — a
+#: visible, deliberate act rather than a fixture refresh.
+#:
+#: When the contract legitimately changes: update the artifact, the golden, LEXICON, and
+#: this hash in one commit, and the clause tables above will tell you if you changed a
+#: rule rather than its wording.
+CONTRACT_SHA256 = {
+    "command": "ff268a973c39ab1058ad032f3e6725e3f2e031e51f44a8e80a5889908fe928d3",
+    "agent": "2d9b35ae1e29170d089e471561a4581c105caff66a44569f5dce765a2beb67a2",
+}
+
+
+class FrozenContractSeal(unittest.TestCase):
+    """Contradiction-by-ADDITION is the case the clause tables structurally cannot see:
+    they assert a required sentence is present, and a contract can be broken by adding a
+    sentence that contradicts it while every required sentence stays put. Presence checks
+    cannot close that; only pinning the whole text can."""
+
+    def test_artifact_text_is_sealed(self):
+        for key, path in (("command", COMMAND), ("agent", AGENT)):
+            with self.subTest(artifact=key):
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                self.assertEqual(
+                    digest, CONTRACT_SHA256[key],
+                    f"{key} text changed. Nothing may be added, removed, or reworded in "
+                    "a frozen contract without updating CONTRACT_SHA256, LEXICON and the "
+                    "golden together — see the clause tables for what each rule requires.")
+
+
 class FrozenLexicon(unittest.TestCase):
-    """The last vocabulary hole: a word in a shape no other check scans for."""
+    """The vocabulary layer: a word in a shape no other check scans for.
+
+    Case-SENSITIVE, because recasing an existing word is how a fifth propagation class
+    named `Source` or a sixth tag named `Review` gets past a lowercased set.
+    """
 
     def test_no_word_enters_the_contract_unnoticed(self):
         for key, path in (("command", COMMAND), ("agent", AGENT)):
             with self.subTest(artifact=key):
-                words = {w.lower() for w in
-                         re.findall(r"[A-Za-z][A-Za-z'-]*",
-                                    path.read_text(encoding="utf-8"))}
+                words = set(re.findall(r"[A-Za-z][A-Za-z'-]*",
+                                       path.read_text(encoding="utf-8")))
                 added = words - LEXICON[key]
                 removed = LEXICON[key] - words
                 self.assertEqual(
@@ -578,6 +628,28 @@ class WorksheetCompleteness(unittest.TestCase):
         # makes the count four rather than three
         self.assertEqual(sum("`description:`" in r for r in rows), 2,
                          "two of the four occurrences are description clauses")
+
+    def test_d6_pre_and_post_carry_the_real_text(self):
+        """Cross-check the worksheet against the SAME constants the overlay tests use.
+
+        A pre/post table is only evidence if its cells are the actual text. Quoting a
+        canonical line but dropping the qualification it preserves would describe a
+        normalization that discards content, which is the opposite of what D6 requires.
+        """
+        section = self.text[self.text.index("## D6 freshness"):]
+        section = section[:section.index("## D7")]
+        flat = squash(section)
+        for name in OVERLAYS:
+            with self.subTest(overlay=name):
+                self.assertIn(squash(CANONICAL[name]), flat,
+                              f"D6 omits the canonical post-state line for {name}")
+                self.assertIn(squash(PRESERVED[name]), flat,
+                              f"D6 omits the qualification {name} preserves — the "
+                              "post-state must show where the content went")
+        # the Claude pre-state is two sentences; the second is the one carrying the
+        # content that survives, so a truncated quote hides the whole question
+        self.assertIn("the newer facts below are canonical.", flat,
+                      "the Claude pre-state is truncated before its second sentence")
 
     def test_d7_states_the_anchor_measurement_and_every_class(self):
         section = self.text[self.text.index("## D7 anchor measurement"):]

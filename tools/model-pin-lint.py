@@ -46,6 +46,7 @@ from pathlib import Path
 SCANNED = frozenset(
     {
         ".claude-plugin",  # the shipped manifest pair
+        ".vibe-test",  # shipped NL test specs (E3.6) — artifacts, so pin-scanned
         "agents",
         "auditor",  # "the deployable audit unit"
         "bin",  # "programs, not prompts — they ship with tests"

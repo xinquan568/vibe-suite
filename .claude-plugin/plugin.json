@@ -30,14 +30,16 @@
     "./commands/repair.md",
     "./commands/score.md",
     "./commands/unbridge.md",
-    "./commands/update.md"
+    "./commands/update.md",
+    "./commands/test.md"
   ],
   "hooks": "./hooks/hooks.json",
   "agents": [
     "./agents/checker.md",
     "./agents/scanner.md",
     "./agents/scorer.md",
-    "./agents/vague-scanner.md"
+    "./agents/vague-scanner.md",
+    "./agents/tester.md"
   ],
   "skills": [
     "./skills/agent-design",

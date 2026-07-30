@@ -510,6 +510,17 @@ class RegistryFailClosed(unittest.TestCase):
             "    description: scope\n", "    description: foo'\tbar\n"))
         self.assertEqual(proc.returncode, 2, "tab hidden by a mid-scalar quote")
 
+    def test_glued_dash_is_not_a_marker(self):
+        # 'foo- ' is plain-scalar content — only the line's leading '- ' is a list
+        # marker. The quote after a glued dash is content: the comment still strips
+        # (PyYAML decodes "foo- 'bar") and a tab inside it is still a bare tab.
+        proc = self._run(REGISTRY_OK.replace(
+            "    description: scope\n", "    description: foo- 'bar # note'\n"))
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        proc = self._run(REGISTRY_OK.replace(
+            "    description: scope\n", "    description: foo- 'bar\tbaz'\n"))
+        self.assertEqual(proc.returncode, 2, "tab hidden after a glued dash")
+
     def test_scan_semantics_whitebox(self):
         # The scan helpers themselves: comment stripping and decoded values must match
         # YAML's reading (PyYAML decodes description as "foo'" in the glued case).
@@ -524,6 +535,9 @@ class RegistryFailClosed(unittest.TestCase):
         self.assertEqual(strip("    description: 'a # b' # c"),
                          "    description: 'a # b' ")
         self.assertEqual(strip("    key: a#b"), "    key: a#b")
+        self.assertEqual(strip("    description: foo- 'bar # note'"),
+                         "    description: foo- 'bar ")
+        self.assertEqual(strip("  - 'a # b' # c"), "  - 'a # b' ")
 
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,

@@ -403,9 +403,13 @@ def _reg_opens_quote(line, index):
     before = line[:index]
     if before.strip(" ") == "":
         return True                       # first non-space character of the line
+    if re.fullmatch(r" *-[ ]+", before):
+        return True                       # directly after the line's list-item marker
     if not before.endswith(" "):
         return False                      # glued to content — YAML reads it as content
-    return before.rstrip(" ")[-1:] in (":", "-")
+    # after a mapping separator; a glued mid-scalar dash (foo- ) is content, so '-' no
+    # longer counts here — only the line-leading marker form above does
+    return before.rstrip(" ").endswith(":")
 
 
 def _reg_strip_comment(line):

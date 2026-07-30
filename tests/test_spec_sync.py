@@ -538,6 +538,30 @@ CONTRACT_SHA256 = {
     "recorded-dry-run": "bf9c97acb9610045aa63da32a356039c336544aeee0032679eebd6de556548e7",
 }
 
+#: The fixture family, sealed by path relative to tests/fixtures/spec-sync/. The seeded
+#: overlay and the two consumers are T0 deliverables as much as the worksheet is: the
+#: acceptance says a dry run over a SEEDED-STALE fixture produces a correctly tagged
+#: report, so editing a seed's source or freshness claim, dropping the required citation
+#: from consumer-linked.md, or adding one to consumer-uncited.md changes what the
+#: acceptance tests — silently, while every row of the expected report still matches.
+FIXTURE_SHA256 = {
+    "README.md": "5c7adfe4c07995217b60049f8f03c8d38394ac9010eb233b798e08540fe1a6ec",
+    "expected-report.md":
+        "da7c4dfe1ac85dfdaca1dba1c747441fe5efa402010807a899c6487e96420201",
+    "recorded-dry-run.md":
+        "bf9c97acb9610045aa63da32a356039c336544aeee0032679eebd6de556548e7",
+    "stale-overlay/SKILL.md":
+        "9db27498ad892d4b7c455f51b26c9ae9c864c4f1dce24e019a759f9a860ff27e",
+    "stale-overlay/consumer-linked.md":
+        "8eb7cdd3ecf2d0f1da46863cc78c1a6f807df197c775e05a7ff488c8896fee5c",
+    "stale-overlay/consumer-uncited.md":
+        "f01498e106fa3a04bee23765f391fcdcf2d05a0b48de4d95b5e878b77cb839cd",
+    "contract/commands-spec-sync.md.golden":
+        "ff268a973c39ab1058ad032f3e6725e3f2e031e51f44a8e80a5889908fe928d3",
+    "contract/agents-spec-researcher.md.golden":
+        "2d9b35ae1e29170d089e471561a4581c105caff66a44569f5dce765a2beb67a2",
+}
+
 #: Every sealed path, by the key used above.
 SEALED = {
     "command": COMMAND,
@@ -565,14 +589,36 @@ class FrozenContractSeal(unittest.TestCase):
                     "(and, for the two artifacts, LEXICON and the golden) in the same "
                     "commit — see the clause tables for what each rule requires.")
 
-    def test_every_frozen_deliverable_is_sealed(self):
-        # a new frozen deliverable must be added to the seal, not merely to the tree:
-        # the worksheet was a T0 deliverable guarded only by presence checks for three
-        # rounds, and that is exactly how a hand oracle drifts without failing anything
-        self.assertEqual(set(SEALED), set(CONTRACT_SHA256),
-                         "every sealed path needs a digest and vice versa")
+    def test_fixture_family_is_sealed(self):
+        for rel, expected in FIXTURE_SHA256.items():
+            with self.subTest(fixture=rel):
+                path = FIX / rel
+                self.assertTrue(path.is_file(), f"sealed fixture missing: {rel}")
+                self.assertEqual(
+                    hashlib.sha256(path.read_bytes()).hexdigest(), expected,
+                    f"{rel} changed. The seeded fixture IS the acceptance: editing a "
+                    "seed's source claim, or a consumer's citation, changes what a "
+                    "correctly tagged report means.")
+
+    def test_no_fixture_file_escapes_the_seal(self):
+        """Ground truth is the TREE, not a map.
+
+        The previous version of this check compared two dicts to each other, which only
+        proved they agreed — a frozen deliverable omitted from BOTH was invisible to it,
+        and that is precisely how the seeded overlay and its two consumers stayed
+        unguarded. Walking the directory means a file cannot be frozen-in-practice and
+        unsealed-in-fact: adding one to the fixture tree fails until it is sealed.
+        """
+        on_disk = {str(p.relative_to(FIX)) for p in FIX.rglob("*") if p.is_file()}
+        self.assertEqual(
+            on_disk, set(FIXTURE_SHA256),
+            "every file under tests/fixtures/spec-sync/ must carry a digest; "
+            f"unsealed: {sorted(on_disk - set(FIXTURE_SHA256))}, "
+            f"stale entries: {sorted(set(FIXTURE_SHA256) - on_disk)}")
+        # the two artifact seals are keyed separately; both maps must stay populated
         for key, path in SEALED.items():
             self.assertTrue(path.is_file(), f"sealed path missing: {key}")
+            self.assertIn(key, CONTRACT_SHA256, f"sealed path without a digest: {key}")
 
 
 class FrozenLexicon(unittest.TestCase):

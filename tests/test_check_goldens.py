@@ -419,7 +419,7 @@ class RegistryFailClosed(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, "colon without whitespace at map level")
         proc = self._run(REGISTRY_OK.replace(
             "    description: scope\n", "    description:\tscope\n"))
-        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        self.assertEqual(proc.returncode, 2, "TAB separator (PyYAML ScannerError)")
 
     def test_tab_in_indentation_refused(self):
         # YAML forbids tabs in indentation; a TAB hiding after (or before) the indent
@@ -469,6 +469,16 @@ class RegistryFailClosed(unittest.TestCase):
             cfg.write_bytes(b"---\nfocus_instructions: sc\xffpe\n---\n")
             proc = run_engine(BROKEN, extra=("--config", str(cfg)))
         self.assertEqual(proc.returncode, 2)
+
+    def test_tabs_outside_quotes_refused(self):
+        # PyYAML rejects tabs in block structure (ScannerError); the accepted subset is
+        # spaces-only outside quoted scalars — a literal TAB inside quotes stays content.
+        proc = self._run(REGISTRY_OK.replace(
+            "    description: scope\n", "    description: scope\t\n"))
+        self.assertEqual(proc.returncode, 2, "trailing TAB")
+        proc = self._run(REGISTRY_OK.replace(
+            "    description: scope\n", '    description: "a\tb"\n'))
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
 
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,

@@ -441,6 +441,27 @@ def _reg_item_head(rest, line_no, source):
     return None, None
 
 
+def _reg_tab_guard(line, line_no, source):
+    """Refuse a bare TAB anywhere outside quoted scalars. PyYAML rejects tabs in block
+    structure (ScannerError); the accepted subset is spaces-only outside quotes, with
+    quoted content (and comment text, stripped before this runs) free to carry tabs."""
+    inside, index = None, 0
+    while index < len(line):
+        char = line[index]
+        if inside:
+            if char == "\\" and inside == '"':
+                index += 2
+                continue
+            if char == inside:
+                inside = None
+        elif char in "\"'":
+            inside = char
+        elif char == "\t":
+            raise RegistryError(f"{source}:{line_no}: tab outside a quoted scalar — "
+                                "spaces only")
+        index += 1
+
+
 def _reg_block(lines, index, indent, source):
     """Parse a mapping or list block whose entries sit at exactly `indent` spaces."""
     entries_list, entries_map = None, None
@@ -449,6 +470,7 @@ def _reg_block(lines, index, indent, source):
         if not raw.strip(" \t"):
             index += 1
             continue
+        _reg_tab_guard(raw, index + 1, source)
         current = len(raw) - len(raw.lstrip(" "))
         if raw[current:current + 1] == "\t":
             raise RegistryError(f"{source}:{index + 1}: tab in indentation — spaces only")

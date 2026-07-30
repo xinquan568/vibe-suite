@@ -75,7 +75,7 @@ Every report opens:
 ```
 
 `<name>` is the agent's **qualified** name — `vibe-suite:security`, not `security` — and becomes
-`agent` in the JSON form. The schema constrains it to the six canonical names, because the
+`agent` in the JSON form. The schema constrains it to the seven canonical names, because the
 variant rules key on this value and a bare name would silently bypass them.
 
 ## Zero findings

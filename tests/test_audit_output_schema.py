@@ -186,6 +186,24 @@ class TestAgentNameIsCanonical(unittest.TestCase):
         self.v = _validator()
         self.schema = _load(SCHEMA_PATH)
 
+    def test_security_scanner_identity_inherits_the_security_variant(self):
+        """E3.9 registered a seventh identity. The enum is closed because the variant
+        rules key on it, so adding the name without extending the security branch would
+        create exactly the silent bypass that closure exists to prevent."""
+        self.assertIn("vibe-suite:security-scanner",
+                      self.schema["properties"]["agent"]["enum"])
+        finding = {
+            "file": "scripts/install.sh:3", "observation": "Pipe to shell — remote code",
+            "severity": "[CRITICAL]", "evidence": "curl ... | sh",
+            "proposed_change": "download, verify, then run", "tradeoff": "two steps",
+        }
+        report = {"agent": "vibe-suite:security-scanner", "findings": [dict(finding)]}
+        # without an exploit scenario the security variant must reject it
+        with self.assertRaises(self.v.ValidationError):
+            self.v.validate(report, self.schema)
+        report["findings"][0]["exploit_scenario"] = "remote code runs as the installing user"
+        self.v.validate(report, self.schema)   # must not raise
+
     def test_rejects_unqualified_agent_name(self):
         report = {
             "agent": "security",  # bare, not vibe-suite:security

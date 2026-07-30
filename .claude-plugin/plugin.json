@@ -33,7 +33,8 @@
     "./commands/update.md",
     "./commands/test.md",
     "./commands/vocab.md",
-    "./commands/spec-sync.md"
+    "./commands/spec-sync.md",
+    "./commands/security-scan.md"
   ],
   "hooks": "./hooks/hooks.json",
   "agents": [
@@ -43,7 +44,8 @@
     "./agents/vague-scanner.md",
     "./agents/tester.md",
     "./agents/vocab-drift-scanner.md",
-    "./agents/spec-researcher.md"
+    "./agents/spec-researcher.md",
+    "./agents/security-scanner.md"
   ],
   "skills": [
     "./skills/agent-design",

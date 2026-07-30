@@ -1,0 +1,416 @@
+# SPDX-License-Identifier: ISC
+"""E3.9 (vibe-34) acceptance: /vibe-suite:security-scan + security-scanner.
+
+Rung 0/1 pins the contracts, the shared-artifact edits, and the fixture oracle. Live
+scanning is the agent's judgment lane — CI makes no model call. What runs mechanically is
+the one-to-one comparison of a RECORDED manual scan against the independently hand-authored
+expectation, plus schema validation of that recorded output.
+
+The scanner's report is one COMPOSITE contract: the skill says the audit-report section
+carries a severity table and a six-column Findings table, and that the scanner's report
+"additionally" carries surface counts and Risk level. "Additionally" is cumulative, so the
+agent owes all of it, and the two findings renderings must agree row for row.
+"""
+
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+COMMAND = REPO_ROOT / "commands" / "security-scan.md"
+AGENT = REPO_ROOT / "agents" / "security-scanner.md"
+SPEC = REPO_ROOT / ".vibe-test" / "security-scanner.spec.md"
+SKILL = REPO_ROOT / "skills" / "security" / "SKILL.md"
+CORE = REPO_ROOT / "skills" / "vibe-core" / "SKILL.md"
+SCHEMA = REPO_ROOT / "schemas" / "audit-output.schema.json"
+VALIDATOR = REPO_ROOT / "scripts" / "validate_audit_output.py"
+FIX = REPO_ROOT / "tests" / "fixtures" / "security-scan"
+EXPECTED = FIX / "expected-findings.md"
+RECORDED = FIX / "recorded-scan.md"
+
+IDENTITY = "vibe-suite:security-scanner"
+BANNERS = ["SECURITY GATE: PASSED", "SECURITY GATE: REVIEW NEEDED",
+           "SECURITY GATE: BLOCKED"]
+RULE = "─" * 60
+
+#: D2c — Risk level grades the highest severity present; the gate is coarser, collapsing
+#: Low into PASS and both High and Critical into BLOCK.
+RISK_LADDER = [
+    ("none", "CLEAR", "PASS"),
+    ("Low", "LOW", "PASS"),
+    ("Medium", "MEDIUM", "REVIEW"),
+    ("High", "HIGH", "BLOCK"),
+    ("Critical", "CRITICAL", "BLOCK"),
+]
+
+
+def squash(text):
+    return re.sub(r"\s+", " ", text)
+
+
+def table_rows(text):
+    """Findings rows: six columns, first cell an integer ordinal.
+
+    The width matters — the severity-counts table also leads with a digit, and accepting
+    it would silently add a phantom finding to every comparison.
+    """
+    rows = []
+    for line in text.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) == 6 and cells[0].isdigit():
+            rows.append(cells)
+    return rows
+
+
+def skill_pattern_names():
+    """The permitted pattern names, PARSED from the security skill.
+
+    Derived rather than restated: the skill is the single pattern DB (F5.2), so a name the
+    scanner permits but the skill does not carry would be exactly the drift F5.2 forbids.
+    """
+    text = SKILL.read_text(encoding="utf-8")
+
+    def section(start, end):
+        i = text.index(start)
+        return text[i:text.index(end, i)]
+
+    names = []
+    for start, end in (("### Critical patterns", "### High patterns"),
+                       ("### High patterns", "### Medium patterns"),
+                       ("### Medium patterns", "## MCP configuration"),
+                       ("## MCP configuration", "## Hook safety")):
+        for line in section(start, end).splitlines():
+            if line.startswith("| ") and "---" not in line:
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                if cells and cells[0] not in ("Pattern", "Check"):
+                    names.append(cells[0])
+    for start, end in (("## Hook safety", "## Dependency supply chain"),
+                       ("## Dependency supply chain", "## Prompt injection surfaces"),
+                       ("## Prompt injection surfaces", "## Severity definitions")):
+        names.extend(re.findall(r"(?m)^- \*\*(.+?)\*\* — ", section(start, end)))
+    return names
+
+
+class Deliverables(unittest.TestCase):
+    def test_artifacts_and_registration(self):
+        self.assertTrue(COMMAND.is_file())
+        self.assertTrue(AGENT.is_file())
+        manifest = json.loads(
+            (REPO_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertIn("./commands/security-scan.md", manifest["commands"])
+        self.assertIn("./agents/security-scanner.md", manifest["agents"])
+        self.assertGreaterEqual(len(manifest["commands"]), 19)
+        self.assertGreaterEqual(len(manifest["agents"]), 8)
+
+    def test_agent_frontmatter_matches_its_shipped_spec(self):
+        body = AGENT.read_text(encoding="utf-8")
+        # the source's description is capability-style ("Scan NL programming plugins…");
+        # the shipped E3.6 spec requires trigger style, so the source supplies behaviour,
+        # not text
+        self.assertRegex(body, r"(?m)^description: Use when")
+        self.assertRegex(body, r"(?m)^model: (haiku|sonnet|opus)$")
+        self.assertRegex(body, r"(?m)^tools: Read, Glob, Grep$")
+        spec = SPEC.read_text(encoding="utf-8")
+        self.assertIn("execution-surface inventory", spec)
+        self.assertIn("risk-level classification", spec)
+
+    def test_agent_has_no_mutation_tool(self):
+        # the spec's non-trigger "fix the dangerous hook" puts mutation out of contract
+        tools = re.search(r"(?m)^tools: (.*)$", AGENT.read_text(encoding="utf-8")).group(1)
+        for forbidden in ("Write", "Edit", "Bash", "NotebookEdit"):
+            self.assertNotIn(forbidden, tools, f"scanner must not carry {forbidden}")
+
+    def test_no_deprecated_vocabulary(self):
+        for path in (COMMAND, AGENT):
+            self.assertNotRegex(path.read_text(encoding="utf-8"), r"(?i)\bimplement\b")
+
+
+class CommandContract(unittest.TestCase):
+    def setUp(self):
+        self.flat = squash(COMMAND.read_text(encoding="utf-8"))
+
+    def test_precondition_and_error_strings(self):
+        for marker in (".claude-plugin/", "agents/", "commands/", "skills/", "hooks/",
+                       "scripts/"):
+            self.assertIn(marker, self.flat)
+        self.assertIn("Directory not found: {path}", self.flat)
+        self.assertIn("Not a Claude Code plugin directory", self.flat)
+
+    def test_body_is_verbatim_and_only_the_banner_is_appended(self):
+        self.assertIn("verbatim", self.flat)
+        self.assertIn("append nothing else", self.flat)
+        self.assertIn("Never mutates the target", self.flat)
+
+    def test_banner_strings_and_rule(self):
+        body = COMMAND.read_text(encoding="utf-8")
+        for banner in BANNERS:
+            self.assertIn(banner, body, f"missing banner: {banner}")
+        self.assertIn(RULE, body, "the banner is framed by 60 box-drawing characters")
+
+    def test_ladder_is_ordered_not_a_set_of_conditions(self):
+        # a Medium-only report satisfies both "no Critical or High" and "only Medium";
+        # the fix is an ORDER, so the command must state one
+        self.assertIn("first match wins", self.flat)
+        self.assertRegex(self.flat, r"BLOCK on any Critical or High.*"
+                                    r"otherwise REVIEW on any Medium.*otherwise PASS")
+
+    def test_disagreement_branch_declines_to_gate(self):
+        self.assertIn("Scan inconsistent: agent recommended <X>, findings imply <Y>. "
+                      "Not gating; rerun /vibe-suite:security-scan.", self.flat)
+        self.assertIn("print **no banner**", self.flat)
+
+    def test_empty_report_is_a_failure_not_a_pass(self):
+        self.assertIn("An empty agent report is a failed scan, not a clean one", self.flat)
+
+
+class CompositeReport(unittest.TestCase):
+    """D2 — seven parts, and the two findings renderings must agree."""
+
+    def setUp(self):
+        self.agent = AGENT.read_text(encoding="utf-8")
+        self.flat = squash(self.agent)
+
+    def test_qualified_header(self):
+        self.assertIn(f"## [Agent: {IDENTITY}] Findings", self.agent)
+
+    def test_all_seven_parts_are_stated(self):
+        for part in ("Severity counts", "| # | Severity | File | Line | Pattern | "
+                     "Description |", "Surface inventory", "Risk level", "Recommendation",
+                     "Exploit scenario", "[GOOD]"):
+            self.assertIn(part, self.agent, f"composite is missing: {part}")
+
+    def test_six_fields_plus_exploit(self):
+        for field in ("File", "Observation", "Severity", "Evidence", "Proposed change",
+                      "Tradeoff", "Exploit scenario"):
+            self.assertIn(f"**{field}**", self.agent, f"missing six-field entry: {field}")
+
+    def test_observation_syntax_makes_pattern_derivable(self):
+        # free prose would leave `Pattern` unbound; the em-dash split is what makes the
+        # summary table derivable instead of re-judged
+        self.assertIn("`<Pattern name> — <prose>`", self.agent)
+        self.assertIn("the text before the", self.flat)
+
+    def test_risk_ladder_rows(self):
+        for highest, risk, rec in RISK_LADDER:
+            with self.subTest(highest=highest):
+                self.assertRegex(
+                    self.flat,
+                    rf"\|\s*{re.escape(highest)}\s*\|\s*`?{risk}`?\s*\|\s*`?{rec}`?\s*\|",
+                    f"missing risk row: {highest} -> {risk}/{rec}")
+
+    def test_good_sentinel_row_and_its_exemption(self):
+        self.assertIn("| 1 | [GOOD] | — | — | — |", self.agent)
+        self.assertIn("exclusive", self.flat)
+        self.assertIn("cannot appear beside a substantive finding", self.flat)
+
+
+class SkillIsTheSingleSourceOfTruth(unittest.TestCase):
+    """Cross-artifact equalities. Each shared artifact this item edits gets an assertion,
+    not a claim of coverage."""
+
+    def test_agent_references_the_skill_by_literal_path(self):
+        # E4.2's acceptance is a grep test over both security front-ends
+        self.assertIn("skills/security/SKILL.md", AGENT.read_text(encoding="utf-8"))
+
+    def test_agent_inlines_untrusted_input_and_references_redaction(self):
+        flat = squash(AGENT.read_text(encoding="utf-8"))
+        self.assertIn("never instructions", flat)   # F9.2 requires inlining, per agent
+        self.assertIn("first four and last four", flat)
+        self.assertIn("vibe-core", flat)            # referenced, never restated
+
+    def test_permitted_pattern_names_are_39_and_unique(self):
+        names = skill_pattern_names()
+        self.assertEqual(len(names), 39,
+                         f"expected 18+6+5+7+3 = 39 named checks, got {len(names)}")
+        self.assertEqual(len(set(names)), 39, "pattern names must be unique")
+
+    def test_every_recorded_pattern_is_a_skill_name(self):
+        permitted = set(skill_pattern_names())
+        for row in table_rows(RECORDED.read_text(encoding="utf-8")):
+            with self.subTest(row=row[0]):
+                if row[1] == "[GOOD]":
+                    continue
+                self.assertIn(row[4], permitted,
+                              f"pattern {row[4]!r} is not a name the skill carries")
+
+    def test_vibe_core_enumeration_equals_the_schema_enum(self):
+        schema_enum = json.loads(SCHEMA.read_text(encoding="utf-8"))["properties"]["agent"]["enum"]
+        core = CORE.read_text(encoding="utf-8")
+        # the enum is closed because the variant rules key on it; the prose that states how
+        # many names there are must not drift from the schema that holds them
+        self.assertIn(f"the {['zero','one','two','three','four','five','six','seven','eight'][len(schema_enum)]} canonical names",
+                      core, f"vibe-core must say there are {len(schema_enum)} canonical names")
+
+    def test_security_skill_carries_the_same_ordered_ladder(self):
+        flat = squash(SKILL.read_text(encoding="utf-8"))
+        self.assertIn("ordered ladder, first match wins", flat)
+        self.assertRegex(flat, r"1\. \*\*BLOCK\*\*.*2\. \*\*REVIEW\*\*.*3\. \*\*PASS\*\*")
+
+
+class RecordedScanAgainstTheOracle(unittest.TestCase):
+    """The judgment lane's evidence, compared mechanically."""
+
+    def setUp(self):
+        self.expected = table_rows(EXPECTED.read_text(encoding="utf-8"))
+        self.recorded = table_rows(RECORDED.read_text(encoding="utf-8"))
+
+    def test_provenance_header(self):
+        text = RECORDED.read_text(encoding="utf-8")
+        for field in ("**Date:**", "**Model:**", "**Command:**", "**Target:**"):
+            self.assertIn(field, text, f"recording must state {field}")
+        self.assertIn("/vibe-suite:security-scan", text)
+
+    def test_one_to_one_with_no_extras(self):
+        self.assertEqual(len(self.recorded), len(self.expected),
+                         "the recording must contain exactly the expected findings")
+        for exp, got in zip(self.expected, self.recorded):
+            with self.subTest(row=exp[0]):
+                self.assertEqual(got, exp)
+
+    def test_both_renderings_agree(self):
+        text = RECORDED.read_text(encoding="utf-8")
+        six_field = re.findall(r"\*\*File\*\* `([^`]+)`\n\*\*Observation\*\* (.+)", text)
+        self.assertEqual(len(six_field), len(self.recorded),
+                         "the six-field and summary renderings must have equal row counts")
+        for (loc, observation), row in zip(six_field, self.recorded):
+            with self.subTest(row=row[0]):
+                path, _, line = loc.rpartition(":")
+                self.assertEqual(row[2], path)
+                self.assertEqual(row[3], line)
+                pattern, _, description = observation.partition(" — ")
+                self.assertEqual(row[4], pattern)
+                self.assertEqual(row[5], description)
+
+    def test_suppressions_are_absent(self):
+        rows = self.recorded
+        # each is a distinct rule with its own seed; an absence assertion is the only way
+        # to test a drop
+        self.assertFalse([r for r in rows if r[2] == "scripts/install.sh" and r[3] == "6"],
+                         "echo-wrapped match must be dropped")
+        self.assertFalse([r for r in rows if r[2] == "scripts/install.sh" and r[3] == "10"],
+                         "heredoc body match must be dropped")
+        self.assertFalse([r for r in rows if r[2] == "package.json" and r[3] == "3"],
+                         "unpinned dependency must be suppressed by the lockfile")
+
+    def test_md_finding_is_capped_not_dropped(self):
+        capped = [r for r in self.recorded if r[2] == "commands/notes.md"]
+        self.assertEqual(len(capped), 1, "the .md match is capped, not dropped")
+        self.assertEqual(capped[0][1], "[LOW]")
+
+    def test_derived_values_follow_the_ladder(self):
+        text = RECORDED.read_text(encoding="utf-8")
+        self.assertIn("Risk level: CRITICAL", text)
+        self.assertIn("Recommendation: BLOCK", text)
+        self.assertEqual(len(re.findall(r"(?m)^Recommendation: ", text)), 1,
+                         "exactly one Recommendation line")
+
+
+class SchemaConformance(unittest.TestCase):
+    """Validate the EMITTED output, not the hand oracle — and prove the extended variant
+    branch actually keys on the new identity."""
+
+    def _serialize(self, drop_exploit=False, agent=IDENTITY):
+        text = RECORDED.read_text(encoding="utf-8")
+        findings = []
+        blocks = re.findall(
+            r"\*\*File\*\* `([^`]+)`\n\*\*Observation\*\* (.+)\n\*\*Severity\*\* (\S+)\n"
+            r"\*\*Evidence\*\* (.+)\n\*\*Proposed change\*\* (.+)\n\*\*Tradeoff\*\* (.+)\n"
+            r"\*\*Exploit scenario\*\* ((?:.|\n)+?)(?=\n\n)", text)
+        self.assertTrue(blocks, "no six-field findings parsed from the recording")
+        for loc, observation, severity, evidence, change, tradeoff, exploit in blocks:
+            entry = {
+                "file": loc, "observation": observation, "severity": severity,
+                "evidence": evidence, "proposed_change": change, "tradeoff": tradeoff,
+            }
+            if not drop_exploit:
+                entry["exploit_scenario"] = " ".join(exploit.split())
+            findings.append(entry)
+        return {"agent": agent, "findings": findings}
+
+    def _validate(self, payload):
+        # the suite's own validator, invoked exactly as CI would — reimplementing schema
+        # checking here would test my reimplementation, not the contract
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump(payload, handle)
+            report = handle.name
+        try:
+            proc = subprocess.run([sys.executable, str(VALIDATOR), report],
+                                  capture_output=True, text=True, timeout=60)
+            return proc.returncode
+        finally:
+            os.unlink(report)
+
+    def test_identity_is_registered(self):
+        enum = json.loads(SCHEMA.read_text(encoding="utf-8"))["properties"]["agent"]["enum"]
+        self.assertIn(IDENTITY, enum)
+
+    def test_security_variant_keys_on_both_identities(self):
+        schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        branches = [b for b in schema.get("allOf", [])
+                    if IDENTITY in b.get("if", {}).get("properties", {})
+                    .get("agent", {}).get("enum", [])]
+        self.assertEqual(len(branches), 1,
+                         "the scanner must inherit the security variant, not bypass it")
+        self.assertIn("vibe-suite:security",
+                      branches[0]["if"]["properties"]["agent"]["enum"])
+
+    def test_recorded_output_validates(self):
+        self.assertEqual(self._validate(self._serialize()), 0,
+                         "the emitted report must satisfy the schema")
+
+    def test_missing_exploit_scenario_is_rejected(self):
+        self.assertNotEqual(self._validate(self._serialize(drop_exploit=True)), 0,
+                            "the security variant must require an Exploit scenario")
+
+    def test_unqualified_identity_is_rejected(self):
+        self.assertNotEqual(self._validate(self._serialize(agent="security-scanner")), 0,
+                            "a bare name would bypass the variant rules")
+
+
+#: SHA-256 of every frozen fixture, keyed by path relative to the fixture root. The seals
+#: close the set; the tests above bind the content. Both are needed: a seal alone permits a
+#: meaningless re-bless, and content assertions alone permit additions.
+FIXTURE_SHA256 = {
+    "README.md":
+        "7c280348e7e02e88717589922bfb7967d9e7e75306899f07e7d224c716c0aed0",
+    "expected-findings.md":
+        "099ab68f067629e14d3918f2b84663e61419db22f8bb13d97ab033467f35164a",
+    "recorded-scan.md":
+        "69cb1cc82f6964748f62ae8f5d1e7eea67d05b353e3cf3c8cd816d84a08ddddb",
+    "seeded-plugin/.claude-plugin/plugin.json":
+        "0ea21b8045f2f6276c6726dfbc633191262bcdea8913642c760547829e088ecc",
+    "seeded-plugin/.mcp.json":
+        "a5dd752876a05f6746a7ac8bb722dc3a0bae9cecd674eb96b149d29ecf26758b",
+    "seeded-plugin/commands/notes.md":
+        "d7b145501ca7fedb2d265b6ee6359319a5426969e79fee068911da8c476244da",
+    "seeded-plugin/hooks/hooks.json":
+        "3905d95c618ff7ec8863ce1753ad3bb6bf9a559531323a782a937db6e41e091c",
+    "seeded-plugin/package-lock.json":
+        "7f48ae6b4b222c871ec29c21d64e6a64bca2005665810a93200693fd40a15bac",
+    "seeded-plugin/package.json":
+        "06c030d9549962a8576b326feea312b0678310b3c78b5303c4522ba33a278342",
+    "seeded-plugin/scripts/install.sh":
+        "c4e2819d668d97c4ddc2fb9d2c255d75adcd68c28764b6e40c3af60870277a82",
+}
+
+
+class FixtureSeal(unittest.TestCase):
+    def test_no_fixture_file_escapes_the_seal(self):
+        on_disk = {str(p.relative_to(FIX)) for p in FIX.rglob("*") if p.is_file()}
+        self.assertEqual(on_disk, set(FIXTURE_SHA256))
+        for rel, digest in FIXTURE_SHA256.items():
+            with self.subTest(fixture=rel):
+                self.assertEqual(
+                    hashlib.sha256((FIX / rel).read_bytes()).hexdigest(), digest)
+
+
+if __name__ == "__main__":
+    unittest.main()

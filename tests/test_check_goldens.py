@@ -311,7 +311,7 @@ class RegistryFailClosed(unittest.TestCase):
 
     def test_keyword_lookalikes_refused(self):
         # YAML's case-variant null/bool spellings are typed forms, never silent strings.
-        for lookalike in ("Null", "NULL", "TRUE", "Yes", "off"):
+        for lookalike in ("Null", "NULL", "TRUE", "Yes", "off", "y", "Y", "n", "N"):
             self.assertEqual(self._description(lookalike).returncode, 2, lookalike)
 
     def test_numeric_lookalikes_refused(self):

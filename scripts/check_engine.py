@@ -266,8 +266,9 @@ REGISTRY_KEYS = {"scopes", "cross_scope_homonyms", "verbs",
                  "deferred_pending_warrant", "rejected_by_higher_principle", "nouns"}
 
 
-#: YAML's null/bool spelling family beyond the canonical lowercase forms decoded above.
-_KEYWORD_LOOKALIKE = re.compile(r"(?i)(null|true|false|yes|no|on|off)")
+#: YAML's null/bool spelling family beyond the canonical lowercase forms decoded above —
+#: including the YAML 1.1 single-letter boolean abbreviations y/Y/n/N.
+_KEYWORD_LOOKALIKE = re.compile(r"(?i)(null|true|false|yes|no|on|off|y|n)")
 
 
 def _reg_quoted(text, line_no, source):

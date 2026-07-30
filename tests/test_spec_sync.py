@@ -523,9 +523,28 @@ LEXICON = {
 #: When the contract legitimately changes: update the artifact, the golden, LEXICON, and
 #: this hash in one commit, and the clause tables above will tell you if you changed a
 #: rule rather than its wording.
+#: The worksheet and the two report oracles are sealed for the same reason and by the
+#: same argument. They are T0 deliverables — the hand-derived expectations the acceptance
+#: rests on — and they were guarded only by presence checks, so a contradicting sentence
+#: added to the D3, D4, D5, D6 or D7 sections passed every test while quietly changing
+#: what the oracle says. A hand oracle that can be edited without failing anything is not
+#: an oracle. Substantive errors in this worksheet kept finding 3 open twice, which is
+#: the strongest argument that it deserves the same seal as the artifacts.
 CONTRACT_SHA256 = {
     "command": "ff268a973c39ab1058ad032f3e6725e3f2e031e51f44a8e80a5889908fe928d3",
     "agent": "2d9b35ae1e29170d089e471561a4581c105caff66a44569f5dce765a2beb67a2",
+    "worksheet": "5c7adfe4c07995217b60049f8f03c8d38394ac9010eb233b798e08540fe1a6ec",
+    "expected-report": "da7c4dfe1ac85dfdaca1dba1c747441fe5efa402010807a899c6487e96420201",
+    "recorded-dry-run": "bf9c97acb9610045aa63da32a356039c336544aeee0032679eebd6de556548e7",
+}
+
+#: Every sealed path, by the key used above.
+SEALED = {
+    "command": COMMAND,
+    "agent": AGENT,
+    "worksheet": FIX / "README.md",
+    "expected-report": EXPECTED,
+    "recorded-dry-run": RECORDED,
 }
 
 
@@ -535,15 +554,25 @@ class FrozenContractSeal(unittest.TestCase):
     sentence that contradicts it while every required sentence stays put. Presence checks
     cannot close that; only pinning the whole text can."""
 
-    def test_artifact_text_is_sealed(self):
-        for key, path in (("command", COMMAND), ("agent", AGENT)):
+    def test_frozen_texts_are_sealed(self):
+        for key, path in SEALED.items():
             with self.subTest(artifact=key):
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
                 self.assertEqual(
                     digest, CONTRACT_SHA256[key],
                     f"{key} text changed. Nothing may be added, removed, or reworded in "
-                    "a frozen contract without updating CONTRACT_SHA256, LEXICON and the "
-                    "golden together — see the clause tables for what each rule requires.")
+                    "a frozen contract or hand oracle without updating CONTRACT_SHA256 "
+                    "(and, for the two artifacts, LEXICON and the golden) in the same "
+                    "commit — see the clause tables for what each rule requires.")
+
+    def test_every_frozen_deliverable_is_sealed(self):
+        # a new frozen deliverable must be added to the seal, not merely to the tree:
+        # the worksheet was a T0 deliverable guarded only by presence checks for three
+        # rounds, and that is exactly how a hand oracle drifts without failing anything
+        self.assertEqual(set(SEALED), set(CONTRACT_SHA256),
+                         "every sealed path needs a digest and vice versa")
+        for key, path in SEALED.items():
+            self.assertTrue(path.is_file(), f"sealed path missing: {key}")
 
 
 class FrozenLexicon(unittest.TestCase):

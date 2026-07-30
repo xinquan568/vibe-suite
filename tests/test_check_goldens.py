@@ -274,6 +274,37 @@ class RegistryFailClosed(unittest.TestCase):
         proc = self._run(REGISTRY_OK.replace("verbs:\n  s: []\n", "verbs:\n  t: []\n"))
         self.assertEqual(proc.returncode, 2)
 
+    def test_null_leaf_refused(self):
+        # A YAML null is not a string; a required string leaf must refuse, not coerce.
+        proc = self._run(REGISTRY_OK.replace(
+            "verbs:\n  s: []\n",
+            "verbs:\n  s:\n    - canonical: null\n      deprecated: []\n"
+            "      output: none\n      judgment: false\n"))
+        self.assertEqual(proc.returncode, 2)
+
+    def test_flow_constructs_refused(self):
+        # Flow mappings and non-empty flow lists are outside the accepted grammar.
+        proc = self._run(REGISTRY_OK.replace(
+            "    paths:\n      - commands/**\n", "    paths: [commands/**]\n"))
+        self.assertEqual(proc.returncode, 2)
+        proc = self._run(REGISTRY_OK.replace(
+            "verbs:\n  s: []\n",
+            "verbs:\n  s:\n    - canonical: use\n      deprecated: []\n"
+            "      output: none\n      judgment: false\n      notes: {oops: 1}\n"))
+        self.assertEqual(proc.returncode, 2)
+
+    def test_unterminated_quoted_scalar_refused(self):
+        proc = self._run(REGISTRY_OK.replace(
+            "    description: scope\n", '    description: "unterminated\n'))
+        self.assertEqual(proc.returncode, 2)
+
+    def test_non_string_homonym_members_refused(self):
+        for member in ("null", "1.5"):
+            proc = self._run(REGISTRY_OK.replace(
+                "cross_scope_homonyms:\n  verbs: []\n",
+                f"cross_scope_homonyms:\n  verbs:\n    - {member}\n"))
+            self.assertEqual(proc.returncode, 2, f"member {member!r} must refuse")
+
 
 class Composition(unittest.TestCase):
     def test_whole_object_composed_golden(self):

@@ -266,15 +266,27 @@ REGISTRY_KEYS = {"scopes", "cross_scope_homonyms", "verbs",
                  "deferred_pending_warrant", "rejected_by_higher_principle", "nouns"}
 
 
-def _reg_scalar(text):
+def _reg_scalar(text, line_no, source):
+    """Decode one scalar fail-closed: YAML's null/bool/number forms decode to their types
+    (so a string-typed leaf refuses them later), quotes must terminate, and flow/tag/anchor
+    constructs are outside the accepted grammar — never silently strings."""
     if text == "[]":
         return []
+    if text in ("null", "~"):
+        return None
     if text in ("true", "false"):
         return text == "true"
     if re.fullmatch(r"-?[0-9]+", text):
         return int(text)
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
-        return text[1:-1]
+    if re.fullmatch(r"-?[0-9]+\.[0-9]+", text):
+        return float(text)
+    if text[:1] in ("\"", "'"):
+        if len(text) >= 2 and text[-1] == text[0]:
+            return text[1:-1]
+        raise RegistryError(f"{source}:{line_no}: unterminated quoted scalar")
+    if text[:1] in ("{", "[", "!", "&", "*", "|", ">") or text.startswith("<<"):
+        raise RegistryError(
+            f"{source}:{line_no}: construct outside the accepted registry grammar")
     return text
 
 
@@ -299,7 +311,9 @@ def _reg_block(lines, index, indent, source):
             rest = content[2:].strip()
             key, sep, value = rest.partition(":")
             if sep and _REG_KEY.match(key.strip()) and (not value or value[0] == " "):
-                item = {key.strip(): _reg_scalar(value.strip()) if value.strip() else None}
+                head = value.strip()
+                item = {key.strip():
+                        _reg_scalar(head, index + 1, source) if head else None}
                 sub, index = _reg_block(lines, index + 1, indent + 2, source)
                 if isinstance(sub, dict):
                     for k, v in sub.items():
@@ -311,7 +325,7 @@ def _reg_block(lines, index, indent, source):
                     raise RegistryError(f"{source}: a list may not follow a list item head")
                 entries_list.append(item)
             else:
-                entries_list.append(_reg_scalar(rest))
+                entries_list.append(_reg_scalar(rest, index + 1, source))
                 index += 1
             continue
         if entries_list is not None:
@@ -324,7 +338,7 @@ def _reg_block(lines, index, indent, source):
         if key in entries_map:
             raise RegistryError(f"{source}:{index + 1}: duplicate key {key!r}")
         if value:
-            entries_map[key] = _reg_scalar(value)
+            entries_map[key] = _reg_scalar(value, index + 1, source)
             index += 1
         else:
             entries_map[key], index = _reg_block(lines, index + 1, indent + 2, source)

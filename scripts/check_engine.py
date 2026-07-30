@@ -363,23 +363,60 @@ def _reg_scalar(text, line_no, source):
     return text
 
 
-def _reg_strip_comment(line):
-    """Drop a YAML inline comment (whitespace-preceded `#` outside quotes) — a comment is
-    never part of the value, so `y # note` must decode as `y`, not a longer string."""
-    inside, index = None, 0
-    while index < len(line):
+def _reg_quote_spans(line):
+    """[(start, end)] quoted-scalar spans, opened only where YAML can START a scalar:
+    at the first non-space of the line, or after a space that follows ':' or '-'. A
+    quote glued to preceding content is plain-scalar CONTENT, never a quote — so a '#'
+    or a tab after it is still a real comment marker / a real bare tab. An unterminated
+    quote spans to line end (the decode path raises its own refusal)."""
+    spans, index, length = [], 0, len(line)
+    while index < length:
         char = line[index]
-        if inside:
-            if char == "\\" and inside == '"':
-                index += 2
-                continue
-            if char == inside:
-                inside = None
-        elif char in "\"'":
-            inside = char
-        elif char == "#" and (index == 0 or line[index - 1] in " \t"):
-            return line[:index]
+        if char in "\"'" and _reg_opens_quote(line, index):
+            start = index
+            index += 1
+            if char == '"':
+                while index < length:
+                    if line[index] == "\\":
+                        index += 2
+                        continue
+                    if line[index] == '"':
+                        index += 1
+                        break
+                    index += 1
+            else:
+                while index < length:
+                    if line[index] == "'":
+                        if line[index + 1:index + 2] == "'":
+                            index += 2
+                            continue
+                        index += 1
+                        break
+                    index += 1
+            spans.append((start, min(index, length)))
+            continue
         index += 1
+    return spans
+
+
+def _reg_opens_quote(line, index):
+    before = line[:index]
+    if before.strip(" ") == "":
+        return True                       # first non-space character of the line
+    if not before.endswith(" "):
+        return False                      # glued to content — YAML reads it as content
+    return before.rstrip(" ")[-1:] in (":", "-")
+
+
+def _reg_strip_comment(line):
+    """Drop a YAML inline comment: a whitespace-preceded `#` outside quoted-scalar
+    spans — a comment is never part of the value, so `y # note` decodes as `y` and
+    `foo' # note` decodes as `foo'` (the glued quote is content, not a quote)."""
+    spans = _reg_quote_spans(line)
+    for index, char in enumerate(line):
+        if char == "#" and (index == 0 or line[index - 1] in " \t") \
+                and not any(s <= index < e for s, e in spans):
+            return line[:index]
     return line
 
 
@@ -442,24 +479,15 @@ def _reg_item_head(rest, line_no, source):
 
 
 def _reg_tab_guard(line, line_no, source):
-    """Refuse a bare TAB anywhere outside quoted scalars. PyYAML rejects tabs in block
-    structure (ScannerError); the accepted subset is spaces-only outside quotes, with
-    quoted content (and comment text, stripped before this runs) free to carry tabs."""
-    inside, index = None, 0
-    while index < len(line):
-        char = line[index]
-        if inside:
-            if char == "\\" and inside == '"':
-                index += 2
-                continue
-            if char == inside:
-                inside = None
-        elif char in "\"'":
-            inside = char
-        elif char == "\t":
+    """Refuse a bare TAB anywhere outside quoted-scalar spans. PyYAML rejects tabs in
+    block structure (ScannerError); the accepted subset is spaces-only outside quotes,
+    with quoted content (and comment text, stripped before this runs) free to carry
+    tabs. Position-aware: a quote glued mid-scalar is content and hides nothing."""
+    spans = _reg_quote_spans(line)
+    for index, char in enumerate(line):
+        if char == "\t" and not any(s <= index < e for s, e in spans):
             raise RegistryError(f"{source}:{line_no}: tab outside a quoted scalar — "
                                 "spaces only")
-        index += 1
 
 
 def _reg_block(lines, index, indent, source):

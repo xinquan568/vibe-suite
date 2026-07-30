@@ -499,6 +499,32 @@ class RegistryFailClosed(unittest.TestCase):
             proc = run_engine(root)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
 
+    def test_mid_scalar_quotes_are_content(self):
+        # A quote glued to preceding content is plain-scalar CONTENT per YAML — it must
+        # not open quote mode: the comment after foo' still strips, and a tab after
+        # foo' is still a bare tab (PyYAML ScannerError).
+        proc = self._run(REGISTRY_OK.replace(
+            "    description: scope\n", "    description: foo' # note\n"))
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        proc = self._run(REGISTRY_OK.replace(
+            "    description: scope\n", "    description: foo'\tbar\n"))
+        self.assertEqual(proc.returncode, 2, "tab hidden by a mid-scalar quote")
+
+    def test_scan_semantics_whitebox(self):
+        # The scan helpers themselves: comment stripping and decoded values must match
+        # YAML's reading (PyYAML decodes description as "foo'" in the glued case).
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        try:
+            import check_engine
+        finally:
+            sys.path.pop(0)
+        strip = check_engine._reg_strip_comment
+        self.assertEqual(strip("    description: foo' # note"),
+                         "    description: foo' ")
+        self.assertEqual(strip("    description: 'a # b' # c"),
+                         "    description: 'a # b' ")
+        self.assertEqual(strip("    key: a#b"), "    key: a#b")
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

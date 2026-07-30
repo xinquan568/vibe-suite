@@ -342,12 +342,94 @@ class RequiredClauses(unittest.TestCase):
 
 
 class ClosedSets(unittest.TestCase):
-    """Every set the contract closes is compared by EQUALITY, so an addition, a swap,
-    a duplicate, or a reordering fails — membership checks could see none of those."""
+    """Every closed set is EXTRACTED with a general pattern and compared by equality
+    against the frozen expectation, in BOTH artifacts. A pattern that matches only the
+    expected values cannot see an addition — `--min-confidence (high|medium)` is blind
+    to `critical` — so every extraction below is deliberately permissive and the
+    equality does the work.
+    """
+
+    D3_TAGS = ["RESOLVED", "REMOVE", "FIX", "ADD", "CONFIRM"]
+    #: The agent restates D3 in its own words; its rows are pinned exactly too.
+    AGENT_TABLE = [
+        ["1", "`RESOLVED`",
+         'carries an explicit hedge about X (caveat / "advisory" / "unsettled" / '
+         '"until … stabilizes")', "now settles X definitively"],
+        ["2", "`REMOVE`", "states X",
+         "documents X as withdrawn or absent, with NO replacement fact"],
+        ["3", "`FIX`", "states X", "states not-X, WITH a replacement fact"],
+        ["4", "`ADD`", "silent on X, and X is inside the overlay's declared scope",
+         "states X"],
+        ["5", "`CONFIRM`", "states X definitely, with no hedge", "states X"],
+    ]
 
     def setUp(self):
         self.command = COMMAND.read_text(encoding="utf-8")
         self.agent = AGENT.read_text(encoding="utf-8")
+        self.both = {"command": self.command, "agent": self.agent}
+
+    @staticmethod
+    def _rows(text):
+        rows = []
+        for line in text.splitlines():
+            if line.startswith("| ") and "`" in line:
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                if cells and cells[0].isdigit():
+                    rows.append(cells)
+        return rows
+
+    def test_targets_are_exactly_four(self):
+        # extracted from the argument-hint, which enumerates the closed target set
+        hint = re.search(r"^argument-hint: \"\[([^\]]+)\]", self.command, re.M)
+        self.assertIsNotNone(hint, "argument-hint must enumerate the targets")
+        self.assertEqual(hint.group(1).split("|"),
+                         ["claude", "codex", "antigravity", "all"],
+                         "the target set is closed and ordered")
+
+    def test_mode_flags_are_exactly_the_frozen_set(self):
+        # GENERAL extraction: any --flag in the command, compared by equality
+        flags = set(re.findall(r"`(--[a-z-]+)", self.command))
+        self.assertEqual(
+            flags, {"--dry-run", "--apply", "--min-confidence", "--overlay-root"},
+            f"an unfrozen flag appeared: {sorted(flags)}")
+
+    def test_threshold_values_are_exactly_high_medium(self):
+        # GENERAL: capture whatever follows the flag, not just the expected words
+        values = set(re.findall(r"--min-confidence[` ]+([a-z|<>-]+)", self.command))
+        tokens = {v for value in values for v in re.split(r"[|<>]", value) if v}
+        self.assertEqual(tokens, {"high", "medium"},
+                         f"threshold vocabulary drifted: {sorted(tokens)}")
+
+    def test_confidence_grades_in_both_artifacts(self):
+        for key, text in self.both.items():
+            with self.subTest(artifact=key):
+                # GENERAL: every backticked word used as a grade in a confidence
+                # sentence, plus the note schema's own alternation
+                # union of BOTH forms the artifacts use: a `confidence: a|b`
+                # alternation and standalone backticked grade words. Permissive
+                # capture (any lowercase word), so an added grade is visible.
+                tokens = set()
+                for alt in re.findall(r"confidence: ([a-z|]+)", text):
+                    tokens.update(alt.split("|"))
+                tokens.update(re.findall(r"`([a-z]+)`", text))
+                # intersect with the universe of plausible grade words, so any grade
+                # the artifact introduces is visible while ordinary prose is not
+                tokens &= {"high", "medium", "low", "critical", "certain", "weak",
+                           "strong", "unknown"}
+                self.assertTrue(tokens, f"{key}: no grade vocabulary found at all")
+                self.assertEqual(tokens, {"high", "medium"},
+                                 f"{key}: grade vocabulary drifted: {sorted(tokens)}")
+                self.assertNotRegex(text, r"`low`",
+                                    f"{key}: `low` is not a grade — insufficient "
+                                    "evidence routes to UNCLASSIFIED")
+
+    def test_unclassified_reasons_in_both_artifacts(self):
+        for key, text in self.both.items():
+            with self.subTest(artifact=key):
+                reasons = set(re.findall(r"`(source-[a-z-]+)`", text))
+                self.assertEqual(reasons, {"source-silent", "source-conflict"},
+                                 f"{key}: UNCLASSIFIED reasons drifted: "
+                                 f"{sorted(reasons)}")
 
     def test_propagation_classes_are_exactly_four(self):
         classes = re.findall(r"^- \*\*([A-Z]+)\*\* —", self.command, re.M)
@@ -355,29 +437,29 @@ class ClosedSets(unittest.TestCase):
                          ["SOURCE", "DOCUMENTARY", "ENCODED", "OPERATIONAL"],
                          "the propagation classes are a closed, ordered set of four")
 
-    def test_agent_tag_table_matches_d3_exactly(self):
-        tags = [m.group(1) for m in
-                re.finditer(r"^\| \d \| `([A-Z]+)` \|", self.agent, re.M)]
-        self.assertEqual(tags, [row[1].strip("`") for row in
-                                CommandContract.D3_TABLE],
-                         "the agent's tag table must carry exactly D3's five tags, "
-                         "in D3's order")
+    def test_agent_table_rows_are_exact(self):
+        self.assertEqual(self._rows(self.agent), self.AGENT_TABLE,
+                         "the agent's tag table must match D3's semantics exactly")
 
-    def test_confidence_vocabulary_is_exactly_high_and_medium(self):
-        # the graded vocabulary is closed: a `low` grade is a contract change, since
-        # insufficient evidence routes to UNCLASSIFIED instead
-        grades = set(re.findall(r"`(high|medium|low)`", self.command))
-        self.assertEqual(grades, {"high", "medium"},
-                         f"confidence grades must be exactly high/medium, got {grades}")
-        self.assertNotRegex(self.command, r"(?i)confidence[^.]*\blow\b")
-        reasons = set(re.findall(r"`(source-[a-z]+)`", self.command))
-        self.assertEqual(reasons, {"source-silent", "source-conflict"})
-
-    def test_targets_and_modes_are_closed(self):
-        modes = set(re.findall(r"`(--dry-run|--apply)`", self.command))
-        self.assertEqual(modes, {"--dry-run", "--apply"})
-        thresholds = set(re.findall(r"--min-confidence (high|medium)\b", self.command))
-        self.assertTrue(thresholds <= {"high", "medium"}, thresholds)
+    def test_agent_frontmatter_is_parsed_not_pattern_matched(self):
+        # a duplicate key would let a second `tools:` line override the allowlist while
+        # a line-regex still matched the first — so parse the block and reject dupes
+        lines = self.agent.split("\n")
+        self.assertEqual(lines[0], "---")
+        keys, fields = [], {}
+        for line in lines[1:]:
+            if line == "---":
+                break
+            m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+            if m:
+                keys.append(m.group(1))
+                fields[m.group(1)] = m.group(2).strip()
+        self.assertEqual(len(keys), len(set(keys)),
+                         f"duplicate frontmatter key: {keys}")
+        self.assertEqual([t.strip() for t in fields["tools"].split(",")],
+                         ["WebFetch", "WebSearch", "Read"],
+                         "the tool allowlist is closed")
+        self.assertEqual(fields["model"], "sonnet")
 
 
 class FreshnessNormalization(unittest.TestCase):

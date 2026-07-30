@@ -31,7 +31,8 @@
     "./commands/score.md",
     "./commands/unbridge.md",
     "./commands/update.md",
-    "./commands/test.md"
+    "./commands/test.md",
+    "./commands/vocab.md"
   ],
   "hooks": "./hooks/hooks.json",
   "agents": [
@@ -39,7 +40,8 @@
     "./agents/scanner.md",
     "./agents/scorer.md",
     "./agents/vague-scanner.md",
-    "./agents/tester.md"
+    "./agents/tester.md",
+    "./agents/vocab-drift-scanner.md"
   ],
   "skills": [
     "./skills/agent-design",

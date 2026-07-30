@@ -1,0 +1,113 @@
+scopes:
+  - id: operative
+    description: the command and agent surfaces where verb canonicality is enforced
+    paths:
+      - commands/**
+      - agents/**
+cross_scope_homonyms:
+  verbs: []
+verbs:
+  operative:
+    - canonical: score
+      deprecated: []
+      output: number plus penalty list
+      judgment: false
+      notes: quality quantified against a rubric
+    - canonical: check
+      deprecated: []
+      output: violation list
+      judgment: false
+      notes: cross-references and structural consistency
+    - canonical: test
+      deprecated: []
+      output: pass or fail
+      judgment: false
+      notes: actual behavior versus a named spec
+    - canonical: scan
+      deprecated: []
+      output: findings versus a signature DB
+      judgment: false
+      notes: matching a known problem class
+    - canonical: ls
+      deprecated: []
+      output: grouped artifact inventory
+      judgment: false
+      notes: discovery and classification
+    - canonical: audit
+      deprecated: []
+      output: composite report
+      judgment: true
+      notes: score plus scan plus judgment combined
+    - canonical: review
+      deprecated: []
+      output: comment trail
+      judgment: true
+      notes: a reader forms an opinion
+    - canonical: delegate
+      deprecated:
+        - implement
+      output: a Codex-executed task
+      judgment: false
+      notes: owner-accepted rename from the merge proposal resolved decision D1
+deferred_pending_warrant: []
+rejected_by_higher_principle: []
+nouns:
+  artifact_class:
+    - canonical: command
+      deprecated: []
+      definition: a slash-command markdown artifact
+    - canonical: agent
+      deprecated: []
+      definition: a dispatched worker artifact
+    - canonical: skill
+      deprecated: []
+      definition: a knowledge or workflow SKILL.md artifact
+    - canonical: rule
+      deprecated: []
+      definition: a quality-rule catalog entry
+    - canonical: hook
+      deprecated: []
+      definition: a harness-executed hook registration
+    - canonical: manifest
+      deprecated: []
+      definition: a plugin manifest file
+    - canonical: frontmatter
+      deprecated: []
+      definition: the YAML header of an NL artifact
+    - canonical: artifact
+      deprecated: []
+      definition: the umbrella noun for any NL file
+  output_class:
+    - canonical: finding
+      deprecated: []
+      definition: one detected problem
+    - canonical: violation
+      deprecated: []
+      definition: a finding from a cross-reference check
+    - canonical: penalty
+      deprecated: []
+      definition: the points one finding subtracts
+    - canonical: score
+      deprecated: []
+      definition: the numeric quality result
+    - canonical: snapshot
+      deprecated: []
+      definition: a point-in-time capture of state
+    - canonical: inventory
+      deprecated: []
+      definition: a grouped listing of discovered artifacts
+    - canonical: report
+      deprecated: []
+      definition: a rendered composite result document
+    - canonical: spec
+      deprecated: []
+      definition: a test specification for an NL artifact
+  role_nouns:
+    - canonical: scorer
+      paired_verb: score
+    - canonical: checker
+      paired_verb: check
+    - canonical: tester
+      paired_verb: test
+    - canonical: scanner
+      paired_verb: ls

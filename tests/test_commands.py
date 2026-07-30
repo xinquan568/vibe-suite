@@ -33,6 +33,16 @@ RETIRED_COMMAND_PATTERNS = (
     re.compile(r"`implement`"),
 )
 
+#: The vocabulary registry is the ONE place that must NAME the retired term — listing
+#: a synonym on a canonical term's deprecated line is how it stays retired
+#: ("deprecation is a visible vocabulary act"). E3.7's registry records
+#: implement→delegate there; that record keeps the term OUT of every other artifact
+#: (the R51 check now enforces it mechanically in scoped surfaces).
+ALLOWED_RETIREMENT_RECORDS = {
+    "skills/vocabulary/SKILL.md",
+    "skills/vocabulary/registry.yaml",
+}
+
 
 def _read(path):
     return path.read_text(encoding="utf-8")
@@ -239,9 +249,12 @@ class TestRetiredCommandNames(unittest.TestCase):
                     text = _read(path)
                 except (UnicodeDecodeError, OSError):
                     continue
+                rel = path.relative_to(REPO_ROOT).as_posix()
+                if rel in ALLOWED_RETIREMENT_RECORDS:
+                    continue
                 for pattern in RETIRED_COMMAND_PATTERNS:
                     if pattern.search(text):
-                        offenders.append(f"{path.relative_to(REPO_ROOT)}: {pattern.pattern}")
+                        offenders.append(f"{rel}: {pattern.pattern}")
         self.assertEqual(offenders, [],
                          "retired `implement` command references in shipped artifacts:\n"
                          + "\n".join(offenders))

@@ -232,7 +232,7 @@ class ErrorTaxonomy(unittest.TestCase):
             proc = run_check(str(root))
         self.assertEqual(proc.returncode, 1)
         self.assertIn(
-            "manifest-vs-disk: commands/x.md: on disk but not registered", 
+            "manifest-vs-disk: commands/x.md: on disk but not registered",
             proc.stdout.decode())
 
     def test_skills_entry_may_name_the_skill_md_file(self):

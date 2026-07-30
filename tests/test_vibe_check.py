@@ -257,6 +257,36 @@ class ErrorTaxonomy(unittest.TestCase):
                 self.assertEqual(proc.returncode, 1, entry_json)
                 self.assertIn("escapes the plugin root", proc.stdout.decode())
 
+    def test_escaping_symlinks_are_reported_once_and_never_read(self):
+        # A component that RESOLVES outside the root (symlink escape) is one
+        # "escapes the plugin root" finding; no content check opens it (the outside
+        # SKILL.md lacks name/description, so any frontmatter/name-dir line would prove
+        # it was read) and unregistered-skill does not double-report it.
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside"
+            (outside / "skill-target").mkdir(parents=True)
+            (outside / "skill-target" / "SKILL.md").write_text("# bare\n",
+                                                               encoding="utf-8")
+            (outside / "cmd-target.md").write_text("# bare\n", encoding="utf-8")
+            root = Path(tmp) / "plugin"
+            (root / ".claude-plugin").mkdir(parents=True)
+            (root / ".claude-plugin" / "plugin.json").write_text(
+                '{"name": "x", "commands": [], "skills": ["./skills/esc"]}',
+                encoding="utf-8")
+            (root / "skills").mkdir()
+            (root / "skills" / "esc").symlink_to(outside / "skill-target",
+                                                 target_is_directory=True)
+            (root / "commands").mkdir()
+            (root / "commands" / "esc.md").symlink_to(outside / "cmd-target.md")
+            proc = run_check(str(root))
+        out = proc.stdout.decode()
+        self.assertEqual(proc.returncode, 1, out + proc.stderr.decode())
+        self.assertEqual(out.count("skills/esc: escapes the plugin root"), 1, out)
+        self.assertEqual(out.count("commands/esc.md: escapes the plugin root"), 1, out)
+        self.assertNotIn("unregistered-skill", out)
+        self.assertNotIn("frontmatter", out)
+        self.assertNotIn("name-dir", out)
+
     def test_invalid_utf8_manifest_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

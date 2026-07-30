@@ -103,6 +103,27 @@ def _contained(root, entry):
     return rel
 
 
+def _disk_contained(root, path):
+    """True when a globbed disk artifact RESOLVES inside the root — a symlink whose
+    target escapes is excluded from every check surface and never opened."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _contained_glob(root, pattern, escapes=None):
+    """Globbed paths that resolve inside the root; escapers optionally collected."""
+    kept = []
+    for path in sorted(root.glob(pattern)):
+        if _disk_contained(root, path):
+            kept.append(path)
+        elif escapes is not None:
+            escapes.append(path.relative_to(root).as_posix())
+    return kept
+
+
 def load_manifest(root):
     """The parsed, structurally USABLE plugin.json, or None when absent."""
     path = root / ".claude-plugin" / "plugin.json"
@@ -175,10 +196,19 @@ def check_manifest_vs_disk(root, manifest):
         elif not (root / hooks_rel).is_file():
             findings.append(finding("manifest-vs-disk", hooks_rel,
                                     "registered in plugin.json but absent on disk"))
+    # disk-side containment sweep: symlinked components resolving outside the root
+    # are one finding each and are excluded from every check surface
+    escapes = []
+    contained = {}
+    for pattern in ("commands/*.md", "commands/shared/*.md", "agents/*.md",
+                    "skills/*/SKILL.md"):
+        contained[pattern] = _contained_glob(root, pattern, escapes)
+    for rel in escapes:
+        findings.append(finding("manifest-vs-disk", rel, "escapes the plugin root"))
     # registration is PER COMPONENT CLASS: a commands file listed under agents[] is
     # not a registered command
     for pattern, key in (("commands/*.md", "commands"), ("agents/*.md", "agents")):
-        for path in sorted(root.glob(pattern)):
+        for path in contained[pattern]:
             rel = path.relative_to(root).as_posix()
             if rel not in classes[key]:
                 findings.append(finding("manifest-vs-disk", rel,
@@ -193,7 +223,7 @@ def check_unregistered_skills(root, manifest):
         registered.add(entry[:-len("/SKILL.md")] if entry.endswith("/SKILL.md")
                        else entry)
     findings = []
-    for skill_md in sorted(root.glob("skills/*/SKILL.md")):
+    for skill_md in _contained_glob(root, "skills/*/SKILL.md"):
         rel_dir = skill_md.parent.relative_to(root).as_posix()
         if rel_dir not in registered:
             findings.append(finding("unregistered-skill", rel_dir,
@@ -223,7 +253,7 @@ def check_frontmatter(root, _manifest):
         ("skills/*/SKILL.md", ("name", "description")),
     )
     for pattern, required in surfaces:
-        for path in sorted(root.glob(pattern)):
+        for path in _contained_glob(root, pattern):
             rel = path.relative_to(root).as_posix()
             keys = frontmatter_keys(path.read_text(encoding="utf-8", errors="replace"))
             _require_keys(rel, keys, required, findings)
@@ -232,7 +262,7 @@ def check_frontmatter(root, _manifest):
 
 def check_name_dir(root, _manifest):
     findings = []
-    for skill_md in sorted(root.glob("skills/*/SKILL.md")):
+    for skill_md in _contained_glob(root, "skills/*/SKILL.md"):
         keys = frontmatter_keys(skill_md.read_text(encoding="utf-8", errors="replace"))
         declared = (keys or {}).get("name")
         directory = skill_md.parent.name
@@ -409,6 +439,13 @@ def main(argv=None):
             return 2
         findings.extend(report_findings)
 
+    unique, seen = [], set()
+    for entry in findings:
+        key = (entry["check"], entry["path"], entry["detail"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(entry)
+    findings = unique
     findings.sort(key=lambda f: (CLASS_ORDER.index(f["check"]), f["path"], f["detail"]))
     verdict = "clean" if not findings else \
         f"{len(findings)} finding" + ("s" if len(findings) != 1 else "")

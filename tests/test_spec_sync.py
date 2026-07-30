@@ -333,6 +333,27 @@ REQUIRED_CLAUSES = [
     ("D8 skip reason stated", "command", "Skipped, with the reason stated"),
     ("D9 non-first-party excluded before tagging", "agent",
      "are NOT evidence and are excluded before tagging"),
+    ("D5 note names the frontmatter key", "command",
+     "`## Correction notes` body section naming the frontmatter key"),
+    ("D9 report every claim examined", "agent",
+     "Report every claim you examined, including CONFIRM and UNCLASSIFIED rows"),
+    ("D9 output row order", "agent", "ordered by tag precedence then section"),
+    ("D9 quote beneath actionable rows", "agent",
+     "Quote the source statement you relied on beneath any FIX, REMOVE, or RESOLVED row"),
+]
+
+#: T0 requires the worksheet to carry hand-derived expectations, not just the fixture's
+#: seed table. Each row names a requirement the frozen plan states verbatim; the third
+#: and fourth were absent from the shipped worksheet until round 6.
+REQUIRED_WORKSHEET = [
+    ("D3 worked example per tag", "## D3 tag precedence"),
+    ("D4 UNCLASSIFIED reason examples", "## D4 confidence and UNCLASSIFIED"),
+    ("D5 note format", "## D5 correction notes"),
+    ("D5 replacement example", "**Replacement example**"),
+    ("D6 pre/post for all four occurrences",
+     "## D6 freshness normalization — pre/post for all four occurrences"),
+    ("D7 anchor measurement",
+     "## D7 anchor measurement and the four-kind classification"),
 ]
 
 #: Frontmatter values the frozen plan fixes exactly (a tier alias, never a pinned id).
@@ -365,6 +386,135 @@ class RequiredClauses(unittest.TestCase):
         self.assertIn("<source label>, <URL> (confidence: high|medium)", worksheet)
         self.assertNotIn("<tag> — <source label> (confidence", worksheet)
 
+
+#: The COMPLETE word set of each artifact, frozen. Every other vocabulary check pins a
+#: token SHAPE — all-caps, hyphenated, inside code spans — and a shape is a syntax, so
+#: `Archival`, `evidence missing`, and a bare `critical` in prose slip past all of them.
+#: A lexicon has no shape: any word not already in the contract fails, in any case,
+#: spacing, or emphasis.
+#:
+#: This lives in test code, NOT in a fixture, and that is the point. The golden closes
+#: the set at byte level but a deliberate re-bless updates it; the lexicon must be
+#: updated here, in the same diff a reviewer reads, so a vocabulary change to a frozen
+#: contract is never invisible. It is a drift detector, not a semantic check — the
+#: equality tables above are what bind meaning.
+LEXICON = {
+    "command": {
+        'a', 'able', 'about', 'absence', 'absent', 'accumulating', 'action', 'add',
+        'added', 'adding', 'after', 'against', 'agent', "agent's", 'agents', 'all',
+        'all-medium', 'alone', 'alternatives', 'an', "anchor's", 'and', 'antigravity',
+        'any', 'application', 'applied', 'applies', 'apply', 'are', 'argument-hint',
+        'arguments', 'artifacts', 'as', 'at', 'audit', 'bar', 'bare', 'basis', 'be',
+        'because', 'becomes', 'been', 'below', 'bin', 'block', 'body', 'both', 'bound',
+        'boundaries', 'branch', 'bridge', 'bump', 'bumps', 'but', 'by', 'caller', 'can',
+        'candidate', 'canonical', 'carries', 'carry', 'carrying', 'case-sensitively',
+        'change', 'changed', 'changes', 'check', 'citation', 'cited', 'citing', 'claim',
+        'classified', 'classify', 'claude', 'code', 'code-change-required', 'codex',
+        'com', 'command', "command's", 'comment', 'commit', 'commits', 'committed',
+        'confidence', 'config', 'confirm', 'conforming', 'consumers', 'convention',
+        'conventions', 'conventions-', 'correct', 'corrected', 'correcting',
+        'correction', 'corrections', 'count', 'counts', 'coverage', 'create', 'data',
+        'date', 'dated', 'declares', 'default', 'defaulting', 'defined', 'definitely',
+        'delete', 'deleted', 'dependency', 'description', 'developers', 'disagree',
+        'disjoint', 'dispatch', 'dispatches', 'do', 'docs', 'doctor', 'documentary',
+        'documentation', 'documented', 'does', 'domain', 'dry-run', 'each', 'edit',
+        'edited', 'either', 'encoded', 'engine', 'entry', 'events', 'every', 'evidence',
+        'exactly', 'except', 'excluding', 'existing', 'exit', 'explicit', 'explicitly',
+        'fact', 'family', 'fault', 'fetched', 'file', 'files', 'first', 'first-party',
+        'fix', 'flags', 'floor', 'follow', 'following', 'follows', 'for', 'freshness',
+        'frontmatter', 'full', 'function', 'gap', 'gemini', 'gemini-extension', 'git',
+        'github', 'goes', 'grade', 'grades', 'h', 'has', 'hedge', 'hedged', 'here',
+        'high', 'hook', 'hook-config', 'hooks', 'how', 'html', 'immediately', 'in',
+        'independently', 'indirect', 'inline', 'input', 'inside', 'instructions',
+        'insufficient', 'into', 'invocation', 'is', 'iso', 'it', 'its', 'json', 'keeps',
+        'key', 'known', 'label', 'label-only', 'labels', 'later', 'least', 'left',
+        'line', "line's", 'link', 'longer', 'ls-files', 'machine-readable', 'many',
+        'markdown', 'marketplace', 'matched', 'matching', 'mcp', 'mcpservers', 'md',
+        'medium', 'meets', 'migration', 'min-confidence', 'mode', 'modes', 'much',
+        'must', 'n', 'named', 'naming', 'never', 'no', 'no-change', 'no-op', 'non-zero',
+        'none', 'not', 'not-x', 'note', "note's", 'notes', 'nothing', 'now', 'number',
+        'observation', 'occurrence', 'occurrences', 'occurs', 'of', 'on', 'one', 'only',
+        'openai', 'operational', 'optional', 'or', 'order', 'other', 'overlay',
+        'overlay-root', 'overlay-style', "overlays'", 'own', 'owning', 'page', 'pages',
+        'parser', 'path', 'paths', 'per', 'per-row', 'per-tool', 'place', 'placement',
+        'plugin', 'plus', 'posttooluse', 'precedence', 'precompact', 'predicate',
+        'pretooluse', 'printing', 'prints', 'propagate', 'propagates', 'propagation',
+        'prose', 'provenance', 'py', 'python', 'quoted', 'raise', 'rather',
+        're-touches', 're-verified', 'reader', 'reading', 'reason', 'records',
+        'reference', 'refuses', 'regardless', 'remain', 'remains', 'remove', 'renders',
+        'replacement', 'replaces', 'report', "report's", 'reported', 'reports',
+        'reproduce', 'required', 'requires', 'research', 'researcher', 'researches',
+        'resolved', 'restates', 'restating', 'retire', 'retirement', 'retires',
+        'returns', 'review', 'rewrites', 'root', 'rooted', 'row', 'rows', 'rule',
+        'rules', 'run', 'run-date', 's', 'same', 'scanned', 'schema', 'scope', 'score',
+        'scripts', 'section', 'select', 'selected', 'selects', 'sessionend',
+        'sessionstart', 'set', 'settings', 'settled', 'settles', 'silent', 'single',
+        'single-overlay', 'skill', 'skills', 'skipped', 'so', 'source',
+        'source-conflict', 'source-silent', 'sources', 'spec', 'spec-researcher',
+        'spec-sync', 'staged', 'state', 'stated', 'statement', 'states', 'status',
+        'step', 'step-', 'still', 'stops', 'subagentstop', 'such', 'summarises',
+        'surfaced', 'swallowed', 'sweep', 'sync', 'table', 'tag', 'tagged', 'tags',
+        'takes', 'target', 'targets', 'tests', 'than', 'that', 'the', 'their', 'them',
+        'themselves', 'these', 'this', 'those', 'three', 'threshold', 'to', 'together',
+        'token', 'tokens', 'toml', 'tool', "tool's", 'tool-agnostic', 'tool-convention',
+        'toward', 'transcription', 'tree', 'trees', 'two', 'un-hedged', 'unclassified',
+        'under', 'unless', 'untouched', 'untrusted', 'unverified', 'update', 'updated',
+        'url', 'urls', 'userpromptsubmit', 'uses', 'valid', 'value', 'verified',
+        'verifies', 'verify', 'vibe-check', 'vibe-suite', 'visible', 'when', 'where',
+        'whereas', 'which', 'whole', 'whose', 'with', 'withdrawal', 'withdrawn',
+        'withheld', 'without', 'working', 'would', 'writable', 'write', 'writes',
+        'writing', 'written', 'x', 'yaml', 'you', 'yourself', 'zero',
+    },
+    "agent": {
+        'a', 'about', 'absent', 'actionable', 'add', 'adjacent', 'advisory', 'against',
+        'aggregators', 'an', 'and', 'answers', 'any', 'applying', 'are', 'as', 'assign',
+        'at', 'bare', 'because', 'before', 'belongs', 'beneath', 'blog', 'both', 'but',
+        'by', 'carries', 'caveat', 'changelog', 'changelogs', 'citations', 'cite',
+        'claim', 'classifiable', 'codex', 'com', 'command', 'confidence', 'confirm',
+        'corrections', 'data', 'date', 'decides', 'declared', 'definitely',
+        'definitively', 'description', 'developers', 'disagree', 'disjoint', 'dispatch',
+        'documentation', 'documented', 'documents', 'domain', 'each', 'emit', 'every',
+        'evidence', 'examined', 'example', 'excluded', 'explicit', 'fact', 'fetched',
+        'first', 'first-party', 'fix', 'for', 'form', 'format', 'from', 'full', 'gap',
+        'grade', 'graded', 'grades', 'hedge', 'hedged', 'high', 'hooks', 'in',
+        'including', 'indirect', 'inference', 'input', 'inside', 'instructions',
+        'insufficient', 'is', 'it', 'its', 'label', 'line', 'low', 'matching', 'md',
+        'medium', 'model', 'must', 'name', 'never', 'no', 'not', 'not-x', 'notes',
+        'now', 'observation', 'on', 'one', 'only', 'openai', 'or', 'order', 'ordered',
+        'output', 'overflow', 'overlay', "overlay's", 'overlays', 'own', 'page',
+        "page's", 'pages', 'path', 'per', 'per-row', 'plus', 'precedence', 'produces',
+        'quotable', 'quote', 'quoted', 'read', 'reason', 'recollection', 'release',
+        'relied', 'remove', 'replacement', 'report', 'repository', 'requires',
+        'research', 'researching', 'resolved', 'return', 'row', "row's", 'rows', 'rule',
+        'rules', 'scope', 'section', 'seed', 'sends', 'settled', 'settles', 'silent',
+        'skill', 'skills', 'sonnet', 'source', 'source-conflict', 'source-silent',
+        'sources', 'spec-researcher', 'spec-sync', 'stabilizes', 'stack', 'state',
+        'statement', 'states', 'stops', 'such', 'table', 'tag', 'tagged', 'tagging',
+        'text', 'that', 'the', 'then', 'to', 'together', 'tool-convention', 'tools',
+        'tutorials', 'two', 'un-hedged', 'unclassified', 'unsettled', 'until',
+        'untrusted', 'url', 'use', 'vendor', "vendor's", 'vibe-core', 'vibe-suite',
+        'webfetch', 'websearch', 'what', 'when', 'with', 'withdrawal', 'withdrawn',
+        'without', 'write', 'x', 'you',
+    },
+}
+
+
+class FrozenLexicon(unittest.TestCase):
+    """The last vocabulary hole: a word in a shape no other check scans for."""
+
+    def test_no_word_enters_the_contract_unnoticed(self):
+        for key, path in (("command", COMMAND), ("agent", AGENT)):
+            with self.subTest(artifact=key):
+                words = {w.lower() for w in
+                         re.findall(r"[A-Za-z][A-Za-z'-]*",
+                                    path.read_text(encoding="utf-8"))}
+                added = words - LEXICON[key]
+                removed = LEXICON[key] - words
+                self.assertEqual(
+                    words, LEXICON[key],
+                    f"{key}: vocabulary changed — added {sorted(added)}, "
+                    f"removed {sorted(removed)}. If intended, update LEXICON in the "
+                    "same commit so the change is visible in review.")
 
 CONTRACT = FIX / "contract"
 
@@ -400,6 +550,45 @@ def table_lead_cells(region):
                     terms.append(lead.group(1))
                 break
     return terms
+
+
+class WorksheetCompleteness(unittest.TestCase):
+    """T0's worksheet is a deliverable, and it was the third place a frozen requirement
+    went missing without any test noticing (after D7.3 and D7.4). Headings alone are not
+    evidence, so each check below asserts the SUBSTANCE the plan asked for."""
+
+    def setUp(self):
+        self.text = (FIX / "README.md").read_text(encoding="utf-8")
+
+    def test_required_sections(self):
+        for rule, anchor in REQUIRED_WORKSHEET:
+            with self.subTest(rule=rule):
+                self.assertIn(anchor, self.text, f"worksheet is missing: {rule}")
+
+    def test_d6_covers_four_occurrences_with_pre_and_post(self):
+        section = self.text[self.text.index("## D6 freshness"):]
+        section = section[:section.index("## D7")]
+        rows = [ln for ln in section.splitlines()
+                if ln.startswith("| ") and re.match(r"\| \d+ \|", ln)]
+        self.assertEqual(len(rows), 4,
+                         "D6 requires pre/post for all FOUR freshness occurrences")
+        for overlay in ("claude", "codex", "antigravity"):
+            self.assertIn(overlay, section, f"D6 omits the {overlay} overlay")
+        # two of the four are `description:` clauses, not body lines — the split that
+        # makes the count four rather than three
+        self.assertEqual(sum("`description:`" in r for r in rows), 2,
+                         "two of the four occurrences are description clauses")
+
+    def test_d7_states_the_anchor_measurement_and_every_class(self):
+        section = self.text[self.text.index("## D7 anchor measurement"):]
+        for path in ("bin/vibe-check", "skills/scoring/SKILL.md",
+                     "skills/conventions-antigravity/SKILL.md"):
+            self.assertIn(path, section, f"anchor measurement omits {path}")
+        for kind in ("SOURCE", "DOCUMENTARY", "ENCODED", "OPERATIONAL"):
+            self.assertIn(f"| {kind} |", section,
+                          f"the four-kind classification omits an example for {kind}")
+        self.assertIn("both citation forms", section.replace("\n", " "),
+                      "the anchor must state that both citation forms are matched")
 
 
 class FrozenContractText(unittest.TestCase):
@@ -582,6 +771,77 @@ class ClosedSets(unittest.TestCase):
 
     #: All-caps words the agent uses for prose emphasis or as proper nouns.
     AGENT_EMPHASIS = {"BOTH", "FIRST", "NOT", "ONE", "SKILL", "URL", "WITH"}
+
+    #: The D7 classes' full DEFINITIONS, not just their names. Binding the name alone
+    #: lets the meaning be inverted underneath it — DOCUMENTARY could be redefined to
+    #: update untouched prose while the four names still compare equal.
+    CLASS_DEFINITIONS = [
+        "- **SOURCE** — the overlay skills themselves.",
+        "- **DOCUMENTARY** — prose restating an overlay fact. On `--apply`, updated ONLY "
+        "when the fact it restates is one this run changed (each with a Step-4 note); a "
+        "documentary occurrence of an untouched fact is reported and left alone.",
+        "- **ENCODED** — a machine-readable transcription (`bin/vibe-check`'s "
+        "`KNOWN_EVENTS`, `scripts/score_engine.py`'s rows, `scripts/check_engine.py`'s "
+        "hook-config schema).",
+        "- **OPERATIONAL** — code reading or writing per-tool paths as its function (the "
+        "bridge family, `doctor.py`, `update.py`, the migration scripts, the hook "
+        "scripts).",
+    ]
+
+    def test_propagation_class_definitions_are_exact(self):
+        section = self._section("Classify every occurrence", "## Step 7")
+        found = [" ".join(m.group(0).split()) for m in
+                 re.finditer(r"(?ms)^- \*\*[A-Z]+\*\*.*?(?=^- \*\*|^\Z|^[A-Z])", section)]
+        self.assertEqual(found, self.CLASS_DEFINITIONS,
+                         "a class definition changed while its name stayed the same")
+
+    #: Every bare-lowercase inline code span in each artifact. These artifacts name
+    #: their vocabulary in code spans, so pinning the whole set by equality catches a
+    #: term added ANYWHERE — outside any section a region-scoped check would look at.
+    CODE_SPANS = {
+        "command": {"all", "antigravity", "claude", "code-change-required", "codex",
+                    "high", "medium", "source-conflict", "source-silent"},
+        "agent": {"high", "medium", "source-conflict", "source-silent"},
+    }
+
+    #: The command's whole-file all-caps and hyphenated vocabularies. Region-scoped
+    #: checks cannot see a term added outside the region they scan; these can, and their
+    #: expectations live in test code rather than in a fixture, so re-blessing a golden
+    #: does not also re-bless them.
+    COMMAND_CAPS = {
+        "ADD", "AGENTS", "BOTH", "CHANGES", "CLAUDE", "CONFIRM", "DOCUMENTARY",
+        "ENCODED", "EXCLUDING", "FIRST", "FIX", "GEMINI", "HTML", "ISO", "ONLY",
+        "OPERATIONAL", "PATH", "REMOVE", "REQUIRED", "REQUIRES", "RESOLVED", "SOURCE",
+        "UNCLASSIFIED", "UNVERIFIED", "URL", "YAML",
+    }
+    COMMAND_HYPHENATED = {
+        "all-medium", "argument-hint", "case-sensitively", "code-change", "dry-run",
+        "first-party", "gemini-extension", "hook-config", "label-only", "ls-files",
+        "machine-readable", "min-confidence", "no-change", "no-op", "non-zero",
+        "overlay-root", "overlay-style", "per-row", "per-tool", "re-touches",
+        "re-verified", "run-date", "single-overlay", "source-conflict", "source-silent",
+        "spec-researcher", "spec-sync", "tool-agnostic", "tool-convention", "un-hedged",
+        "vibe-check", "vibe-suite",
+    }
+
+    def test_command_whole_file_vocabularies_are_closed(self):
+        caps = set(re.findall(r"\b([A-Z]{3,})\b", self.command))
+        self.assertEqual(caps, self.COMMAND_CAPS,
+                         f"command all-caps vocabulary drifted: "
+                         f"{sorted(caps ^ self.COMMAND_CAPS)}")
+        hyphenated = set(re.findall(r"\b([a-z]+-[a-z]+)\b", self.command))
+        self.assertEqual(hyphenated, self.COMMAND_HYPHENATED,
+                         f"command hyphenated vocabulary drifted: "
+                         f"{sorted(hyphenated ^ self.COMMAND_HYPHENATED)}")
+
+    def test_code_span_vocabulary_is_closed(self):
+        for key, text in self.both.items():
+            with self.subTest(artifact=key):
+                spans = {s for s in re.findall(r"`([^`\n]+)`", text)
+                         if re.fullmatch(r"[a-z][a-z-]*", s)}
+                self.assertEqual(spans, self.CODE_SPANS[key],
+                                 f"{key}: inline-code vocabulary drifted: "
+                                 f"{sorted(spans)}")
 
     def test_agent_table_rows_are_exact(self):
         self.assertEqual(self._rows(self.agent), self.AGENT_TABLE,

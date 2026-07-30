@@ -37,6 +37,77 @@ would tolerate it, but that is not the standard being met).
 Retirement: a later `--apply` CONFIRM at `high` against a source dated ≥ the note's date
 deletes it — and that CONFIRM row IS writable, so retirement is reachable.
 
+**Replacement example** (one note per claim, never accumulating). A 2026-06-10 run FIXes
+the event-case claim; a 2026-07-14 run FIXes the same claim again when the source adds a
+second event. The later run REPLACES the note — it does not append a second one:
+
+```
+before (after the 2026-06-10 run)
+  Hook events are PascalCase: `PreToolUse`, `PostToolUse`.
+  <!-- spec-sync 2026-06-10: FIX — code.claude.com/docs/en/hooks, https://code.claude.com/docs/en/hooks (confidence: high) -->
+
+after (the 2026-07-14 run)
+  Hook events are PascalCase: `PreToolUse`, `PostToolUse`, `PostToolBatch`.
+  <!-- spec-sync 2026-07-14: FIX — code.claude.com/docs/en/hooks, https://code.claude.com/docs/en/hooks (confidence: high) -->
+```
+
+The 2026-06-10 note is gone, not stacked above the new one. Two notes on one claim is the
+defect this rule exists to prevent.
+
+## D6 freshness normalization — pre/post for all four occurrences
+
+Four freshness statements existed across three overlays (two of them in
+`conventions-codex`), in three prose shapes and two placements. Pre-state quoted from
+`2bbcef5`; post-state is the shipped canonical line, which is the first content after
+each H1.
+
+| # | Overlay | Placement | Pre | Post |
+|---|---|---|---|---|
+| 1 | claude | body | `Freshness: refreshed 2026-06-07 against the official docs map dated 2026-06-05, which tracks Claude Code ≥ v2.1.16x.` | `**Spec freshness:** verified 2026-06-07 against the official Claude Code docs map dated 2026-06-05 (code.claude.com/docs/en/)` |
+| 2 | codex | body | `Refresh state: verified 2026-06-07 against Codex CLI 0.137.0 (released 2026-06-04; pre-releases existed up to 0.138.0-alpha.6 at refresh time).` | `**Spec freshness:** verified 2026-06-07 against Codex CLI 0.137.0, released 2026-06-04 (developers.openai.com/codex)` |
+| 3 | codex | `description:` | `facts checked 2026-06-07 versus Codex 0.137.0 (a 2026-06-04 release)` | date claim removed; the version pairing survives in the body line above |
+| 4 | antigravity | `description:` | `the spec has not settled since Antigravity 2.0 (2026-05-19), so most tool-specific checks stay advisory` | `**Spec freshness:** UNVERIFIED — research written 2026-05-25, six days after the Antigravity 2.0 announcement of 2026-05-19; the verification pass described in §10 has not landed (developers.googleblog.com)` |
+
+Two content qualifications are PRESERVED rather than normalized away: Claude's
+`≥ v2.1.16x` canonicality note, and Codex's prerelease parenthetical. Antigravity reads
+`UNVERIFIED` rather than a date because its own STATUS block says the verification pass
+has not landed — writing a verified date there would assert something the overlay denies.
+Exactly one dated marker exists per overlay after normalization; that is what makes a
+`--apply` bump a single unambiguous edit.
+
+## D7 anchor measurement and the four-kind classification
+
+**Anchor, re-measured at this HEAD** (not copied from the plan — see the note below).
+Scope excludes `tests/`, `docs/`, `.github/`.
+
+| File | Plain `conventions-<tool> §N` | Markdown-link `[conventions-<tool>](…) §N` |
+|---|---|---|
+| `bin/vibe-check` | 1 | 0 |
+| `skills/scoring/SKILL.md` | 8 | 3 |
+| `skills/conventions-antigravity/SKILL.md` | 0 | 1 |
+
+Three anchored files, 13 citations. **The frozen plan recorded 2 plain citations in
+`bin/vibe-check`; the current measurement is 1.** The plan measured at `2bbcef5`, and this
+worksheet records what the tree says now — the count is a measurement, so it is re-taken
+rather than transcribed. Either way the anchored SET is unchanged, which is what D7 turns
+on. The matcher must accept both citation forms: the antigravity occurrence is a
+link-form cross-citation of `conventions-codex §6` and is invisible to a plain-form
+matcher.
+
+**The four kinds, one example each:**
+
+| Kind | Example | Why | `--apply` behaviour |
+|---|---|---|---|
+| SOURCE | `skills/conventions-claude/SKILL.md` | the overlay itself — the fact's origin | rewritten by the run |
+| DOCUMENTARY | `consumer-uncited.md` restating the skills path in prose | prose repeating an overlay fact, no citation | updated ONLY if this run changed the fact it restates |
+| ENCODED | `bin/vibe-check`'s `KNOWN_EVENTS` list | a machine-readable transcription of the event catalog | never edited — reported `code-change-required` with its owning test named |
+| OPERATIONAL | `scripts/update.py` reading `.claude/` | code whose function is to read/write per-tool paths | never edited — reported `code-change-required` |
+
+The ENCODED/OPERATIONAL boundary is not cosmetic: editing either changes program
+behaviour, so it needs a code change with its own test, which is why this command reports
+them and stops. Correcting `KNOWN_EVENTS` by text substitution would silently alter what
+`bin/vibe-check` accepts.
+
 ## The fixture (`stale-overlay/`) — seven seeds
 
 | # | Seed | Expected tag | Expected confidence/reason |

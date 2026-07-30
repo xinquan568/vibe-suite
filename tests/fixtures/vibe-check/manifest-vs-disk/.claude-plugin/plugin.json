@@ -1,0 +1,7 @@
+{
+  "name": "fixture-manifest",
+  "version": "0.0.1",
+  "commands": ["./commands/real.md", "./commands/ghost.md"],
+  "agents": [],
+  "skills": []
+}

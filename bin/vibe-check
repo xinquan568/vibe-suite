@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: ISC
+"""bin/vibe-check — deterministic CI validator (F4.4, amended by ADR-0001).
+
+Stdlib-only; no Claude Code required. Usage:
+
+    bin/vibe-check [dir] [--json] [--report PATH] [--mirrors]
+
+Modes: with no options, the structural checks run on the working directory; an explicit
+[dir] targets that root. `--report PATH` alone (no dir, no --mirrors) is REPORT-ONLY —
+no structural checks run and no plugin root is required. An explicit dir plus --report
+runs both. `--mirrors` always engages directory mode; before E7.2 ships the mirror hash
+manifest it refuses (exit 2) naming the dependency.
+
+Check classes (root component surfaces only — nested plugin roots are other plugins):
+manifest-vs-disk, unregistered-skill, frontmatter (presence of the block and each
+class's required keys per plugin-discover.md's inventory table), name-dir, hook-case
+(a wrong-case variant of a known event, per conventions-claude §6; unknown exact names
+are NOT findings — §6's open-world policy), monorepo (the root is not a plugin but
+sub-plugin roots exist below), version (manifests that declare a version for the same
+plugin must agree), mirrors (deferred; refusal pre-E7.2), report (fail-closed subset
+validation against the CANONICAL schema — ADR-0001; the subset lives in
+scripts/validate_audit_output.py and is stated only there).
+
+Exit codes: 0 = every requested check ran, zero findings. 1 = findings (including a
+parsed report the canonical schema rejects). 2 = a requested check could not run: bad
+dir; root neither plugin nor monorepo; unparsable or structurally unusable plugin.json;
+unparsable configured hooks file or marketplace.json; unreadable or non-JSON report;
+UnsupportedSchemaError (the schema outran the checker — ADR-0001's loud halt);
+--mirrors without its manifest; usage errors.
+"""
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent / "scripts"))
+
+import validate_audit_output as _vao   # noqa: E402  (the one statement of the subset)
+
+CANONICAL_SCHEMA = _HERE.parent / "schemas" / "audit-output.schema.json"
+
+CLASS_ORDER = ["manifest-vs-disk", "unregistered-skill", "frontmatter", "name-dir",
+               "hook-case", "monorepo", "version", "mirrors", "report"]
+
+#: conventions-claude SKILL §6's event tables (core + additional documented). The check
+#: is a CASING check against these; §6's open-world policy means an exact name absent
+#: from this list is never a finding. This list follows §6 by hand — see that skill.
+KNOWN_EVENTS = [
+    "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest",
+    "UserPromptSubmit", "Stop", "SubagentStop", "SessionStart", "SessionEnd",
+    "PreCompact", "Notification", "InstructionsLoaded",
+    "StopFailure", "FileChanged", "TaskCompleted", "Setup", "SubagentStart",
+    "UserPromptExpansion", "PermissionDenied", "PostToolBatch", "MessageDisplay",
+    "TaskCreated", "TeammateIdle", "ConfigChange", "CwdChanged", "WorktreeCreate",
+    "WorktreeRemove", "PostCompact", "Elicitation", "ElicitationResult",
+]
+_KNOWN_BY_LOWER = {event.lower(): event for event in KNOWN_EVENTS}
+
+_FM_KEY = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
+
+
+class CheckError(Exception):
+    """A requested check could not run — the exit-2 class."""
+
+
+def finding(check, path, detail):
+    return {"check": check, "path": path, "detail": detail}
+
+
+def _read_json(path, what):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as err:
+        raise CheckError(f"cannot read {what} {path}: {err.strerror}") from None
+    try:
+        return json.loads(text)
+    except ValueError as err:
+        raise CheckError(f"unparsable {what} {path}: {err}") from None
+
+
+def _norm(entry):
+    return entry[2:] if entry.startswith("./") else entry
+
+
+def load_manifest(root):
+    """The parsed, structurally USABLE plugin.json, or None when absent."""
+    path = root / ".claude-plugin" / "plugin.json"
+    if not path.is_file():
+        return None
+    data = _read_json(path, "plugin.json")
+    if not isinstance(data, dict):
+        raise CheckError("plugin.json is not a JSON object")
+    for key in ("commands", "agents", "skills"):
+        value = data.get(key)
+        if value is not None and (not isinstance(value, list)
+                                  or any(not isinstance(item, str) for item in value)):
+            raise CheckError(f"plugin.json {key!r} must be a list of strings")
+    hooks = data.get("hooks")
+    if hooks is not None and not isinstance(hooks, (str, dict)):
+        raise CheckError("plugin.json 'hooks' must be a path string or an inline object")
+    return data
+
+
+def frontmatter_keys(text):
+    """{key: value} of a leading frontmatter block, or None when there is no block."""
+    lines = text.split("\n")
+    if not lines or lines[0] != "---":
+        return None
+    keys = {}
+    for line in lines[1:]:
+        if line == "---":
+            return keys
+        match = _FM_KEY.match(line)
+        if match:
+            keys[match.group(1)] = match.group(2).strip()
+    return None
+
+
+def check_manifest_vs_disk(root, manifest):
+    findings = []
+    if "name" not in manifest:
+        findings.append(finding("manifest-vs-disk", ".claude-plugin/plugin.json",
+                                "missing required 'name'"))
+    registered = set()
+    for key in ("commands", "agents", "skills"):
+        for entry in manifest.get(key) or []:
+            rel = _norm(entry)
+            registered.add(rel)
+            if not (root / rel).exists():
+                findings.append(finding("manifest-vs-disk", rel,
+                                        "registered in plugin.json but absent on disk"))
+    hooks = manifest.get("hooks")
+    if isinstance(hooks, str) and not (root / _norm(hooks)).is_file():
+        findings.append(finding("manifest-vs-disk", _norm(hooks),
+                                "registered in plugin.json but absent on disk"))
+    for pattern, kind in (("commands/*.md", "commands"), ("agents/*.md", "agents")):
+        for path in sorted(root.glob(pattern)):
+            rel = path.relative_to(root).as_posix()
+            if rel not in registered:
+                findings.append(finding("manifest-vs-disk", rel,
+                                        "on disk but not registered in plugin.json"))
+    return findings
+
+
+def check_unregistered_skills(root, manifest):
+    registered = {_norm(entry) for entry in manifest.get("skills") or []}
+    findings = []
+    for skill_md in sorted(root.glob("skills/*/SKILL.md")):
+        rel_dir = skill_md.parent.relative_to(root).as_posix()
+        if rel_dir not in registered:
+            findings.append(finding("unregistered-skill", rel_dir,
+                                    "SKILL.md present but not in plugin.json skills[]"))
+    return findings
+
+
+def _require_keys(rel, keys, required, findings):
+    if keys is None:
+        findings.append(finding("frontmatter", rel, "missing frontmatter block"))
+        return
+    for key in required:
+        if key not in keys:
+            findings.append(finding("frontmatter", rel,
+                                    f"missing required key '{key}'"))
+
+
+def check_frontmatter(root, _manifest):
+    findings = []
+    surfaces = (
+        ("commands/*.md", ("description",)),
+        ("commands/shared/*.md", ("description", "user-invocable")),
+        ("agents/*.md", ("description",)),
+        ("skills/*/SKILL.md", ("name", "description")),
+    )
+    for pattern, required in surfaces:
+        for path in sorted(root.glob(pattern)):
+            rel = path.relative_to(root).as_posix()
+            keys = frontmatter_keys(path.read_text(encoding="utf-8", errors="replace"))
+            _require_keys(rel, keys, required, findings)
+    return findings
+
+
+def check_name_dir(root, _manifest):
+    findings = []
+    for skill_md in sorted(root.glob("skills/*/SKILL.md")):
+        keys = frontmatter_keys(skill_md.read_text(encoding="utf-8", errors="replace"))
+        declared = (keys or {}).get("name")
+        directory = skill_md.parent.name
+        if declared is not None and declared != directory:
+            rel = skill_md.relative_to(root).as_posix()
+            findings.append(finding("name-dir", rel,
+                                    f"name '{declared}' does not match directory "
+                                    f"'{directory}'"))
+    return findings
+
+
+def check_hook_case(root, manifest):
+    hooks_value = manifest.get("hooks")
+    if isinstance(hooks_value, str):
+        rel = _norm(hooks_value)
+        path = root / rel
+        if not path.is_file():
+            return []   # the dangling registration is manifest-vs-disk's finding
+        config = _read_json(path, "hooks config")
+    elif isinstance(hooks_value, dict):
+        rel = ".claude-plugin/plugin.json"
+        config = hooks_value
+    else:
+        path = root / "hooks" / "hooks.json"
+        if not path.is_file():
+            return []
+        rel = "hooks/hooks.json"
+        config = _read_json(path, "hooks config")
+    events = config.get("hooks") if isinstance(config, dict) else None
+    if not isinstance(events, dict):
+        return []
+    findings = []
+    for event in sorted(events):
+        canonical = _KNOWN_BY_LOWER.get(event.lower())
+        if canonical is not None and event != canonical:
+            findings.append(finding("hook-case", rel,
+                                    f"event '{event}' should be '{canonical}'"))
+    return findings
+
+
+def check_monorepo(root):
+    findings = []
+    for marker in sorted(root.rglob(".claude-plugin")):
+        if marker.is_dir() and (marker / "plugin.json").is_file():
+            sub = marker.parent
+            if sub != root:
+                rel = sub.relative_to(root).as_posix()
+                findings.append(finding("monorepo", rel,
+                                        "sub-plugin root (run vibe-check per sub-plugin)"))
+    return findings
+
+
+def check_version(root, manifest):
+    marketplace = root / ".claude-plugin" / "marketplace.json"
+    if not marketplace.is_file():
+        return []
+    data = _read_json(marketplace, "marketplace.json")
+    if not isinstance(data, dict):
+        raise CheckError("marketplace.json is not a JSON object")
+    own_name = manifest.get("name")
+    own_version = manifest.get("version")
+    findings = []
+    for entry in data.get("plugins") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("name") == own_name and own_version is not None:
+            declared = entry.get("version")
+            if declared is not None and declared != own_version:
+                findings.append(finding(
+                    "version", ".claude-plugin/marketplace.json",
+                    f"plugin '{own_name}' version '{declared}' != plugin.json "
+                    f"version '{own_version}'"))
+    return findings
+
+
+STRUCTURAL_CHECKS = [
+    ("manifest-vs-disk", check_manifest_vs_disk),
+    ("unregistered-skill", check_unregistered_skills),
+    ("frontmatter", check_frontmatter),
+    ("name-dir", check_name_dir),
+    ("hook-case", check_hook_case),
+    ("version", check_version),
+]
+
+
+def validate_report(report_path, schema_path=None):
+    """(exit_class, findings) for --report. 0 = conforms; 1 = a PARSED document the
+    schema rejects (findings carry the validator's message); 2 = the check could not run
+    (unreadable, non-JSON, or the schema outran the checker). Production always uses the
+    canonical installation schema; `schema_path` exists for the test seam only and is
+    not reachable from the CLI (ADR-0001 binds --report to the canonical schema)."""
+    report_path = Path(report_path)
+    try:
+        text = report_path.read_text(encoding="utf-8")
+    except OSError as err:
+        print(f"vibe-check: cannot read report {report_path}: {err.strerror}",
+              file=sys.stderr)
+        return 2, []
+    try:
+        report = json.loads(text)
+    except ValueError as err:
+        print(f"vibe-check: report {report_path} is not JSON: {err}", file=sys.stderr)
+        return 2, []
+    schema_file = Path(schema_path) if schema_path else CANONICAL_SCHEMA
+    try:
+        schema = json.loads(schema_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        print(f"vibe-check: cannot load schema {schema_file}: {err}", file=sys.stderr)
+        return 2, []
+    try:
+        _vao.validate(report, schema)
+    except _vao.ValidationError as err:
+        return 1, [finding("report", str(report_path), str(err))]
+    except _vao.UnsupportedSchemaError as err:
+        print(f"vibe-check: UnsupportedSchemaError: {err}", file=sys.stderr)
+        return 2, []
+    return 0, []
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="vibe-check",
+                                     description=__doc__.splitlines()[2])
+    parser.add_argument("dir", nargs="?", default=None)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--report")
+    parser.add_argument("--mirrors", action="store_true")
+    args = parser.parse_args(argv)
+
+    report_only = args.report is not None and args.dir is None and not args.mirrors
+    findings = []
+    checked = {name: False for name in CLASS_ORDER}
+    root_display = None
+
+    if not report_only:
+        root_display = args.dir if args.dir is not None else "."
+        root = Path(root_display)
+        if not root.is_dir():
+            print(f"vibe-check: {root_display!r} is not a directory", file=sys.stderr)
+            return 2
+        try:
+            manifest = load_manifest(root)
+            if manifest is None:
+                sub_findings = check_monorepo(root)
+                if not sub_findings:
+                    print(f"vibe-check: {root_display!r} is not a Claude Code plugin "
+                          "directory (and holds no sub-plugins)", file=sys.stderr)
+                    return 2
+                checked["monorepo"] = True
+                findings.extend(sub_findings)
+            else:
+                for name, check in STRUCTURAL_CHECKS:
+                    findings.extend(check(root, manifest))
+                    checked[name] = True
+                checked["monorepo"] = True   # ran vacuously: the root IS the plugin
+        except CheckError as err:
+            print(f"vibe-check: {err}", file=sys.stderr)
+            return 2
+        if args.mirrors:
+            print("vibe-check: mirror hash manifest not found; ships with E7.2/F9.6",
+                  file=sys.stderr)
+            return 2
+
+    if args.report is not None:
+        checked["report"] = True
+        report_rc, report_findings = validate_report(args.report)
+        if report_rc == 2:
+            return 2
+        findings.extend(report_findings)
+
+    findings.sort(key=lambda f: (CLASS_ORDER.index(f["check"]), f["path"], f["detail"]))
+    verdict = "clean" if not findings else \
+        f"{len(findings)} finding" + ("s" if len(findings) != 1 else "")
+
+    if args.json:
+        json.dump({"root": root_display, "verdict": verdict, "findings": findings,
+                   "checked": {name: checked[name] for name in sorted(checked)}},
+                  sys.stdout, indent=2)
+        print()
+    else:
+        for entry in findings:
+            print(f"{entry['check']}: {entry['path']}: {entry['detail']}")
+        print(f"vibe-check: {verdict}")
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

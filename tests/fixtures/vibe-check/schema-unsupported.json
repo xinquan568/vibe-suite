@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xinquan568/vibe-suite/schemas/audit-output.schema.json",
+  "title": "vibe-suite audit output",
+  "description": "The machine-readable form of the finding contract. JSON is canonical; the Markdown format agents emit is its rendering. Which variant field is mandatory depends on the emitting agent, which only the report knows \u2014 so those rules are report-level conditionals reaching into findings, not per-finding rules. Deliberately expressed with a small keyword set so the repository's fail-closed checker can enforce all of it: no $ref/$defs (the finding schema is inlined), no const (enum of one), no not (non-[GOOD] severities are enumerated).",
+  "type": "object",
+  "required": [
+    "agent",
+    "findings"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "agent": {
+      "type": "string",
+      "enum": [
+        "vibe-suite:recon",
+        "vibe-suite:architecture",
+        "vibe-suite:error-handling",
+        "vibe-suite:edge-cases",
+        "vibe-suite:security",
+        "vibe-suite:testing"
+      ],
+      "description": "The <name> from the output header '## [Agent: <name>] Findings'. Constrained to the canonical qualified names: an unqualified name such as 'security' is rejected, because the agent-specific variant rules key on this value and a bare name would bypass them.",
+      "pattern": "^vibe-suite:"
+    },
+    "findings": {
+      "type": "array",
+      "minItems": 1,
+      "description": "At least one entry. A report with nothing to raise carries exactly one [GOOD] sentinel rather than an empty array.",
+      "items": {
+        "type": "object",
+        "required": [
+          "observation",
+          "severity",
+          "evidence",
+          "proposed_change",
+          "tradeoff"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "description": "path:line. Required unless severity is [GOOD] \u2014 the sentinel refers to no location."
+          },
+          "observation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "[CRITICAL]",
+              "[HIGH]",
+              "[MEDIUM]",
+              "[LOW]",
+              "[GOOD]"
+            ]
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1
+          },
+          "proposed_change": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tradeoff": {
+            "type": "string",
+            "minLength": 1
+          },
+          "effort": {
+            "type": "string",
+            "enum": [
+              "[<1 day]",
+              "[<1 week]",
+              "[<1 month]",
+              "[>1 month]"
+            ],
+            "description": "Optional. Specified alongside the six fields rather than among them."
+          },
+          "exploit_scenario": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Required on security findings that are not [GOOD]."
+          },
+          "risk_matrix": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Required on edge-case findings that are not [GOOD]."
+          }
+        },
+        "if": {
+          "properties": {
+            "severity": {
+              "enum": [
+                "[CRITICAL]",
+                "[HIGH]",
+                "[MEDIUM]",
+                "[LOW]"
+              ]
+            }
+          },
+          "required": [
+            "severity"
+          ]
+        },
+        "then": {
+          "required": [
+            "file"
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "findings": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "severity": {
+                  "enum": [
+                    "[GOOD]"
+                  ]
+                }
+              },
+              "required": [
+                "severity"
+              ]
+            }
+          }
+        },
+        "required": [
+          "findings"
+        ]
+      },
+      "then": {
+        "properties": {
+          "findings": {
+            "maxItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "agent": {
+            "enum": [
+              "vibe-suite:security"
+            ]
+          }
+        },
+        "required": [
+          "agent"
+        ]
+      },
+      "then": {
+        "properties": {
+          "findings": {
+            "items": {
+              "if": {
+                "properties": {
+                  "severity": {
+                    "enum": [
+                      "[CRITICAL]",
+                      "[HIGH]",
+                      "[MEDIUM]",
+                      "[LOW]"
+                    ]
+                  }
+                },
+                "required": [
+                  "severity"
+                ]
+              },
+              "then": {
+                "required": [
+                  "exploit_scenario"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "agent": {
+            "enum": [
+              "vibe-suite:edge-cases"
+            ]
+          }
+        },
+        "required": [
+          "agent"
+        ]
+      },
+      "then": {
+        "properties": {
+          "findings": {
+            "items": {
+              "if": {
+                "properties": {
+                  "severity": {
+                    "enum": [
+                      "[CRITICAL]",
+                      "[HIGH]",
+                      "[MEDIUM]",
+                      "[LOW]"
+                    ]
+                  }
+                },
+                "required": [
+                  "severity"
+                ]
+              },
+              "then": {
+                "required": [
+                  "risk_matrix"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

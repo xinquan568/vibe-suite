@@ -1,0 +1,6 @@
+{
+  "hooks": {
+    "postToolUse": [],
+    "TotallyNewEvent": []
+  }
+}

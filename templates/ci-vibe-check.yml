@@ -1,0 +1,13 @@
+# vibe-suite CI validation template (F4.4). Copy into .github/workflows/ to activate —
+# this file ships as a template; activation is the release gate's decision (P7).
+name: vibe-check
+on:
+  push:
+  pull_request:
+jobs:
+  vibe-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the deterministic CI validator on the checkout root
+        run: python3 bin/vibe-check .

@@ -308,6 +308,16 @@ REQUIRED_CLAUSES = [
      "updated ONLY when the fact it restates is one this run changed"),
     ("D7 citation changed-section only", "command",
      "reported as REQUIRED targets ONLY when the cited section is one this run changed"),
+    ("D2 withheld rows are not changes", "command",
+     "Rows withheld by the threshold do not create changes"),
+    ("D2 no-change reason is per overlay", "command",
+     "with the reason stated per overlay"),
+    ("D6 freshness rewritten atomically", "command",
+     "rewrites that line's state, date, and source label together as one edit"),
+    ("D7 every row states its basis", "command",
+     "Every classified row states its basis so a reader can audit it"),
+    ("D8 non-zero status surfaced", "command",
+     "a non-zero status is surfaced, never swallowed"),
 ]
 
 #: Frontmatter values the frozen plan fixes exactly (a tier alias, never a pinned id).
@@ -339,6 +349,42 @@ class RequiredClauses(unittest.TestCase):
         worksheet = (FIX / "README.md").read_text(encoding="utf-8")
         self.assertIn("<source label>, <URL> (confidence: high|medium)", worksheet)
         self.assertNotIn("<tag> — <source label> (confidence", worksheet)
+
+
+CONTRACT = FIX / "contract"
+
+
+class FrozenContractText(unittest.TestCase):
+    """The set-closure mechanism, and the only one that does not depend on a grammar.
+
+    Every check below this one extracts with a PATTERN, and a pattern encodes a syntax:
+    reading targets out of `argument-hint` cannot see a target named only in the body,
+    a backtick-anchored flag scan cannot see an unbackticked `--audit`, and a
+    ``- **CLASS** —`` scan cannot see ``- **CLASS**:``. Each such hole is closed by
+    widening one pattern, and the next unanticipated syntax opens another. So the
+    artifacts are ALSO pinned whole: any addition, anywhere, in any syntax, changes the
+    text and fails here.
+
+    This does not make the pattern checks redundant, and the division matters. The
+    golden closes the SET (nothing may be added); REQUIRED_CLAUSES and the equality
+    tables bind the CONTENT to the frozen plan (the golden cannot be re-blessed into
+    something that no longer states D1–D9). Updating a golden is therefore a deliberate
+    act that must still satisfy every semantic check.
+    """
+
+    GOLDENS = {"command": (COMMAND, CONTRACT / "commands-spec-sync.md.golden"),
+               "agent": (AGENT, CONTRACT / "agents-spec-researcher.md.golden")}
+
+    def test_artifacts_match_their_frozen_text(self):
+        for key, (shipped, golden) in self.GOLDENS.items():
+            with self.subTest(artifact=key):
+                self.assertTrue(golden.is_file(), f"missing golden for {key}")
+                self.assertEqual(
+                    shipped.read_text(encoding="utf-8"),
+                    golden.read_text(encoding="utf-8"),
+                    f"{key} differs from its frozen contract text. If the change is "
+                    "intended, re-verify it against the frozen plan and update "
+                    f"{golden.relative_to(REPO_ROOT)} in the same commit.")
 
 
 class ClosedSets(unittest.TestCase):
@@ -386,56 +432,73 @@ class ClosedSets(unittest.TestCase):
                          ["claude", "codex", "antigravity", "all"],
                          "the target set is closed and ordered")
 
+    #: Where each artifact defines its confidence vocabulary. Scoping the scan to the
+    #: defining section is what lets it capture BARE words without drowning in prose.
+    GRADE_REGION = {"command": ("## Step 3", "## Step 4"),
+                    "agent": ("## Confidence,", "## Output format")}
+
+    def _region(self, key):
+        text = self.both[key]
+        start, end = self.GRADE_REGION[key]
+        self.assertIn(start, text, f"{key}: confidence section not found")
+        i = text.index(start)
+        return text[i:text.index(end, i)]
+
     def test_mode_flags_are_exactly_the_frozen_set(self):
-        # GENERAL extraction: any --flag in the command, compared by equality
-        flags = set(re.findall(r"`(--[a-z-]+)", self.command))
+        # every --flag ANYWHERE, backticked or not: a mode introduced in plain prose
+        # is still a mode
+        flags = set(re.findall(r"(--[a-z][a-z-]*)", self.command))
         self.assertEqual(
             flags, {"--dry-run", "--apply", "--min-confidence", "--overlay-root"},
             f"an unfrozen flag appeared: {sorted(flags)}")
 
     def test_threshold_values_are_exactly_high_medium(self):
-        # GENERAL: capture whatever follows the flag, not just the expected words
-        values = set(re.findall(r"--min-confidence[` ]+([a-z|<>-]+)", self.command))
+        # accept every separator the flag could be written with (space, `=`, backtick),
+        # so `--min-confidence=critical` is captured as readily as the frozen form
+        values = set(re.findall(r"--min-confidence[=\s`]+([a-zA-Z|<>-]+)", self.command))
         tokens = {v for value in values for v in re.split(r"[|<>]", value) if v}
         self.assertEqual(tokens, {"high", "medium"},
                          f"threshold vocabulary drifted: {sorted(tokens)}")
 
     def test_confidence_grades_in_both_artifacts(self):
-        for key, text in self.both.items():
+        for key in self.both:
             with self.subTest(artifact=key):
-                # GENERAL: every backticked word used as a grade in a confidence
-                # sentence, plus the note schema's own alternation
-                # union of BOTH forms the artifacts use: a `confidence: a|b`
-                # alternation and standalone backticked grade words. Permissive
-                # capture (any lowercase word), so an added grade is visible.
-                tokens = set()
-                for alt in re.findall(r"confidence: ([a-z|]+)", text):
-                    tokens.update(alt.split("|"))
-                tokens.update(re.findall(r"`([a-z]+)`", text))
-                # intersect with the universe of plausible grade words, so any grade
-                # the artifact introduces is visible while ordinary prose is not
-                tokens &= {"high", "medium", "low", "critical", "certain", "weak",
-                           "strong", "unknown"}
-                self.assertTrue(tokens, f"{key}: no grade vocabulary found at all")
+                region = self._region(key)
+                # three grade-defining shapes, none of which assumes backticks or a
+                # fixed universe of words: a backticked term, a list item `- X — …`,
+                # and a defining sentence `X is an/a/first-party …`
+                tokens = set(re.findall(r"`([a-z]+)`", region))
+                tokens |= set(re.findall(r"(?m)^- +`?([a-z]+)`?\s+—", region))
+                tokens |= set(re.findall(
+                    r"`?\b([a-z]+)\b`?\s+is\s+(?:an|a|first-party)\b", region))
+                tokens -= {"withheld", "row", "claim", "grade", "reason"}
                 self.assertEqual(tokens, {"high", "medium"},
                                  f"{key}: grade vocabulary drifted: {sorted(tokens)}")
-                self.assertNotRegex(text, r"`low`",
-                                    f"{key}: `low` is not a grade — insufficient "
-                                    "evidence routes to UNCLASSIFIED")
 
     def test_unclassified_reasons_in_both_artifacts(self):
-        for key, text in self.both.items():
+        for key in self.both:
             with self.subTest(artifact=key):
-                reasons = set(re.findall(r"`(source-[a-z-]+)`", text))
+                # any hyphenated backticked token in the section, not just `source-*`:
+                # a reason named `evidence-missing` is still a reason
+                reasons = set(re.findall(r"`([a-z]+-[a-z]+)`", self._region(key)))
                 self.assertEqual(reasons, {"source-silent", "source-conflict"},
                                  f"{key}: UNCLASSIFIED reasons drifted: "
                                  f"{sorted(reasons)}")
 
     def test_propagation_classes_are_exactly_four(self):
-        classes = re.findall(r"^- \*\*([A-Z]+)\*\* —", self.command, re.M)
+        # match the class name alone — a fifth class written `- **ARCHIVAL**:` rather
+        # than `- **ARCHIVAL** —` is the same addition in different punctuation
+        classes = re.findall(r"(?m)^- \*\*([A-Z]+)\*\*", self.command)
         self.assertEqual(classes,
                          ["SOURCE", "DOCUMENTARY", "ENCODED", "OPERATIONAL"],
                          "the propagation classes are a closed, ordered set of four")
+
+    def test_agent_tag_vocabulary_is_closed_outside_the_table_too(self):
+        # the table check pins the rows; this pins the VOCABULARY, so a sixth tag
+        # introduced in prose below the table is caught as well
+        tags = set(re.findall(r"`([A-Z]+)`", self.agent))
+        self.assertEqual(tags, set(self.D3_TAGS) | {"UNCLASSIFIED"},
+                         f"agent tag vocabulary drifted: {sorted(tags)}")
 
     def test_agent_table_rows_are_exact(self):
         self.assertEqual(self._rows(self.agent), self.AGENT_TABLE,
@@ -450,12 +513,20 @@ class ClosedSets(unittest.TestCase):
         for line in lines[1:]:
             if line == "---":
                 break
-            m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+            # a key at ANY indentation and in EITHER quoting style: YAML resolves
+            # `"tools":` and an indented `tools:` to the same key, so a parser that
+            # only recognises bare keys at column 0 lets a later duplicate silently
+            # override the allowlist while the first line still reads correctly
+            m = re.match(r"""^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*:\s*(.*)$""",
+                         line)
             if m:
-                keys.append(m.group(1))
-                fields[m.group(1)] = m.group(2).strip()
+                key = m.group(1) or m.group(2) or m.group(3)
+                keys.append(key)
+                fields[key] = m.group(4).strip()
         self.assertEqual(len(keys), len(set(keys)),
                          f"duplicate frontmatter key: {keys}")
+        self.assertEqual(set(keys), {"name", "description", "model", "tools"},
+                         f"the frontmatter key set is closed: {sorted(keys)}")
         self.assertEqual([t.strip() for t in fields["tools"].split(",")],
                          ["WebFetch", "WebSearch", "Read"],
                          "the tool allowlist is closed")

@@ -189,8 +189,9 @@ def registered_by_class(root, manifest, findings=None):
                     escape_rel = _norm(entry)
                     if key == "skills" and escape_rel.endswith("/SKILL.md"):
                         # canonical escape path is the skill DIRECTORY — the same
-                        # form the disk sweep reports, so dedupe collapses them
-                        escape_rel = escape_rel[:-len("/SKILL.md")]
+                        # form the disk sweep reports, so dedupe collapses them;
+                        # the parent of "/SKILL.md" is "/" (never the empty string)
+                        escape_rel = escape_rel[:-len("/SKILL.md")] or "/"
                     findings.append(finding("manifest-vs-disk", escape_rel,
                                             "escapes the plugin root"))
                 continue

@@ -257,6 +257,17 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertEqual(out.count("escapes the plugin root"), 1, out)
         self.assertIn("manifest-vs-disk: /etc/passwd: escapes the plugin root", out)
 
+    def test_degenerate_absolute_skill_spellings_collapse(self):
+        # "/" and "/SKILL.md" are directory and SKILL.md spellings of ONE absolute
+        # artifact; the canonical escape path is "/" — exactly one finding.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = run_check(str(self._tmp_plugin(
+                tmp, '{"name": "x", "skills": ["/", "/SKILL.md"]}')))
+        out = proc.stdout.decode()
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(out.count("escapes the plugin root"), 1, out)
+        self.assertIn("manifest-vs-disk: /: escapes the plugin root", out)
+
     def test_manifest_paths_are_contained(self):
         # Absolute and traversal entries are findings and are never read/registered.
         for entry_json in ('{"name": "x", "commands": ["../outside.md"]}',

@@ -257,6 +257,14 @@ def check_mechanical(root, arts, deprecated_terms):
 # ------------------------------------------------------------------ registry (R51 sidecar)
 
 
+#: Characters YAML's reader forbids (C0/C1 controls beyond tab/LF/CR, DEL, surrogates,
+#: FFFE/FFFF) plus the exotic line breaks (NEL, LS, PS) — outside the accepted subset,
+#: which allows printable characters with ASCII-only line breaks and space/tab whitespace.
+_FORBIDDEN_STREAM = re.compile(
+    "[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F"
+    "\u2028\u2029\ud800-\udfff\ufffe\uffff]")
+
+
 class RegistryError(Exception):
     """registry.yaml is outside the documented schema — a refusal, never a silent skip."""
 
@@ -425,11 +433,11 @@ def _reg_item_head(rest, line_no, source):
         if after == "":
             return None, None
         if after[:1] == ":" and (len(after) == 1 or after[1] in " \t"):
-            return _reg_key(rest[:end + 1], line_no, source), after[2:].strip()
+            return _reg_key(rest[:end + 1], line_no, source), after[2:].strip(" \t")
         raise RegistryError(f"{source}:{line_no}: trailing text after a quoted scalar")
     key, sep, value = rest.partition(":")
     if sep and (not value or value[0] in " \t"):
-        return _reg_key(key.strip(), line_no, source), value.strip()
+        return _reg_key(key.strip(" \t"), line_no, source), value.strip(" \t")
     return None, None
 
 
@@ -438,7 +446,7 @@ def _reg_block(lines, index, indent, source):
     entries_list, entries_map = None, None
     while index < len(lines):
         raw = _reg_strip_comment(lines[index])
-        if not raw.strip():
+        if not raw.strip(" \t"):
             index += 1
             continue
         current = len(raw) - len(raw.lstrip(" "))
@@ -448,12 +456,12 @@ def _reg_block(lines, index, indent, source):
             break
         if current > indent:
             raise RegistryError(f"{source}:{index + 1}: unexpected indentation")
-        content = raw.strip()
+        content = raw.strip(" \t")
         if content.startswith("- "):
             if entries_map is not None:
                 raise RegistryError(f"{source}:{index + 1}: list item inside a mapping")
             entries_list = [] if entries_list is None else entries_list
-            rest = content[2:].strip()
+            rest = content[2:].strip(" \t")
             head_key, head = _reg_item_head(rest, index + 1, source)
             if head_key is not None:
                 item = {head_key:
@@ -480,8 +488,8 @@ def _reg_block(lines, index, indent, source):
         separator = re.search(r":(?=[ \t]|$)", content)
         if not separator:
             raise RegistryError(f"{source}:{index + 1}: expected 'key:' or 'key: value'")
-        key = _reg_key(content[:separator.start()].strip(), index + 1, source)
-        value = content[separator.start() + 1:].strip()
+        key = _reg_key(content[:separator.start()].strip(" \t"), index + 1, source)
+        value = content[separator.start() + 1:].strip(" \t")
         entries_map = {} if entries_map is None else entries_map
         if key in entries_map:
             raise RegistryError(f"{source}:{index + 1}: duplicate key {key!r}")
@@ -532,7 +540,12 @@ def registry_terms(path):
     are not synonyms); canonical terms are never flagged.
     """
     source = path.name
-    tree, _ = _reg_block(read_text(path).split("\n"), 0, 0, source)
+    stream = read_text(path)
+    bad = _FORBIDDEN_STREAM.search(stream)
+    if bad:
+        raise RegistryError(f"{source}: forbidden character U+{ord(bad.group()):04X} "
+                            "in the character stream")
+    tree, _ = _reg_block(stream.split("\n"), 0, 0, source)
     if not isinstance(tree, dict):
         raise RegistryError(f"{source}: top level must be a mapping")
     unknown = set(tree) - REGISTRY_KEYS

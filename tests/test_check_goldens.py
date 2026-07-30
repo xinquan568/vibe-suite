@@ -436,6 +436,22 @@ class RegistryFailClosed(unittest.TestCase):
         self.assertEqual(self._description("=x").returncode, 0)
         self.assertEqual(self._description('"="').returncode, 0)
 
+    def test_forbidden_stream_characters_refused(self):
+        # YAML's reader forbids C0/C1 controls (beyond tab/LF/CR), DEL, and we refuse
+        # the exotic line breaks (NEL, LS, PS) as outside the accepted subset — a
+        # form feed must never be silently stripped into a valid line.
+        for ch in ("\x0c", "\x07", "\x00", "\x85", "\u2028", "\x7f"):
+            proc = self._run(REGISTRY_OK.replace(
+                "    description: scope\n", f"    description: {ch}scope\n"))
+            self.assertEqual(proc.returncode, 2, repr(ch))
+
+    def test_non_ascii_whitespace_is_content(self):
+        # NBSP is Python-whitespace but YAML content: it must survive into the value,
+        # not be stripped — the engine and YAML agree the leaf is a plain string.
+        proc = self._run(REGISTRY_OK.replace(
+            "    description: scope\n", "    description: \xa0scope\n"))
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

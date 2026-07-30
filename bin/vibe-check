@@ -124,12 +124,21 @@ def _contained_glob(root, pattern, escapes=None):
     return kept
 
 
+def _read_grammar(root, path, what):
+    """A grammar input (manifest, hooks config, marketplace) must RESOLVE inside the
+    root — a symlink escaping it cannot be parsed safely (could-not-run, exit 2)."""
+    if not _disk_contained(root, path):
+        rel = path.relative_to(root).as_posix()
+        raise CheckError(f"{what} {rel} escapes the plugin root")
+    return _read_json(path, what)
+
+
 def load_manifest(root):
     """The parsed, structurally USABLE plugin.json, or None when absent."""
     path = root / ".claude-plugin" / "plugin.json"
     if not path.is_file():
         return None
-    data = _read_json(path, "plugin.json")
+    data = _read_grammar(root, path, "plugin.json")
     if not isinstance(data, dict):
         raise CheckError("plugin.json is not a JSON object")
     for key in ("commands", "agents", "skills"):
@@ -198,13 +207,18 @@ def check_manifest_vs_disk(root, manifest):
                                     "registered in plugin.json but absent on disk"))
     # disk-side containment sweep: symlinked components resolving outside the root
     # are one finding each and are excluded from every check surface
-    escapes = []
     contained = {}
     for pattern in ("commands/*.md", "commands/shared/*.md", "agents/*.md",
                     "skills/*/SKILL.md"):
+        escapes = []
         contained[pattern] = _contained_glob(root, pattern, escapes)
-    for rel in escapes:
-        findings.append(finding("manifest-vs-disk", rel, "escapes the plugin root"))
+        for rel in escapes:
+            if pattern == "skills/*/SKILL.md":
+                # canonical escape path is the skill DIRECTORY — the same form the
+                # registration side reports, so the two collapse in dedupe
+                rel = rel[:-len("/SKILL.md")]
+            findings.append(finding("manifest-vs-disk", rel,
+                                    "escapes the plugin root"))
     # registration is PER COMPONENT CLASS: a commands file listed under agents[] is
     # not a registered command
     for pattern, key in (("commands/*.md", "commands"), ("agents/*.md", "agents")):
@@ -283,7 +297,7 @@ def check_hook_case(root, manifest):
         path = root / rel
         if not path.is_file():
             return []   # the dangling registration is manifest-vs-disk's finding
-        config = _read_json(path, "hooks config")
+        config = _read_grammar(root, path, "hooks config")
     elif isinstance(hooks_value, dict):
         rel = ".claude-plugin/plugin.json"
         config = hooks_value
@@ -292,7 +306,7 @@ def check_hook_case(root, manifest):
         if not path.is_file():
             return []
         rel = "hooks/hooks.json"
-        config = _read_json(path, "hooks config")
+        config = _read_grammar(root, path, "hooks config")
     events = config.get("hooks") if isinstance(config, dict) else None
     if not isinstance(events, dict):
         return []
@@ -308,6 +322,8 @@ def check_hook_case(root, manifest):
 def check_monorepo(root):
     findings = []
     for marker in sorted(root.rglob(".claude-plugin")):
+        if not _disk_contained(root, marker):
+            continue   # a symlinked marker resolving outside is not a sub-plugin here
         if marker.is_dir() and (marker / "plugin.json").is_file():
             sub = marker.parent
             if sub != root:
@@ -321,7 +337,7 @@ def check_version(root, manifest):
     marketplace = root / ".claude-plugin" / "marketplace.json"
     if not marketplace.is_file():
         return []
-    data = _read_json(marketplace, "marketplace.json")
+    data = _read_grammar(root, marketplace, "marketplace.json")
     if not isinstance(data, dict):
         raise CheckError("marketplace.json is not a JSON object")
     own_name = manifest.get("name")

@@ -265,8 +265,10 @@ class ErrorTaxonomy(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             outside = Path(tmp) / "outside"
             (outside / "skill-target").mkdir(parents=True)
-            (outside / "skill-target" / "SKILL.md").write_text("# bare\n",
-                                                               encoding="utf-8")
+            # the outside SKILL.md has a MISMATCHED name and no description: any
+            # frontmatter or name-dir line in the output would prove it was read
+            (outside / "skill-target" / "SKILL.md").write_text(
+                "---\nname: outside\n---\n# bare\n", encoding="utf-8")
             (outside / "cmd-target.md").write_text("# bare\n", encoding="utf-8")
             root = Path(tmp) / "plugin"
             (root / ".claude-plugin").mkdir(parents=True)
@@ -281,11 +283,63 @@ class ErrorTaxonomy(unittest.TestCase):
             proc = run_check(str(root))
         out = proc.stdout.decode()
         self.assertEqual(proc.returncode, 1, out + proc.stderr.decode())
-        self.assertEqual(out.count("skills/esc: escapes the plugin root"), 1, out)
-        self.assertEqual(out.count("commands/esc.md: escapes the plugin root"), 1, out)
-        self.assertNotIn("unregistered-skill", out)
-        self.assertNotIn("frontmatter", out)
-        self.assertNotIn("name-dir", out)
+        lines = [l for l in out.splitlines() if not l.startswith("vibe-check:")]
+        # EXACTLY the two escape findings — one per artifact, canonical path, nothing
+        # read, nothing double-reported
+        self.assertEqual(lines, [
+            "manifest-vs-disk: commands/esc.md: escapes the plugin root",
+            "manifest-vs-disk: skills/esc: escapes the plugin root",
+        ])
+        self.assertIn("vibe-check: 2 findings", out)
+
+    def test_escaping_grammar_file_symlinks_refuse(self):
+        # plugin.json, marketplace.json, and the default hooks config are GRAMMAR
+        # inputs: when any of them is a symlink resolving outside the root, the check
+        # cannot run safely — exit 2, target never parsed.
+        def base(tmp, with_manifest=True):
+            outside = Path(tmp) / "outside"
+            outside.mkdir(exist_ok=True)
+            root = Path(tmp) / "plugin"
+            (root / ".claude-plugin").mkdir(parents=True)
+            if with_manifest:
+                (root / ".claude-plugin" / "plugin.json").write_text(
+                    '{"name": "x"}', encoding="utf-8")
+            return outside, root
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outside, root = base(tmp, with_manifest=False)
+            (outside / "plugin.json").write_text('{"name": "evil"}', encoding="utf-8")
+            (root / ".claude-plugin" / "plugin.json").symlink_to(
+                outside / "plugin.json")
+            self.assertEqual(run_check(str(root)).returncode, 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            outside, root = base(tmp)
+            (outside / "marketplace.json").write_text('{"plugins": []}',
+                                                      encoding="utf-8")
+            (root / ".claude-plugin" / "marketplace.json").symlink_to(
+                outside / "marketplace.json")
+            self.assertEqual(run_check(str(root)).returncode, 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            outside, root = base(tmp)
+            (outside / "hooks.json").write_text('{"hooks": {}}', encoding="utf-8")
+            (root / "hooks").mkdir()
+            (root / "hooks" / "hooks.json").symlink_to(outside / "hooks.json")
+            self.assertEqual(run_check(str(root)).returncode, 2)
+
+    def test_symlinked_monorepo_marker_is_not_a_sub_plugin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside" / ".claude-plugin"
+            outside.mkdir(parents=True)
+            (outside / "plugin.json").write_text('{"name": "elsewhere"}',
+                                                 encoding="utf-8")
+            root = Path(tmp) / "not-a-plugin"
+            (root / "sub").mkdir(parents=True)
+            (root / "sub" / ".claude-plugin").symlink_to(outside,
+                                                         target_is_directory=True)
+            proc = run_check(str(root))
+        # the only "sub-plugin" resolves outside → no monorepo evidence → exit 2
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not a Claude Code plugin", proc.stderr.decode())
 
     def test_invalid_utf8_manifest_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:

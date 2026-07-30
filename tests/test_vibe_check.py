@@ -397,6 +397,26 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertEqual(out.count("escapes the plugin root"), 1, out)
         self.assertIn("manifest-vs-disk: commands/esc.md: escapes the plugin root", out)
 
+    def test_long_alias_chain_still_converges(self):
+        # A 10-link legitimate chain must reach the boundary link — no finite step cap
+        # may split the family.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            (root / ".claude-plugin").mkdir(parents=True)
+            (root / "commands").mkdir()
+            (root / "commands" / "esc.md").symlink_to("/etc/passwd")
+            (root / "aliases").mkdir()
+            (root / "aliases" / "a9.md").symlink_to("../commands/esc.md")
+            for i in range(8, -1, -1):
+                (root / "aliases" / f"a{i}.md").symlink_to(f"a{i + 1}.md")
+            (root / ".claude-plugin" / "plugin.json").write_text(
+                '{"name": "x", "commands": ["aliases/a0.md"]}', encoding="utf-8")
+            proc = run_check(str(root))
+        out = proc.stdout.decode()
+        self.assertEqual(proc.returncode, 1, out + proc.stderr.decode())
+        self.assertEqual(out.count("escapes the plugin root"), 1, out)
+        self.assertIn("manifest-vs-disk: commands/esc.md: escapes the plugin root", out)
+
     def test_symlink_cycle_is_handled_not_crashed(self):
         # A repo-local cycle must degrade to a refusal or finding — never a traceback.
         with tempfile.TemporaryDirectory() as tmp:

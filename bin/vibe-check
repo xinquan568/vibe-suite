@@ -133,7 +133,9 @@ def _canonical_rel(root, entry):
     if not path.is_absolute():
         return rel
     root_real = root.resolve()
-    for _ in range(8):   # single-link steps; the cap breaks symlink cycles
+    seen = set()
+    while str(path) not in seen:   # finite real entries; a revisit is a cycle
+        seen.add(str(path))
         parts = path.parts
         # boundary search over PROPER prefixes (never realpathing the final
         # component, whose own escape must stay unresolved); the full path joins
@@ -237,7 +239,9 @@ def _chain_canonical(root, rel):
     author-controlled in-root aliases gets ONE canonical escape name — the link that
     actually crosses the boundary."""
     current = rel
-    for _ in range(8):
+    seen = set()
+    while current not in seen:   # every hop is a real filesystem entry: finite; a
+        seen.add(current)        # revisit is a cycle and returns a stable spelling
         link = root / current
         try:
             if not link.is_symlink():

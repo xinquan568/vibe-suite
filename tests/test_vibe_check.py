@@ -246,6 +246,17 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertEqual(proc.returncode, 0,
                          proc.stdout.decode() + proc.stderr.decode())
 
+    def test_absolute_spellings_collapse_to_one_finding(self):
+        # POSIX normpath preserves exactly two leading slashes; /x and //x are the
+        # same artifact and must emit ONE canonical escape finding.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = run_check(str(self._tmp_plugin(
+                tmp, '{"name": "x", "commands": ["/etc/passwd", "//etc/passwd"]}')))
+        out = proc.stdout.decode()
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(out.count("escapes the plugin root"), 1, out)
+        self.assertIn("manifest-vs-disk: /etc/passwd: escapes the plugin root", out)
+
     def test_manifest_paths_are_contained(self):
         # Absolute and traversal entries are findings and are never read/registered.
         for entry_json in ('{"name": "x", "commands": ["../outside.md"]}',

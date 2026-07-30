@@ -89,8 +89,12 @@ def _norm(entry):
     """One spelling per target: posix-normalize the entry (./ prefixes, trailing
     slashes, internal // and /./ segments), so every registration spelling of one
     artifact yields ONE canonical relative path on every surface — registration sets,
-    containment, escape findings, and dedupe alike."""
-    return posixpath.normpath(entry)
+    containment, escape findings, and dedupe alike. POSIX lets normpath keep exactly two
+    leading slashes; //x and /x are one artifact here, so leading slashes collapse."""
+    rel = posixpath.normpath(entry)
+    if rel.startswith("//"):
+        rel = "/" + rel.lstrip("/")
+    return rel
 
 
 def _contained(root, entry):

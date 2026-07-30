@@ -32,7 +32,8 @@
     "./commands/unbridge.md",
     "./commands/update.md",
     "./commands/test.md",
-    "./commands/vocab.md"
+    "./commands/vocab.md",
+    "./commands/spec-sync.md"
   ],
   "hooks": "./hooks/hooks.json",
   "agents": [
@@ -41,7 +42,8 @@
     "./agents/scorer.md",
     "./agents/vague-scanner.md",
     "./agents/tester.md",
-    "./agents/vocab-drift-scanner.md"
+    "./agents/vocab-drift-scanner.md",
+    "./agents/spec-researcher.md"
   ],
   "skills": [
     "./skills/agent-design",

@@ -5,14 +5,15 @@ description: Claude Code overlay on the conventions floor — schemas and conven
 
 # Claude Code Conventions Overlay
 
+**Spec freshness:** verified 2026-06-07 against the official Claude Code docs map dated 2026-06-05 (code.claude.com/docs/en/)
+
 Overlay on the universal [conventions floor](../conventions/SKILL.md). Floor
 rules always apply; the rules below bind only to artifacts at Claude Code's
 canonical paths (`.claude/`, `plugin.json`, and plugin component
 directories).
 
-Freshness: refreshed 2026-06-07 against the official docs map dated
-2026-06-05, which tracks Claude Code ≥ v2.1.16x. Where earlier notes
-conflicted with that refresh, the newer facts below are canonical.
+That map tracks Claude Code ≥ v2.1.16x; where earlier notes conflicted with this
+refresh, the newer facts below are canonical.
 
 Deep-detail tables live in [references/reference.md](references/reference.md):
 hook context fields, the settings field table, auto-memory details, the LSP

@@ -1,0 +1,1232 @@
+# SPDX-License-Identifier: ISC
+"""E3.8 (vibe-33) acceptance: /vibe-suite:spec-sync + spec-researcher.
+
+Rung 0/1 pins contracts, the freshness normalization, and the fixture oracle. The live
+research step is the agent's judgment lane: CI performs no network fetch. What runs
+mechanically here is the one-to-one comparison of a RECORDED manual dry run against the
+hand-authored expectation — the recording's provenance header states when and how it
+was produced.
+"""
+
+import hashlib
+import json
+import re
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+COMMAND = REPO_ROOT / "commands" / "spec-sync.md"
+AGENT = REPO_ROOT / "agents" / "spec-researcher.md"
+SPEC = REPO_ROOT / ".vibe-test" / "spec-researcher.spec.md"
+FIX = REPO_ROOT / "tests" / "fixtures" / "spec-sync"
+EXPECTED = FIX / "expected-report.md"
+RECORDED = FIX / "recorded-dry-run.md"
+OVERLAYS = {
+    "claude": REPO_ROOT / "skills" / "conventions-claude" / "SKILL.md",
+    "codex": REPO_ROOT / "skills" / "conventions-codex" / "SKILL.md",
+    "antigravity": REPO_ROOT / "skills" / "conventions-antigravity" / "SKILL.md",
+}
+
+#: D6's exact canonical post-state lines (verbatim, including the ≥ character in the
+#: preserved Claude qualification).
+CANONICAL = {
+    "claude": "**Spec freshness:** verified 2026-06-07 against the official Claude Code "
+              "docs map dated 2026-06-05 (code.claude.com/docs/en/)",
+    "codex": "**Spec freshness:** verified 2026-06-07 against Codex CLI 0.137.0, "
+             "released 2026-06-04 (developers.openai.com/codex)",
+    "antigravity": "**Spec freshness:** UNVERIFIED — research written 2026-05-25, six "
+                   "days after the Antigravity 2.0 announcement of 2026-05-19; the "
+                   "verification pass described in §10 has not landed "
+                   "(developers.googleblog.com)",
+}
+PRESERVED = {
+    "claude": "That map tracks Claude Code ≥ v2.1.16x; where earlier notes conflicted "
+              "with this refresh, the newer facts below are canonical.",
+    "codex": "Pre-releases existed up to 0.138.0-alpha.6 at refresh time.",
+    "antigravity": "the spec has not settled since Antigravity 2.0, so most "
+                   "tool-specific checks stay advisory",
+}
+SUPERSEDED = ["Freshness: refreshed 2026-06-07", "Refresh state: verified 2026-06-07"]
+
+
+#: D6 requires each overlay's `description:` to survive normalization UNDATED — exactly
+#: one dated marker per overlay, and it is the canonical body line. Descriptions are a
+#: bounded, frozen field, so they are pinned exactly rather than pattern-checked.
+OVERLAY_DESCRIPTIONS = {
+    "claude":
+        "Claude Code overlay on the conventions floor \u2014 schemas and conventions for "
+        "plugin.json, commands, skills, agents, rules, hooks, .mcp.json, "
+        "marketplace.json, CLAUDE.md, memory, and settings at .claude/ canonical paths.",
+    "codex":
+        "Overlay of Codex CLI conventions \u2014 the config.toml grammar, the "
+        ".codex-plugin/plugin.json manifest, the .agents/skills/ layout, the "
+        "agents/openai.yaml sidecar, hook events, the AGENTS.md hierarchy, and "
+        "marketplace.json.",
+    "antigravity":
+        "Overlay of Antigravity (plus legacy Gemini CLI) conventions \u2014 workspace "
+        "skills under .agent/, the .gemini/ paths, gemini-extension.json, GEMINI.md "
+        "imports, slash commands in TOML, and the Gemini-lineage hook events; the spec "
+        "has not settled since Antigravity 2.0, so most tool-specific checks stay "
+        "advisory.",
+}
+
+
+TAGS = ["RESOLVED", "REMOVE", "FIX", "ADD", "CONFIRM"]
+
+
+#: Every sentence in each overlay that makes a freshness or verification claim. D6's
+#: deliverable is that exactly ONE dated marker exists per overlay, and a presence check
+#: on the canonical line cannot see a second sentence appended elsewhere saying the
+#: opposite — "this overlay is not verified" contradicts the canonical state while the
+#: canonical line itself still matches.
+#:
+#: The overlays are deliberately NOT sealed whole: they are living documents, and
+#: `/vibe-suite:spec-sync` exists to edit them. Only the freshness-claim surface is
+#: closed, so unrelated overlay content stays free to change.
+FRESHNESS_STATEMENTS = {
+    "claude": [
+        "**Spec freshness:** verified 2026-06-07 against the official Claude "
+        "Code docs map dated 2026-06-05 (code.claude.com/docs/en/)",
+        "where earlier notes conflicted with this refresh, the newer facts "
+        "below are canonical.",
+    ],
+    "codex": [
+        "**Spec freshness:** verified 2026-06-07 against Codex CLI 0.137.0, "
+        "released 2026-06-04 (developers.openai.com/codex)",
+        "Pre-releases existed up to 0.138.0-alpha.6 at refresh time.",
+        "Resolved at the 2026-06-07 refresh:",
+    ],
+    "antigravity": [
+        "**Spec freshness:** UNVERIFIED \u2014 research written 2026-05-25, six days "
+        "after the Antigravity 2.0 announcement of 2026-05-19;",
+        "What sets GEMINI.md apart from AGENTS.md/CLAUDE.md is `@file.md` "
+        "import support through the Memory Import Processor \u2014 checked against "
+        "geminicli.com/docs/reference/memport/ on 2026-05-26.",
+    ],
+}
+
+FRESHNESS_VOCAB = re.compile(
+    r"(?i)\b(verified|unverified|freshness|refresh\w*|checked)\b")
+
+
+def freshness_claims(text):
+    """Every sentence making a freshness or verification claim, in document order."""
+    found = []
+    for para in re.split(r"\n\s*\n", text):
+        flat = re.sub(r"\s+", " ", para).strip()
+        for sentence in re.split(r"(?<=[.;])\s+", flat):
+            if FRESHNESS_VOCAB.search(sentence):
+                found.append(sentence)
+    return found
+
+
+
+
+def squash(text):
+    return re.sub(r"\s+", " ", text)
+
+
+def report_rows(text):
+    """Parse a gap-report table into (seed, section, tag, confidence) tuples."""
+    rows = []
+    for line in text.splitlines():
+        if not line.startswith("| ") or line.startswith("| Seed") or set(
+                line.replace("|", "").strip()) <= set("-: "):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) >= 4 and cells[0].isdigit():
+            rows.append(tuple(cells[:4]))
+    return rows
+
+
+class Deliverables(unittest.TestCase):
+    def test_artifacts_and_registration(self):
+        self.assertTrue(COMMAND.is_file())
+        self.assertTrue(AGENT.is_file())
+        manifest = json.loads(
+            (REPO_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertIn("./commands/spec-sync.md", manifest["commands"])
+        self.assertIn("./agents/spec-researcher.md", manifest["agents"])
+        # at least the E3.8 state; later items add more (membership above pins ours)
+        self.assertGreaterEqual(len(manifest["commands"]), 18)
+        self.assertGreaterEqual(len(manifest["agents"]), 7)
+
+    def test_agent_frontmatter_matches_its_shipped_spec(self):
+        body = AGENT.read_text(encoding="utf-8")
+        self.assertRegex(body, r"(?m)^description: Use when")
+        self.assertRegex(body, r"(?m)^model: (haiku|sonnet|opus)$")
+        # exact allowlist — adding Write (or any tool) is a contract change
+        self.assertRegex(body, r"(?m)^tools: WebFetch, WebSearch, Read$")
+        spec = SPEC.read_text(encoding="utf-8")
+        self.assertIn("FIX/REMOVE/ADD/CONFIRM/RESOLVED", spec)
+        flat = squash(body)
+        self.assertIn("first-party", flat.lower())
+        self.assertRegex(flat, r"(?i)one dispatch per overlay|per-overlay dispatch")
+        # the output-table contract, field by field
+        self.assertIn("| Seed/claim | Section | Tag | Confidence or reason | "
+                      "Source label | URL |", flat)
+        for tag in TAGS:
+            self.assertIn(tag, body, f"agent must state tag {tag}")
+        for reason in ("source-silent", "source-conflict"):
+            self.assertIn(reason, body)
+        # D4/D5 evidence rules, each bound: per-row label AND URL; a quoted statement
+        # with its URL for every graded row; deficient evidence routed to UNCLASSIFIED
+        self.assertIn("and the full page URL", flat)
+        self.assertIn("Every graded row (`high` or `medium`) must quote the source "
+                      "statement it relied on together with that URL", flat)
+        self.assertIn("a row without a quotable statement and URL is not graded "
+                      "evidence and belongs in `UNCLASSIFIED`", flat)
+
+    def test_no_deprecated_vocabulary(self):
+        # R51 is enforced on commands/** and agents/** (E3.7).
+        for path in (COMMAND, AGENT):
+            self.assertNotRegex(path.read_text(encoding="utf-8"), r"(?i)\bimplement\b")
+
+
+class CommandContract(unittest.TestCase):
+    def setUp(self):
+        self.body = COMMAND.read_text(encoding="utf-8")
+        self.flat = squash(self.body)
+
+    def test_targets_field_complete(self):
+        # D1: three tokens, `all` as default, floor excluded — each asserted by content
+        for token in ("claude", "codex", "antigravity", "all"):
+            self.assertIn(f"`{token}`", self.body, f"target token missing: {token}")
+        self.assertIn("`all` (the default)", self.flat)
+        self.assertIn("`skills/conventions/` floor is never a target", self.flat)
+
+    def test_modes_and_change_predicate(self):
+        self.assertIn("--dry-run", self.body)
+        self.assertIn("--apply", self.body)
+        self.assertIn("remains writable after the confidence threshold", self.flat)
+        self.assertRegex(self.flat, r"(?i)no-change branch")
+        self.assertRegex(self.flat, r"(?i)never commits")
+        # D2: RESOLVED and a retiring CONFIRM are both actionable — deleting either
+        # from the predicate fails here
+        self.assertIn("FIX, REMOVE, ADD, or RESOLVED", self.flat)
+        self.assertIn("CONFIRM that retires a correction note", self.flat)
+
+    #: D3's five rows, EXACTLY and IN ORDER. A dict collapsed duplicates and hid
+    #: reordering; an ordered list of full rows admits neither.
+    D3_TABLE = [
+        ["1", "`RESOLVED`", "carries an explicit hedge about X", "now settles X",
+         "retire the hedge, state the settled fact"],
+        ["2", "`REMOVE`", "states X", "X withdrawn/absent, no replacement",
+         "delete the claim"],
+        ["3", "`FIX`", "states X", "states not-X, with a replacement",
+         "correct the claim in place"],
+        ["4", "`ADD`", "silent on X, X in scope", "states X", "add the claim"],
+        ["5", "`CONFIRM`", "states X definitely (no hedge)", "states X",
+         "none, except note retirement (below)"],
+    ]
+
+    def test_tag_precedence_table_is_exact_and_ordered(self):
+        rows = []
+        for line in self.body.splitlines():
+            if line.startswith("| ") and "`" in line:
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                if cells and cells[0].isdigit():
+                    rows.append(cells)
+        self.assertEqual(rows, self.D3_TABLE,
+                         "the precedence table must match the frozen semantics exactly, "
+                         "in order, with no extra or duplicate rows")
+
+    def test_disjointness_rules_stated(self):
+        self.assertIn("requires a replacement fact", self.flat)
+        self.assertRegex(self.flat, r"(?i)CONFIRM requires .*un-hedged|no hedge")
+
+    def test_confidence_and_threshold(self):
+        self.assertIn("UNCLASSIFIED", self.body)
+        self.assertIn("source-silent", self.body)
+        self.assertIn("source-conflict", self.body)
+        self.assertIn("--min-confidence", self.body)
+        self.assertRegex(self.flat, r"(?i)default(s)? (to )?`?medium`?")
+        self.assertIn("(withheld: below --min-confidence)", self.flat)
+        # D4: both grade DEFINITIONS and the orthogonality statement
+        self.assertIn("`high` is an explicit first-party statement", self.flat)
+        self.assertIn("`medium` is first-party but indirect", self.flat)
+        self.assertIn("grade the evidence, never the tag", self.flat)
+        self.assertIn("Insufficient evidence is not a grade", self.flat)
+
+    def test_evidence_contract_command_side(self):
+        # the note carries BOTH label and URL, and the freshness line's label-only
+        # convention is stated as a DISTINCTION, not a conflation
+        self.assertIn("`<source label>` is the overlay-style bare domain path and "
+                      "`<URL>` is the full first-party page URL", self.flat)
+        self.assertIn("the note records BOTH", self.flat)
+        self.assertIn("follows the overlays' existing label-only convention", self.flat)
+        self.assertIn("not full URLs", self.flat)
+
+    def test_correction_notes(self):
+        self.assertIn(
+            "<!-- spec-sync <run-date>: <tag> — <source label>, <URL> "
+            "(confidence: high|medium) -->", self.body)
+        self.assertIn("replaces its note rather than adding one", self.flat)
+        self.assertIn("one note per claim, never accumulating", self.flat)
+        self.assertIn("## Correction notes", self.body)
+        self.assertRegex(self.flat, r"(?i)not valid YAML|conforming parser")
+        # retirement is reachable: a note-retiring CONFIRM is writable
+        self.assertRegex(self.flat,
+                         r"(?i)CONFIRM .*retires .*(is writable|counts toward)")
+
+    def test_overlay_root_semantics(self):
+        self.assertIn("--overlay-root", self.body)
+        self.assertRegex(self.flat, r"(?i)replaces the (selected )?overlay set")
+        self.assertRegex(self.flat, r"(?i)requires an explicit target|refuses")
+
+    #: The frozen 23-token sweep set — the command must SHIP it, not reference it.
+    SWEEP_TOKENS = [
+        ".claude/", ".codex/", ".agent/", ".gemini/", "AGENTS.md", "GEMINI.md",
+        "CLAUDE.md", "hooks.json", "settings.json", "config.toml", ".mcp.json",
+        "mcpServers", "marketplace.json", "plugin.json", "CLAUDE_PLUGIN_ROOT",
+        "PreToolUse", "PostToolUse", "SessionStart", "SessionEnd", "SubagentStop",
+        "PreCompact", "UserPromptSubmit", "gemini-extension",
+    ]
+
+    def _token_block(self):
+        """The fenced token block itself — not the whole document, so a token that
+        also appears elsewhere (CLAUDE_PLUGIN_ROOT is in the verify command) cannot
+        satisfy the sweep definition by accident."""
+        m = re.search(r"\*Tokens \((\d+) alternatives[^)]*\):\*\s*\n```\n(.*?)```",
+                      self.body, re.S)
+        self.assertIsNotNone(m, "the sweep's token block is missing")
+        declared = int(m.group(1))
+        tokens = m.group(2).split()
+        return declared, tokens
+
+    def test_sweep_token_block_is_exact(self):
+        declared, tokens = self._token_block()
+        # the declared count, the actual count, and the frozen set must all agree —
+        # a removed token, an added token, or a stale count each fails
+        self.assertEqual(declared, 23, "declared alternative count drifted")
+        self.assertEqual(len(tokens), 23, f"token block holds {len(tokens)} tokens")
+        self.assertEqual(sorted(tokens), sorted(self.SWEEP_TOKENS),
+                         "token block differs from the frozen sweep set")
+
+    def test_sweep_scope_is_exact(self):
+        # the scope sentence, verbatim: EXCLUDING (not INCLUDING) those three trees
+        self.assertIn(
+            "every file in `git ls-files` EXCLUDING the `tests/`, `docs/`, and "
+            "`.github/` trees", self.flat)
+
+    def test_propagation_rules(self):
+        for kind in ("SOURCE", "DOCUMENTARY", "ENCODED", "OPERATIONAL"):
+            self.assertIn(f"**{kind}**", self.body, f"class missing: {kind}")
+        self.assertIn("code-change-required", self.body)
+        self.assertRegex(self.flat, r"(?i)never edited\*{0,2} by this command")
+        # both citation forms (D7.4)
+        self.assertIn("conventions-<tool> §N", self.body)
+        self.assertIn("Markdown link to the overlay", self.flat)
+
+    def test_verify_step_fully_pinned(self):
+        self.assertIn(
+            'python3 "${CLAUDE_PLUGIN_ROOT}/bin/vibe-check" "${CLAUDE_PLUGIN_ROOT}"',
+            self.body)
+        self.assertRegex(self.flat, r"(?i)exit status")
+
+
+#: Every binding rule from the frozen plan, each pinned to an EXACT phrase in the
+#: artifact that owns it. Adding a rule to the plan means adding a row here; deleting a
+#: rule from an artifact fails the corresponding case. Phrases are matched against
+#: whitespace-squashed text so line wrapping cannot mask a deletion.
+REQUIRED_CLAUSES = [
+    # (rule, file-key, exact phrase)
+    ("D1 default", "command", "`all` (the default)"),
+    ("D1 all selects three", "command", "selects those three"),
+    ("D1 floor excluded", "command", "`skills/conventions/` floor is never a target"),
+    ("D2 dry-run default", "command", "`--dry-run` (the default)"),
+    ("D2 actionable set", "command", "FIX, REMOVE, ADD, or RESOLVED"),
+    ("D2 retiring CONFIRM", "command", "CONFIRM that retires a correction note"),
+    ("D4 high grade", "command", "`high` is an explicit first-party statement"),
+    ("D4 medium grade", "command", "`medium` is first-party but indirect"),
+    ("D4 orthogonality", "command", "grade the evidence, never the tag"),
+    ("D4 not-a-grade", "command", "Insufficient evidence is not a grade"),
+    ("D4 threshold default", "command", "**default `medium`**"),
+    ("D5 every correction", "command", "Every applied correction carries a note"),
+    ("D5 run-date semantics", "command",
+     "is the ISO date of the run that writes it"),
+    ("D5 body placement", "command",
+     "the line immediately following the corrected or added claim"),
+    ("D5 frontmatter placement", "command",
+     "the note never goes inside the YAML block"),
+    ("D5 retirement condition", "command",
+     "`CONFIRM` at `high` confidence against a source dated at or after the note's own"),
+    ("D5 one note per claim", "command", "one note per claim, never accumulating"),
+    ("D6 label-only distinction", "command", "not full URLs"),
+    ("D7 case sensitivity", "command", "case-sensitively"),
+    ("D7 scope", "command",
+     "every file in `git ls-files` EXCLUDING the `tests/`, `docs/`, and `.github/` trees"),
+    ("D7 required targets", "command", "with the citing line quoted"),
+    ("D7 never edited", "command", "**never edited** by this command"),
+    ("D8 verify target", "command",
+     'python3 "${CLAUDE_PLUGIN_ROOT}/bin/vibe-check" "${CLAUDE_PLUGIN_ROOT}"'),
+    ("D9 first-party only", "agent", "**First-party only.**"),
+    ("D9 page date", "agent", "plus the page's own date when it carries one"),
+    ("D9 graded quote+URL", "agent",
+     "Every graded row (`high` or `medium`) must quote the source statement it relied "
+     "on together with that URL"),
+    ("D9 unclassified routing", "agent",
+     "a row without a quotable statement and URL is not graded evidence and belongs in "
+     "`UNCLASSIFIED`"),
+    ("D9 research not apply", "agent",
+     "You research and report; applying corrections belongs to"),
+    # --- rows added after the round-3 probe pass named them (each was deletable)
+    ("D1 token->overlay mapping", "command",
+     "`claude`, `codex`, and `antigravity` each select one overlay skill"),
+    ("D3 RESOLVED action", "command", "retire the hedge, state the settled fact"),
+    ("D5 REMOVE note placement", "command",
+     "for REMOVE in place of the deleted claim"),
+    ("D7 documentary changed-fact only", "command",
+     "updated ONLY when the fact it restates is one this run changed"),
+    ("D7 citation changed-section only", "command",
+     "reported as REQUIRED targets ONLY when the cited section is one this run changed"),
+    ("D2 withheld rows are not changes", "command",
+     "Rows withheld by the threshold do not create changes"),
+    ("D2 no-change reason is per overlay", "command",
+     "with the reason stated per overlay"),
+    ("D6 freshness rewritten atomically", "command",
+     "rewrites that line's state, date, and source label together as one edit"),
+    ("D7 every row states its basis", "command",
+     "Every classified row states its basis so a reader can audit it"),
+    ("D8 non-zero status surfaced", "command",
+     "a non-zero status is surfaced, never swallowed"),
+    ("D3 first-matching precedence", "command",
+     "classified by the FIRST matching rule"),
+    ("D4 withheld rows still reported", "command",
+     "is reported as `(withheld: below --min-confidence)`"),
+    ("D4 medium writes by default", "command",
+     "both grades write unless you raise the bar"),
+    ("D7 every occurrence classified", "command", "Classify every occurrence"),
+    ("D7 owning tests named", "command", "with their owning tests named"),
+    ("D7 anchor coverage still printed", "command",
+     "The report still prints the anchor's coverage"),
+    ("D7 coverage is not the bound", "command",
+     "coverage is no longer the propagation bound; the sweep is"),
+    ("D8 skip reason stated", "command", "Skipped, with the reason stated"),
+    ("D9 non-first-party excluded before tagging", "agent",
+     "are NOT evidence and are excluded before tagging"),
+    ("D5 note names the frontmatter key", "command",
+     "`## Correction notes` body section naming the frontmatter key"),
+    ("D9 report every claim examined", "agent",
+     "Report every claim you examined, including CONFIRM and UNCLASSIFIED rows"),
+    ("D9 output row order", "agent", "ordered by tag precedence then section"),
+    ("D9 quote beneath actionable rows", "agent",
+     "Quote the source statement you relied on beneath any FIX, REMOVE, or RESOLVED row"),
+]
+
+#: T0 requires the worksheet to carry hand-derived expectations, not just the fixture's
+#: seed table. Each row names a requirement the frozen plan states verbatim; the third
+#: and fourth were absent from the shipped worksheet until round 6.
+REQUIRED_WORKSHEET = [
+    ("D3 worked example per tag", "## D3 tag precedence"),
+    ("D4 UNCLASSIFIED reason examples", "## D4 confidence and UNCLASSIFIED"),
+    ("D5 note format", "## D5 correction notes"),
+    ("D5 replacement example", "**Replacement example**"),
+    ("D6 pre/post for all four occurrences",
+     "## D6 freshness normalization — pre/post for all four occurrences"),
+    ("D7 anchor measurement",
+     "## D7 anchor measurement and the four-kind classification"),
+]
+
+#: Frontmatter values the frozen plan fixes exactly (a tier alias, never a pinned id).
+REQUIRED_FRONTMATTER = [("agent", "model", "sonnet")]
+
+
+class RequiredClauses(unittest.TestCase):
+    """One case per binding rule — the table above is the contract's inventory."""
+
+    def test_every_rule_is_present(self):
+        sources = {"command": squash(COMMAND.read_text(encoding="utf-8")),
+                   "agent": squash(AGENT.read_text(encoding="utf-8"))}
+        for rule, key, phrase in REQUIRED_CLAUSES:
+            with self.subTest(rule=rule):
+                self.assertIn(phrase, sources[key],
+                              f"{rule}: required clause missing from {key}")
+
+    def test_required_frontmatter_values(self):
+        # D9 fixes the agent at sonnet-class; haiku or opus is a contract change
+        sources = {"agent": AGENT.read_text(encoding="utf-8"),
+                   "command": COMMAND.read_text(encoding="utf-8")}
+        for key, field, value in REQUIRED_FRONTMATTER:
+            with self.subTest(field=field):
+                self.assertRegex(sources[key], rf"(?m)^{field}: {value}$",
+                                 f"{key} {field} must be {value}")
+
+    def test_worksheet_note_schema_matches_the_command(self):
+        # the worksheet must not document a superseded schema (step-9 finding 2)
+        worksheet = (FIX / "README.md").read_text(encoding="utf-8")
+        self.assertIn("<source label>, <URL> (confidence: high|medium)", worksheet)
+        self.assertNotIn("<tag> — <source label> (confidence", worksheet)
+
+
+#: The COMPLETE word set of each artifact, frozen. Every other vocabulary check pins a
+#: token SHAPE — all-caps, hyphenated, inside code spans — and a shape is a syntax, so
+#: `Archival`, `evidence missing`, and a bare `critical` in prose slip past all of them.
+#: A lexicon has no shape: any word not already in the contract fails, in any case,
+#: spacing, or emphasis.
+#:
+#: This lives in test code, NOT in a fixture, and that is the point. The golden closes
+#: the set at byte level but a deliberate re-bless updates it; the lexicon must be
+#: updated here, in the same diff a reviewer reads, so a vocabulary change to a frozen
+#: contract is never invisible. It is a drift detector, not a semantic check — the
+#: equality tables above are what bind meaning.
+LEXICON = {
+    "command": {
+        'A', 'ADD', 'AGENTS', 'Action', 'Arguments', 'BOTH', 'Because', 'Boundaries',
+        'CHANGES', 'CLAUDE', 'CONFIRM', 'Classify', 'Consumers', 'Correction',
+        'DOCUMENTARY', 'Dispatch', 'ENCODED', 'EVENTS', 'EXCLUDING', 'Each', 'Every',
+        'FIRST', 'FIX', 'Fetched', 'For', 'GEMINI', 'H', 'HTML', 'ISO', 'Insufficient',
+        'It', 'KNOWN', 'Markdown', 'Modes', 'N', 'Never', 'No', 'Nothing', 'ONLY',
+        'OPERATIONAL', 'On', 'Order', 'Overlay', 'PATH', 'PLUGIN', 'Placement',
+        'PostToolUse', 'PreCompact', 'PreToolUse', 'Printing', 'REMOVE', 'REQUIRED',
+        'REQUIRES', 'RESOLVED', 'ROOT', 'Report', 'Research', 'Researches',
+        'Retirement', 'Rows', 'Run', 'SOURCE', 'Scope', 'SessionEnd', 'SessionStart',
+        'Skipped', 'So', 'Source', 'Spec', 'Step', 'Step-', 'SubagentStop', 'Sync',
+        'Tag', 'Targets', 'The', 'These', 'Tokens', 'UNCLASSIFIED', 'UNVERIFIED', 'URL',
+        'URLs', 'Untrusted', 'UserPromptSubmit', 'Verify', 'When', 'X', 'YAML', 'a',
+        'able', 'about', 'absence', 'absent', 'accumulating', 'add', 'added', 'adding',
+        'after', 'against', 'agent', "agent's", 'agents', 'all', 'all-medium', 'alone',
+        'alternatives', 'an', "anchor's", 'and', 'antigravity', 'any', 'application',
+        'applied', 'applies', 'apply', 'are', 'argument-hint', 'artifacts', 'as', 'at',
+        'audit', 'bar', 'bare', 'basis', 'be', 'because', 'becomes', 'been', 'below',
+        'bin', 'block', 'body', 'both', 'bound', 'branch', 'bridge', 'bump', 'bumps',
+        'but', 'by', 'caller', 'can', 'candidate', 'canonical', 'carries', 'carry',
+        'carrying', 'case-sensitively', 'change', 'changed', 'changes', 'check',
+        'citation', 'cited', 'citing', 'claim', 'classified', 'classify', 'claude',
+        'code', 'code-change-required', 'codex', 'com', 'command', "command's",
+        'comment', 'commit', 'commits', 'committed', 'confidence', 'config',
+        'conforming', 'consumers', 'convention', 'conventions', 'conventions-',
+        'correct', 'corrected', 'correcting', 'correction', 'corrections', 'count',
+        'counts', 'coverage', 'create', 'data', 'date', 'dated', 'declares', 'default',
+        'defaulting', 'defined', 'definitely', 'delete', 'deleted', 'dependency',
+        'description', 'developers', 'disagree', 'disjoint', 'dispatch', 'dispatches',
+        'do', 'docs', 'doctor', 'documentary', 'documentation', 'documented', 'does',
+        'domain', 'dry-run', 'each', 'edit', 'edited', 'either', 'engine', 'entry',
+        'every', 'evidence', 'exactly', 'except', 'existing', 'exit', 'explicit',
+        'explicitly', 'fact', 'family', 'fault', 'file', 'files', 'first',
+        'first-party', 'flags', 'floor', 'follow', 'following', 'follows', 'for',
+        'freshness', 'frontmatter', 'full', 'function', 'gap', 'gemini',
+        'gemini-extension', 'git', 'github', 'goes', 'grade', 'grades', 'has', 'hedge',
+        'hedged', 'here', 'high', 'hook', 'hook-config', 'hooks', 'how', 'immediately',
+        'in', 'independently', 'indirect', 'inline', 'input', 'inside', 'instructions',
+        'into', 'invocation', 'is', 'it', 'its', 'json', 'keeps', 'key', 'label',
+        'label-only', 'labels', 'later', 'least', 'left', 'line', "line's", 'link',
+        'longer', 'ls-files', 'machine-readable', 'many', 'marketplace', 'matched',
+        'matching', 'mcp', 'mcpServers', 'md', 'medium', 'meets', 'migration',
+        'min-confidence', 'mode', 'much', 'must', 'named', 'naming', 'never', 'no',
+        'no-change', 'no-op', 'non-zero', 'none', 'not', 'not-X', 'note', "note's",
+        'notes', 'nothing', 'now', 'number', 'observation', 'occurrence', 'occurrences',
+        'occurs', 'of', 'on', 'one', 'only', 'openai', 'optional', 'or', 'other',
+        'overlay', 'overlay-root', 'overlay-style', "overlays'", 'own', 'owning',
+        'page', 'pages', 'parser', 'path', 'paths', 'per', 'per-row', 'per-tool',
+        'place', 'plugin', 'plus', 'precedence', 'predicate', 'prints', 'propagate',
+        'propagates', 'propagation', 'prose', 'provenance', 'py', 'python', 'quoted',
+        'raise', 'rather', 're-touches', 're-verified', 'reader', 'reading', 'reason',
+        'records', 'reference', 'refuses', 'regardless', 'remain', 'remains', 'renders',
+        'replacement', 'replaces', 'report', "report's", 'reported', 'reports',
+        'reproduce', 'requires', 'research', 'researcher', 'restates', 'restating',
+        'retire', 'retirement', 'retires', 'returns', 'review', 'rewrites', 'root',
+        'rooted', 'row', 'rows', 'rule', 'rules', 'run', 'run-date', 's', 'same',
+        'scanned', 'schema', 'scope', 'score', 'scripts', 'section', 'select',
+        'selected', 'selects', 'set', 'settings', 'settled', 'settles', 'silent',
+        'single', 'single-overlay', 'skill', 'skills', 'so', 'source',
+        'source-conflict', 'source-silent', 'sources', 'spec', 'spec-researcher',
+        'spec-sync', 'staged', 'state', 'stated', 'statement', 'states', 'status',
+        'still', 'stops', 'such', 'summarises', 'surfaced', 'swallowed', 'sweep',
+        'sync', 'table', 'tag', 'tagged', 'tags', 'takes', 'target', 'targets', 'tests',
+        'than', 'that', 'the', 'their', 'them', 'themselves', 'this', 'those', 'three',
+        'threshold', 'to', 'together', 'token', 'toml', 'tool', "tool's",
+        'tool-agnostic', 'tool-convention', 'toward', 'transcription', 'tree', 'trees',
+        'two', 'un-hedged', 'under', 'unless', 'untouched', 'update', 'updated', 'uses',
+        'valid', 'value', 'verified', 'verifies', 'verify', 'vibe-check', 'vibe-suite',
+        'visible', 'when', 'where', 'whereas', 'which', 'whole', 'whose', 'with',
+        'withdrawal', 'withdrawn', 'withheld', 'without', 'working', 'would',
+        'writable', 'write', 'writes', 'writing', 'written', 'you', 'yourself', 'zero',
+    },
+    "agent": {
+        'ADD', 'BOTH', 'Blog', 'CONFIRM', 'Cite', 'Confidence', 'Every', 'FIRST', 'FIX',
+        'Fetched', 'First-party', 'Insufficient', 'NO', 'NOT', 'Never', 'ONE', 'One',
+        'Order', 'Output', 'Overflow', 'Overlay', 'Quote', 'REMOVE', 'RESOLVED', 'Read',
+        'Report', 'SKILL', 'Section', 'Seed', 'Source', 'Sources', 'Stack', 'Tag',
+        'The', 'UNCLASSIFIED', 'URL', 'Untrusted', 'Use', 'Vendor', 'WITH', 'WebFetch',
+        'WebSearch', 'When', 'X', 'You', 'a', 'about', 'absent', 'actionable',
+        'adjacent', 'advisory', 'against', 'aggregators', 'an', 'and', 'answers', 'any',
+        'applying', 'are', 'as', 'assign', 'at', 'bare', 'because', 'before', 'belongs',
+        'beneath', 'but', 'by', 'carries', 'caveat', 'changelog', 'changelogs',
+        'citations', 'claim', 'classifiable', 'codex', 'com', 'command', 'confidence',
+        'corrections', 'data', 'date', 'decides', 'declared', 'definitely',
+        'definitively', 'description', 'developers', 'disagree', 'disjoint', 'dispatch',
+        'documentation', 'documented', 'documents', 'domain', 'each', 'emit', 'every',
+        'evidence', 'examined', 'example', 'excluded', 'explicit', 'fact',
+        'first-party', 'for', 'form', 'format', 'from', 'full', 'gap', 'grade',
+        'graded', 'grades', 'hedge', 'hedged', 'high', 'hooks', 'in', 'including',
+        'indirect', 'inference', 'input', 'inside', 'instructions', 'is', 'it', 'its',
+        'label', 'line', 'low', 'matching', 'md', 'medium', 'model', 'must', 'name',
+        'never', 'no', 'not', 'not-X', 'notes', 'now', 'observation', 'on', 'one',
+        'only', 'openai', 'or', 'ordered', 'overlay', "overlay's", 'overlays', 'own',
+        'page', "page's", 'pages', 'path', 'per', 'per-row', 'plus', 'precedence',
+        'produces', 'quotable', 'quote', 'quoted', 'reason', 'recollection', 'release',
+        'relied', 'replacement', 'report', 'repository', 'requires', 'research',
+        'researching', 'return', 'row', "row's", 'rows', 'rule', 'rules', 'scope',
+        'section', 'sends', 'settled', 'settles', 'silent', 'skills', 'sonnet',
+        'source', 'source-conflict', 'source-silent', 'spec-researcher', 'spec-sync',
+        'stabilizes', 'state', 'statement', 'states', 'stops', 'such', 'table', 'tag',
+        'tagged', 'tagging', 'text', 'that', 'the', 'then', 'to', 'together',
+        'tool-convention', 'tools', 'tutorials', 'two', 'un-hedged', 'unsettled',
+        'until', 'use', 'vendor', "vendor's", 'vibe-core', 'vibe-suite', 'what', 'when',
+        'with', 'withdrawal', 'withdrawn', 'without', 'write', 'you',
+    },
+}
+
+
+#: SHA-256 of each artifact as shipped. The lexicon closes the VOCABULARY; this closes
+#: the TEXT. It exists because vocabulary is not meaning: a reviewer defeated the lexicon
+#: without adding a single new word, by recasing existing ones (`Source` as a fifth class
+#: name lowercases into the set) and by composing contradicting sentences entirely out of
+#: words the contract already used — "a claim the source is silent on is written" inverts
+#: D4 using nothing new. No lexical check can see that; only the text can.
+#:
+#: Both this and LEXICON live in test code rather than a fixture on purpose. The golden
+#: under tests/fixtures closes the same set, but a mutation that re-blesses the golden
+#: still fails here, so defeating the contract requires editing the test suite — a
+#: visible, deliberate act rather than a fixture refresh.
+#:
+#: When the contract legitimately changes: update the artifact, the golden, LEXICON, and
+#: this hash in one commit, and the clause tables above will tell you if you changed a
+#: rule rather than its wording.
+#: The worksheet and the two report oracles are sealed for the same reason and by the
+#: same argument. They are T0 deliverables — the hand-derived expectations the acceptance
+#: rests on — and they were guarded only by presence checks, so a contradicting sentence
+#: added to the D3, D4, D5, D6 or D7 sections passed every test while quietly changing
+#: what the oracle says. A hand oracle that can be edited without failing anything is not
+#: an oracle. Substantive errors in this worksheet kept finding 3 open twice, which is
+#: the strongest argument that it deserves the same seal as the artifacts.
+CONTRACT_SHA256 = {
+    "command": "ff268a973c39ab1058ad032f3e6725e3f2e031e51f44a8e80a5889908fe928d3",
+    "agent": "2d9b35ae1e29170d089e471561a4581c105caff66a44569f5dce765a2beb67a2",
+    "worksheet": "5c7adfe4c07995217b60049f8f03c8d38394ac9010eb233b798e08540fe1a6ec",
+    "expected-report": "da7c4dfe1ac85dfdaca1dba1c747441fe5efa402010807a899c6487e96420201",
+    "recorded-dry-run": "bf9c97acb9610045aa63da32a356039c336544aeee0032679eebd6de556548e7",
+}
+
+#: The fixture family, sealed by path relative to tests/fixtures/spec-sync/. The seeded
+#: overlay and the two consumers are T0 deliverables as much as the worksheet is: the
+#: acceptance says a dry run over a SEEDED-STALE fixture produces a correctly tagged
+#: report, so editing a seed's source or freshness claim, dropping the required citation
+#: from consumer-linked.md, or adding one to consumer-uncited.md changes what the
+#: acceptance tests — silently, while every row of the expected report still matches.
+FIXTURE_SHA256 = {
+    "README.md": "5c7adfe4c07995217b60049f8f03c8d38394ac9010eb233b798e08540fe1a6ec",
+    "expected-report.md":
+        "da7c4dfe1ac85dfdaca1dba1c747441fe5efa402010807a899c6487e96420201",
+    "recorded-dry-run.md":
+        "bf9c97acb9610045aa63da32a356039c336544aeee0032679eebd6de556548e7",
+    "stale-overlay/SKILL.md":
+        "9db27498ad892d4b7c455f51b26c9ae9c864c4f1dce24e019a759f9a860ff27e",
+    "stale-overlay/consumer-linked.md":
+        "8eb7cdd3ecf2d0f1da46863cc78c1a6f807df197c775e05a7ff488c8896fee5c",
+    "stale-overlay/consumer-uncited.md":
+        "f01498e106fa3a04bee23765f391fcdcf2d05a0b48de4d95b5e878b77cb839cd",
+    "contract/commands-spec-sync.md.golden":
+        "ff268a973c39ab1058ad032f3e6725e3f2e031e51f44a8e80a5889908fe928d3",
+    "contract/agents-spec-researcher.md.golden":
+        "2d9b35ae1e29170d089e471561a4581c105caff66a44569f5dce765a2beb67a2",
+}
+
+#: Every sealed path, by the key used above.
+SEALED = {
+    "command": COMMAND,
+    "agent": AGENT,
+    "worksheet": FIX / "README.md",
+    "expected-report": EXPECTED,
+    "recorded-dry-run": RECORDED,
+}
+
+
+class FrozenContractSeal(unittest.TestCase):
+    """Contradiction-by-ADDITION is the case the clause tables structurally cannot see:
+    they assert a required sentence is present, and a contract can be broken by adding a
+    sentence that contradicts it while every required sentence stays put. Presence checks
+    cannot close that; only pinning the whole text can."""
+
+    def test_frozen_texts_are_sealed(self):
+        for key, path in SEALED.items():
+            with self.subTest(artifact=key):
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                self.assertEqual(
+                    digest, CONTRACT_SHA256[key],
+                    f"{key} text changed. Nothing may be added, removed, or reworded in "
+                    "a frozen contract or hand oracle without updating CONTRACT_SHA256 "
+                    "(and, for the two artifacts, LEXICON and the golden) in the same "
+                    "commit — see the clause tables for what each rule requires.")
+
+    def test_fixture_family_is_sealed(self):
+        for rel, expected in FIXTURE_SHA256.items():
+            with self.subTest(fixture=rel):
+                path = FIX / rel
+                self.assertTrue(path.is_file(), f"sealed fixture missing: {rel}")
+                self.assertEqual(
+                    hashlib.sha256(path.read_bytes()).hexdigest(), expected,
+                    f"{rel} changed. The seeded fixture IS the acceptance: editing a "
+                    "seed's source claim, or a consumer's citation, changes what a "
+                    "correctly tagged report means.")
+
+    def test_no_fixture_file_escapes_the_seal(self):
+        """Ground truth is the TREE, not a map.
+
+        The previous version of this check compared two dicts to each other, which only
+        proved they agreed — a frozen deliverable omitted from BOTH was invisible to it,
+        and that is precisely how the seeded overlay and its two consumers stayed
+        unguarded. Walking the directory means a file cannot be frozen-in-practice and
+        unsealed-in-fact: adding one to the fixture tree fails until it is sealed.
+        """
+        on_disk = {str(p.relative_to(FIX)) for p in FIX.rglob("*") if p.is_file()}
+        self.assertEqual(
+            on_disk, set(FIXTURE_SHA256),
+            "every file under tests/fixtures/spec-sync/ must carry a digest; "
+            f"unsealed: {sorted(on_disk - set(FIXTURE_SHA256))}, "
+            f"stale entries: {sorted(set(FIXTURE_SHA256) - on_disk)}")
+        # the two artifact seals are keyed separately; both maps must stay populated
+        for key, path in SEALED.items():
+            self.assertTrue(path.is_file(), f"sealed path missing: {key}")
+            self.assertIn(key, CONTRACT_SHA256, f"sealed path without a digest: {key}")
+
+
+class FrozenLexicon(unittest.TestCase):
+    """The vocabulary layer: a word in a shape no other check scans for.
+
+    Case-SENSITIVE, because recasing an existing word is how a fifth propagation class
+    named `Source` or a sixth tag named `Review` gets past a lowercased set.
+    """
+
+    def test_no_word_enters_the_contract_unnoticed(self):
+        for key, path in (("command", COMMAND), ("agent", AGENT)):
+            with self.subTest(artifact=key):
+                words = set(re.findall(r"[A-Za-z][A-Za-z'-]*",
+                                       path.read_text(encoding="utf-8")))
+                added = words - LEXICON[key]
+                removed = LEXICON[key] - words
+                self.assertEqual(
+                    words, LEXICON[key],
+                    f"{key}: vocabulary changed — added {sorted(added)}, "
+                    f"removed {sorted(removed)}. If intended, update LEXICON in the "
+                    "same commit so the change is visible in review.")
+
+CONTRACT = FIX / "contract"
+
+
+def list_terms(region):
+    """Lead term of every list item, whatever the marker or emphasis.
+
+    `- X`, `* X`, `1. X`, `- **X**`, and ``- `X` `` all yield X, so a vocabulary added
+    as a numbered or bolded item is as visible as one added in the frozen style.
+    """
+    terms = []
+    for line in region.splitlines():
+        item = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$", line)
+        if item:
+            lead = re.match(r"^[`*_]*([A-Za-z][A-Za-z0-9_-]*)", item.group(1))
+            if lead:
+                terms.append(lead.group(1))
+    return terms
+
+
+def table_lead_cells(region):
+    """Lead term of each table row's first non-numeric cell — a vocabulary moved into
+    table form is still that vocabulary."""
+    terms = []
+    for line in region.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        for cell in cells:
+            if cell and not cell.isdigit() and not set(cell) <= set("-: "):
+                lead = re.match(r"^[`*_]*([A-Za-z][A-Za-z0-9_-]*)", cell)
+                if lead:
+                    terms.append(lead.group(1))
+                break
+    return terms
+
+
+class WorksheetCompleteness(unittest.TestCase):
+    """T0's worksheet is a deliverable, and it was the third place a frozen requirement
+    went missing without any test noticing (after D7.3 and D7.4). Headings alone are not
+    evidence, so each check below asserts the SUBSTANCE the plan asked for."""
+
+    def setUp(self):
+        self.text = (FIX / "README.md").read_text(encoding="utf-8")
+
+    def test_required_sections(self):
+        for rule, anchor in REQUIRED_WORKSHEET:
+            with self.subTest(rule=rule):
+                self.assertIn(anchor, self.text, f"worksheet is missing: {rule}")
+
+    def test_d6_covers_four_occurrences_with_pre_and_post(self):
+        section = self.text[self.text.index("## D6 freshness"):]
+        section = section[:section.index("## D7")]
+        rows = [ln for ln in section.splitlines()
+                if ln.startswith("| ") and re.match(r"\| \d+ \|", ln)]
+        self.assertEqual(len(rows), 4,
+                         "D6 requires pre/post for all FOUR freshness occurrences")
+        for overlay in ("claude", "codex", "antigravity"):
+            self.assertIn(overlay, section, f"D6 omits the {overlay} overlay")
+        # two of the four are `description:` clauses, not body lines — the split that
+        # makes the count four rather than three
+        self.assertEqual(sum("`description:`" in r for r in rows), 2,
+                         "two of the four occurrences are description clauses")
+
+    def test_d6_pre_and_post_carry_the_real_text(self):
+        """Cross-check the worksheet against the SAME constants the overlay tests use.
+
+        A pre/post table is only evidence if its cells are the actual text. Quoting a
+        canonical line but dropping the qualification it preserves would describe a
+        normalization that discards content, which is the opposite of what D6 requires.
+        """
+        section = self.text[self.text.index("## D6 freshness"):]
+        section = section[:section.index("## D7")]
+        flat = squash(section)
+        for name in OVERLAYS:
+            with self.subTest(overlay=name):
+                self.assertIn(squash(CANONICAL[name]), flat,
+                              f"D6 omits the canonical post-state line for {name}")
+                self.assertIn(squash(PRESERVED[name]), flat,
+                              f"D6 omits the qualification {name} preserves — the "
+                              "post-state must show where the content went")
+        # the Claude pre-state is two sentences; the second is the one carrying the
+        # content that survives, so a truncated quote hides the whole question
+        self.assertIn("the newer facts below are canonical.", flat,
+                      "the Claude pre-state is truncated before its second sentence")
+
+    def test_d7_states_the_anchor_measurement_and_every_class(self):
+        section = self.text[self.text.index("## D7 anchor measurement"):]
+        for path in ("bin/vibe-check", "skills/scoring/SKILL.md",
+                     "skills/conventions-antigravity/SKILL.md"):
+            self.assertIn(path, section, f"anchor measurement omits {path}")
+        for kind in ("SOURCE", "DOCUMENTARY", "ENCODED", "OPERATIONAL"):
+            self.assertIn(f"| {kind} |", section,
+                          f"the four-kind classification omits an example for {kind}")
+        self.assertIn("both citation forms", section.replace("\n", " "),
+                      "the anchor must state that both citation forms are matched")
+
+
+class FrozenContractText(unittest.TestCase):
+    """The set-closure mechanism, and the only one that does not depend on a grammar.
+
+    Every check below this one extracts with a PATTERN, and a pattern encodes a syntax:
+    reading targets out of `argument-hint` cannot see a target named only in the body,
+    a backtick-anchored flag scan cannot see an unbackticked `--audit`, and a
+    ``- **CLASS** —`` scan cannot see ``- **CLASS**:``. Each such hole is closed by
+    widening one pattern, and the next unanticipated syntax opens another. So the
+    artifacts are ALSO pinned whole: any addition, anywhere, in any syntax, changes the
+    text and fails here.
+
+    This does not make the pattern checks redundant, and the division matters. The
+    golden closes the SET (nothing may be added); REQUIRED_CLAUSES and the equality
+    tables bind the CONTENT to the frozen plan (the golden cannot be re-blessed into
+    something that no longer states D1–D9). Updating a golden is therefore a deliberate
+    act that must still satisfy every semantic check.
+    """
+
+    GOLDENS = {"command": (COMMAND, CONTRACT / "commands-spec-sync.md.golden"),
+               "agent": (AGENT, CONTRACT / "agents-spec-researcher.md.golden")}
+
+    def test_artifacts_match_their_frozen_text(self):
+        for key, (shipped, golden) in self.GOLDENS.items():
+            with self.subTest(artifact=key):
+                self.assertTrue(golden.is_file(), f"missing golden for {key}")
+                self.assertEqual(
+                    shipped.read_text(encoding="utf-8"),
+                    golden.read_text(encoding="utf-8"),
+                    f"{key} differs from its frozen contract text. If the change is "
+                    "intended, re-verify it against the frozen plan and update "
+                    f"{golden.relative_to(REPO_ROOT)} in the same commit.")
+
+
+class ClosedSets(unittest.TestCase):
+    """Every closed set is EXTRACTED with a general pattern and compared by equality
+    against the frozen expectation, in BOTH artifacts. A pattern that matches only the
+    expected values cannot see an addition — `--min-confidence (high|medium)` is blind
+    to `critical` — so every extraction below is deliberately permissive and the
+    equality does the work.
+    """
+
+    D3_TAGS = ["RESOLVED", "REMOVE", "FIX", "ADD", "CONFIRM"]
+    #: The agent restates D3 in its own words; its rows are pinned exactly too.
+    AGENT_TABLE = [
+        ["1", "`RESOLVED`",
+         'carries an explicit hedge about X (caveat / "advisory" / "unsettled" / '
+         '"until … stabilizes")', "now settles X definitively"],
+        ["2", "`REMOVE`", "states X",
+         "documents X as withdrawn or absent, with NO replacement fact"],
+        ["3", "`FIX`", "states X", "states not-X, WITH a replacement fact"],
+        ["4", "`ADD`", "silent on X, and X is inside the overlay's declared scope",
+         "states X"],
+        ["5", "`CONFIRM`", "states X definitely, with no hedge", "states X"],
+    ]
+
+    def setUp(self):
+        self.command = COMMAND.read_text(encoding="utf-8")
+        self.agent = AGENT.read_text(encoding="utf-8")
+        self.both = {"command": self.command, "agent": self.agent}
+
+    @staticmethod
+    def _rows(text):
+        rows = []
+        for line in text.splitlines():
+            if line.startswith("| ") and "`" in line:
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                if cells and cells[0].isdigit():
+                    rows.append(cells)
+        return rows
+
+    def test_targets_are_exactly_four(self):
+        # extracted from the argument-hint, which enumerates the closed target set
+        hint = re.search(r"^argument-hint: \"\[([^\]]+)\]", self.command, re.M)
+        self.assertIsNotNone(hint, "argument-hint must enumerate the targets")
+        self.assertEqual(hint.group(1).split("|"),
+                         ["claude", "codex", "antigravity", "all"],
+                         "the target set is closed and ordered")
+        # ...and again from the Targets section itself, so a target introduced only in
+        # the body is caught by this test rather than incidentally by a clause
+        body = self._section("## Targets", "## Modes")
+        named = {t for t in re.findall(r"`([^`]+)`", body)
+                 if re.fullmatch(r"[a-z]+", t)}
+        self.assertEqual(named, {"claude", "codex", "antigravity", "all"},
+                         f"the Targets section names an unfrozen target: {sorted(named)}")
+
+    #: Where each artifact defines its confidence vocabulary. Scoping the scan to the
+    #: defining section is what lets it capture BARE words without drowning in prose.
+    GRADE_REGION = {"command": ("## Step 3", "## Step 4"),
+                    "agent": ("## Confidence,", "## Output format")}
+
+    def _region(self, key):
+        text = self.both[key]
+        start, end = self.GRADE_REGION[key]
+        self.assertIn(start, text, f"{key}: confidence section not found")
+        i = text.index(start)
+        return text[i:text.index(end, i)]
+
+    def _section(self, start, end, key="command"):
+        text = self.both[key]
+        self.assertIn(start, text, f"{key}: section {start!r} not found")
+        i = text.index(start)
+        return text[i:text.index(end, i)]
+
+    def test_mode_flags_are_exactly_the_frozen_set(self):
+        # every flag ANYWHERE, backticked or not, long or short: a mode introduced in
+        # plain prose or as `-a` is still a mode
+        flags = set(re.findall(r"(?<![\w-])(--?[a-z][a-z-]*)", self.command))
+        self.assertEqual(
+            flags, {"--dry-run", "--apply", "--min-confidence", "--overlay-root"},
+            f"an unfrozen flag appeared: {sorted(flags)}")
+
+    def test_threshold_values_are_exactly_high_medium(self):
+        # accept every separator the flag could be written with (space, `=`, backtick),
+        # so `--min-confidence=critical` is captured as readily as the frozen form
+        values = set(re.findall(r"--min-confidence[=\s`]+([a-zA-Z|<>-]+)", self.command))
+        tokens = {v for value in values for v in re.split(r"[|<>]", value) if v}
+        self.assertEqual(tokens, {"high", "medium"},
+                         f"threshold vocabulary drifted: {sorted(tokens)}")
+
+    def test_confidence_grades_in_both_artifacts(self):
+        for key in self.both:
+            with self.subTest(artifact=key):
+                region = self._region(key)
+                # three grade-defining shapes, none of which assumes backticks or a
+                # fixed universe of words: a backticked term, a list item `- X — …`,
+                # and a defining sentence `X is an/a/first-party …`
+                tokens = set(re.findall(r"`([a-z]+)`", region))
+                tokens |= {t for t in list_terms(region) if t.islower()}
+                tokens |= {t for t in table_lead_cells(region) if t.islower()}
+                tokens |= set(re.findall(
+                    r"`?\b([a-z]+)\b`?\s+is\s+(?:an|a|first-party)\b", region))
+                tokens -= self.GRADE_SECTION_PROSE
+                self.assertEqual(tokens, {"high", "medium"},
+                                 f"{key}: grade vocabulary drifted: {sorted(tokens)}")
+
+    #: Lowercase words that legitimately appear in a grade-defining position in the
+    #: confidence sections without being grades. Asserted by subtraction, so a NEW
+    #: prose word in that position also fails — the exemption list cannot silently grow.
+    GRADE_SECTION_PROSE = {"withheld", "row", "claim", "grade", "reason", "confidence"}
+
+    def test_unclassified_reasons_in_both_artifacts(self):
+        for key in self.both:
+            with self.subTest(artifact=key):
+                # every hyphenated lowercase term in the section, backticked or not —
+                # a reason written plainly as evidence-missing is still a reason
+                region = self._region(key)
+                terms = set(re.findall(r"\b([a-z]+-[a-z]+)\b", region))
+                self.assertEqual(
+                    terms, {"source-silent", "source-conflict"} | self.REGION_PROSE[key],
+                    f"{key}: a new hyphenated term appeared in the confidence "
+                    f"section: {sorted(terms)}")
+
+    #: The hyphenated NON-reason vocabulary each confidence section already contains.
+    #: Equality against reasons ∪ this set means any new hyphenated term fails, however
+    #: it is written, and the exemptions are enumerated rather than pattern-excused.
+    REGION_PROSE = {
+        "command": {"all-medium", "first-party", "min-confidence", "no-change"},
+        "agent": {"first-party"},
+    }
+
+    def test_propagation_classes_are_exactly_four(self):
+        # structural: the lead term of each list item in the classification section,
+        # so `1. **ARCHIVAL**` and `- **ARCHIVAL**:` are as visible as the frozen form
+        section = self._section("Classify every occurrence", "## Step 7")
+        classes = [t for t in list_terms(section) if t.isupper()]
+        self.assertEqual(classes,
+                         ["SOURCE", "DOCUMENTARY", "ENCODED", "OPERATIONAL"],
+                         "the propagation classes are a closed, ordered set of four")
+
+    def test_agent_tag_vocabulary_is_closed_outside_the_table_too(self):
+        # every all-caps word in the agent, backticked, bolded or plain, compared by
+        # equality — a sixth tag cannot hide in prose, and because the emphasis words
+        # are enumerated rather than pattern-excused, a new one fails here too
+        caps = set(re.findall(r"\b([A-Z]{3,})\b", self.agent))
+        self.assertEqual(
+            caps, set(self.D3_TAGS) | {"UNCLASSIFIED"} | self.AGENT_EMPHASIS,
+            f"agent all-caps vocabulary drifted: {sorted(caps)}")
+
+    #: All-caps words the agent uses for prose emphasis or as proper nouns.
+    AGENT_EMPHASIS = {"BOTH", "FIRST", "NOT", "ONE", "SKILL", "URL", "WITH"}
+
+    #: The D7 classes' full DEFINITIONS, not just their names. Binding the name alone
+    #: lets the meaning be inverted underneath it — DOCUMENTARY could be redefined to
+    #: update untouched prose while the four names still compare equal.
+    CLASS_DEFINITIONS = [
+        "- **SOURCE** — the overlay skills themselves.",
+        "- **DOCUMENTARY** — prose restating an overlay fact. On `--apply`, updated ONLY "
+        "when the fact it restates is one this run changed (each with a Step-4 note); a "
+        "documentary occurrence of an untouched fact is reported and left alone.",
+        "- **ENCODED** — a machine-readable transcription (`bin/vibe-check`'s "
+        "`KNOWN_EVENTS`, `scripts/score_engine.py`'s rows, `scripts/check_engine.py`'s "
+        "hook-config schema).",
+        "- **OPERATIONAL** — code reading or writing per-tool paths as its function (the "
+        "bridge family, `doctor.py`, `update.py`, the migration scripts, the hook "
+        "scripts).",
+    ]
+
+    def test_propagation_class_definitions_are_exact(self):
+        section = self._section("Classify every occurrence", "## Step 7")
+        found = [" ".join(m.group(0).split()) for m in
+                 re.finditer(r"(?ms)^- \*\*[A-Z]+\*\*.*?(?=^- \*\*|^\Z|^[A-Z])", section)]
+        self.assertEqual(found, self.CLASS_DEFINITIONS,
+                         "a class definition changed while its name stayed the same")
+
+    #: Every bare-lowercase inline code span in each artifact. These artifacts name
+    #: their vocabulary in code spans, so pinning the whole set by equality catches a
+    #: term added ANYWHERE — outside any section a region-scoped check would look at.
+    CODE_SPANS = {
+        "command": {"all", "antigravity", "claude", "code-change-required", "codex",
+                    "high", "medium", "source-conflict", "source-silent"},
+        "agent": {"high", "medium", "source-conflict", "source-silent"},
+    }
+
+    #: The command's whole-file all-caps and hyphenated vocabularies. Region-scoped
+    #: checks cannot see a term added outside the region they scan; these can, and their
+    #: expectations live in test code rather than in a fixture, so re-blessing a golden
+    #: does not also re-bless them.
+    COMMAND_CAPS = {
+        "ADD", "AGENTS", "BOTH", "CHANGES", "CLAUDE", "CONFIRM", "DOCUMENTARY",
+        "ENCODED", "EXCLUDING", "FIRST", "FIX", "GEMINI", "HTML", "ISO", "ONLY",
+        "OPERATIONAL", "PATH", "REMOVE", "REQUIRED", "REQUIRES", "RESOLVED", "SOURCE",
+        "UNCLASSIFIED", "UNVERIFIED", "URL", "YAML",
+    }
+    COMMAND_HYPHENATED = {
+        "all-medium", "argument-hint", "case-sensitively", "code-change", "dry-run",
+        "first-party", "gemini-extension", "hook-config", "label-only", "ls-files",
+        "machine-readable", "min-confidence", "no-change", "no-op", "non-zero",
+        "overlay-root", "overlay-style", "per-row", "per-tool", "re-touches",
+        "re-verified", "run-date", "single-overlay", "source-conflict", "source-silent",
+        "spec-researcher", "spec-sync", "tool-agnostic", "tool-convention", "un-hedged",
+        "vibe-check", "vibe-suite",
+    }
+
+    def test_command_whole_file_vocabularies_are_closed(self):
+        caps = set(re.findall(r"\b([A-Z]{3,})\b", self.command))
+        self.assertEqual(caps, self.COMMAND_CAPS,
+                         f"command all-caps vocabulary drifted: "
+                         f"{sorted(caps ^ self.COMMAND_CAPS)}")
+        hyphenated = set(re.findall(r"\b([a-z]+-[a-z]+)\b", self.command))
+        self.assertEqual(hyphenated, self.COMMAND_HYPHENATED,
+                         f"command hyphenated vocabulary drifted: "
+                         f"{sorted(hyphenated ^ self.COMMAND_HYPHENATED)}")
+
+    def test_code_span_vocabulary_is_closed(self):
+        for key, text in self.both.items():
+            with self.subTest(artifact=key):
+                spans = {s for s in re.findall(r"`([^`\n]+)`", text)
+                         if re.fullmatch(r"[a-z][a-z-]*", s)}
+                self.assertEqual(spans, self.CODE_SPANS[key],
+                                 f"{key}: inline-code vocabulary drifted: "
+                                 f"{sorted(spans)}")
+
+    def test_agent_table_rows_are_exact(self):
+        self.assertEqual(self._rows(self.agent), self.AGENT_TABLE,
+                         "the agent's tag table must match D3's semantics exactly")
+
+    def test_agent_frontmatter_is_parsed_not_pattern_matched(self):
+        # a duplicate key would let a second `tools:` line override the allowlist while
+        # a line-regex still matched the first — so parse the block and reject dupes
+        lines = self.agent.split("\n")
+        self.assertEqual(lines[0], "---")
+        keys, fields = [], {}
+        for line in lines[1:]:
+            if line == "---":
+                break
+            # a key at ANY indentation and in EITHER quoting style: YAML resolves
+            # `"tools":` and an indented `tools:` to the same key, so a parser that
+            # only recognises bare keys at column 0 lets a later duplicate silently
+            # override the allowlist while the first line still reads correctly
+            # `? tools` is YAML's explicit-key form and resolves to the same key as a
+            # plain `tools:`, so it is a duplicate the parser must see
+            m = re.match(
+                r"""^\s*(?:\?\s+)?(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*:?\s*(.*)$""",
+                line)
+            if m:
+                key = m.group(1) or m.group(2) or m.group(3)
+                keys.append(key)
+                fields[key] = m.group(4).strip()
+        self.assertEqual(len(keys), len(set(keys)),
+                         f"duplicate frontmatter key: {keys}")
+        self.assertEqual(set(keys), {"name", "description", "model", "tools"},
+                         f"the frontmatter key set is closed: {sorted(keys)}")
+        self.assertEqual([t.strip() for t in fields["tools"].split(",")],
+                         ["WebFetch", "WebSearch", "Read"],
+                         "the tool allowlist is closed")
+        self.assertEqual(fields["model"], "sonnet")
+
+
+class FreshnessNormalization(unittest.TestCase):
+    def test_descriptions_are_exact_and_undated(self):
+        """D6's other half: the `description:` of each overlay survives normalization
+        UNDATED, so exactly one dated marker exists per overlay. Frontmatter is a
+        bounded field, so it is pinned exactly — that also closes asserting a
+        verification state there, which no body-prose check would see."""
+        for name, path in OVERLAYS.items():
+            with self.subTest(overlay=name):
+                match = re.search(r"(?m)^description: (.*)$",
+                                  path.read_text(encoding="utf-8"))
+                self.assertIsNotNone(match, f"{name}: no description")
+                self.assertEqual(match.group(1), OVERLAY_DESCRIPTIONS[name],
+                                 f"{name}: description changed")
+                self.assertNotRegex(
+                    match.group(1), r"\d{4}-\d{2}-\d{2}",
+                    f"{name}: D6 leaves exactly one dated marker per overlay, and it "
+                    "is the canonical body line — not the description")
+
+    def test_freshness_claims_are_a_closed_set(self):
+        """D6 promises exactly one dated marker per overlay. Asserting the canonical
+        line is PRESENT cannot keep that promise: a sentence appended anywhere else in
+        the overlay denying the verified state contradicts it while the canonical line
+        still matches. So the whole freshness-claim surface is compared by equality.
+
+        SCOPE, stated rather than implied. This closes sentences that name a freshness
+        state in the vocabulary D6 uses. It does NOT close free prose asserting the same
+        thing in other words — "stale", "out of date", "fully audited" — and widening the
+        synonym list does not converge, because the next synonym is always outside it.
+        That residue is currently UNOWNED, and saying so is more useful than routing it
+        somewhere it does not fit. The nearest existing lane is the checker agent's
+        `behavioral-contradiction` class (E3.4), but that procedure collects OBLIGATION
+        sentences — imperatives and always/never/must statements — and compares polarity
+        about the same action. "This overlay is stale" is a factual claim, not an
+        obligation, so it falls outside that class as specified. Closing it mechanically
+        means either extending that judgment procedure to factual claims or adding a
+        structural rule, and either is a code change with its own tests and its own item.
+
+        The overlays are also deliberately not sealed whole, unlike this item's own
+        artifacts and fixtures: they are living documents that `/vibe-suite:spec-sync`
+        exists to edit, so freezing them would break the thing the command is for. What
+        IS mechanically closed here is what D6 specifies — the canonical line, the
+        description field, the absence of superseded markers, and this vocabulary.
+        """
+        for name, path in OVERLAYS.items():
+            with self.subTest(overlay=name):
+                claims = freshness_claims(path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    claims, FRESHNESS_STATEMENTS[name],
+                    f"{name}: the freshness-claim surface changed. Exactly one dated "
+                    "marker may exist per overlay, and no other sentence may assert or "
+                    "deny a verification state.")
+
+    def test_exact_canonical_lines(self):
+        for name, path in OVERLAYS.items():
+            with self.subTest(overlay=name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(CANONICAL[name], squash(text))
+                self.assertEqual(text.count("**Spec freshness:**"), 1)
+                self.assertIn(PRESERVED[name], squash(text))
+
+    def test_canonical_line_is_first_content_after_h1(self):
+        for name, path in OVERLAYS.items():
+            with self.subTest(overlay=name):
+                lines = path.read_text(encoding="utf-8").splitlines()
+                h1 = next(i for i, l in enumerate(lines) if l.startswith("# "))
+                after = [l for l in lines[h1 + 1:] if l.strip()]
+                self.assertTrue(after[0].startswith("**Spec freshness:**"),
+                                f"{name}: first content after H1 is {after[0][:60]!r}")
+
+    def test_no_superseded_marker_and_no_dated_description(self):
+        for name, path in OVERLAYS.items():
+            with self.subTest(overlay=name):
+                text = path.read_text(encoding="utf-8")
+                for old in SUPERSEDED:
+                    self.assertNotIn(old, text)
+                description = next(
+                    (l for l in text.splitlines() if l.startswith("description:")), "")
+                self.assertNotRegex(description, r"\d{4}-\d{2}-\d{2}")
+
+
+class FixtureOracle(unittest.TestCase):
+    def test_fixture_seeds_present(self):
+        overlay = (FIX / "stale-overlay" / "SKILL.md").read_text(encoding="utf-8")
+        for n in range(1, 8):
+            self.assertIn(f"SEED {n}", overlay)
+        self.assertTrue((FIX / "stale-overlay" / "consumer-linked.md").is_file())
+        self.assertTrue((FIX / "stale-overlay" / "consumer-uncited.md").is_file())
+
+    def test_recorded_dry_run_matches_the_oracle_one_to_one(self):
+        self.assertTrue(RECORDED.is_file(),
+                        "the recorded manual dry run is missing")
+        recorded = RECORDED.read_text(encoding="utf-8")
+        self.assertRegex(recorded.splitlines()[0] + recorded.splitlines()[1],
+                         r"(?i)provenance|recorded")
+        self.assertIn("--overlay-root", recorded)
+        expected_rows = report_rows(EXPECTED.read_text(encoding="utf-8"))
+        self.assertEqual(len(expected_rows), 7, "the oracle must carry seven seeds")
+        recorded_rows = report_rows(recorded)
+        self.assertEqual(recorded_rows, expected_rows,
+                         "recorded run drifted from the hand-authored oracle")
+        # every row well-formed: a known tag, and a confidence/reason from the
+        # closed vocabulary — a malformed or invented row fails here
+        allowed = set(TAGS) | {"UNCLASSIFIED"}
+        vocab = {"high", "medium", "source-silent", "source-conflict"}
+        for seed, section, tag, conf in recorded_rows:
+            self.assertIn(tag, allowed, f"seed {seed}: unknown tag {tag!r}")
+            self.assertIn(conf, vocab, f"seed {seed}: bad confidence/reason {conf!r}")
+            self.assertTrue(section.startswith("§"), f"seed {seed}: section {section!r}")
+        self.assertEqual(len({r[0] for r in recorded_rows}), 7, "seeds must be unique")
+
+    def test_dry_run_wrote_nothing(self):
+        recorded = squash(RECORDED.read_text(encoding="utf-8"))
+        self.assertRegex(recorded, r"(?i)no file (was )?written|dry run: no write")
+        self.assertRegex(recorded, r"(?i)no verify|verify skipped")
+
+
+class ThresholdRegressions(unittest.TestCase):
+    """The two cases the plan review required (step-6 finding 6)."""
+
+    def test_default_is_medium(self):
+        flat = squash(COMMAND.read_text(encoding="utf-8"))
+        self.assertIn("(**default `medium`**", flat)
+
+    def test_all_medium_under_high_takes_no_change_branch(self):
+        flat = squash(COMMAND.read_text(encoding="utf-8"))
+        self.assertRegex(
+            flat,
+            r"(?i)all-medium run under `--min-confidence high` applies nothing")
+        self.assertRegex(flat, r"(?i)no write, no bump, no propagation, no verify")
+
+
+if __name__ == "__main__":
+    unittest.main()

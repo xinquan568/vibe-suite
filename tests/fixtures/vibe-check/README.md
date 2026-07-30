@@ -39,7 +39,7 @@ non-JSON report file; UnsupportedSchemaError; --mirrors without its manifest; us
 |---|---|---|---|
 | `manifest-vs-disk/` | manifest registers `./commands/ghost.md` (absent); disk carries unregistered `agents/stray.md`; `commands/real.md` registered+clean | `manifest-vs-disk: agents/stray.md: on disk but not registered in plugin.json` · `manifest-vs-disk: commands/ghost.md: registered in plugin.json but absent on disk` | 1 |
 | `unregistered-skill/` | `skills/orphan/SKILL.md` present; manifest `skills` omits it | `unregistered-skill: skills/orphan: SKILL.md present but not in plugin.json skills[]` | 1 |
-| `frontmatter/` | `commands/noblock.md` no block; `agents/nodesc.md` block missing description; `commands/shared/nodesc.md` has `user-invocable: false` but no description (all registered where registrable) | `frontmatter: agents/nodesc.md: missing required key 'description'` · `frontmatter: commands/noblock.md: missing frontmatter block` · `frontmatter: commands/shared/nodesc.md: missing required key 'description'` | 1 |
+| `frontmatter/` | `commands/noblock.md` no block; `agents/nodesc.md` block missing description; `commands/shared/nodesc.md` has `user-invocable: false` but no description; `commands/shared/invocable-true.md` has description but `user-invocable: true` (the value must be exactly false) | `frontmatter: agents/nodesc.md: missing required key 'description'` · `frontmatter: commands/noblock.md: missing frontmatter block` · `frontmatter: commands/shared/invocable-true.md: key 'user-invocable' must be false` · `frontmatter: commands/shared/nodesc.md: missing required key 'description'` | 1 |
 | `name-dir/` | `skills/alpha/SKILL.md` carries `name: beta` (registered) | `name-dir: skills/alpha/SKILL.md: name 'beta' does not match directory 'alpha'` | 1 |
 | `hook-case/` | manifest `hooks: ./hooks/hooks.json`; config `{"hooks": {"postToolUse": [], "TotallyNewEvent": []}}` — the unknown exact name is the §6 open-world ANTI-seed | `hook-case: hooks/hooks.json: event 'postToolUse' should be 'PostToolUse'` (exactly one) | 1 |
 | `hook-case-configured/` | manifest `hooks: ./config/custom-hooks.json`; that file `{"hooks": {"sessionstart": []}}` | `hook-case: config/custom-hooks.json: event 'sessionstart' should be 'SessionStart'` | 1 |
@@ -55,6 +55,32 @@ the suite itself (repo root) seeds nothing — expected `vibe-check: clean`, exi
 `schema-unsupported.json` (module-seam input, not a CLI fixture): the canonical schema
 plus a `pattern` keyword — `validate()` must raise UnsupportedSchemaError; vibe-check's
 boundary maps it to exit 2.
+
+## Module-seam expectations (hand-derived, not CLI cases)
+
+- Inline-object hooks: `check_hook_case(root, {"name": "x", "hooks": {"hooks":
+  {"postToolUse": []}}})` yields exactly one finding whose detail names
+  `'PostToolUse'` — the inline branch shares the event-map reader with the path branch.
+- `validate_report(sample, schema=schema-unsupported.json)` → `(2, [])`.
+
+## --report per-case table (hand-derived)
+
+| Input | Exit | Rationale (D6) |
+|---|---|---|
+| `tests/fixtures/sample-report.json` | 0 | conforms (mandated passing case); also from a non-plugin CWD |
+| `report-invalid.json` | 1 | PARSED document the canonical schema rejects (finding carries the validator's message) |
+| a non-JSON file | 2 | no instance exists — the check could not run |
+| an absent/unreadable path | 2 | I/O — the check could not run |
+| invalid UTF-8 bytes | 2 | the stream never decodes — the check could not run |
+
+## Containment and registration expectations (hand-derived)
+
+- Manifest entries that are absolute or escape the root (`../…`) are findings
+  ("escapes the plugin root") and are never read or registered — including a `hooks`
+  path, whose target file must never be opened.
+- Registration is PER COMPONENT CLASS: `commands/x.md` listed only under `agents[]` is
+  an unregistered command; a `skills[]` entry may name the directory OR its SKILL.md.
+- Invalid UTF-8 in plugin.json → exit 2 (could-not-run), matching the report row above.
 
 ## --json golden (`expected-manifest-vs-disk.json`)
 

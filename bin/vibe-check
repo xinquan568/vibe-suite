@@ -76,6 +76,8 @@ def _read_json(path, what):
         text = path.read_text(encoding="utf-8")
     except OSError as err:
         raise CheckError(f"cannot read {what} {path}: {err.strerror}") from None
+    except UnicodeDecodeError as err:
+        raise CheckError(f"{what} {path} is not valid UTF-8: {err}") from None
     try:
         return json.loads(text)
     except ValueError as err:
@@ -84,6 +86,21 @@ def _read_json(path, what):
 
 def _norm(entry):
     return entry[2:] if entry.startswith("./") else entry
+
+
+def _contained(root, entry):
+    """The normalized, root-contained relative path for a manifest entry, or None when
+    the entry is absolute or escapes the plugin root (symlinks resolved) — an escaping
+    entry is a finding and its target is never read or registered."""
+    rel = _norm(entry)
+    if Path(rel).is_absolute():
+        return None
+    resolved = (root / rel).resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return rel
 
 
 def load_manifest(root):
@@ -120,34 +137,61 @@ def frontmatter_keys(text):
     return None
 
 
+def registered_by_class(root, manifest, findings=None):
+    """{class: set of contained, normalized entries}; escaping entries become findings
+    (when a findings list is given) and are never registered."""
+    classes = {}
+    for key in ("commands", "agents", "skills"):
+        contained = set()
+        for entry in manifest.get(key) or []:
+            rel = _contained(root, entry)
+            if rel is None:
+                if findings is not None:
+                    findings.append(finding("manifest-vs-disk", _norm(entry),
+                                            "escapes the plugin root"))
+                continue
+            contained.add(rel)
+        classes[key] = contained
+    return classes
+
+
 def check_manifest_vs_disk(root, manifest):
     findings = []
     if "name" not in manifest:
         findings.append(finding("manifest-vs-disk", ".claude-plugin/plugin.json",
                                 "missing required 'name'"))
-    registered = set()
-    for key in ("commands", "agents", "skills"):
-        for entry in manifest.get(key) or []:
-            rel = _norm(entry)
-            registered.add(rel)
+    classes = registered_by_class(root, manifest, findings)
+    for key, contained in classes.items():
+        for rel in sorted(contained):
             if not (root / rel).exists():
                 findings.append(finding("manifest-vs-disk", rel,
                                         "registered in plugin.json but absent on disk"))
     hooks = manifest.get("hooks")
-    if isinstance(hooks, str) and not (root / _norm(hooks)).is_file():
-        findings.append(finding("manifest-vs-disk", _norm(hooks),
-                                "registered in plugin.json but absent on disk"))
-    for pattern, kind in (("commands/*.md", "commands"), ("agents/*.md", "agents")):
+    if isinstance(hooks, str):
+        hooks_rel = _contained(root, hooks)
+        if hooks_rel is None:
+            findings.append(finding("manifest-vs-disk", _norm(hooks),
+                                    "escapes the plugin root"))
+        elif not (root / hooks_rel).is_file():
+            findings.append(finding("manifest-vs-disk", hooks_rel,
+                                    "registered in plugin.json but absent on disk"))
+    # registration is PER COMPONENT CLASS: a commands file listed under agents[] is
+    # not a registered command
+    for pattern, key in (("commands/*.md", "commands"), ("agents/*.md", "agents")):
         for path in sorted(root.glob(pattern)):
             rel = path.relative_to(root).as_posix()
-            if rel not in registered:
+            if rel not in classes[key]:
                 findings.append(finding("manifest-vs-disk", rel,
                                         "on disk but not registered in plugin.json"))
     return findings
 
 
 def check_unregistered_skills(root, manifest):
-    registered = {_norm(entry) for entry in manifest.get("skills") or []}
+    registered = set()
+    for entry in registered_by_class(root, manifest)["skills"]:
+        # a skills[] entry may name the directory or its SKILL.md file
+        registered.add(entry[:-len("/SKILL.md")] if entry.endswith("/SKILL.md")
+                       else entry)
     findings = []
     for skill_md in sorted(root.glob("skills/*/SKILL.md")):
         rel_dir = skill_md.parent.relative_to(root).as_posix()
@@ -165,6 +209,9 @@ def _require_keys(rel, keys, required, findings):
         if key not in keys:
             findings.append(finding("frontmatter", rel,
                                     f"missing required key '{key}'"))
+        elif key == "user-invocable" and keys[key] != "false":
+            findings.append(finding("frontmatter", rel,
+                                    "key 'user-invocable' must be false"))
 
 
 def check_frontmatter(root, _manifest):
@@ -200,7 +247,9 @@ def check_name_dir(root, _manifest):
 def check_hook_case(root, manifest):
     hooks_value = manifest.get("hooks")
     if isinstance(hooks_value, str):
-        rel = _norm(hooks_value)
+        rel = _contained(root, hooks_value)
+        if rel is None:
+            return []   # the escaping registration is manifest-vs-disk's finding
         path = root / rel
         if not path.is_file():
             return []   # the dangling registration is manifest-vs-disk's finding
@@ -284,6 +333,10 @@ def validate_report(report_path, schema_path=None):
         print(f"vibe-check: cannot read report {report_path}: {err.strerror}",
               file=sys.stderr)
         return 2, []
+    except UnicodeDecodeError as err:
+        print(f"vibe-check: report {report_path} is not valid UTF-8: {err}",
+              file=sys.stderr)
+        return 2, []
     try:
         report = json.loads(text)
     except ValueError as err:
@@ -320,6 +373,12 @@ def main(argv=None):
     root_display = None
 
     if not report_only:
+        if args.mirrors:
+            # the deferred class refuses before anything else pre-E7.2 — its refusal
+            # governs every composition that engages directory mode
+            print("vibe-check: mirror hash manifest not found; ships with E7.2/F9.6",
+                  file=sys.stderr)
+            return 2
         root_display = args.dir if args.dir is not None else "."
         root = Path(root_display)
         if not root.is_dir():
@@ -343,11 +402,6 @@ def main(argv=None):
         except CheckError as err:
             print(f"vibe-check: {err}", file=sys.stderr)
             return 2
-        if args.mirrors:
-            print("vibe-check: mirror hash manifest not found; ships with E7.2/F9.6",
-                  file=sys.stderr)
-            return 2
-
     if args.report is not None:
         checked["report"] = True
         report_rc, report_findings = validate_report(args.report)

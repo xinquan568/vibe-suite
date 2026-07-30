@@ -70,6 +70,7 @@ class PerClassFixtures(unittest.TestCase):
         ("frontmatter",
          ["frontmatter: agents/nodesc.md: missing required key 'description'",
           "frontmatter: commands/noblock.md: missing frontmatter block",
+          "frontmatter: commands/shared/invocable-true.md: key 'user-invocable' must be false",
           "frontmatter: commands/shared/nodesc.md: missing required key 'description'"]),
         ("name-dir",
          ["name-dir: skills/alpha/SKILL.md: name 'beta' does not match directory 'alpha'"]),
@@ -154,10 +155,13 @@ class ReportValidation(unittest.TestCase):
         self.assertEqual(findings, [])
 
     def test_report_plus_mirrors_engages_directory_mode(self):
-        # --mirrors always engages directory mode; pre-E7.2 its refusal governs.
+        # --mirrors always engages directory mode; pre-E7.2 ITS refusal governs the
+        # outcome — not an unrelated non-plugin-root error.
         with tempfile.TemporaryDirectory() as tmp:
             proc = run_check("--report", str(SAMPLE), "--mirrors", cwd=tmp)
         self.assertEqual(proc.returncode, 2)
+        self.assertIn("mirror hash manifest not found; ships with E7.2/F9.6",
+                      proc.stderr.decode())
 
 
 class ErrorTaxonomy(unittest.TestCase):
@@ -216,6 +220,58 @@ class ErrorTaxonomy(unittest.TestCase):
             (root / ".claude-plugin" / "marketplace.json").write_text(
                 '{"name": "m", "plugins": [{"name": "x"}]}', encoding="utf-8")
             self.assertEqual(run_check(str(root)).returncode, 0)
+
+    def test_registration_is_per_component_class(self):
+        # A commands file listed only under agents[] is NOT registered as a command.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tmp_plugin(
+                tmp, '{"name": "x", "agents": ["./commands/x.md"], "commands": []}')
+            (root / "commands").mkdir()
+            (root / "commands" / "x.md").write_text(
+                "---\ndescription: d.\n---\n# x\n", encoding="utf-8")
+            proc = run_check(str(root))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn(
+            "manifest-vs-disk: commands/x.md: on disk but not registered", 
+            proc.stdout.decode())
+
+    def test_skills_entry_may_name_the_skill_md_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._tmp_plugin(
+                tmp, '{"name": "x", "skills": ["./skills/s/SKILL.md"]}')
+            (root / "skills" / "s").mkdir(parents=True)
+            (root / "skills" / "s" / "SKILL.md").write_text(
+                "---\nname: s\ndescription: d.\n---\n# s\n", encoding="utf-8")
+            proc = run_check(str(root))
+        self.assertEqual(proc.returncode, 0,
+                         proc.stdout.decode() + proc.stderr.decode())
+
+    def test_manifest_paths_are_contained(self):
+        # Absolute and traversal entries are findings and are never read/registered.
+        for entry_json in ('{"name": "x", "commands": ["../outside.md"]}',
+                           '{"name": "x", "commands": ["/etc/passwd"]}',
+                           '{"name": "x", "hooks": "../../outside-hooks.json"}'):
+            with self.subTest(manifest=entry_json):
+                with tempfile.TemporaryDirectory() as tmp:
+                    proc = run_check(str(self._tmp_plugin(tmp, entry_json)))
+                self.assertEqual(proc.returncode, 1, entry_json)
+                self.assertIn("escapes the plugin root", proc.stdout.decode())
+
+    def test_invalid_utf8_manifest_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".claude-plugin").mkdir()
+            (root / ".claude-plugin" / "plugin.json").write_bytes(
+                b'{"name": "x\xff"}')
+            proc = run_check(str(root))
+        self.assertEqual(proc.returncode, 2)
+
+    def test_invalid_utf8_report_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "bad.json"
+            bad.write_bytes(b'{"agent": "\xff"}')
+            proc = run_check("--report", str(bad))
+        self.assertEqual(proc.returncode, 2)
 
     def test_inline_hooks_object_at_the_seam(self):
         # The inline branch of hook-config resolution shares the event-map reader.

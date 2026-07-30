@@ -272,8 +272,11 @@ class ErrorTaxonomy(unittest.TestCase):
             (outside / "cmd-target.md").write_text("# bare\n", encoding="utf-8")
             root = Path(tmp) / "plugin"
             (root / ".claude-plugin").mkdir(parents=True)
+            # BOTH supported skills[] forms register the escaping skill: the dir form
+            # and the SKILL.md form must canonicalize to the same escape path
             (root / ".claude-plugin" / "plugin.json").write_text(
-                '{"name": "x", "commands": [], "skills": ["./skills/esc"]}',
+                '{"name": "x", "commands": [],'
+                ' "skills": ["./skills/esc", "./skills/esc/SKILL.md"]}',
                 encoding="utf-8")
             (root / "skills").mkdir()
             (root / "skills" / "esc").symlink_to(outside / "skill-target",

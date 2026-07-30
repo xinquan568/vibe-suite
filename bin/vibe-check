@@ -177,7 +177,12 @@ def registered_by_class(root, manifest, findings=None):
             rel = _contained(root, entry)
             if rel is None:
                 if findings is not None:
-                    findings.append(finding("manifest-vs-disk", _norm(entry),
+                    escape_rel = _norm(entry)
+                    if key == "skills" and escape_rel.endswith("/SKILL.md"):
+                        # canonical escape path is the skill DIRECTORY — the same
+                        # form the disk sweep reports, so dedupe collapses them
+                        escape_rel = escape_rel[:-len("/SKILL.md")]
+                    findings.append(finding("manifest-vs-disk", escape_rel,
                                             "escapes the plugin root"))
                 continue
             contained.add(rel)

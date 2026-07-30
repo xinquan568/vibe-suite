@@ -417,6 +417,28 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertEqual(out.count("escapes the plugin root"), 1, out)
         self.assertIn("manifest-vs-disk: commands/esc.md: escapes the plugin root", out)
 
+    def test_middle_segment_alias_spellings_collapse(self):
+        # d -> . makes d/commands/esc.md a second spelling of commands/esc.md; the
+        # dirname canonicalizes physically, so both registrations yield ONE finding,
+        # and an alias-spelled registration of an EXISTING command is not flagged.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "plugin"
+            (root / ".claude-plugin").mkdir(parents=True)
+            (root / "commands").mkdir()
+            (root / "commands" / "esc.md").symlink_to("/etc/passwd")
+            (root / "commands" / "real.md").write_text(
+                "---\ndescription: d.\n---\n# real\n", encoding="utf-8")
+            (root / "d").symlink_to(".", target_is_directory=True)
+            (root / ".claude-plugin" / "plugin.json").write_text(
+                '{"name": "x", "commands": ["commands/esc.md",'
+                ' "d/commands/esc.md", "d/commands/real.md"]}', encoding="utf-8")
+            proc = run_check(str(root))
+        out = proc.stdout.decode()
+        self.assertEqual(proc.returncode, 1, out + proc.stderr.decode())
+        self.assertEqual(out.count("escapes the plugin root"), 1, out)
+        self.assertIn("manifest-vs-disk: commands/esc.md: escapes the plugin root", out)
+        self.assertNotIn("real.md", out)
+
     def test_symlink_cycle_is_handled_not_crashed(self):
         # A repo-local cycle must degrade to a refusal or finding — never a traceback.
         with tempfile.TemporaryDirectory() as tmp:

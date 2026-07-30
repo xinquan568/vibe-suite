@@ -117,7 +117,8 @@ def _contained(root, entry):
         resolved.relative_to(root.resolve())
     except ValueError:
         return None
-    return rel
+    canonical = _dir_canonical(root, rel)
+    return canonical if canonical is not None else rel
 
 
 def _canonical_rel(root, entry):
@@ -233,15 +234,34 @@ def frontmatter_keys(text):
     return None
 
 
+def _dir_canonical(root, rel):
+    """`rel` with its DIRNAME canonicalized physically (realpath of the parent — the
+    final component is never resolved), or None when the parent chain leaves the root.
+    This collapses middle-segment directory aliases (d→. spellings) and bounds the
+    walk's candidate space by real directories."""
+    parent = posixpath.dirname(rel)
+    try:
+        parent_real = Path(os.path.realpath(root / parent)) if parent else root.resolve()
+    except OSError:
+        return None
+    try:
+        base = parent_real.relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
+    name = posixpath.basename(rel)
+    return name if base == "." else posixpath.normpath(posixpath.join(base, name))
+
+
 def _chain_canonical(root, rel):
     """The LAST in-root spelling on a repo-local symlink chain before it leaves the
     root (or `rel` itself for non-symlinks/cycles). One escaping target reached through
     author-controlled in-root aliases gets ONE canonical escape name — the link that
     actually crosses the boundary."""
-    current = rel
-    seen = set()
-    while current not in seen:   # every hop is a real filesystem entry: finite; a
-        seen.add(current)        # revisit is a cycle and returns a stable spelling
+    current = _dir_canonical(root, rel)
+    if current is None:
+        return rel
+    trail = [current]
+    while True:   # dir-canonical spellings are backed by real directories: finite
         link = root / current
         try:
             if not link.is_symlink():
@@ -258,8 +278,15 @@ def _chain_canonical(root, rel):
                 posixpath.join(posixpath.dirname(current), str(target)))
             if candidate.startswith(".."):
                 return current          # next hop leaves the root
+        candidate = _dir_canonical(root, candidate)
+        if candidate is None:
+            return current              # next hop's parent chain leaves the root
+        if candidate in trail:
+            # a cycle: return its lexicographically smallest member, identical for
+            # every entry point into the same cycle
+            return min(trail[trail.index(candidate):])
+        trail.append(candidate)
         current = candidate
-    return current
 
 
 def _skill_escape_base(rel):

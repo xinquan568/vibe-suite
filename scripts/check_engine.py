@@ -328,9 +328,16 @@ def _reg_scalar(text, line_no, source):
         return float(text)
     if text[:1] in ("\"", "'"):
         return _reg_quoted(text, line_no, source)
-    if text[:1] in ("{", "[", "!", "&", "*", "|", ">") or text.startswith("<<"):
+    if text[:1] in ("{", "[", "!", "&", "*", "|", ">", ",", "]", "}", "%", "@", "`") \
+            or text.startswith("<<"):
         raise RegistryError(
             f"{source}:{line_no}: construct outside the accepted registry grammar")
+    if text[:1] == "?" and (len(text) == 1 or text[1] in " \t"):
+        # '?' + whitespace is YAML's complex-key indicator: the text is a mapping
+        # ({key: null}), never a plain string. '?' followed by a non-space is a legal
+        # plain scalar and passes through.
+        raise RegistryError(f"{source}:{line_no}: complex-key indicator '?' is outside "
+                            "the accepted registry grammar")
     if _KEYWORD_LOOKALIKE.fullmatch(text) or text[:1] in tuple("+-.0123456789"):
         raise RegistryError(f"{source}:{line_no}: ambiguous scalar {text!r}; "
                             "quote it if a string is meant")

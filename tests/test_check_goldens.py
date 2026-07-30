@@ -395,6 +395,21 @@ class RegistryFailClosed(unittest.TestCase):
         self.assertEqual(self._description('"has: colon"').returncode, 0,
                          "quoted colon-space string")
 
+    def test_yaml_indicator_leading_scalars_refused(self):
+        # The complex-key indicator '?' followed by whitespace is mapping syntax
+        # ({key: null}), and the flow/reserved indicators , ] } % @ ` cannot begin a
+        # YAML plain scalar at all — none may pass as a silent string.
+        proc = self._run(REGISTRY_OK.replace(
+            "      - commands/**\n", "      - ? commands/**\n"))
+        self.assertEqual(proc.returncode, 2, "complex-key list item")
+        self.assertEqual(self._description("? x").returncode, 2, "complex-key value")
+        for lead in (", x", "] x", "} x", "% x", "@ x", "` x"):
+            self.assertEqual(self._description(lead).returncode, 2, lead)
+        # '?' and ':' followed by a NON-space are legal YAML plain scalars.
+        self.assertEqual(self._description("?x").returncode, 0)
+        self.assertEqual(self._description(":x").returncode, 0)
+        self.assertEqual(self._description('"? quoted"').returncode, 0)
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

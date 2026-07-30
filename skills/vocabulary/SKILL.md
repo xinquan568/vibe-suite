@@ -11,17 +11,22 @@ registry marks canonical rather than coining a synonym. Synonym drift is what th
 exists to prevent: two names for the same thing force every reader to prove to
 themselves that the names are not two things.
 
-Enforcement wiring: deprecated synonyms are flagged by `/vibe-suite:check` and
-penalized by `/vibe-suite:score` (rule R51, below).
+Enforcement wiring: deprecated synonyms are flagged by `/vibe-suite:check`;
+`/vibe-suite:score` penalization is DEFERRED until the score engine gains a registry
+reader (it currently emits an advisory-zero note whenever R51 is enabled — rule R51,
+below).
 
 ## Registry status — read this first
 
-This skill defines the discipline and documents the registry FORMAT. The suite's
-registry DATA — the authoritative canonical/deprecated tables and the
-machine-readable `registry.yaml` sidecar — does not ship with this skill. That
-file is delivered by the vocab tooling stage (E3.7). Until it lands, R51 cannot
-fire and remains a documented, disabled capability, and every term table in this
-file is a worked example of the semantics, not the suite registry itself.
+This skill defines the discipline and documents the registry FORMAT — and, as of
+E3.7, carries the suite's registry DATA. The registry SHIPS as of E3.7: the
+authoritative tables below and the machine-readable `registry.yaml` sidecar beside
+this file, kept in exact agreement. R51 is ENABLED for the suite
+(`.vibe-suite.md`). Enforcement today is the CHECK lane only; the score lane's
+registry reader is deferred (it emits an advisory-zero note until it lands), which
+E7.4's release score gate inherits by name. The worked term tables further down
+this file remain examples of the semantics; the authoritative suite tables are in
+their own section below.
 
 ## Boundary with the conventions skill
 
@@ -106,9 +111,11 @@ There are four warrant types (principle P6): literary, user, structural, and
 domain.
 
 - Literary warrant means the term already appears in at least one artifact in
-  the corpus today. Every listed term must carry it, and it is verified by the
+  the corpus today. Every listed CANONICAL term must carry it, verified by the
   extraction tooling delivered with E3.7 — rerun the extraction after any add or
-  rename.
+  rename. A retired synonym enters on the warrant of the retirement decision
+  itself (domain warrant) — being absent from the current corpus is its success
+  condition, not a warrant failure.
 - Entry bar: a term already in use enters on literary warrant alone; a brand-new
   coinage needs a user, structural, or domain warrant.
 - Precedence: warrant is checked last. It is an entry requirement, not a veto
@@ -121,14 +128,19 @@ domain.
 
 - Opt-in, disabled by default. Enable via `rule_overrides.R51.enabled: true` in
   the suite's project config (`.vibe-suite.md`).
-- Penalty: -2 per occurrence of a deprecated synonym, capped at -10 per file.
-  Disabled means zero penalty, always.
+- When score enforcement lands: -2 per occurrence of a deprecated synonym, capped
+  at -10 per file; disabled means zero penalty, always. Today the check lane
+  reports one finding per deprecated term per file, carrying the occurrence count in
+  its detail; no penalty arithmetic applies.
 - Prerequisites: a `vocabulary_skill:` setting pointing at a vocabulary skill
-  that has a `registry.yaml` sidecar. If either is missing, R51 cannot fire and
-  the scorer emits an advisory note instead.
+  that has a `registry.yaml` sidecar. The prerequisites gate CHECK-lane
+  enforcement (either missing → the check class is absent). The scorer's
+  advisory-zero note fires WHENEVER R51 is enabled — prerequisites present or
+  not — because the score engine reads neither setting nor sidecar until its
+  reader lands.
 - Deferred terms are exempt from R51 flagging — they are not synonyms.
-- Readers: only the check and score paths read the registry, and only while R51
-  is enabled.
+- Readers: the check path reads and enforces today, only while R51 is enabled;
+  the score path's reader is deferred (advisory-zero until then).
 
 ### Registry-free companion: the drift scan
 
@@ -137,6 +149,79 @@ corpus with no registry at all. Its output is advisory only — no penalty. Use 
 on projects that have not adopted R51 yet, or alongside R51 as a periodic check
 that the registry is still exhaustive. It ships as its own command/agent path in
 the vocab tooling stage (E3.7).
+
+## The suite registry (authoritative tables)
+
+The sidecar `registry.yaml` beside this file mirrors these tables EXACTLY; on
+conflict, these tables win. Every canonical row cites corpus evidence.
+
+### Verbs (scope `operative`: "the command and agent surfaces where verb
+canonicality is enforced" — paths commands/** + agents/**)
+
+| Verb | Deprecated | Output | Judgment | Notes | Evidence |
+|---|---|---|---|---|---|
+| `score` | — | number plus penalty list | no | quality quantified against a rubric | commands/score.md |
+| `check` | — | violation list | no | cross-references and structural consistency | commands/check.md |
+| `test` | — | pass or fail | no | actual behavior versus a named spec | commands/test.md |
+| `scan` | — | findings versus a signature DB | no | matching a known problem class | agents/vague-scanner.md |
+| `ls` | — | grouped artifact inventory | no | discovery and classification | commands/ls.md |
+| `audit` | — | composite report | yes | score plus scan plus judgment combined | skills/scoring/SKILL.md |
+| `review` | — | comment trail | yes | a reader forms an opinion | skills/vibe-core/SKILL.md |
+| `delegate` | `implement` | a Codex-executed task | no | owner-accepted rename from the merge proposal resolved decision D1 | commands/delegate.md (canonical); retirement warrant plan-i1-r1.md:672, row :469 |
+
+The sidecar's remaining sections are EMPTY by decision and mirrored as such:
+`cross_scope_homonyms.verbs: []` (no sanctioned homonyms yet),
+`deferred_pending_warrant: []`, `rejected_by_higher_principle: []`.
+
+### Noun classes (unscoped; canonical-only by rule — deprecated entries would scan
+every artifact including this file)
+
+| Artifact-class noun | Deprecated | Definition | Evidence |
+|---|---|---|---|
+| `command` | — | a slash-command markdown artifact | commands/check.md |
+| `agent` | — | a dispatched worker artifact | agents/checker.md |
+| `skill` | — | a knowledge or workflow SKILL.md artifact | skills/testing/SKILL.md |
+| `rule` | — | a quality-rule catalog entry | skills/rules/SKILL.md |
+| `hook` | — | a harness-executed hook registration | hooks/hooks.json |
+| `manifest` | — | a plugin manifest file | .claude-plugin/plugin.json |
+| `frontmatter` | — | the YAML header of an NL artifact | skills/conventions-claude/SKILL.md |
+| `artifact` | — | the umbrella noun for any NL file | skills/vibe-core/SKILL.md |
+
+| Output-class noun | Deprecated | Definition | Evidence |
+|---|---|---|---|
+| `finding` | — | one detected problem | skills/vibe-core/SKILL.md |
+| `violation` | — | a finding from a cross-reference check | commands/check.md |
+| `penalty` | — | the points one finding subtracts | skills/scoring/SKILL.md |
+| `score` | — | the numeric quality result | commands/score.md |
+| `snapshot` | — | a point-in-time capture of state | skills/patterns/SKILL.md |
+| `inventory` | — | a grouped listing of discovered artifacts | commands/ls.md |
+| `report` | — | a rendered composite result document | commands/test.md |
+| `spec` | — | a test specification for an NL artifact | skills/testing/SKILL.md |
+
+| Role noun | Paired verb | Evidence |
+|---|---|---|
+| `scorer` | score | agents/scorer.md |
+| `checker` | check | agents/checker.md |
+| `tester` | test | agents/tester.md |
+| `scanner` | ls | agents/scanner.md |
+
+### Config-vocabulary decisions (recorded; mechanically inert)
+
+The documented schema has no config-vocabulary table, so these merged DECISIONS are
+recorded here only: `engine` (the execution backend selector), the
+`cross_model_audit_engine` config key, and `reviewer backend` (the review-side
+engine selection) — citations: the merge proposal's resolved decisions and the
+`.vibe-suite.md` schema in scripts/lib/config.py. They carry no deprecated claims,
+so the sidecar and these tables remain in exact agreement.
+
+### Candidate deprecations (pending prose cleanup — NOT authoritative)
+
+These merge-era synonyms are NOT deprecated in the authoritative tables or the
+sidecar, because they still occur in scoped suite prose (case-insensitive sweep
+counts at seeding time): `lint` (3 files), `validate` (1), `analyze` (2),
+`find` (5), `search` (2), `list` (11). Listing any of them authoritatively
+requires migrating those occurrences first — deprecation is a visible vocabulary
+act, and the suite must keep passing its own R51 check.
 
 ## registry.yaml — format
 

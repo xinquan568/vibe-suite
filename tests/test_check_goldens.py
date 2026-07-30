@@ -325,6 +325,16 @@ class RegistryFailClosed(unittest.TestCase):
         for value in ('"foo\\"', "'foo''", '"foo" bar', '"a\\qb"'):
             self.assertEqual(self._description(value).returncode, 2, value)
 
+    def test_inline_comments_stripped_before_decode(self):
+        # A YAML inline comment is not part of the value: comment-suffixed ambiguous
+        # scalars refuse, comment-suffixed plain strings parse, and a # inside quotes
+        # is content, not a comment.
+        for value in ("y # note", "NULL # note", "1e3 # note"):
+            self.assertEqual(self._description(value).returncode, 2, value)
+        for value in ("scope # trailing note", '"a # not a comment"'):
+            proc = self._description(value)
+            self.assertEqual(proc.returncode, 0, f"{value}: {proc.stderr.decode()}")
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

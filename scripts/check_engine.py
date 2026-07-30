@@ -337,12 +337,32 @@ def _reg_scalar(text, line_no, source):
     return text
 
 
+def _reg_strip_comment(line):
+    """Drop a YAML inline comment (whitespace-preceded `#` outside quotes) — a comment is
+    never part of the value, so `y # note` must decode as `y`, not a longer string."""
+    inside, index = None, 0
+    while index < len(line):
+        char = line[index]
+        if inside:
+            if char == "\\" and inside == '"':
+                index += 2
+                continue
+            if char == inside:
+                inside = None
+        elif char in "\"'":
+            inside = char
+        elif char == "#" and (index == 0 or line[index - 1] in " \t"):
+            return line[:index]
+        index += 1
+    return line
+
+
 def _reg_block(lines, index, indent, source):
     """Parse a mapping or list block whose entries sit at exactly `indent` spaces."""
     entries_list, entries_map = None, None
     while index < len(lines):
-        raw = lines[index]
-        if not raw.strip() or raw.lstrip().startswith("#"):
+        raw = _reg_strip_comment(lines[index])
+        if not raw.strip():
             index += 1
             continue
         current = len(raw) - len(raw.lstrip(" "))

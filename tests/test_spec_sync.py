@@ -48,6 +48,29 @@ PRESERVED = {
 }
 SUPERSEDED = ["Freshness: refreshed 2026-06-07", "Refresh state: verified 2026-06-07"]
 
+
+#: D6 requires each overlay's `description:` to survive normalization UNDATED — exactly
+#: one dated marker per overlay, and it is the canonical body line. Descriptions are a
+#: bounded, frozen field, so they are pinned exactly rather than pattern-checked.
+OVERLAY_DESCRIPTIONS = {
+    "claude":
+        "Claude Code overlay on the conventions floor \u2014 schemas and conventions for "
+        "plugin.json, commands, skills, agents, rules, hooks, .mcp.json, "
+        "marketplace.json, CLAUDE.md, memory, and settings at .claude/ canonical paths.",
+    "codex":
+        "Overlay of Codex CLI conventions \u2014 the config.toml grammar, the "
+        ".codex-plugin/plugin.json manifest, the .agents/skills/ layout, the "
+        "agents/openai.yaml sidecar, hook events, the AGENTS.md hierarchy, and "
+        "marketplace.json.",
+    "antigravity":
+        "Overlay of Antigravity (plus legacy Gemini CLI) conventions \u2014 workspace "
+        "skills under .agent/, the .gemini/ paths, gemini-extension.json, GEMINI.md "
+        "imports, slash commands in TOML, and the Gemini-lineage hook events; the spec "
+        "has not settled since Antigravity 2.0, so most tool-specific checks stay "
+        "advisory.",
+}
+
+
 TAGS = ["RESOLVED", "REMOVE", "FIX", "ADD", "CONFIRM"]
 
 
@@ -1075,11 +1098,48 @@ class ClosedSets(unittest.TestCase):
 
 
 class FreshnessNormalization(unittest.TestCase):
+    def test_descriptions_are_exact_and_undated(self):
+        """D6's other half: the `description:` of each overlay survives normalization
+        UNDATED, so exactly one dated marker exists per overlay. Frontmatter is a
+        bounded field, so it is pinned exactly — that also closes asserting a
+        verification state there, which no body-prose check would see."""
+        for name, path in OVERLAYS.items():
+            with self.subTest(overlay=name):
+                match = re.search(r"(?m)^description: (.*)$",
+                                  path.read_text(encoding="utf-8"))
+                self.assertIsNotNone(match, f"{name}: no description")
+                self.assertEqual(match.group(1), OVERLAY_DESCRIPTIONS[name],
+                                 f"{name}: description changed")
+                self.assertNotRegex(
+                    match.group(1), r"\d{4}-\d{2}-\d{2}",
+                    f"{name}: D6 leaves exactly one dated marker per overlay, and it "
+                    "is the canonical body line — not the description")
+
     def test_freshness_claims_are_a_closed_set(self):
         """D6 promises exactly one dated marker per overlay. Asserting the canonical
         line is PRESENT cannot keep that promise: a sentence appended anywhere else in
         the overlay denying the verified state contradicts it while the canonical line
-        still matches. So the whole freshness-claim surface is compared by equality."""
+        still matches. So the whole freshness-claim surface is compared by equality.
+
+        SCOPE, stated rather than implied. This closes sentences that name a freshness
+        state in the vocabulary D6 uses. It does NOT close free prose asserting the same
+        thing in other words — "stale", "out of date", "fully audited" — and widening the
+        synonym list does not converge, because the next synonym is always outside it.
+        That residue is currently UNOWNED, and saying so is more useful than routing it
+        somewhere it does not fit. The nearest existing lane is the checker agent's
+        `behavioral-contradiction` class (E3.4), but that procedure collects OBLIGATION
+        sentences — imperatives and always/never/must statements — and compares polarity
+        about the same action. "This overlay is stale" is a factual claim, not an
+        obligation, so it falls outside that class as specified. Closing it mechanically
+        means either extending that judgment procedure to factual claims or adding a
+        structural rule, and either is a code change with its own tests and its own item.
+
+        The overlays are also deliberately not sealed whole, unlike this item's own
+        artifacts and fixtures: they are living documents that `/vibe-suite:spec-sync`
+        exists to edit, so freezing them would break the thing the command is for. What
+        IS mechanically closed here is what D6 specifies — the canonical line, the
+        description field, the absence of superseded markers, and this vocabulary.
+        """
         for name, path in OVERLAYS.items():
             with self.subTest(overlay=name):
                 claims = freshness_claims(path.read_text(encoding="utf-8"))

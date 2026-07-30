@@ -318,6 +318,21 @@ REQUIRED_CLAUSES = [
      "Every classified row states its basis so a reader can audit it"),
     ("D8 non-zero status surfaced", "command",
      "a non-zero status is surfaced, never swallowed"),
+    ("D3 first-matching precedence", "command",
+     "classified by the FIRST matching rule"),
+    ("D4 withheld rows still reported", "command",
+     "is reported as `(withheld: below --min-confidence)`"),
+    ("D4 medium writes by default", "command",
+     "both grades write unless you raise the bar"),
+    ("D7 every occurrence classified", "command", "Classify every occurrence"),
+    ("D7 owning tests named", "command", "with their owning tests named"),
+    ("D7 anchor coverage still printed", "command",
+     "The report still prints the anchor's coverage"),
+    ("D7 coverage is not the bound", "command",
+     "coverage is no longer the propagation bound; the sweep is"),
+    ("D8 skip reason stated", "command", "Skipped, with the reason stated"),
+    ("D9 non-first-party excluded before tagging", "agent",
+     "are NOT evidence and are excluded before tagging"),
 ]
 
 #: Frontmatter values the frozen plan fixes exactly (a tier alias, never a pinned id).
@@ -352,6 +367,39 @@ class RequiredClauses(unittest.TestCase):
 
 
 CONTRACT = FIX / "contract"
+
+
+def list_terms(region):
+    """Lead term of every list item, whatever the marker or emphasis.
+
+    `- X`, `* X`, `1. X`, `- **X**`, and ``- `X` `` all yield X, so a vocabulary added
+    as a numbered or bolded item is as visible as one added in the frozen style.
+    """
+    terms = []
+    for line in region.splitlines():
+        item = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$", line)
+        if item:
+            lead = re.match(r"^[`*_]*([A-Za-z][A-Za-z0-9_-]*)", item.group(1))
+            if lead:
+                terms.append(lead.group(1))
+    return terms
+
+
+def table_lead_cells(region):
+    """Lead term of each table row's first non-numeric cell — a vocabulary moved into
+    table form is still that vocabulary."""
+    terms = []
+    for line in region.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        for cell in cells:
+            if cell and not cell.isdigit() and not set(cell) <= set("-: "):
+                lead = re.match(r"^[`*_]*([A-Za-z][A-Za-z0-9_-]*)", cell)
+                if lead:
+                    terms.append(lead.group(1))
+                break
+    return terms
 
 
 class FrozenContractText(unittest.TestCase):
@@ -431,6 +479,13 @@ class ClosedSets(unittest.TestCase):
         self.assertEqual(hint.group(1).split("|"),
                          ["claude", "codex", "antigravity", "all"],
                          "the target set is closed and ordered")
+        # ...and again from the Targets section itself, so a target introduced only in
+        # the body is caught by this test rather than incidentally by a clause
+        body = self._section("## Targets", "## Modes")
+        named = {t for t in re.findall(r"`([^`]+)`", body)
+                 if re.fullmatch(r"[a-z]+", t)}
+        self.assertEqual(named, {"claude", "codex", "antigravity", "all"},
+                         f"the Targets section names an unfrozen target: {sorted(named)}")
 
     #: Where each artifact defines its confidence vocabulary. Scoping the scan to the
     #: defining section is what lets it capture BARE words without drowning in prose.
@@ -444,10 +499,16 @@ class ClosedSets(unittest.TestCase):
         i = text.index(start)
         return text[i:text.index(end, i)]
 
+    def _section(self, start, end, key="command"):
+        text = self.both[key]
+        self.assertIn(start, text, f"{key}: section {start!r} not found")
+        i = text.index(start)
+        return text[i:text.index(end, i)]
+
     def test_mode_flags_are_exactly_the_frozen_set(self):
-        # every --flag ANYWHERE, backticked or not: a mode introduced in plain prose
-        # is still a mode
-        flags = set(re.findall(r"(--[a-z][a-z-]*)", self.command))
+        # every flag ANYWHERE, backticked or not, long or short: a mode introduced in
+        # plain prose or as `-a` is still a mode
+        flags = set(re.findall(r"(?<![\w-])(--?[a-z][a-z-]*)", self.command))
         self.assertEqual(
             flags, {"--dry-run", "--apply", "--min-confidence", "--overlay-root"},
             f"an unfrozen flag appeared: {sorted(flags)}")
@@ -468,37 +529,59 @@ class ClosedSets(unittest.TestCase):
                 # fixed universe of words: a backticked term, a list item `- X — …`,
                 # and a defining sentence `X is an/a/first-party …`
                 tokens = set(re.findall(r"`([a-z]+)`", region))
-                tokens |= set(re.findall(r"(?m)^- +`?([a-z]+)`?\s+—", region))
+                tokens |= {t for t in list_terms(region) if t.islower()}
+                tokens |= {t for t in table_lead_cells(region) if t.islower()}
                 tokens |= set(re.findall(
                     r"`?\b([a-z]+)\b`?\s+is\s+(?:an|a|first-party)\b", region))
-                tokens -= {"withheld", "row", "claim", "grade", "reason"}
+                tokens -= self.GRADE_SECTION_PROSE
                 self.assertEqual(tokens, {"high", "medium"},
                                  f"{key}: grade vocabulary drifted: {sorted(tokens)}")
+
+    #: Lowercase words that legitimately appear in a grade-defining position in the
+    #: confidence sections without being grades. Asserted by subtraction, so a NEW
+    #: prose word in that position also fails — the exemption list cannot silently grow.
+    GRADE_SECTION_PROSE = {"withheld", "row", "claim", "grade", "reason", "confidence"}
 
     def test_unclassified_reasons_in_both_artifacts(self):
         for key in self.both:
             with self.subTest(artifact=key):
-                # any hyphenated backticked token in the section, not just `source-*`:
-                # a reason named `evidence-missing` is still a reason
-                reasons = set(re.findall(r"`([a-z]+-[a-z]+)`", self._region(key)))
-                self.assertEqual(reasons, {"source-silent", "source-conflict"},
-                                 f"{key}: UNCLASSIFIED reasons drifted: "
-                                 f"{sorted(reasons)}")
+                # every hyphenated lowercase term in the section, backticked or not —
+                # a reason written plainly as evidence-missing is still a reason
+                region = self._region(key)
+                terms = set(re.findall(r"\b([a-z]+-[a-z]+)\b", region))
+                self.assertEqual(
+                    terms, {"source-silent", "source-conflict"} | self.REGION_PROSE[key],
+                    f"{key}: a new hyphenated term appeared in the confidence "
+                    f"section: {sorted(terms)}")
+
+    #: The hyphenated NON-reason vocabulary each confidence section already contains.
+    #: Equality against reasons ∪ this set means any new hyphenated term fails, however
+    #: it is written, and the exemptions are enumerated rather than pattern-excused.
+    REGION_PROSE = {
+        "command": {"all-medium", "first-party", "min-confidence", "no-change"},
+        "agent": {"first-party"},
+    }
 
     def test_propagation_classes_are_exactly_four(self):
-        # match the class name alone — a fifth class written `- **ARCHIVAL**:` rather
-        # than `- **ARCHIVAL** —` is the same addition in different punctuation
-        classes = re.findall(r"(?m)^- \*\*([A-Z]+)\*\*", self.command)
+        # structural: the lead term of each list item in the classification section,
+        # so `1. **ARCHIVAL**` and `- **ARCHIVAL**:` are as visible as the frozen form
+        section = self._section("Classify every occurrence", "## Step 7")
+        classes = [t for t in list_terms(section) if t.isupper()]
         self.assertEqual(classes,
                          ["SOURCE", "DOCUMENTARY", "ENCODED", "OPERATIONAL"],
                          "the propagation classes are a closed, ordered set of four")
 
     def test_agent_tag_vocabulary_is_closed_outside_the_table_too(self):
-        # the table check pins the rows; this pins the VOCABULARY, so a sixth tag
-        # introduced in prose below the table is caught as well
-        tags = set(re.findall(r"`([A-Z]+)`", self.agent))
-        self.assertEqual(tags, set(self.D3_TAGS) | {"UNCLASSIFIED"},
-                         f"agent tag vocabulary drifted: {sorted(tags)}")
+        # every all-caps word in the agent, backticked, bolded or plain, compared by
+        # equality — a sixth tag cannot hide in prose, and because the emphasis words
+        # are enumerated rather than pattern-excused, a new one fails here too
+        caps = set(re.findall(r"\b([A-Z]{3,})\b", self.agent))
+        self.assertEqual(
+            caps, set(self.D3_TAGS) | {"UNCLASSIFIED"} | self.AGENT_EMPHASIS,
+            f"agent all-caps vocabulary drifted: {sorted(caps)}")
+
+    #: All-caps words the agent uses for prose emphasis or as proper nouns.
+    AGENT_EMPHASIS = {"BOTH", "FIRST", "NOT", "ONE", "SKILL", "URL", "WITH"}
 
     def test_agent_table_rows_are_exact(self):
         self.assertEqual(self._rows(self.agent), self.AGENT_TABLE,
@@ -517,8 +600,11 @@ class ClosedSets(unittest.TestCase):
             # `"tools":` and an indented `tools:` to the same key, so a parser that
             # only recognises bare keys at column 0 lets a later duplicate silently
             # override the allowlist while the first line still reads correctly
-            m = re.match(r"""^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*:\s*(.*)$""",
-                         line)
+            # `? tools` is YAML's explicit-key form and resolves to the same key as a
+            # plain `tools:`, so it is a duplicate the parser must see
+            m = re.match(
+                r"""^\s*(?:\?\s+)?(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*:?\s*(.*)$""",
+                line)
             if m:
                 key = m.group(1) or m.group(2) or m.group(3)
                 keys.append(key)

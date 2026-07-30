@@ -142,6 +142,10 @@ change with its own tests. Consumers carrying an explicit section citation (eith
 reported as REQUIRED targets ONLY when the cited section is one this run changed —
 a citation to an untouched section is not a target — with the citing line quoted. Every classified row states its basis so a reader can audit it.
 
+The report still prints the anchor's coverage — how many files carry an explicit section
+citation — but coverage is no longer the propagation bound; the sweep is. Printing it
+keeps visible how much of the tree states its dependency explicitly.
+
 ## Step 7 — verify (`--apply` with changes)
 
 ```

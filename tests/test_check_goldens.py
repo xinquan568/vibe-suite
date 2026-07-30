@@ -374,6 +374,27 @@ class RegistryFailClosed(unittest.TestCase):
         proc = self._run(registry)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
 
+    def test_colon_whitespace_in_unquoted_scalars_refused(self):
+        # An unquoted scalar containing ':'+whitespace (or ending ':') is YAML mapping
+        # syntax in block context, never a plain string — on every surface. Colon WITHOUT
+        # following whitespace stays a plain scalar (YAML agrees); quoting is the
+        # spelling for genuine colon-space strings.
+        proc = self._run(REGISTRY_OK.replace(
+            "      - commands/**\n", "      - foo:bar: baz\n"))
+        self.assertEqual(proc.returncode, 2, "multi-colon mapping-shaped list item")
+        proc = self._run(REGISTRY_OK.replace(
+            "cross_scope_homonyms:\n  verbs: []\n",
+            "cross_scope_homonyms:\n  foo:bar: baz\n"))
+        self.assertEqual(proc.returncode, 2, "multi-colon mapping-shaped map line")
+        self.assertEqual(self._description("has: colon").returncode, 2,
+                         "nested mapping in a value")
+        self.assertEqual(self._description("dangling:").returncode, 2,
+                         "trailing-colon value")
+        self.assertEqual(self._description("a:b").returncode, 0,
+                         "colon without whitespace is a plain scalar")
+        self.assertEqual(self._description('"has: colon"').returncode, 0,
+                         "quoted colon-space string")
+
     def test_quoted_strings_accepted(self):
         # Quoting is the documented spelling for anything exotic: keywords, numbers,
         # colons, and escaped quotes all parse to plain strings.

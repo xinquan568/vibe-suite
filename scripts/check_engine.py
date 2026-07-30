@@ -334,6 +334,12 @@ def _reg_scalar(text, line_no, source):
     if _KEYWORD_LOOKALIKE.fullmatch(text) or text[:1] in tuple("+-.0123456789"):
         raise RegistryError(f"{source}:{line_no}: ambiguous scalar {text!r}; "
                             "quote it if a string is meant")
+    if re.search(r":(?=[ \t]|$)", text):
+        # In YAML block context a plain scalar cannot contain ': ' or end with ':' —
+        # that is mapping syntax. Refusing it HERE closes the class on every surface
+        # (map values, list scalars, item-head values) at once.
+        raise RegistryError(f"{source}:{line_no}: unquoted scalar {text!r} carries "
+                            "mapping syntax; quote it if a string is meant")
     return text
 
 

@@ -1,8 +1,24 @@
-nouns:
-  report:
-    canonical: report
+scopes:
+  - id: flow
+    description: the fixture command surface
+    paths:
+      - commands/**
 verbs:
-  use:
-    canonical: use
-    deprecated:
-      - utilize
+  flow:
+    use:
+      canonical: use
+      deprecated:
+        - utilize
+      output: none
+      judgment: false
+deferred_pending_warrant:
+  - verb: triage
+    proposed_for: naming the fixture gap
+    p2_p5_pass: true
+    needed_warrant: user
+nouns:
+  output_class:
+    report:
+      canonical: report
+      deprecated: []
+      definition: the audit output artifact

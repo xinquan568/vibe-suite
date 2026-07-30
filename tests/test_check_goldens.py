@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: ISC
 """E3.4 (vibe-29) acceptance: /vibe-suite:check — cross-component consistency.
-STAGED DRAFT (authored during the classifier outage; place as tests/test_check_goldens.py
-after the plan verify clears and adjust only if the verify demands plan changes).
 
 The engine (scripts/check_engine.py) owns the mechanical classes AND the composition; the
 checker agent owns the two judgment classes by authored contract. Oracles are hand-derived
 (the worksheet in tests/fixtures/check/broken/README.md predates the engine).
 
 Engine CLI: --root <dir> [--config <file>] [--judgment <file>]; artifacts self-discovered
-under the root (classify-routed); exit 0 scored, 2 refusal (bad root, <2 artifacts, unknown
-judgment class). Output JSON: {"verdict": "CLEAN"|"<N> issues", "issues": [...],
-"checked": {...}}. Composition: issues = mechanical + judgment; CLEAN iff empty.
+under the root (classify-routed); exit 0 scored, 2 refusal (bad root, <2 artifacts,
+malformed config, malformed registry, malformed/unreadable/unknown-class judgment).
+Output JSON: {"verdict": "CLEAN"|"<N> issues", "issues": [...], "checked": {...}} —
+goldens compare the COMPLETE object. Composition: issues = mechanical + judgment; CLEAN
+iff empty.
 """
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -36,6 +38,12 @@ PARTIAL = REPO_ROOT / "commands" / "shared" / "plugin-discover.md"
 F43_DIRECTIONS = {"command-partial", "agent-skills", "hook-script", "claude-md-listing"}
 #: plugin-discover.md's map edges, parsed live in the matrix test.
 PARTIAL_EDGES = {"command-agent", "command-partial", "agent-skill", "hook-script"}
+#: The partial names the skill edge in the singular, F4.3 in the plural — one edge, two
+#: spellings, normalized before the intersection is taken.
+EDGE_NORMALIZE = {"agent-skill": "agent-skills"}
+
+CLEAN_CHECKED = {"agent": 1, "claude-md": 1, "command": 1, "hook-config": 0,
+                 "partial": 0, "script": 0, "skill": 1}
 
 
 def run_engine(root, extra=()):
@@ -43,6 +51,12 @@ def run_engine(root, extra=()):
         [sys.executable, str(ENGINE), "--root", str(root), *extra],
         capture_output=True,
     )
+
+
+def config_variant(tmp, body):
+    path = Path(tmp) / "variant.md"
+    path.write_text(f"---\n{body}---\n", encoding="utf-8")
+    return path
 
 
 class DeliverablesShip(unittest.TestCase):
@@ -83,19 +97,31 @@ class DeliverablesShip(unittest.TestCase):
 
 
 class MechanicalGolden(unittest.TestCase):
-    def test_per_class_catch_and_exact_golden(self):
+    def test_whole_object_golden(self):
         proc = run_engine(BROKEN)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         got = json.loads(proc.stdout.decode())
         want = json.loads(ORACLE_MECH.read_text(encoding="utf-8"))
-        self.assertEqual(got["issues"], want["issues"])
-        self.assertEqual(got["verdict"], want["verdict"])
+        self.assertEqual(got, want)
+
+    def test_per_class_catch(self):
+        got = json.loads(run_engine(BROKEN).stdout.decode())
         classes = [i["class"] for i in got["issues"]]
-        self.assertEqual(classes.count("reference-integrity"), 4)
+        self.assertEqual(classes.count("reference-integrity"), 5)
         self.assertIn("orphan", classes)
         self.assertIn("r51-drift", classes)
         directions = {i.get("direction") for i in got["issues"] if "direction" in i}
         self.assertEqual(directions, F43_DIRECTIONS)
+
+    def test_hook_target_extracted_exactly(self):
+        # The dangling target carries no quote, backslash, or trailing argument, and the
+        # resolving quoted+argument hook keeps its script off the orphan list.
+        got = json.loads(run_engine(BROKEN).stdout.decode())
+        hook_targets = [i["target"] for i in got["issues"]
+                        if i.get("direction") == "hook-script"]
+        self.assertEqual(hook_targets, ["scripts/missing-hook.sh"])
+        orphans = [i["source"] for i in got["issues"] if i["class"] == "orphan"]
+        self.assertNotIn("scripts/present-hook.mjs", orphans)
 
     def test_verdict_n_fidelity(self):
         got = json.loads(run_engine(BROKEN).stdout.decode())
@@ -110,22 +136,76 @@ class MechanicalGolden(unittest.TestCase):
         self.assertEqual(outs[0], outs[1])
         self.assertEqual(outs[1], outs[2])
 
-    def test_r51_disabled_default_excludes_the_class(self):
-        # Same fixture, config suppressed via --config pointing at a missing file → defaults.
-        proc = run_engine(BROKEN, extra=("--config", str(BROKEN / "no-such-config.md")))
+
+class R51Preconditions(unittest.TestCase):
+    def _classes(self, extra):
+        proc = run_engine(BROKEN, extra=extra)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         got = json.loads(proc.stdout.decode())
-        self.assertNotIn("r51-drift", [i["class"] for i in got["issues"]])
-        self.assertEqual(got["verdict"], "5 issues")
+        return got, [i["class"] for i in got["issues"]]
+
+    def test_disabled_default_excludes_the_class(self):
+        # --config pointing at a missing file → defaults; R51 is opt-in, disabled default.
+        got, classes = self._classes(("--config", str(BROKEN / "no-such-config.md")))
+        self.assertNotIn("r51-drift", classes)
+        self.assertEqual(got["verdict"], "6 issues")
+
+    def test_disabled_explicit_survives_other_enabled_rules(self):
+        # R51 must be armed by ITS OWN enabled leaf, never another rule's.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config_variant(
+                tmp,
+                "rule_overrides:\n"
+                "  R51:\n    enabled: false\n    vocabulary_skill: skills/util\n"
+                "  R07:\n    enabled: true\n")
+            got, classes = self._classes(("--config", str(cfg)))
+        self.assertNotIn("r51-drift", classes)
+        self.assertEqual(got["verdict"], "6 issues")
+
+    def test_enabled_without_vocabulary_skill_cannot_fire(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config_variant(tmp, "rule_overrides:\n  R51:\n    enabled: true\n")
+            got, classes = self._classes(("--config", str(cfg)))
+        self.assertNotIn("r51-drift", classes)
+        self.assertEqual(got["verdict"], "6 issues")
+
+    def test_enabled_without_registry_cannot_fire(self):
+        # skills/orphaned exists but ships no registry.yaml sidecar.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config_variant(
+                tmp,
+                "rule_overrides:\n  R51:\n    enabled: true\n"
+                "    vocabulary_skill: skills/orphaned\n")
+            got, classes = self._classes(("--config", str(cfg)))
+        self.assertNotIn("r51-drift", classes)
+        self.assertEqual(got["verdict"], "6 issues")
+
+    def test_malformed_config_refused(self):
+        # enabled takes a bool; a quoted string is a config error, and the posture is
+        # fail-closed (exit 2), never a silent default.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = config_variant(
+                tmp, 'rule_overrides:\n  R51:\n    enabled: "true"\n')
+            proc = run_engine(BROKEN, extra=("--config", str(cfg)))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("config", proc.stderr.decode())
+
+    def test_scope_and_deferred_exemptions_pinned_by_golden(self):
+        # helper.md's "utilize" is outside the verb's commands/** scope; go.md's "triage"
+        # is deferred-pending-warrant. Neither may appear as an r51 source/why.
+        got = json.loads(run_engine(BROKEN).stdout.decode())
+        r51 = [i for i in got["issues"] if i["class"] == "r51-drift"]
+        self.assertEqual([i["source"] for i in r51], ["commands/go.md"])
+        self.assertNotIn("triage", json.dumps(r51))
 
 
 class Composition(unittest.TestCase):
-    def test_composed_golden(self):
+    def test_whole_object_composed_golden(self):
         proc = run_engine(BROKEN, extra=("--judgment", str(JUDGMENT)))
         self.assertEqual(proc.returncode, 0, proc.stderr.decode())
         got = json.loads(proc.stdout.decode())
         want = json.loads(ORACLE_COMPOSED.read_text(encoding="utf-8"))
-        self.assertEqual(got["verdict"], want["verdict"])
-        self.assertEqual(got["issues"], want["issues"])
+        self.assertEqual(got, want)
 
     def test_composition_rule(self):
         mech = json.loads(run_engine(BROKEN).stdout.decode())
@@ -134,32 +214,52 @@ class Composition(unittest.TestCase):
         judgment = json.loads(JUDGMENT.read_text(encoding="utf-8"))
         self.assertEqual(len(composed["issues"]), len(mech["issues"]) + len(judgment))
 
-    def test_unknown_judgment_class_refused(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            bad = Path(tmp) / "bad.json"
-            bad.write_text('[{"class": "invented-class", "detail": "x", "sources": []}]',
-                           encoding="utf-8")
-            proc = run_engine(BROKEN, extra=("--judgment", str(bad)))
-            self.assertEqual(proc.returncode, 2)
-
     def test_clean_fixture_is_clean_both_modes(self):
-        import tempfile
-        for extra in ((), None):
-            proc = run_engine(CLEAN) if extra == () else None
-            if proc is None:
-                with tempfile.TemporaryDirectory() as tmp:
-                    empty = Path(tmp) / "empty.json"
-                    empty.write_text("[]", encoding="utf-8")
-                    proc = run_engine(CLEAN, extra=("--judgment", str(empty)))
-            got = json.loads(proc.stdout.decode())
-            self.assertEqual(got["verdict"], "CLEAN")
-            self.assertEqual(got["issues"], [])
+        want = {"verdict": "CLEAN", "issues": [], "checked": CLEAN_CHECKED}
+        self.assertEqual(json.loads(run_engine(CLEAN).stdout.decode()), want)
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = Path(tmp) / "empty.json"
+            empty.write_text("[]", encoding="utf-8")
+            proc = run_engine(CLEAN, extra=("--judgment", str(empty)))
+        self.assertEqual(json.loads(proc.stdout.decode()), want)
 
 
 class Refusals(unittest.TestCase):
+    def _refused(self, judgment_text):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "bad.json"
+            bad.write_text(judgment_text, encoding="utf-8")
+            proc = run_engine(BROKEN, extra=("--judgment", str(bad)))
+        self.assertEqual(proc.returncode, 2, proc.stdout.decode())
+
+    def test_unknown_judgment_class_refused(self):
+        self._refused('[{"class": "invented-class", "detail": "x", "sources": []}]')
+
+    def test_non_object_judgment_entry_refused(self):
+        self._refused('["not-an-object"]')
+
+    def test_judgment_missing_detail_refused(self):
+        self._refused('[{"class": "terminology-drift", "sources": []}]')
+
+    def test_judgment_sources_not_a_string_list_refused(self):
+        self._refused('[{"class": "behavioral-contradiction", "detail": "d", '
+                      '"sources": "not-a-list"}]')
+        self._refused('[{"class": "behavioral-contradiction", "detail": "d", '
+                      '"sources": [1]}]')
+
+    @unittest.skipIf(os.geteuid() == 0, "permission bits do not bind root")
+    def test_unreadable_judgment_file_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "bad.json"
+            bad.write_text("[]", encoding="utf-8")
+            bad.chmod(0)
+            try:
+                proc = run_engine(BROKEN, extra=("--judgment", str(bad)))
+            finally:
+                bad.chmod(0o600)
+        self.assertEqual(proc.returncode, 2)
+
     def test_fewer_than_two_artifacts_refused(self):
-        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp) / "skills" / "solo"
             d.mkdir(parents=True)
@@ -177,7 +277,7 @@ class Refusals(unittest.TestCase):
 
 class DirectionMatrix(unittest.TestCase):
     def test_three_set_matrix(self):
-        # Set A: the partial's map edges (parsed live from its reference-direction table).
+        # Set A: the partial's map edges (parsed live from its reference-direction list).
         text = PARTIAL.read_text(encoding="utf-8")
         a = set()
         for pair, token in (("command", "agent"), ("command", "partial"),
@@ -188,12 +288,15 @@ class DirectionMatrix(unittest.TestCase):
                              f"the partial must still document the {pair}->{token} edge")
             a.add(f"{pair}-{token}")
         self.assertEqual(a, PARTIAL_EDGES)
-        # Set B: F4.3's reportable directions (constant). Intersection: three edges.
-        inter = {"command-partial", "hook-script"}
-        # agent-skill (partial) and agent-skills (F4.3) are the same edge, named per source
-        self.assertEqual(len(F43_DIRECTIONS & {"command-partial", "hook-script"}), 2)
-        self.assertIn("claude-md-listing", F43_DIRECTIONS - {d for d in PARTIAL_EDGES})
+        # Set B: F4.3's reportable directions (constant). The intersection, after
+        # normalizing the two spellings of the skill edge, is exactly three edges;
+        # claude-md-listing is the direction the partial lacks.
+        a_normalized = {EDGE_NORMALIZE.get(edge, edge) for edge in a}
+        self.assertEqual(a_normalized & F43_DIRECTIONS,
+                         {"command-partial", "agent-skills", "hook-script"})
+        self.assertEqual(F43_DIRECTIONS - a_normalized, {"claude-md-listing"})
         # command-agent is orphan-input only: the engine must not report it as a direction.
+        self.assertEqual(a_normalized - F43_DIRECTIONS, {"command-agent"})
         got = json.loads(run_engine(BROKEN).stdout.decode())
         self.assertNotIn("command-agent",
                          {i.get("direction") for i in got["issues"] if "direction" in i})

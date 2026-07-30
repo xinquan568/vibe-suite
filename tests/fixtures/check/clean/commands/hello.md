@@ -5,5 +5,5 @@ argument-hint: ""
 
 # /fixture-clean:hello
 
-Dispatch the [buddy](../agents/buddy.md) agent. Run the checks before committing. File the
-outcome in the report.
+Dispatch the buddy agent. Run the checks before committing. File the outcome in the
+report.

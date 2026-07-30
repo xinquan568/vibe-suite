@@ -8,4 +8,5 @@ argument-hint: ""
 Follow the shared steps in [missing-partial](shared/missing-partial.md), then dispatch the
 [helper](../agents/helper.md) agent to utilize the results.
 
-Always run the checks before committing. File the outcome in the audit report.
+Always run the checks before committing. Triage the leftovers, then file the outcome in
+the audit report.

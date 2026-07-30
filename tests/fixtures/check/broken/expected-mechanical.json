@@ -1,5 +1,5 @@
 {
-  "verdict": "6 issues",
+  "verdict": "7 issues",
   "issues": [
     {
       "class": "reference-integrity",
@@ -30,6 +30,13 @@
       "detail": "listed path does not resolve"
     },
     {
+      "class": "reference-integrity",
+      "direction": "claude-md-listing",
+      "source": "CLAUDE.md",
+      "target": "fixture-broken:absent",
+      "detail": "listed plugin component token does not resolve"
+    },
+    {
       "class": "orphan",
       "source": "skills/orphaned/SKILL.md",
       "detail": "zero inbound reference edges"
@@ -39,5 +46,14 @@
       "source": "commands/go.md",
       "detail": "deprecated term 'utilize' (canonical: 'use'), 1 occurrence"
     }
-  ]
+  ],
+  "checked": {
+    "agent": 1,
+    "claude-md": 1,
+    "command": 1,
+    "hook-config": 1,
+    "partial": 0,
+    "script": 1,
+    "skill": 2
+  }
 }

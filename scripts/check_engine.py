@@ -1,34 +1,49 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: ISC
-"""Deterministic consistency engine for /vibe-suite:check (STAGED DRAFT — place as
-scripts/check_engine.py after the plan verify clears).
+"""Deterministic consistency engine for /vibe-suite:check.
 
 The engine owns the mechanical classes and the composition; the checker agent owns the two
 judgment classes and feeds them back via --judgment. Mechanical classes:
 
   reference-integrity, four reportable directions (F4.3):
-    command-partial     a command's reference to a shared partial resolves
-    agent-skills        an agent's `skills:` entry resolves to skills/<name>/SKILL.md
-    hook-script         a hooks.json command's ${CLAUDE_PLUGIN_ROOT}/ path resolves
-    claude-md-listing   a CLAUDE.md list item that is path-shaped resolves
+    command-partial     a `(commands/)?shared/<name>.md` token in a command's body resolves
+    agent-skills        an agent's frontmatter `skills:` entry (scalar or list form)
+                        resolves to skills/<name>/SKILL.md
+    hook-script         each ${CLAUDE_PLUGIN_ROOT}/ path in a parsed command-type hook's
+                        command string resolves (quotes and arguments never leak in)
+    claude-md-listing   a CLAUDE.md list item that is path-shaped resolves against the
+                        root; a `plugin:component` token resolves to commands/<component>.md
   orphan                a non-root component (skill, agent, shared partial, script) with
-                        zero inbound edges — per commands/shared/plugin-discover.md's map;
-                        command→agent edges feed THIS computation only and are never a
+                        zero inbound edges — per commands/shared/plugin-discover.md's map:
+                        command→agent (path or whole-word name), command→partial,
+                        agent→skill (frontmatter AND body path tokens), hook→script,
+                        plus resolving CLAUDE.md listings. Command→agent and agent-body
+                        skill references feed THIS computation only and are never a
                         reportable direction; manifest-claims are F4.4's, not checked here
   r51-drift             deprecated registry terms, only under the vocabulary skill's stated
-                        preconditions (rule_overrides.R51.enabled + vocabulary_skill with a
-                        registry.yaml)
+                        preconditions: `.vibe-suite.md` (read fail-closed through
+                        scripts/lib/config.py) has rule_overrides.R51.enabled true, not
+                        suppressed, with a contained vocabulary_skill whose registry.yaml
+                        exists. Verb terms flag only inside their scope's path globs;
+                        noun-class terms are unscoped; deferred terms are never flagged.
 
 Refusals (exit 2): bad root; fewer than two artifacts ("check: consistency needs >=2
-artifacts; found <n>"); unreadable/unknown-class --judgment file.
+artifacts; found <n>"); malformed or invalid config; a registry.yaml outside the documented
+schema; a judgment file that is unreadable, unparsable, or carries an unknown class or a
+malformed finding shape.
 
 Output (stdout JSON, deterministic ordering, byte-identical across runs):
   {"verdict": "CLEAN" | "<N> issues", "issues": [...], "checked": {...}}
 Composition: issues = mechanical + judgment (file order); CLEAN iff the composed list is
 empty; N == len(issues) exactly.
+
+The grammar's oracle is the hand-authored worksheet (tests/fixtures/check/broken/README.md);
+the edge definitions come from commands/shared/plugin-discover.md, the R51 semantics from
+skills/vocabulary/SKILL.md.
 """
 
 import argparse
+import fnmatch
 import json
 import re
 import sys
@@ -38,13 +53,18 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
+import config   # noqa: E402  (scripts/lib — the one fail-closed .vibe-suite.md reader)
+
 JUDGMENT_CLASSES = {"behavioral-contradiction", "terminology-drift"}
 DIRECTION_ORDER = ["command-partial", "agent-skills", "hook-script", "claude-md-listing"]
 CLASS_ORDER = {"reference-integrity": 0, "orphan": 1, "r51-drift": 2,
                "behavioral-contradiction": 3, "terminology-drift": 3}
 
-MD_LINK = re.compile(r"\]\(([^)\s]+)\)")
-PATH_SHAPED = re.compile(r".+/.+|.+\.(md|json|sh|py|mjs|yaml|toml)$")
+PARTIAL_TOKEN = re.compile(r"(?<![A-Za-z0-9._/-])(?:commands/)?shared/[A-Za-z0-9._-]+\.md")
+SKILL_TOKEN = re.compile(r"(?<![A-Za-z0-9._/-])skills/([A-Za-z0-9._-]+)")
+HOOK_TARGET = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/([^\"'\s]+)")
+PATH_SHAPED = re.compile(r".+/.+|.+\.(md|json|sh)$")
+PLUGIN_TOKEN = re.compile(r"[a-z0-9-]+:([a-z0-9-]+)")
 LIST_ITEM = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
 
 
@@ -57,19 +77,39 @@ def read_text(path):
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def frontmatter_fields(text):
-    """Minimal `key: value` frontmatter read (skills:/name: lines are all this needs)."""
+def body_of(text):
+    """The document below its frontmatter block (the whole text when there is none)."""
+    lines = text.split("\n")
+    if lines and lines[0] == "---":
+        for index in range(1, len(lines)):
+            if lines[index] == "---":
+                return "\n".join(lines[index + 1:])
+    return text
+
+
+def agent_skills(text):
+    """Frontmatter `skills:` entries — comma-separated scalar or YAML list form."""
     lines = text.split("\n")
     if not lines or lines[0] != "---":
-        return {}
-    fields = {}
+        return []
+    names, in_skills = [], False
     for line in lines[1:]:
         if line == "---":
             break
-        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+        if in_skills:
+            m = re.match(r"^\s+-\s+(\S+)\s*$", line)
+            if m:
+                names.append(m.group(1))
+                continue
+            in_skills = False
+        m = re.match(r"^skills:\s*(.*)$", line)
         if m:
-            fields[m.group(1)] = m.group(2).strip()
-    return fields
+            value = m.group(1).strip()
+            if value:
+                names.extend(s.strip() for s in value.split(",") if s.strip())
+            else:
+                in_skills = True
+    return names
 
 
 def discover(root):
@@ -97,95 +137,115 @@ def discover(root):
     return arts
 
 
-def check_mechanical(root, arts, config):
-    issues, edges = [], []   # edges: (source_rel, target_rel) inbound map input
+def walk_hooks(node):
+    """Every {"type": "command", "command": <str>} object in a parsed hooks.json."""
+    if isinstance(node, dict):
+        if node.get("type") == "command" and isinstance(node.get("command"), str):
+            yield node["command"]
+        for key in sorted(node):
+            yield from walk_hooks(node[key])
+    elif isinstance(node, list):
+        for item in node:
+            yield from walk_hooks(item)
 
-    # command-partial (reportable) + command-agent (orphan input only)
+
+def check_mechanical(root, arts, deprecated_terms):
+    issues, edges = [], set()   # edges: target rels with at least one inbound reference
+    seen = set()                # (direction, source, target) dedupe for reported issues
+
+    def dangling(direction, source, target, detail):
+        if (direction, source, target) not in seen:
+            seen.add((direction, source, target))
+            issues.append({"class": "reference-integrity", "direction": direction,
+                           "source": source, "target": target, "detail": detail})
+
+    agent_names = {rel: Path(rel).stem for rel in arts["agent"]}
+
+    # command bodies: partial tokens (reportable) + agent references (orphan input only)
     for rel in arts["command"]:
-        body = read_text(root / rel)
-        base = (root / rel).parent
-        for target in MD_LINK.findall(body):
-            if target.startswith(("http:", "https:", "#")):
-                continue
-            resolved = (base / target).resolve()
-            try:
-                target_rel = resolved.relative_to(root.resolve()).as_posix()
-            except ValueError:
-                continue
-            if re.fullmatch(r"commands/shared/[^/]+\.md", target_rel):
-                if resolved.is_file():
-                    edges.append((rel, target_rel))
-                else:
-                    issues.append({"class": "reference-integrity",
-                                   "direction": "command-partial", "source": rel,
-                                   "target": target_rel,
-                                   "detail": "referenced shared partial does not exist"})
-            elif re.fullmatch(r"agents/[^/]+\.md", target_rel) and resolved.is_file():
-                edges.append((rel, target_rel))   # orphan input only, never reported
-
-    # agent-skills (reportable) + agent→skill edges
-    for rel in arts["agent"]:
-        fields = frontmatter_fields(read_text(root / rel))
-        for name in [s.strip() for s in fields.get("skills", "").split(",") if s.strip()]:
-            target_rel = f"skills/{name}/SKILL.md"
-            if (root / target_rel).is_file():
-                edges.append((rel, target_rel))
+        body = body_of(read_text(root / rel))
+        for token in PARTIAL_TOKEN.findall(body):
+            target = f"commands/shared/{Path(token).name}"
+            if (root / target).is_file():
+                edges.add(target)
             else:
-                issues.append({"class": "reference-integrity",
-                               "direction": "agent-skills", "source": rel,
-                               "target": target_rel,
-                               "detail": "skills: entry resolves to no SKILL.md"})
+                dangling("command-partial", rel, target,
+                         "referenced shared partial does not exist")
+        for agent_rel, name in agent_names.items():
+            if agent_rel in body or re.search(rf"\b{re.escape(name)}\b", body):
+                edges.add(agent_rel)
 
-    # hook-script (reportable)
+    # agents: frontmatter skills: (reportable) + body skill tokens (orphan input only)
+    for rel in arts["agent"]:
+        text = read_text(root / rel)
+        for name in agent_skills(text):
+            target = f"skills/{name}/SKILL.md"
+            if (root / target).is_file():
+                edges.add(target)
+            else:
+                dangling("agent-skills", rel, target,
+                         "skills: entry resolves to no SKILL.md")
+        for name in SKILL_TOKEN.findall(body_of(text)):
+            target = f"skills/{name}/SKILL.md"
+            if (root / target).is_file():
+                edges.add(target)
+
+    # hook commands, read out of the PARSED object (reportable)
     for rel in arts["hook-config"]:
         try:
             data = json.loads(read_text(root / rel))
         except ValueError:
             continue   # malformed hook config is F4.4/frontmatter territory, not ours
-        blob = json.dumps(data)
-        for m in re.finditer(r"\$\{CLAUDE_PLUGIN_ROOT\}/([^\"']+)", blob):
-            target_rel = m.group(1)
-            if (root / target_rel).is_file():
-                edges.append((rel, target_rel))
-            else:
-                issues.append({"class": "reference-integrity",
-                               "direction": "hook-script", "source": rel,
-                               "target": target_rel,
-                               "detail": "hook command names a script that does not exist"})
+        for command in walk_hooks(data):
+            for target in HOOK_TARGET.findall(command):
+                if (root / target).is_file():
+                    edges.add(target)
+                else:
+                    dangling("hook-script", rel, target,
+                             "hook command names a script that does not exist")
 
-    # claude-md-listing (reportable; the partial's gap — grammar per the worksheet)
+    # CLAUDE.md listings: path-shaped items and plugin:component tokens (reportable)
     for rel in arts["claude-md"]:
         for line in read_text(root / rel).splitlines():
             m = LIST_ITEM.match(line)
             if not m:
                 continue
             item = m.group(1).strip().strip("`")
-            if not PATH_SHAPED.fullmatch(item):
+            if PATH_SHAPED.fullmatch(item):
+                if (root / item).exists():
+                    edges.add(item)
+                else:
+                    dangling("claude-md-listing", rel, item,
+                             "listed path does not resolve")
                 continue
-            if (root / item).exists():
-                edges.append((rel, item))
-            else:
-                issues.append({"class": "reference-integrity",
-                               "direction": "claude-md-listing", "source": rel,
-                               "target": item, "detail": "listed path does not resolve"})
+            token = PLUGIN_TOKEN.fullmatch(item)
+            if token:
+                target = f"commands/{token.group(1)}.md"
+                if (root / target).is_file():
+                    edges.add(target)
+                else:
+                    dangling("claude-md-listing", rel, item,
+                             "listed plugin component token does not resolve")
 
     # orphans: non-root components with zero inbound edges
-    inbound = {t for _, t in edges}
     for kind in ("skill", "agent", "partial", "script"):
         for rel in arts[kind]:
-            if rel not in inbound:
+            if rel not in edges:
                 issues.append({"class": "orphan", "source": rel,
                                "detail": "zero inbound reference edges"})
 
-    # r51-drift under the stated preconditions
-    deprecated = r51_deprecated_terms(root, config)
-    if deprecated:
+    # r51-drift: deprecated terms under scope, per the pre-validated registry table
+    if deprecated_terms:
         scan = [r for k in ("command", "agent", "skill", "partial", "claude-md")
                 for r in arts[k]]
         for rel in scan:
-            body = read_text(root / rel).lower()
-            for term, canonical in sorted(deprecated.items()):
-                n = len(re.findall(rf"\b{re.escape(term)}\b", body))
+            lowered = read_text(root / rel).lower()
+            for term, canonical, scope_paths in sorted(
+                    deprecated_terms, key=lambda t: (t[0], t[1])):
+                if scope_paths is not None and \
+                        not any(fnmatch.fnmatch(rel, g) for g in scope_paths):
+                    continue
+                n = len(re.findall(rf"\b{re.escape(term)}\b", lowered))
                 if n:
                     issues.append({"class": "r51-drift", "source": rel,
                                    "detail": f"deprecated term '{term}' (canonical: "
@@ -194,38 +254,205 @@ def check_mechanical(root, arts, config):
     return issues
 
 
-def r51_deprecated_terms(root, config_path):
-    """{deprecated_term: canonical} when R51's preconditions hold, else {}."""
-    cfg = config_path if config_path else root / ".vibe-suite.md"
-    if not cfg.is_file():
-        return {}
-    text = read_text(cfg)
-    if not re.search(r"R51:\s*$|R51:\s*\{", text, re.M):
-        enabled = re.search(r"R51:(?:.|\n)*?enabled:\s*true", text)
-    else:
-        enabled = re.search(r"enabled:\s*true", text)
-    vocab = re.search(r"vocabulary_skill:\s*(\S+)", text)
-    if not (enabled and vocab):
-        return {}
-    registry = root / vocab.group(1) / "registry.yaml"
-    if not registry.is_file():
-        return {}
-    terms, canonical = {}, None
-    for line in read_text(registry).splitlines():
-        m = re.match(r"^\s+canonical:\s*(\S+)", line)
-        if m:
-            canonical = m.group(1)
-        m = re.match(r"^\s+-\s+(\S+)", line)
-        if m and canonical:
-            terms[m.group(1)] = canonical
+# ------------------------------------------------------------------ registry (R51 sidecar)
+
+
+class RegistryError(Exception):
+    """registry.yaml is outside the documented schema — a refusal, never a silent skip."""
+
+
+_REG_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*$")
+REGISTRY_KEYS = {"scopes", "cross_scope_homonyms", "verbs",
+                 "deferred_pending_warrant", "rejected_by_higher_principle", "nouns"}
+
+
+def _reg_scalar(text):
+    if text == "[]":
+        return []
+    if text in ("true", "false"):
+        return text == "true"
+    if re.fullmatch(r"-?[0-9]+", text):
+        return int(text)
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
+def _reg_block(lines, index, indent, source):
+    """Parse a mapping or list block whose entries sit at exactly `indent` spaces."""
+    entries_list, entries_map = None, None
+    while index < len(lines):
+        raw = lines[index]
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            index += 1
+            continue
+        current = len(raw) - len(raw.lstrip(" "))
+        if current < indent:
+            break
+        if current > indent:
+            raise RegistryError(f"{source}:{index + 1}: unexpected indentation")
+        content = raw.strip()
+        if content.startswith("- "):
+            if entries_map is not None:
+                raise RegistryError(f"{source}:{index + 1}: list item inside a mapping")
+            entries_list = [] if entries_list is None else entries_list
+            rest = content[2:].strip()
+            key, sep, value = rest.partition(":")
+            if sep and _REG_KEY.match(key.strip()) and (not value or value[0] == " "):
+                item = {key.strip(): _reg_scalar(value.strip()) if value.strip() else None}
+                sub, index = _reg_block(lines, index + 1, indent + 2, source)
+                if isinstance(sub, dict):
+                    for k, v in sub.items():
+                        if k in item:
+                            raise RegistryError(
+                                f"{source}: duplicate key {k!r} in a list item")
+                        item[k] = v
+                elif sub is not None:
+                    raise RegistryError(f"{source}: a list may not follow a list item head")
+                entries_list.append(item)
+            else:
+                entries_list.append(_reg_scalar(rest))
+                index += 1
+            continue
+        if entries_list is not None:
+            raise RegistryError(f"{source}:{index + 1}: mapping key inside a list")
+        key, sep, value = content.partition(":")
+        key, value = key.strip(), value.strip()
+        if not sep or not _REG_KEY.match(key):
+            raise RegistryError(f"{source}:{index + 1}: expected 'key:' or 'key: value'")
+        entries_map = {} if entries_map is None else entries_map
+        if key in entries_map:
+            raise RegistryError(f"{source}:{index + 1}: duplicate key {key!r}")
+        if value:
+            entries_map[key] = _reg_scalar(value)
+            index += 1
+        else:
+            entries_map[key], index = _reg_block(lines, index + 1, indent + 2, source)
+    return entries_list if entries_list is not None else entries_map, index
+
+
+def _string_list(value, label, source):
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise RegistryError(f"{source}: {label} must be a list of strings")
+    return value
+
+
+def registry_terms(path):
+    """[(deprecated_term, canonical, scope_paths|None)] per the documented six-key schema.
+
+    Verb entries are scope-keyed and flag only inside their scope's path globs; noun-class
+    entries are unscoped; deferred and rejected terms are never flagged (they are not
+    synonyms); canonical terms are never flagged. Anything outside the schema raises.
+    """
+    source = path.name
+    tree, _ = _reg_block(read_text(path).split("\n"), 0, 0, source)
+    if not isinstance(tree, dict):
+        raise RegistryError(f"{source}: top level must be a mapping")
+    unknown = set(tree) - REGISTRY_KEYS
+    if unknown:
+        raise RegistryError(f"{source}: unknown top-level key {sorted(unknown)[0]!r}")
+
+    scopes = {}
+    for scope in tree.get("scopes") or []:
+        if not isinstance(scope, dict) or not isinstance(scope.get("id"), str):
+            raise RegistryError(f"{source}: each scope needs a string id")
+        scopes[scope["id"]] = _string_list(scope.get("paths") or [],
+                                           f"scopes[{scope['id']}].paths", source)
+
+    terms = []
+    verbs = tree.get("verbs") or {}
+    if not isinstance(verbs, dict):
+        raise RegistryError(f"{source}: verbs must be a mapping keyed by scope id")
+    for scope_id, entries in verbs.items():
+        if scope_id not in scopes:
+            raise RegistryError(f"{source}: verbs scope {scope_id!r} is not declared")
+        if not isinstance(entries, dict):
+            raise RegistryError(f"{source}: verbs.{scope_id} must be a mapping of entries")
+        for name, entry in entries.items():
+            if not isinstance(entry, dict) or not isinstance(entry.get("canonical"), str):
+                raise RegistryError(f"{source}: verbs.{scope_id}.{name} needs a canonical")
+            for term in _string_list(entry.get("deprecated") or [],
+                                     f"verbs.{scope_id}.{name}.deprecated", source):
+                terms.append((term, entry["canonical"], scopes[scope_id]))
+
+    nouns = tree.get("nouns") or {}
+    if not isinstance(nouns, dict):
+        raise RegistryError(f"{source}: nouns must be a mapping")
+    for klass in ("artifact_class", "output_class"):
+        entries = nouns.get(klass) or {}
+        if not isinstance(entries, dict):
+            raise RegistryError(f"{source}: nouns.{klass} must be a mapping of entries")
+        for name, entry in entries.items():
+            if not isinstance(entry, dict) or not isinstance(entry.get("canonical"), str):
+                raise RegistryError(f"{source}: nouns.{klass}.{name} needs a canonical")
+            for term in _string_list(entry.get("deprecated") or [],
+                                     f"nouns.{klass}.{name}.deprecated", source):
+                terms.append((term, entry["canonical"], None))
     return terms
+
+
+def r51_deprecated_terms(root, resolved_config):
+    """The term table when R51's preconditions hold (vocabulary skill), else []."""
+    r51 = (resolved_config.get("rule_overrides") or {}).get("R51") or {}
+    if r51.get("suppress") is True or r51.get("enabled") is not True:
+        return []
+    vocab = r51.get("vocabulary_skill")
+    if not isinstance(vocab, str):
+        return []
+    registry = root / vocab / "registry.yaml"
+    if not registry.is_file():
+        return []
+    return registry_terms(registry)
+
+
+def load_config(root, config_arg):
+    """Resolve the project config fail-closed through scripts/lib/config.py.
+
+    No --config: the root's `.vibe-suite.md` (defaults when absent). --config <path>:
+    that file's text validated against the root (defaults when the file is absent —
+    the caller is pointing away from the root's config on purpose). Malformed or
+    invalid config raises — the engine refuses rather than defaulting.
+    """
+    if config_arg:
+        path = Path(config_arg)
+        if not path.is_file():
+            return config.resolve_text("---\n---\n", str(root))[0]
+        return config.resolve_text(read_text(path), str(root))[0]
+    return config.load_with_warnings(str(root))[0]
 
 
 def sort_key(issue):
     return (CLASS_ORDER.get(issue["class"], 9),
             DIRECTION_ORDER.index(issue["direction"])
             if issue.get("direction") in DIRECTION_ORDER else 9,
-            issue.get("source", ""), issue.get("target", ""))
+            issue.get("source", ""), issue.get("target", ""), issue.get("detail", ""))
+
+
+def load_judgment(path_arg):
+    """(validated judgment list, None) or (None, error string) — errors are refusals."""
+    path = Path(path_arg)
+    if not path.is_file():
+        return None, f"judgment file {path_arg!r} does not exist"
+    try:
+        judgment = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as err:
+        return None, f"judgment file cannot be read: {err}"
+    except ValueError as err:
+        return None, f"judgment file does not parse: {err}"
+    if not isinstance(judgment, list):
+        return None, "judgment file must be a JSON list"
+    for finding in judgment:
+        if not isinstance(finding, dict):
+            return None, "judgment entries must be objects"
+        if finding.get("class") not in JUDGMENT_CLASSES:
+            return None, f"unknown judgment class {finding.get('class')!r}"
+        if not isinstance(finding.get("detail"), str) or not finding["detail"]:
+            return None, "judgment entries need a non-empty string detail"
+        sources = finding.get("sources")
+        if not isinstance(sources, list) or \
+                any(not isinstance(item, str) for item in sources):
+            return None, "judgment entries need a sources list of strings"
+    return judgment, None
 
 
 def main(argv=None):
@@ -243,23 +470,22 @@ def main(argv=None):
     if count < 2:
         return fail(f"consistency needs >=2 artifacts; found {count}")
 
-    config = Path(args.config) if args.config else None
-    issues = check_mechanical(root, arts, config)
+    try:
+        resolved_config = load_config(root, args.config)
+        deprecated_terms = r51_deprecated_terms(root, resolved_config)
+    except (config.ConfigSyntaxError, config.ConfigValueError,
+            config.ConfigContainmentError) as err:
+        return fail(f"config: {err}")
+    except RegistryError as err:
+        return fail(f"registry: {err}")
+
+    issues = check_mechanical(root, arts, deprecated_terms)
     issues.sort(key=sort_key)
 
     if args.judgment:
-        jpath = Path(args.judgment)
-        if not jpath.is_file():
-            return fail(f"judgment file {args.judgment!r} does not exist")
-        try:
-            judgment = json.loads(read_text(jpath))
-        except ValueError as err:
-            return fail(f"judgment file does not parse: {err}")
-        if not isinstance(judgment, list):
-            return fail("judgment file must be a JSON list")
-        for finding in judgment:
-            if finding.get("class") not in JUDGMENT_CLASSES:
-                return fail(f"unknown judgment class {finding.get('class')!r}")
+        judgment, error = load_judgment(args.judgment)
+        if error:
+            return fail(error)
         issues.extend(judgment)   # file order, after the mechanical block
 
     verdict = "CLEAN" if not issues else f"{len(issues)} issues"

@@ -8,8 +8,8 @@ skills: util, absent-skill
 
 # helper
 
-Assemble results for the go flow. Never run the checks before committing; the review
-dossier records the outcome instead.
+Assemble results for the go flow, and utilize whatever it hands over. Never run the checks
+before committing; the review dossier records the outcome instead.
 
 ## Output format
 

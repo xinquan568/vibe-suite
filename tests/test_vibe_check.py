@@ -304,6 +304,30 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertNotIn("frontmatter", out)
         self.assertNotIn("name-dir", out)
 
+    def test_absolute_in_root_registration_is_contained(self):
+        # An absolute path RESOLVING inside the root does not escape: it is converted
+        # to its root-relative canonical form, so the symlink-escaping artifact it
+        # names gets exactly ONE escape finding (from the disk sweep).
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (outside / "SKILL.md").write_text("---\nname: outside\n---\n# o\n",
+                                              encoding="utf-8")
+            root = Path(tmp) / "plugin"
+            (root / ".claude-plugin").mkdir(parents=True)
+            (root / "skills").mkdir()
+            (root / "skills" / "esc").symlink_to(outside, target_is_directory=True)
+            (root / ".claude-plugin" / "plugin.json").write_text(
+                json.dumps({"name": "x",
+                            "skills": [str(root / "skills" / "esc")]}),
+                encoding="utf-8")
+            proc = run_check(str(root))
+        out = proc.stdout.decode()
+        self.assertEqual(proc.returncode, 1, out + proc.stderr.decode())
+        self.assertEqual(out.count("escapes the plugin root"), 1, out)
+        self.assertIn("manifest-vs-disk: skills/esc: escapes the plugin root", out)
+        self.assertNotIn("unregistered-skill", out)
+
     def test_manifest_paths_are_contained(self):
         # Absolute and traversal entries are findings and are never read/registered.
         for entry_json in ('{"name": "x", "commands": ["../outside.md"]}',

@@ -99,16 +99,38 @@ def _norm(entry):
 
 def _contained(root, entry):
     """The normalized, root-contained relative path for a manifest entry, or None when
-    the entry is absolute or escapes the plugin root (symlinks resolved) — an escaping
-    entry is a finding and its target is never read or registered."""
-    rel = _norm(entry)
+    the entry ESCAPES the plugin root (symlinks resolved) — an escaping entry is a
+    finding and its target is never read or registered. An absolute entry that RESOLVES
+    inside the root does not escape: it is converted to its root-relative canonical
+    form, so every spelling of one in-root artifact shares one path."""
+    rel = _canonical_rel(root, entry)
     if Path(rel).is_absolute():
-        return None
+        try:
+            return Path(rel).resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return None
     resolved = (root / rel).resolve()
     try:
         resolved.relative_to(root.resolve())
     except ValueError:
         return None
+    return rel
+
+
+def _canonical_rel(root, entry):
+    """The best canonical spelling of an entry: normalized, and — when it lies under
+    the root by EITHER root spelling (/var vs /private/var), converted LEXICALLY to the
+    root-relative form without traversing the entry's own symlinks. An entry outside
+    the root keeps its normalized absolute spelling. Escape findings use this, so every
+    spelling of one artifact yields one finding path across both emit sites."""
+    rel = _norm(entry)
+    path = Path(rel)
+    if path.is_absolute():
+        for base in (root.absolute(), root.resolve()):
+            try:
+                return path.relative_to(base).as_posix()
+            except ValueError:
+                continue
     return rel
 
 
@@ -195,7 +217,7 @@ def registered_by_class(root, manifest, findings=None):
             rel = _contained(root, entry)
             if rel is None:
                 if findings is not None:
-                    escape_rel = _norm(entry)
+                    escape_rel = _canonical_rel(root, entry)
                     if key == "skills":
                         escape_rel = _skill_escape_base(escape_rel)
                     findings.append(finding("manifest-vs-disk", escape_rel,
@@ -221,7 +243,7 @@ def check_manifest_vs_disk(root, manifest):
     if isinstance(hooks, str):
         hooks_rel = _contained(root, hooks)
         if hooks_rel is None:
-            findings.append(finding("manifest-vs-disk", _norm(hooks),
+            findings.append(finding("manifest-vs-disk", _canonical_rel(root, hooks),
                                     "escapes the plugin root"))
         elif not (root / hooks_rel).is_file():
             findings.append(finding("manifest-vs-disk", hooks_rel,

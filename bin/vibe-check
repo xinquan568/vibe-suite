@@ -32,6 +32,7 @@ UnsupportedSchemaError (the schema outran the checker — ADR-0001's loud halt);
 
 import argparse
 import json
+import os
 import posixpath
 import re
 import sys
@@ -118,19 +119,25 @@ def _contained(root, entry):
 
 
 def _canonical_rel(root, entry):
-    """The best canonical spelling of an entry: normalized, and — when it lies under
-    the root by EITHER root spelling (/var vs /private/var), converted LEXICALLY to the
-    root-relative form without traversing the entry's own symlinks. An entry outside
-    the root keeps its normalized absolute spelling. Escape findings use this, so every
-    spelling of one artifact yields one finding path across both emit sites."""
+    """The best canonical spelling of an entry. Absolute entries may spell the root
+    through ANY directory-symlink alias (/var vs /private/var, either orientation):
+    the SHORTEST path prefix whose realpath lands under the resolved root is the
+    spelling boundary, and the remainder is taken LEXICALLY from there — the entry's
+    own trailing symlinks are never traversed, so every spelling of one artifact
+    yields one finding path across both emit sites. Entries genuinely outside the
+    root keep their normalized absolute spelling."""
     rel = _norm(entry)
     path = Path(rel)
-    if path.is_absolute():
-        for base in (root.absolute(), root.resolve()):
-            try:
-                return path.relative_to(base).as_posix()
-            except ValueError:
-                continue
+    if not path.is_absolute():
+        return rel
+    root_real = root.resolve()
+    parts = path.parts
+    for cut in range(1, len(parts) + 1):
+        try:
+            base = Path(os.path.realpath(Path(*parts[:cut]))).relative_to(root_real)
+        except ValueError:
+            continue
+        return posixpath.normpath("/".join([base.as_posix(), *parts[cut:]]))
     return rel
 
 

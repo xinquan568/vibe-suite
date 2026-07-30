@@ -328,6 +328,31 @@ class ErrorTaxonomy(unittest.TestCase):
         self.assertIn("manifest-vs-disk: skills/esc: escapes the plugin root", out)
         self.assertNotIn("unregistered-skill", out)
 
+    def test_alias_orientation_yields_one_finding(self):
+        # Invoke the root in RESOLVED form (/private/var/...) while registering the
+        # escaping artifact through the alias spelling (/var/...): still one canonical
+        # relative finding.
+        with tempfile.TemporaryDirectory() as tmp:
+            alias_root = Path(tmp) / "plugin"          # /var/... spelling on macOS
+            resolved_root = Path(tmp).resolve() / "plugin"
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            (outside / "SKILL.md").write_text("---\nname: outside\n---\n# o\n",
+                                              encoding="utf-8")
+            (alias_root / ".claude-plugin").mkdir(parents=True)
+            (alias_root / "skills").mkdir()
+            (alias_root / "skills" / "esc").symlink_to(outside,
+                                                       target_is_directory=True)
+            (alias_root / ".claude-plugin" / "plugin.json").write_text(
+                json.dumps({"name": "x",
+                            "skills": [str(alias_root / "skills" / "esc")]}),
+                encoding="utf-8")
+            proc = run_check(str(resolved_root))
+        out = proc.stdout.decode()
+        self.assertEqual(proc.returncode, 1, out + proc.stderr.decode())
+        self.assertEqual(out.count("escapes the plugin root"), 1, out)
+        self.assertIn("manifest-vs-disk: skills/esc: escapes the plugin root", out)
+
     def test_manifest_paths_are_contained(self):
         # Absolute and traversal entries are findings and are never read/registered.
         for entry_json in ('{"name": "x", "commands": ["../outside.md"]}',

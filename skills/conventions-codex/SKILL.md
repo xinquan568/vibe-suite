@@ -5,6 +5,8 @@ description: Overlay of Codex CLI conventions — the config.toml grammar, the .
 
 # Codex CLI conventions overlay
 
+**Spec freshness:** verified 2026-06-07 against Codex CLI 0.137.0, released 2026-06-04 (developers.openai.com/codex)
+
 This skill is the Tier 2-Codex overlay in the vibe-suite knowledge library. The
 universal [conventions](../conventions/SKILL.md) floor states what every agent
 artifact must satisfy no matter which tool runs it; this overlay stacks the
@@ -14,8 +16,6 @@ scoring an artifact aimed at the Codex CLI. The suite scorer pulls it in when
 its classification step (step 3) labels an artifact Tier 2-Codex, and the suite
 checker loads it for cross-component validation. Penalty weights are not
 defined here — they live with the suite scoring rules; this file records facts.
-
-**Spec freshness:** verified 2026-06-07 against Codex CLI 0.137.0, released 2026-06-04 (developers.openai.com/codex)
 
 Pre-releases existed up to 0.138.0-alpha.6 at refresh time.
 

@@ -86,9 +86,17 @@ class Deliverables(unittest.TestCase):
         self.assertRegex(body, r"(?m)^tools: .*WebFetch.*WebSearch")
         spec = SPEC.read_text(encoding="utf-8")
         self.assertIn("FIX/REMOVE/ADD/CONFIRM/RESOLVED", spec)
+        self.assertRegex(body, r"(?m)^tools: .*\bRead\b")
         flat = squash(body)
         self.assertIn("first-party", flat.lower())
         self.assertRegex(flat, r"(?i)one dispatch per overlay|per-overlay dispatch")
+        # the output-table contract, field by field
+        self.assertIn("| Seed/claim | Section | Tag | Confidence or reason | "
+                      "Source label | URL |", flat)
+        for tag in TAGS:
+            self.assertIn(tag, body, f"agent must state tag {tag}")
+        for reason in ("source-silent", "source-conflict"):
+            self.assertIn(reason, body)
 
     def test_no_deprecated_vocabulary(self):
         # R51 is enforced on commands/** and agents/** (E3.7).
@@ -101,17 +109,50 @@ class CommandContract(unittest.TestCase):
         self.body = COMMAND.read_text(encoding="utf-8")
         self.flat = squash(self.body)
 
+    def test_targets_field_complete(self):
+        # D1: three tokens, `all` as default, floor excluded — each asserted by content
+        for token in ("claude", "codex", "antigravity", "all"):
+            self.assertIn(f"`{token}`", self.body, f"target token missing: {token}")
+        self.assertIn("`all` (the default)", self.flat)
+        self.assertIn("`skills/conventions/` floor is never a target", self.flat)
+
     def test_modes_and_change_predicate(self):
         self.assertIn("--dry-run", self.body)
         self.assertIn("--apply", self.body)
         self.assertIn("remains writable after the confidence threshold", self.flat)
         self.assertRegex(self.flat, r"(?i)no-change branch")
         self.assertRegex(self.flat, r"(?i)never commits")
+        # D2: RESOLVED and a retiring CONFIRM are both actionable — deleting either
+        # from the predicate fails here
+        self.assertIn("FIX, REMOVE, ADD, or RESOLVED", self.flat)
+        self.assertIn("CONFIRM that retires a correction note", self.flat)
 
-    def test_tag_precedence_and_disjointness(self):
-        for tag in TAGS:
-            self.assertIn(tag, self.body)
-        # the two disjointness rules the review demanded
+    #: D3's five rows, each (order, tag, overlay-state fragment, source-state fragment).
+    #: Deleting any row — or altering its evidence condition — fails this test.
+    D3_ROWS = [
+        ("1", "RESOLVED", "explicit hedge", "now settles X"),
+        ("2", "REMOVE", "states X", "no replacement"),
+        ("3", "FIX", "states X", "with a replacement"),
+        ("4", "ADD", "silent on X", "states X"),
+        ("5", "CONFIRM", "no hedge", "states X"),
+    ]
+
+    def test_tag_precedence_rows_field_complete(self):
+        rows = {}
+        for line in self.body.splitlines():
+            if line.startswith("| ") and "`" in line:
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                if cells and cells[0].isdigit():
+                    rows[cells[0]] = cells
+        self.assertEqual(sorted(rows), ["1", "2", "3", "4", "5"],
+                         "D3 must state exactly five precedence rows")
+        for order, tag, overlay_state, source_state in self.D3_ROWS:
+            cells = rows[order]
+            self.assertIn(tag, cells[1], f"rule {order}: wrong tag")
+            self.assertIn(overlay_state, cells[2], f"rule {order}: overlay condition")
+            self.assertIn(source_state, cells[3], f"rule {order}: source condition")
+
+    def test_disjointness_rules_stated(self):
         self.assertIn("requires a replacement fact", self.flat)
         self.assertRegex(self.flat, r"(?i)CONFIRM requires .*un-hedged|no hedge")
 
@@ -122,9 +163,18 @@ class CommandContract(unittest.TestCase):
         self.assertIn("--min-confidence", self.body)
         self.assertRegex(self.flat, r"(?i)default(s)? (to )?`?medium`?")
         self.assertIn("(withheld: below --min-confidence)", self.flat)
+        # D4: both grade DEFINITIONS and the orthogonality statement
+        self.assertIn("`high` is an explicit first-party statement", self.flat)
+        self.assertIn("`medium` is first-party but indirect", self.flat)
+        self.assertIn("grade the evidence, never the tag", self.flat)
+        self.assertIn("Insufficient evidence is not a grade", self.flat)
 
     def test_correction_notes(self):
-        self.assertIn("<!-- spec-sync <run-date>:", self.body)
+        self.assertIn(
+            "<!-- spec-sync <run-date>: <tag> — <source label>, <URL> "
+            "(confidence: high|medium) -->", self.body)
+        self.assertIn("replaces its note rather than adding one", self.flat)
+        self.assertIn("one note per claim, never accumulating", self.flat)
         self.assertIn("## Correction notes", self.body)
         self.assertRegex(self.flat, r"(?i)not valid YAML|conforming parser")
         # retirement is reachable: a note-retiring CONFIRM is writable
@@ -136,12 +186,31 @@ class CommandContract(unittest.TestCase):
         self.assertRegex(self.flat, r"(?i)replaces the (selected )?overlay set")
         self.assertRegex(self.flat, r"(?i)requires an explicit target|refuses")
 
+    #: The frozen 23-token sweep set — the command must SHIP it, not reference it.
+    SWEEP_TOKENS = [
+        ".claude/", ".codex/", ".agent/", ".gemini/", "AGENTS.md", "GEMINI.md",
+        "CLAUDE.md", "hooks.json", "settings.json", "config.toml", ".mcp.json",
+        "mcpServers", "marketplace.json", "plugin.json", "CLAUDE_PLUGIN_ROOT",
+        "PreToolUse", "PostToolUse", "SessionStart", "SessionEnd", "SubagentStop",
+        "PreCompact", "UserPromptSubmit", "gemini-extension",
+    ]
+
+    def test_sweep_definition_is_shipped(self):
+        self.assertEqual(len(self.SWEEP_TOKENS), 23)
+        for token in self.SWEEP_TOKENS:
+            self.assertIn(token, self.body, f"sweep token not shipped: {token}")
+        for excluded in ("tests/", "docs/", "`.github/`"):
+            self.assertIn(excluded, self.body, f"exclusion not stated: {excluded}")
+        self.assertIn("git ls-files", self.body)
+
     def test_propagation_rules(self):
-        self.assertRegex(self.flat, r"(?i)documentary")
-        self.assertRegex(self.flat, r"(?i)encoded")
-        self.assertRegex(self.flat, r"(?i)operational")
+        for kind in ("SOURCE", "DOCUMENTARY", "ENCODED", "OPERATIONAL"):
+            self.assertIn(f"**{kind}**", self.body, f"class missing: {kind}")
         self.assertIn("code-change-required", self.body)
         self.assertRegex(self.flat, r"(?i)never edited\*{0,2} by this command")
+        # both citation forms (D7.4)
+        self.assertIn("conventions-<tool> §N", self.body)
+        self.assertIn("Markdown link to the overlay", self.flat)
 
     def test_verify_step_fully_pinned(self):
         self.assertIn(
@@ -158,6 +227,15 @@ class FreshnessNormalization(unittest.TestCase):
                 self.assertIn(CANONICAL[name], squash(text))
                 self.assertEqual(text.count("**Spec freshness:**"), 1)
                 self.assertIn(PRESERVED[name], squash(text))
+
+    def test_canonical_line_is_first_content_after_h1(self):
+        for name, path in OVERLAYS.items():
+            with self.subTest(overlay=name):
+                lines = path.read_text(encoding="utf-8").splitlines()
+                h1 = next(i for i, l in enumerate(lines) if l.startswith("# "))
+                after = [l for l in lines[h1 + 1:] if l.strip()]
+                self.assertTrue(after[0].startswith("**Spec freshness:**"),
+                                f"{name}: first content after H1 is {after[0][:60]!r}")
 
     def test_no_superseded_marker_and_no_dated_description(self):
         for name, path in OVERLAYS.items():
@@ -190,6 +268,15 @@ class FixtureOracle(unittest.TestCase):
         recorded_rows = report_rows(recorded)
         self.assertEqual(recorded_rows, expected_rows,
                          "recorded run drifted from the hand-authored oracle")
+        # every row well-formed: a known tag, and a confidence/reason from the
+        # closed vocabulary — a malformed or invented row fails here
+        allowed = set(TAGS) | {"UNCLASSIFIED"}
+        vocab = {"high", "medium", "source-silent", "source-conflict"}
+        for seed, section, tag, conf in recorded_rows:
+            self.assertIn(tag, allowed, f"seed {seed}: unknown tag {tag!r}")
+            self.assertIn(conf, vocab, f"seed {seed}: bad confidence/reason {conf!r}")
+            self.assertTrue(section.startswith("§"), f"seed {seed}: section {section!r}")
+        self.assertEqual(len({r[0] for r in recorded_rows}), 7, "seeds must be unique")
 
     def test_dry_run_wrote_nothing(self):
         recorded = squash(RECORDED.read_text(encoding="utf-8"))

@@ -74,10 +74,14 @@ branch: no write, no bump, no propagation, no verify.
 Every applied correction carries a note:
 
 ```
-<!-- spec-sync <run-date>: <tag> — <source label> (confidence: high|medium) -->
+<!-- spec-sync <run-date>: <tag> — <source label>, <URL> (confidence: high|medium) -->
 ```
 
-`<run-date>` is the ISO date of the run that writes it. **Placement:** for a body claim,
+`<run-date>` is the ISO date of the run that writes it; `<source label>` is the
+overlay-style bare domain path and `<URL>` is the full first-party page URL the
+researcher quoted — the note records BOTH, because a note is provenance for one
+correction, whereas the freshness line (Step 5) summarises a whole overlay and follows
+the overlays' existing label-only convention. **Placement:** for a body claim,
 the line immediately following the corrected or added claim, and for REMOVE in place of
 the deleted claim. For a correction to a `description:` or any other frontmatter value,
 the note never goes inside the YAML block — an HTML comment is not valid YAML and a
@@ -105,8 +109,22 @@ state, date, and source label together as one edit.
 
 ## Step 6 — propagation
 
-Run the recorded per-tool token sweep over tracked non-test files and classify every
-occurrence:
+Run the per-tool token sweep and classify every occurrence. **The sweep is defined
+here, not by reference** — a caller must be able to reproduce the candidate set exactly.
+
+*Scope:* every file in `git ls-files` EXCLUDING the `tests/`, `docs/`, and `.github/`
+trees.
+
+*Tokens (23 alternatives, matched case-sensitively):*
+
+```
+.claude/  .codex/  .agent/  .gemini/  AGENTS.md  GEMINI.md  CLAUDE.md
+hooks.json  settings.json  config.toml  .mcp.json  mcpServers  marketplace.json
+plugin.json  CLAUDE_PLUGIN_ROOT  PreToolUse  PostToolUse  SessionStart  SessionEnd
+SubagentStop  PreCompact  UserPromptSubmit  gemini-extension
+```
+
+Classify every occurrence:
 
 - **SOURCE** — the overlay skills themselves.
 - **DOCUMENTARY** — prose restating an overlay fact. On `--apply`, updated (each with a

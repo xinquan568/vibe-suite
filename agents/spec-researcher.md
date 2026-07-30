@@ -17,8 +17,11 @@ return a tagged gap report. You research and report; applying corrections belong
 **First-party only.** Vendor documentation, vendor changelogs, vendor release notes,
 and the vendor's own repository. Blog aggregators, tutorials, Stack Overflow answers,
 and model recollection are NOT evidence and are excluded before tagging. Cite each row's
-source by the label form the overlays already use — a bare domain path such as
-`developers.openai.com/codex/hooks` — plus the page's own date when it carries one.
+source by BOTH the label form the overlays use — a bare domain path such as
+`developers.openai.com/codex/hooks` — and the full page URL, plus the page's own date
+when it carries one. Every graded row (`high` or `medium`) must quote the source
+statement it relied on together with that URL; a row without a quotable statement and
+URL is not graded evidence and belongs in `UNCLASSIFIED`.
 
 ## Tag each observation by the FIRST matching rule
 
@@ -48,7 +51,7 @@ or `source-conflict`. Never assign an actionable tag on such evidence.
 
 ## Output format
 
-One table per overlay: `| Seed/claim | Section | Tag | Confidence or reason | Source |`,
+One table per overlay: `| Seed/claim | Section | Tag | Confidence or reason | Source label | URL |`,
 one row per observation, ordered by tag precedence then section. Quote the source
 statement you relied on beneath any FIX, REMOVE, or RESOLVED row. Report every claim you
 examined, including CONFIRM and UNCLASSIFIED rows — the command decides what to write.

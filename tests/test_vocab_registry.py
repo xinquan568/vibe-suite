@@ -98,9 +98,35 @@ class SkillEdits(unittest.TestCase):
             "the check path reads and enforces today",
             "The registry SHIPS as of E3.7",
             "fires WHENEVER R51 is enabled",
+            "one finding per deprecated term per file",
+            "retired synonym enters on the warrant of the retirement decision",
         ]
         for new in present:
             self.assertIn(new, text, f"missing new statement: {new}")
+
+    def test_verb_table_walks_against_the_sidecar(self):
+        # Field-complete exact agreement: every registry verb entry appears as a
+        # SKILL.md table row with matching deprecated/output/judgment/notes.
+        engine = load_check_engine()
+        tree, _ = engine._reg_block(
+            REGISTRY.read_text(encoding="utf-8").split("\n"), 0, 0, "registry.yaml")
+        entries = tree["verbs"]["operative"]
+        # walk ONLY the authoritative section — the worked-example bright-line table
+        # earlier in the file shares verb names by design
+        text = self._text()
+        text = text[text.index("## The suite registry (authoritative tables)"):]
+        for entry in entries:
+            row = next((l for l in text.splitlines()
+                        if l.startswith(f"| `{entry['canonical']}` |")), None)
+            self.assertIsNotNone(row, entry["canonical"])
+            cells = [c.strip() for c in row.strip("|").split("|")]
+            dep = cells[1].strip("`")
+            expected_dep = entry["deprecated"][0] if entry["deprecated"] else "—"
+            self.assertEqual(dep, expected_dep, row)
+            self.assertEqual(cells[2], entry["output"], row)
+            self.assertEqual(cells[3], "yes" if entry["judgment"] else "no", row)
+            self.assertEqual(cells[4], entry["notes"], row)
+            self.assertTrue(cells[5], f"missing evidence cell: {row}")
 
     def test_authoritative_tables_and_candidates_note(self):
         text = self._text()
@@ -129,11 +155,17 @@ class Extractor(unittest.TestCase):
         got = json.loads(proc.stdout.decode())
         rows = {t["term"]: t for t in got["terms"]}
         self.assertEqual(rows["wombat"]["count"], 4)
-        self.assertEqual(len(rows["wombat"]["files"]), 3)
+        self.assertEqual(rows["wombat"]["files"],
+                         ["commands/go.md", "commands/shared/part.md",
+                          "skills/one/SKILL.md"])
         self.assertEqual(rows["quokka"]["count"], 3)
-        self.assertEqual(len(rows["quokka"]["files"]), 3)
-        self.assertEqual(rows["numbat"]["count"], 1)
-        self.assertEqual(rows["numbat"]["files"], ["CLAUDE.md"])
+        self.assertEqual(rows["quokka"]["files"],
+                         ["CLAUDE.md", "agents/helper.md", "commands/go.md"])
+        # NESTED CLAUDE.md files are part of the checker-owned surface
+        self.assertEqual(rows["numbat"]["count"], 2)
+        self.assertEqual(rows["numbat"]["files"],
+                         ["CLAUDE.md", "nested/CLAUDE.md"])
+        self.assertEqual(rows["nested-token"]["files"], ["nested/CLAUDE.md"])
 
     def test_min_count_and_determinism(self):
         proc = self._run("--root", str(FIX / "extract"), "--min-count", "4")

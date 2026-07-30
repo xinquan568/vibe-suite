@@ -29,8 +29,10 @@ import sys
 from pathlib import Path
 
 #: The R51 scan classes (check_engine.py is the owning statement of this list).
+#: CLAUDE.md is discovered at ANY depth, mirroring the checker's rel == "CLAUDE.md"
+#: or endswith("/CLAUDE.md") rule (with its .git/node_modules exclusions).
 PATTERNS = ["commands/*.md", "commands/shared/*.md", "agents/*.md",
-            "skills/*/SKILL.md", "CLAUDE.md"]
+            "skills/*/SKILL.md"]
 
 _TOKEN = re.compile(r"\b[a-z][a-z0-9_-]+\b")
 
@@ -46,8 +48,13 @@ def main(argv=None):
         return 2
 
     counts, files = {}, {}
+    claude_mds = [p for p in root.rglob("CLAUDE.md")
+                  if ".git" not in p.parts and "node_modules" not in p.parts]
+    discovered = []
     for pattern in PATTERNS:
-        for path in sorted(root.glob(pattern)):
+        discovered.extend(root.glob(pattern))
+    for path in sorted(set(discovered) | set(claude_mds)):
+        if True:
             rel = path.relative_to(root).as_posix()
             text = path.read_text(encoding="utf-8", errors="replace").lower()
             seen_here = set()

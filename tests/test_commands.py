@@ -35,13 +35,11 @@ RETIRED_COMMAND_PATTERNS = (
 
 #: The vocabulary registry is the ONE place that must NAME the retired term — listing
 #: a synonym on a canonical term's deprecated line is how it stays retired
-#: ("deprecation is a visible vocabulary act"). E3.7's registry records
-#: implement→delegate there; that record keeps the term OUT of every other artifact
-#: (the R51 check now enforces it mechanically in scoped surfaces).
-ALLOWED_RETIREMENT_RECORDS = {
-    "skills/vocabulary/SKILL.md",
-    "skills/vocabulary/registry.yaml",
-}
+#: ("deprecation is a visible vocabulary act"). Only the exact RECORD LINES are
+#: exempt; the rest of the file is scanned like any other (a future
+#: /vibe-suite:implement reference there would still be caught). registry.yaml needs
+#: no exemption — its plain-scalar entry matches no retired-reference pattern.
+RETIREMENT_RECORD_LINES = re.compile(r"^\| `delegate` \| `implement` \|.*$", re.M)
 
 
 def _read(path):
@@ -250,8 +248,8 @@ class TestRetiredCommandNames(unittest.TestCase):
                 except (UnicodeDecodeError, OSError):
                     continue
                 rel = path.relative_to(REPO_ROOT).as_posix()
-                if rel in ALLOWED_RETIREMENT_RECORDS:
-                    continue
+                if rel == "skills/vocabulary/SKILL.md":
+                    text = RETIREMENT_RECORD_LINES.sub("", text)
                 for pattern in RETIRED_COMMAND_PATTERNS:
                     if pattern.search(text):
                         offenders.append(f"{rel}: {pattern.pattern}")

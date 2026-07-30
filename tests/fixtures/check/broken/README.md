@@ -47,13 +47,26 @@ root→target edges per F4.3).
   never arms R51), R51 is not suppressed, `vocabulary_skill` is set and inside the root,
   and `<vocabulary_skill>/registry.yaml` exists. Any precondition unmet → the class is
   absent (advisory, not an error).
-- The registry follows the documented six-key schema. Deprecated terms come from `verbs`
-  (keyed by scope id; each entry `{canonical, deprecated[], …}` — flagged only in files
-  matching that scope's `paths` globs) and from `nouns.artifact_class` /
-  `nouns.output_class` entries (unscoped). `deferred_pending_warrant` terms are NEVER
-  flagged ("they are not synonyms"); `rejected_by_higher_principle` terms are never
-  entered; canonical terms are never flagged. A registry that does not parse against this
-  schema is a refusal (exit 2), fail-closed like the config.
+- The registry must carry the documented schema's six top-level keys — `scopes`,
+  `cross_scope_homonyms`, `verbs`, `deferred_pending_warrant`,
+  `rejected_by_higher_principle`, `nouns` — each fully shape-checked: `scopes` is a list
+  of `{id, description, paths[]}`; `cross_scope_homonyms` is `{verbs: [...]}`; `verbs` is
+  a map keyed by a DECLARED scope id, each scope holding a LIST of entries
+  `{canonical, deprecated[], output, judgment(bool), notes?}` (the entry's `canonical`
+  names the verb — the same entry shape the noun classes use); `deferred_pending_warrant`
+  is a list of `{verb, scope?, proposed_for, p2_p5_pass(bool), needed_warrant}`;
+  `rejected_by_higher_principle` is a list of `{verb, scope, blocker_principle, blocker}`;
+  `nouns` has exactly the subkeys `artifact_class[]` and `output_class[]` (lists of
+  `{canonical, deprecated[], definition}`) plus `role_nouns[]` (list of
+  `{canonical, paired_verb}`). A missing top-level key, an unknown key at any level, a
+  missing required field, or a wrongly typed value is a refusal (exit 2) — fail-closed
+  like the config: legitimate documented input parses, off-schema input is never
+  half-parsed.
+- Deprecated terms come from `verbs` entries (flagged only in files matching the owning
+  scope's `paths` globs) and from `nouns.artifact_class` / `nouns.output_class` entries
+  (unscoped). `deferred_pending_warrant` terms are NEVER flagged ("they are not
+  synonyms"); `rejected_by_higher_principle` terms are never entered; canonical terms are
+  never flagged.
 
 ## Broken fixture seeds (tests/fixtures/check/broken/)
 

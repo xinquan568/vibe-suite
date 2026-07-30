@@ -3,10 +3,11 @@ scopes:
     description: the fixture command surface
     paths:
       - commands/**
+cross_scope_homonyms:
+  verbs: []
 verbs:
   flow:
-    use:
-      canonical: use
+    - canonical: use
       deprecated:
         - utilize
       output: none
@@ -16,9 +17,11 @@ deferred_pending_warrant:
     proposed_for: naming the fixture gap
     p2_p5_pass: true
     needed_warrant: user
+rejected_by_higher_principle: []
 nouns:
+  artifact_class: []
   output_class:
-    report:
-      canonical: report
+    - canonical: report
       deprecated: []
       definition: the audit output artifact
+  role_nouns: []

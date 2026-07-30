@@ -199,6 +199,82 @@ class R51Preconditions(unittest.TestCase):
         self.assertNotIn("triage", json.dumps(r51))
 
 
+#: A minimal registry carrying every one of the documented schema's six top-level keys.
+REGISTRY_OK = """\
+scopes:
+  - id: s
+    description: scope
+    paths:
+      - commands/**
+cross_scope_homonyms:
+  verbs: []
+verbs:
+  s: []
+deferred_pending_warrant: []
+rejected_by_higher_principle: []
+nouns:
+  artifact_class: []
+  output_class: []
+  role_nouns: []
+"""
+
+
+def registry_root(tmp, registry_text):
+    """A tmp root with R51 armed at skills/vocab and the given registry text."""
+    root = Path(tmp)
+    (root / ".vibe-suite.md").write_text(
+        "---\nrule_overrides:\n  R51:\n    enabled: true\n"
+        "    vocabulary_skill: skills/vocab\n---\n", encoding="utf-8")
+    for name in ("vocab", "extra"):
+        d = root / "skills" / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: fixture.\n---\n# {name}\n",
+            encoding="utf-8")
+    (root / "skills" / "vocab" / "registry.yaml").write_text(
+        registry_text, encoding="utf-8")
+    return root
+
+
+class RegistryFailClosed(unittest.TestCase):
+    def _run(self, registry_text):
+        with tempfile.TemporaryDirectory() as tmp:
+            return run_engine(registry_root(tmp, registry_text))
+
+    def test_documented_schema_accepted(self):
+        proc = self._run(REGISTRY_OK)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+
+    def test_missing_top_level_key_refused(self):
+        proc = self._run(REGISTRY_OK.replace(
+            "nouns:\n  artifact_class: []\n  output_class: []\n  role_nouns: []\n", ""))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("registry", proc.stderr.decode())
+
+    def test_unknown_nested_key_refused(self):
+        proc = self._run(REGISTRY_OK.replace(
+            "verbs:\n  s: []\n",
+            "verbs:\n  s:\n    - canonical: use\n      deprecated: []\n"
+            "      output: none\n      judgment: false\n      bogus: extra\n"))
+        self.assertEqual(proc.returncode, 2)
+
+    def test_missing_required_verb_field_refused(self):
+        proc = self._run(REGISTRY_OK.replace(
+            "verbs:\n  s: []\n",
+            "verbs:\n  s:\n    - canonical: use\n      deprecated: []\n"
+            "      output: none\n"))
+        self.assertEqual(proc.returncode, 2)
+
+    def test_malformed_section_scalar_refused(self):
+        proc = self._run(REGISTRY_OK.replace(
+            "deferred_pending_warrant: []\n", "deferred_pending_warrant: nonsense\n"))
+        self.assertEqual(proc.returncode, 2)
+
+    def test_undeclared_verbs_scope_refused(self):
+        proc = self._run(REGISTRY_OK.replace("verbs:\n  s: []\n", "verbs:\n  t: []\n"))
+        self.assertEqual(proc.returncode, 2)
+
+
 class Composition(unittest.TestCase):
     def test_whole_object_composed_golden(self):
         proc = run_engine(BROKEN, extra=("--judgment", str(JUDGMENT)))

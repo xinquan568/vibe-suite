@@ -331,18 +331,43 @@ def _reg_block(lines, index, indent, source):
     return entries_list if entries_list is not None else entries_map, index
 
 
-def _string_list(value, label, source):
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise RegistryError(f"{source}: {label} must be a list of strings")
+def _reg_entry(entry, required, optional, label, source):
+    """Shape-check one schema entry: exact keys, exact leaf types. Off-schema raises."""
+    if not isinstance(entry, dict):
+        raise RegistryError(f"{source}: {label} must be a mapping")
+    unknown = set(entry) - set(required) - set(optional)
+    if unknown:
+        raise RegistryError(f"{source}: {label}: unknown key {sorted(unknown)[0]!r}")
+    missing = set(required) - set(entry)
+    if missing:
+        raise RegistryError(f"{source}: {label}: missing key {sorted(missing)[0]!r}")
+    for key, kind in {**required, **optional}.items():
+        if key not in entry:
+            continue
+        value = entry[key]
+        if kind == "str" and not isinstance(value, str):
+            raise RegistryError(f"{source}: {label}.{key}: expected a string")
+        if kind == "bool" and not isinstance(value, bool):
+            raise RegistryError(f"{source}: {label}.{key}: expected true or false")
+        if kind == "str-list" and (not isinstance(value, list)
+                                   or any(not isinstance(item, str) for item in value)):
+            raise RegistryError(f"{source}: {label}.{key}: expected a list of strings")
+
+
+def _reg_list(value, label, source):
+    if not isinstance(value, list):
+        raise RegistryError(f"{source}: {label} must be a list")
     return value
 
 
 def registry_terms(path):
     """[(deprecated_term, canonical, scope_paths|None)] per the documented six-key schema.
 
-    Verb entries are scope-keyed and flag only inside their scope's path globs; noun-class
-    entries are unscoped; deferred and rejected terms are never flagged (they are not
-    synonyms); canonical terms are never flagged. Anything outside the schema raises.
+    All six top-level keys are required and every section is shape-checked — legitimate
+    documented input parses, off-schema input refuses rather than half-parsing. Verb
+    entries are scope-keyed lists and flag only inside their scope's path globs;
+    noun-class entries are unscoped; deferred and rejected terms are never flagged (they
+    are not synonyms); canonical terms are never flagged.
     """
     source = path.name
     tree, _ = _reg_block(read_text(path).split("\n"), 0, 0, source)
@@ -351,43 +376,64 @@ def registry_terms(path):
     unknown = set(tree) - REGISTRY_KEYS
     if unknown:
         raise RegistryError(f"{source}: unknown top-level key {sorted(unknown)[0]!r}")
+    missing = REGISTRY_KEYS - set(tree)
+    if missing:
+        raise RegistryError(f"{source}: missing top-level key {sorted(missing)[0]!r}")
 
     scopes = {}
-    for scope in tree.get("scopes") or []:
-        if not isinstance(scope, dict) or not isinstance(scope.get("id"), str):
-            raise RegistryError(f"{source}: each scope needs a string id")
-        scopes[scope["id"]] = _string_list(scope.get("paths") or [],
-                                           f"scopes[{scope['id']}].paths", source)
+    for scope in _reg_list(tree["scopes"], "scopes", source):
+        _reg_entry(scope, {"id": "str", "description": "str", "paths": "str-list"}, {},
+                   "scopes entry", source)
+        scopes[scope["id"]] = scope["paths"]
+
+    _reg_entry(tree["cross_scope_homonyms"], {"verbs": "str-list"}, {},
+               "cross_scope_homonyms", source)
 
     terms = []
-    verbs = tree.get("verbs") or {}
+    verbs = tree["verbs"]
     if not isinstance(verbs, dict):
         raise RegistryError(f"{source}: verbs must be a mapping keyed by scope id")
     for scope_id, entries in verbs.items():
         if scope_id not in scopes:
             raise RegistryError(f"{source}: verbs scope {scope_id!r} is not declared")
-        if not isinstance(entries, dict):
-            raise RegistryError(f"{source}: verbs.{scope_id} must be a mapping of entries")
-        for name, entry in entries.items():
-            if not isinstance(entry, dict) or not isinstance(entry.get("canonical"), str):
-                raise RegistryError(f"{source}: verbs.{scope_id}.{name} needs a canonical")
-            for term in _string_list(entry.get("deprecated") or [],
-                                     f"verbs.{scope_id}.{name}.deprecated", source):
+        for entry in _reg_list(entries, f"verbs.{scope_id}", source):
+            _reg_entry(entry, {"canonical": "str", "deprecated": "str-list",
+                               "output": "str", "judgment": "bool"},
+                       {"notes": "str"}, f"verbs.{scope_id} entry", source)
+            for term in entry["deprecated"]:
                 terms.append((term, entry["canonical"], scopes[scope_id]))
 
-    nouns = tree.get("nouns") or {}
+    for entry in _reg_list(tree["deferred_pending_warrant"],
+                           "deferred_pending_warrant", source):
+        _reg_entry(entry, {"verb": "str", "proposed_for": "str",
+                           "p2_p5_pass": "bool", "needed_warrant": "str"},
+                   {"scope": "str"}, "deferred_pending_warrant entry", source)
+
+    for entry in _reg_list(tree["rejected_by_higher_principle"],
+                           "rejected_by_higher_principle", source):
+        _reg_entry(entry, {"verb": "str", "scope": "str",
+                           "blocker_principle": "str", "blocker": "str"}, {},
+                   "rejected_by_higher_principle entry", source)
+
+    nouns = tree["nouns"]
     if not isinstance(nouns, dict):
         raise RegistryError(f"{source}: nouns must be a mapping")
+    noun_keys = {"artifact_class", "output_class", "role_nouns"}
+    unknown = set(nouns) - noun_keys
+    if unknown:
+        raise RegistryError(f"{source}: nouns: unknown key {sorted(unknown)[0]!r}")
+    missing = noun_keys - set(nouns)
+    if missing:
+        raise RegistryError(f"{source}: nouns: missing key {sorted(missing)[0]!r}")
     for klass in ("artifact_class", "output_class"):
-        entries = nouns.get(klass) or {}
-        if not isinstance(entries, dict):
-            raise RegistryError(f"{source}: nouns.{klass} must be a mapping of entries")
-        for name, entry in entries.items():
-            if not isinstance(entry, dict) or not isinstance(entry.get("canonical"), str):
-                raise RegistryError(f"{source}: nouns.{klass}.{name} needs a canonical")
-            for term in _string_list(entry.get("deprecated") or [],
-                                     f"nouns.{klass}.{name}.deprecated", source):
+        for entry in _reg_list(nouns[klass], f"nouns.{klass}", source):
+            _reg_entry(entry, {"canonical": "str", "deprecated": "str-list",
+                               "definition": "str"}, {}, f"nouns.{klass} entry", source)
+            for term in entry["deprecated"]:
                 terms.append((term, entry["canonical"], None))
+    for entry in _reg_list(nouns["role_nouns"], "nouns.role_nouns", source):
+        _reg_entry(entry, {"canonical": "str", "paired_verb": "str"}, {},
+                   "role_nouns entry", source)
     return terms
 
 

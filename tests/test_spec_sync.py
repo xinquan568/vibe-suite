@@ -134,32 +134,30 @@ class CommandContract(unittest.TestCase):
         self.assertIn("FIX, REMOVE, ADD, or RESOLVED", self.flat)
         self.assertIn("CONFIRM that retires a correction note", self.flat)
 
-    #: D3's five rows, EXACTLY as the shipped table must read (all five columns).
-    #: Fragment matching let a semantics swap pass; equality does not.
-    D3_TABLE = {
-        "1": ["1", "`RESOLVED`", "carries an explicit hedge about X", "now settles X",
-              "retire the hedge, state the settled fact"],
-        "2": ["2", "`REMOVE`", "states X", "X withdrawn/absent, no replacement",
-              "delete the claim"],
-        "3": ["3", "`FIX`", "states X", "states not-X, with a replacement",
-              "correct the claim in place"],
-        "4": ["4", "`ADD`", "silent on X, X in scope", "states X", "add the claim"],
-        "5": ["5", "`CONFIRM`", "states X definitely (no hedge)", "states X",
-              "none, except note retirement (below)"],
-    }
+    #: D3's five rows, EXACTLY and IN ORDER. A dict collapsed duplicates and hid
+    #: reordering; an ordered list of full rows admits neither.
+    D3_TABLE = [
+        ["1", "`RESOLVED`", "carries an explicit hedge about X", "now settles X",
+         "retire the hedge, state the settled fact"],
+        ["2", "`REMOVE`", "states X", "X withdrawn/absent, no replacement",
+         "delete the claim"],
+        ["3", "`FIX`", "states X", "states not-X, with a replacement",
+         "correct the claim in place"],
+        ["4", "`ADD`", "silent on X, X in scope", "states X", "add the claim"],
+        ["5", "`CONFIRM`", "states X definitely (no hedge)", "states X",
+         "none, except note retirement (below)"],
+    ]
 
-    def test_tag_precedence_rows_field_complete(self):
-        rows = {}
+    def test_tag_precedence_table_is_exact_and_ordered(self):
+        rows = []
         for line in self.body.splitlines():
             if line.startswith("| ") and "`" in line:
                 cells = [c.strip() for c in line.strip("|").split("|")]
                 if cells and cells[0].isdigit():
-                    rows[cells[0]] = cells
-        self.assertEqual(sorted(rows), ["1", "2", "3", "4", "5"],
-                         "D3 must state exactly five precedence rows")
-        for order, expected in self.D3_TABLE.items():
-            self.assertEqual(rows[order], expected,
-                             f"D3 rule {order} differs from the frozen semantics")
+                    rows.append(cells)
+        self.assertEqual(rows, self.D3_TABLE,
+                         "the precedence table must match the frozen semantics exactly, "
+                         "in order, with no extra or duplicate rows")
 
     def test_disjointness_rules_stated(self):
         self.assertIn("requires a replacement fact", self.flat)
@@ -341,6 +339,45 @@ class RequiredClauses(unittest.TestCase):
         worksheet = (FIX / "README.md").read_text(encoding="utf-8")
         self.assertIn("<source label>, <URL> (confidence: high|medium)", worksheet)
         self.assertNotIn("<tag> — <source label> (confidence", worksheet)
+
+
+class ClosedSets(unittest.TestCase):
+    """Every set the contract closes is compared by EQUALITY, so an addition, a swap,
+    a duplicate, or a reordering fails — membership checks could see none of those."""
+
+    def setUp(self):
+        self.command = COMMAND.read_text(encoding="utf-8")
+        self.agent = AGENT.read_text(encoding="utf-8")
+
+    def test_propagation_classes_are_exactly_four(self):
+        classes = re.findall(r"^- \*\*([A-Z]+)\*\* —", self.command, re.M)
+        self.assertEqual(classes,
+                         ["SOURCE", "DOCUMENTARY", "ENCODED", "OPERATIONAL"],
+                         "the propagation classes are a closed, ordered set of four")
+
+    def test_agent_tag_table_matches_d3_exactly(self):
+        tags = [m.group(1) for m in
+                re.finditer(r"^\| \d \| `([A-Z]+)` \|", self.agent, re.M)]
+        self.assertEqual(tags, [row[1].strip("`") for row in
+                                CommandContract.D3_TABLE],
+                         "the agent's tag table must carry exactly D3's five tags, "
+                         "in D3's order")
+
+    def test_confidence_vocabulary_is_exactly_high_and_medium(self):
+        # the graded vocabulary is closed: a `low` grade is a contract change, since
+        # insufficient evidence routes to UNCLASSIFIED instead
+        grades = set(re.findall(r"`(high|medium|low)`", self.command))
+        self.assertEqual(grades, {"high", "medium"},
+                         f"confidence grades must be exactly high/medium, got {grades}")
+        self.assertNotRegex(self.command, r"(?i)confidence[^.]*\blow\b")
+        reasons = set(re.findall(r"`(source-[a-z]+)`", self.command))
+        self.assertEqual(reasons, {"source-silent", "source-conflict"})
+
+    def test_targets_and_modes_are_closed(self):
+        modes = set(re.findall(r"`(--dry-run|--apply)`", self.command))
+        self.assertEqual(modes, {"--dry-run", "--apply"})
+        thresholds = set(re.findall(r"--min-confidence (high|medium)\b", self.command))
+        self.assertTrue(thresholds <= {"high", "medium"}, thresholds)
 
 
 class FreshnessNormalization(unittest.TestCase):

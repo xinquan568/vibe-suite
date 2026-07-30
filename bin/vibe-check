@@ -85,7 +85,10 @@ def _read_json(path, what):
 
 
 def _norm(entry):
-    return entry[2:] if entry.startswith("./") else entry
+    """One spelling per target: strip the ./ prefix and any trailing slashes, so every
+    registration form of one artifact yields one canonical relative path."""
+    rel = entry[2:] if entry.startswith("./") else entry
+    return rel.rstrip("/") or rel
 
 
 def _contained(root, entry):

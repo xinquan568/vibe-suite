@@ -276,7 +276,8 @@ class ErrorTaxonomy(unittest.TestCase):
             # and the SKILL.md form must canonicalize to the same escape path
             (root / ".claude-plugin" / "plugin.json").write_text(
                 '{"name": "x", "commands": [],'
-                ' "skills": ["./skills/esc", "./skills/esc/SKILL.md"]}',
+                ' "skills": ["./skills/esc", "./skills/esc/",'
+                ' "./skills/esc/SKILL.md"]}',
                 encoding="utf-8")
             (root / "skills").mkdir()
             (root / "skills" / "esc").symlink_to(outside / "skill-target",

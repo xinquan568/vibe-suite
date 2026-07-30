@@ -127,8 +127,9 @@ SubagentStop  PreCompact  UserPromptSubmit  gemini-extension
 Classify every occurrence:
 
 - **SOURCE** — the overlay skills themselves.
-- **DOCUMENTARY** — prose restating an overlay fact. On `--apply`, updated (each with a
-  Step-4 note).
+- **DOCUMENTARY** — prose restating an overlay fact. On `--apply`, updated ONLY when
+  the fact it restates is one this run changed (each with a Step-4 note); a
+  documentary occurrence of an untouched fact is reported and left alone.
 - **ENCODED** — a machine-readable transcription (`bin/vibe-check`'s `KNOWN_EVENTS`,
   `scripts/score_engine.py`'s rows, `scripts/check_engine.py`'s hook-config schema).
 - **OPERATIONAL** — code reading or writing per-tool paths as its function (the bridge
@@ -137,9 +138,9 @@ Classify every occurrence:
 ENCODED and OPERATIONAL occurrences are reported as `code-change-required` with their
 owning tests named, and are **never edited** by this command — correcting them is a code
 change with its own tests. Consumers carrying an explicit section citation (either
-`conventions-<tool> §N` or a Markdown link to the overlay with a section number) whose
-cited section this run changed are reported as REQUIRED targets, with the citing line
-quoted. Every classified row states its basis so a reader can audit it.
+`conventions-<tool> §N` or a Markdown link to the overlay with a section number) are
+reported as REQUIRED targets ONLY when the cited section is one this run changed —
+a citation to an untouched section is not a target — with the citing line quoted. Every classified row states its basis so a reader can audit it.
 
 ## Step 7 — verify (`--apply` with changes)
 

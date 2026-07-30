@@ -283,8 +283,7 @@ REQUIRED_CLAUSES = [
     ("D7 case sensitivity", "command", "case-sensitively"),
     ("D7 scope", "command",
      "every file in `git ls-files` EXCLUDING the `tests/`, `docs/`, and `.github/` trees"),
-    ("D7 required targets", "command",
-     "reported as REQUIRED targets, with the citing line quoted"),
+    ("D7 required targets", "command", "with the citing line quoted"),
     ("D7 never edited", "command", "**never edited** by this command"),
     ("D8 verify target", "command",
      'python3 "${CLAUDE_PLUGIN_ROOT}/bin/vibe-check" "${CLAUDE_PLUGIN_ROOT}"'),
@@ -298,7 +297,20 @@ REQUIRED_CLAUSES = [
      "`UNCLASSIFIED`"),
     ("D9 research not apply", "agent",
      "You research and report; applying corrections belongs to"),
+    # --- rows added after the round-3 probe pass named them (each was deletable)
+    ("D1 token->overlay mapping", "command",
+     "`claude`, `codex`, and `antigravity` each select one overlay skill"),
+    ("D3 RESOLVED action", "command", "retire the hedge, state the settled fact"),
+    ("D5 REMOVE note placement", "command",
+     "for REMOVE in place of the deleted claim"),
+    ("D7 documentary changed-fact only", "command",
+     "updated ONLY when the fact it restates is one this run changed"),
+    ("D7 citation changed-section only", "command",
+     "reported as REQUIRED targets ONLY when the cited section is one this run changed"),
 ]
+
+#: Frontmatter values the frozen plan fixes exactly (a tier alias, never a pinned id).
+REQUIRED_FRONTMATTER = [("agent", "model", "sonnet")]
 
 
 class RequiredClauses(unittest.TestCase):
@@ -311,6 +323,15 @@ class RequiredClauses(unittest.TestCase):
             with self.subTest(rule=rule):
                 self.assertIn(phrase, sources[key],
                               f"{rule}: required clause missing from {key}")
+
+    def test_required_frontmatter_values(self):
+        # D9 fixes the agent at sonnet-class; haiku or opus is a contract change
+        sources = {"agent": AGENT.read_text(encoding="utf-8"),
+                   "command": COMMAND.read_text(encoding="utf-8")}
+        for key, field, value in REQUIRED_FRONTMATTER:
+            with self.subTest(field=field):
+                self.assertRegex(sources[key], rf"(?m)^{field}: {value}$",
+                                 f"{key} {field} must be {value}")
 
     def test_worksheet_note_schema_matches_the_command(self):
         # the worksheet must not document a superseded schema (step-9 finding 2)

@@ -1,0 +1,4 @@
+{
+  "database_url": "postgres://admin:hunter2@db.internal:5432/app",
+  "debug": true
+}

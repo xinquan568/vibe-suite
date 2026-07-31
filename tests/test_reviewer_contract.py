@@ -163,23 +163,45 @@ def lexical_units(text):
     return units
 
 
+#: A sentence opening that refers back to the previous one. The evasion this closes is natural prose:
+#: name the flag, then define "its" values in the next sentence.
+ANAPHOR = re.compile(
+    r"^\W*(its|it|they|them|these|those|this|that|the flag|the option|the key)\b", re.I)
+
+
 def redefinitions(text):
     """Every place a pinned term is *defined* outside the `## Round bounds` block.
 
-    Exemption is by **line interval**, so an identical definition line copied elsewhere is not exempt
-    by matching the block's text. Matching is **case-insensitive**. The unit comes from
-    `lexical_units` — un-wrapped, sentence-scoped.
+    Exemption is by **line interval**, so a definition line copied elsewhere is not exempt by matching
+    the block's text. Matching is **case-insensitive**. Units come from `lexical_units` — un-wrapped,
+    then sentence-scoped.
+
+    **Anaphora carries the subject forward.** Sentence scoping alone let a definition be written across
+    two sentences — `Use --max-review-rounds to configure the loop. Its valid values are 1..5.` — with
+    the term in one unit and the markers in the next. That is ordinary documentation, not a contrived
+    evasion, so it has to be caught. Within a paragraph, once a sentence names a pinned term, a later
+    sentence that *opens with a reference back* and carries a marker is attributed to that term.
+
+    The anaphor requirement is what keeps this from re-creating the false positive that paragraph-wide
+    matching produced: `All inputs must be validated.` following a usage line refers to inputs, not to
+    the flag, and does not open with a reference back.
     """
     start, end, count = round_bounds_span(text)
     hits = []
+    carried = None                    # a pinned term named earlier in this paragraph
+    para_key = None
     for first, last, unit in lexical_units(text):
+        if (first, last) != para_key:
+            para_key, carried = (first, last), None
         if count == 1 and first >= start and last < end:
-            continue                      # wholly inside the one legal block
+            continue                  # wholly inside the one legal block
         low = unit.lower()
-        if not DEFINITION_MARKER.search(low):
-            continue
-        if any(term.lower() in low for term in PINNED_TERMS):
+        names_term = any(term.lower() in low for term in PINNED_TERMS)
+        has_marker = bool(DEFINITION_MARKER.search(low))
+        if has_marker and (names_term or (carried and ANAPHOR.match(unit))):
             hits.append((first + 1, unit.strip()))
+        if names_term:
+            carried = unit
     return hits
 
 
@@ -409,6 +431,22 @@ class TestPolicy(unittest.TestCase):
                "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
         self.assertEqual(redefinitions(doc), [],
                          "a marker in the next sentence is not a definition of the flag")
+
+    def test_a_definition_split_across_sentences_by_anaphora_is_caught(self):
+        """Sentence scoping alone let this through: name the flag, define "its" values next.
+        Ordinary documentation, not a contrived construction."""
+        doc = ("# c\n\nUse --max-review-rounds to configure the loop. Its valid values are 1..5,\n"
+               "and it defaults to 3.\n\n"
+               "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
+        self.assertTrue(redefinitions(doc),
+                        "a definition carried by an anaphor must still be caught")
+
+    def test_anaphora_does_not_reach_across_a_paragraph_break(self):
+        """The carry is paragraph-scoped; a new paragraph is a new subject."""
+        doc = ("# c\n\nUse --max-review-rounds to configure the loop.\n\n"
+               "Its valid values are 1..5.\n\n"
+               "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
+        self.assertEqual(redefinitions(doc), [])
 
     def test_a_definition_wrapped_within_one_sentence_is_still_caught(self):
         """The narrowing must not undo finding 3: un-wrapping happens before the sentence split."""

@@ -1,0 +1,9 @@
+{
+  "finding": "config read with no validation, no default, and a swallowed KeyError",
+  "owner": "vibe-suite:error-handling",
+  "not_owner": "vibe-suite:architecture",
+  "rationale": "F3.4 makes error-handling the primary owner of config management; F3.3 has architecture defer config findings to it. A naive reviewer files this under architecture because the defect sits at a module boundary, which is exactly the confusion the deconfliction exists to settle.",
+  "file": "service/client.py",
+  "line": 21,
+  "construct": "try/except KeyError whose handler body is only `pass`"
+}

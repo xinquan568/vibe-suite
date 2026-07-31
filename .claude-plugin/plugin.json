@@ -46,7 +46,13 @@
     "./agents/tester.md",
     "./agents/vocab-drift-scanner.md",
     "./agents/spec-researcher.md",
-    "./agents/security-scanner.md"
+    "./agents/security-scanner.md",
+    "./agents/recon.md",
+    "./agents/architecture.md",
+    "./agents/error-handling.md",
+    "./agents/security.md",
+    "./agents/testing.md",
+    "./agents/edge-cases.md"
   ],
   "skills": [
     "./skills/agent-design",

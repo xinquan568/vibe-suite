@@ -6,11 +6,74 @@ own lint rejects.
 
 So the command produces nothing until it has checked that what it would produce is valid.
 
+## The procedure
+
+Six steps, and **the two programs are not optional**. They hold the conversions and the publication
+guards; a session that assembled a profile by hand would bypass the escaping, the containment checks
+and the in-memory lint — which is the whole reason they exist as programs rather than as prose.
+
+**1. Collect the git facts.** Read-only, from the target repository:
+
+```
+git -C <path> rev-parse --is-inside-work-tree     # is_git_repository
+git -C <path> remote get-url origin               # remote
+git -C <path> symbolic-ref --short refs/remotes/origin/HEAD   # default_branch
+gh api user --jq .login                           # login, optional
+```
+
+A command that fails contributes its fact as absent rather than aborting the collection — the
+preconditions are reported together, so they have to be *gathered* together.
+
+**2. Detect.** Feed those facts, plus the repository root, to the detector:
+
+```
+scripts/detect_profile.py --facts - [--id <profile-id>]
+```
+
+It exits non-zero with every unmet precondition named, and otherwise prints the detected fields as
+JSON. Its exit code is the answer to "can this repository have a profile at all".
+
+**3. Interview.** Ask the five questions below. Each answer is added to the detected JSON under the
+field named in the table — `id_shorthand` is fed back through the detector, since it becomes a pattern
+rather than a value.
+
+> **Why this file invokes `gh` at all.** Every other part of the pipeline reaches the source system
+> through the [driver](../drivers/github.md), and `scripts/gh_boundary_lint.py` enforces that. This
+> command is the exception, and the reason is structural rather than convenient: the driver is chosen
+> by `source_driver` **in a profile**, and this is the command that creates the profile. Routing it
+> through a driver would require the thing it is being run to produce.
+>
+> The exemption is one file and two read-only probes — identity, and whether the repository answers. It
+> publishes nothing and reads nothing about a work item.
+
+**4. Smoke-check the source.** With a login, confirm the repository actually answers:
+
+```
+gh issue list --repo <repo_id> --limit 1
+```
+
+A failure here is reported and does **not** stop the write: the profile is still valid, and the user
+learns their access is the problem rather than their configuration. **Without a login this step is
+skipped**, and the skip is reported — an unrun check reported as passing would be worse than either.
+
+**5. Write.** Hand the complete field set to the writer:
+
+```
+scripts/write_profile.py --root <workspace> --fields - [--force]
+```
+
+It refuses unknown fields, refuses values the profile grammar cannot carry, lints the candidate before
+publishing, and writes profile-then-pointer.
+
+**6. Report what happened**, including anything skipped. Exit codes: `0` written; `1` bad input; `2` a
+guard refused; `3` the candidate would not lint; `4` a write failed — and on `4` the message names an
+orphaned profile if there is one.
+
 ## Preconditions — reported all at once
 
 Three, checked in one pass and reported together:
 
-1. the path is a **git repository**;
+1. the path is a **git repository** — `rev-parse --is-inside-work-tree`;
 2. it has an **`origin` remote on github.com** — the only implemented [source driver](../drivers/github.md);
 3. it has a **resolvable default branch**, which the work branch is cut from.
 

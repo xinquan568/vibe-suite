@@ -68,7 +68,8 @@ class DetectCase(unittest.TestCase):
     """
 
     def detect(self, **facts):
-        payload = {"root": str(FIXTURES / facts.pop("fixture", "node-gates"))}
+        payload = {"root": str(FIXTURES / facts.pop("fixture", "node-gates")),
+                   "is_git_repository": True}
         payload.update(facts)
         result = subprocess.run(
             [sys.executable, str(DETECT), "--facts", "-"],
@@ -105,6 +106,21 @@ class TestPreconditions(DetectCase):
         report = (result.stdout + result.stderr).lower()
         self.assertIn("origin", report)
         self.assertIn("branch", report)
+
+    def test_a_non_git_directory_is_refused(self):
+        """The first documented precondition, which nothing checked until the review found it."""
+        result = self.detect(remote="git@github.com:acme/demo.git", default_branch="main",
+                             is_git_repository=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("git repository", (result.stdout + result.stderr).lower())
+
+    def test_all_three_preconditions_are_reported_together(self):
+        result = self.detect(fixture="no-remote", remote=None, default_branch=None,
+                             is_git_repository=False)
+        report = (result.stdout + result.stderr).lower()
+        for phrase in ("git repository", "origin", "branch"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, report)
 
     def test_missing_auth_is_a_warning_not_a_refusal(self):
         """Auth decides whether the smoke check runs, not whether a valid profile can be written."""
@@ -330,25 +346,117 @@ class TestWriteDiscipline(WriteCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertIn("Renamed", (self.ws / "profiles" / "demo.md").read_text(encoding="utf-8"))
 
-    def test_the_pointer_edit_preserves_every_other_key_and_the_body(self):
-        config = self.ws / ".vibe-suite.md"
-        config.write_text("---\nscore_threshold: 80\neffort: high\n---\n\n# Notes\n\nkeep me\n",
-                          encoding="utf-8")
-        self.write()
-        after = config.read_text(encoding="utf-8")
-        self.assertIn("score_threshold: 80", after)
-        self.assertIn("effort: high", after)
-        self.assertIn("keep me", after)
-        self.assertRegex(after, r"(?m)^issue2pr_profile:\s*demo\s*$")
+    def test_the_pointer_edit_preserves_every_other_byte(self):
+        """Byte equality, not substring presence.
 
-    def test_a_destination_outside_the_root_is_refused(self):
+        Substring assertions pass while the file is rebuilt around them — line endings normalised,
+        blank lines dropped, ordering changed. What the claim says is that untouched bytes are
+        untouched, so that is what is compared.
+        """
+        config = self.ws / ".vibe-suite.md"
+        before = "---\nscore_threshold: 80\neffort: high\n---\n\n# Notes\n\nkeep me\n"
+        config.write_text(before, encoding="utf-8", newline="")
+        self.assertEqual(self.write().returncode, 0)
+        after = config.read_text(encoding="utf-8", newline="")
+        self.assertEqual(after.replace("issue2pr_profile: demo\n", ""), before,
+                         "everything except the inserted entry must be byte-identical")
+
+    def test_crlf_line_endings_survive(self):
+        config = self.ws / ".vibe-suite.md"
+        config.write_text("---\r\nscore_threshold: 80\r\n---\r\n\r\nbody\r\n",
+                          encoding="utf-8", newline="")
+        self.assertEqual(self.write().returncode, 0)
+        after = config.read_text(encoding="utf-8", newline="")
+        self.assertIn("\r\n", after, "reading with translation would have destroyed these")
+        self.assertNotIn("\n\n\n", after)
+
+    def test_a_body_line_that_looks_like_the_pointer_is_not_configuration(self):
+        """Searching the whole document made a sentence about configuration into configuration."""
+        config = self.ws / ".vibe-suite.md"
+        # At column 0, inside a fenced example — the shape a document explaining configuration
+        # actually has. Indented or inline, `^` never matched it and the test proved nothing.
+        config.write_text("---\n---\n\n# Notes\n\n```\nissue2pr_profile: other\n```\n",
+                          encoding="utf-8")
+        result = self.write()
+        self.assertEqual(result.returncode, 0,
+                         "a body line is prose, and must not demand --force: " + result.stderr)
+
+    def test_force_repoints_from_a_different_existing_id(self):
+        config = self.ws / ".vibe-suite.md"
+        config.write_text("---\nissue2pr_profile: other\n---\n", encoding="utf-8")
+        without = self.write()
+        self.assertNotEqual(without.returncode, 0, "repointing needs --force")
+        self.assertIn("other", without.stdout + without.stderr)
+        with_force = self.write(None, "--force")
+        self.assertEqual(with_force.returncode, 0, with_force.stderr)
+        self.assertRegex(config.read_text(encoding="utf-8"), r"(?m)^issue2pr_profile: demo$")
+
+    def test_a_symlinked_profile_destination_is_refused(self):
+        """The actual containment boundary.
+
+        The previous version declared an *empty* directory as the root and called the resulting failure
+        a containment refusal — it failed because `./repo` was absent, which proves nothing about
+        containment.
+        """
         outside = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, outside, True)
-        result = subprocess.run(
-            [sys.executable, str(WRITE), "--root", str(outside), "--fields", "-"],
-            input=json.dumps(self.fields()), capture_output=True, text=True, timeout=60)
+        (outside / "planted.md").write_text("planted\n", encoding="utf-8")
+        (self.ws / "profiles" / "demo.md").symlink_to(outside / "planted.md")
+        result = self.write()
         self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("Traceback", result.stderr, "it must refuse in words, not by traceback")
+        self.assertIn("symlink", (result.stdout + result.stderr).lower())
+        self.assertEqual((outside / "planted.md").read_text(encoding="utf-8"), "planted\n",
+                         "the symlink target must not be written through")
+
+    def test_a_symlinked_pointer_is_refused(self):
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / "config.md").write_text("planted\n", encoding="utf-8")
+        (self.ws / ".vibe-suite.md").unlink(missing_ok=True)
+        (self.ws / ".vibe-suite.md").symlink_to(outside / "config.md")
+        result = self.write()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((outside / "config.md").read_text(encoding="utf-8"), "planted\n")
+
+
+class TestOptionalFieldsSurvive(WriteCase):
+    """The interview's whole output. An earlier writer rendered the required fields and dropped these."""
+
+    def interview(self):
+        return self.fields(
+            tdd_policy="A behavioural change lands with a test that fails without it.",
+            anti_patterns=["Editing generated files by hand.", "Shipping without a flag."],
+            mental_model_refs=["docs/architecture.md"],
+            scenario_overrides={"hotfix": "bug-fix"},
+        )
+
+    def parsed(self):
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import profile_lint
+        return profile_lint.parse_frontmatter(
+            (self.ws / "profiles" / "demo.md").read_text(encoding="utf-8"))
+
+    def test_every_interview_field_round_trips(self):
+        result = self.write(self.interview())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        parsed = self.parsed()
+        self.assertIn("A behavioural change", parsed["tdd_policy"])
+        self.assertEqual(len(parsed["anti_patterns"]), 2)
+        self.assertEqual(parsed["mental_model_refs"], ["docs/architecture.md"])
+        self.assertEqual(parsed["scenario_overrides"], {"hotfix": "bug-fix"})
+
+    def test_a_profile_with_interview_fields_still_passes_the_real_lint(self):
+        self.assertEqual(self.write(self.interview()).returncode, 0)
+        lint = self.lint(self.ws / "profiles" / "demo.md")
+        self.assertEqual(lint.returncode, 0, lint.stdout + lint.stderr)
+
+    def test_an_unknown_field_is_refused_rather_than_dropped(self):
+        """Rendering only known fields would swallow a misspelling — which is what the contract's
+        unknown-field rule exists to prevent, so the writer must not defeat the lint it then runs."""
+        result = self.write(self.fields(tdd_polcy="strict"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("tdd_polcy", result.stdout + result.stderr)
+        self.assertFalse((self.ws / "profiles" / "demo.md").exists())
 
 
 class TestSerialization(WriteCase):
@@ -406,6 +514,30 @@ class TestReferenceStatesTheInterview(unittest.TestCase):
         """If the invocation differs, the refusal is a dead end."""
         self.assertIn("profile init", CORE.read_text(encoding="utf-8"))
         self.assertIn("profile init", self.text)
+
+    def test_the_procedure_names_both_programs(self):
+        """Without this the slash command could assemble a profile by hand and bypass every
+        conversion, guard and in-memory lint the two programs exist to hold."""
+        for program in ("scripts/detect_profile.py", "scripts/write_profile.py"):
+            with self.subTest(program=program):
+                self.assertIn(program, self.text)
+
+    def test_the_procedure_defines_the_facts_handoff(self):
+        for fact in ("is_git_repository", "remote", "default_branch", "login"):
+            with self.subTest(fact=fact):
+                self.assertIn(fact, self.text)
+
+    def test_the_smoke_check_is_specified_including_its_skip(self):
+        """A warning string is not a smoke check. The procedure must say what runs and when it does
+        not, because an unrun check reported as passing is worse than either."""
+        self.assertRegex(self.norm, r"gh issue list")
+        self.assertIn("skipped", self.norm)
+        self.assertRegex(self.norm, r"does not stop the write|not stop the write")
+
+    def test_the_exit_codes_are_documented(self):
+        for code in ("0", "1", "2", "3", "4"):
+            with self.subTest(code=code):
+                self.assertRegex(self.text, r"`?%s`?[ ]" % code)
 
     def test_the_precondition_reporting_rule_is_stated(self):
         self.assertRegex(self.norm, r"everything (that is )?missing|all .{0,20}missing|not the first")

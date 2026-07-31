@@ -78,16 +78,46 @@ def unrenderable(fields):
     return problems
 
 
+#: Written as a block sequence.
+LIST_FIELDS = ("gates", "anti_patterns", "mental_model_refs")
+#: Written as a one-level mapping.
+MAP_FIELDS = ("category_extensions", "scenario_overrides")
+#: Everything the contract defines, in the order a reader wants them.
+SCALAR_FIELDS = ("contract_version", "project_id", "repo_id", "repo_path", "base_branch",
+                 "source_driver", "id_pattern", "url_regex", "branch_template",
+                 "gate_mechanics", "pr_body_template", "tdd_policy", "reviewer_backend")
+
+#: `profile_id` is the writer's own metadata — it names the file and the pointer, and is not a profile
+#: field. Anything else unrecognised is a caller error rather than something to drop quietly.
+WRITER_METADATA = ("profile_id",)
+
+
 def render(fields):
-    """The profile, in the subset `profile_lint.parse_frontmatter` accepts."""
+    """The profile, in the subset `profile_lint.parse_frontmatter` accepts.
+
+    **Every supported field is serialized**, not only the required ones. An earlier version emitted the
+    ten required fields and `gates` and silently dropped `tdd_policy`, `anti_patterns`,
+    `mental_model_refs` and `scenario_overrides` — which is the entire output of the interview. A
+    scaffolder that asks and discards is worse than one that never asks.
+    """
     lines = ["---"]
-    for name in ("contract_version", "project_id", "repo_id", "repo_path", "base_branch",
-                 "source_driver", "id_pattern", "url_regex", "branch_template"):
+    for name in SCALAR_FIELDS:
+        if name not in fields:
+            continue
         value = fields[name]
         lines.append("%s: %s" % (name, value if name == "contract_version" else "'%s'" % value))
-    lines.append("gates:")
-    for gate in fields["gates"]:
-        lines.append("  - '%s'" % gate)
+    for name in LIST_FIELDS:
+        if name not in fields:
+            continue
+        lines.append("%s:" % name)
+        for item in fields[name]:
+            lines.append("  - '%s'" % item)
+    for name in MAP_FIELDS:
+        if name not in fields:
+            continue
+        lines.append("%s:" % name)
+        for key, value in sorted(fields[name].items()):
+            lines.append("  %s: '%s'" % (key, value))
     lines.append("---")
     lines.append("")
     lines.append("# %s" % fields["project_id"])
@@ -105,23 +135,61 @@ def render(fields):
 
 
 def read_pointer(path):
-    """The existing configuration, or a fresh empty one. Never discarded."""
+    """The existing configuration verbatim, or a fresh empty one.
+
+    `newline=""` matters: the default translates CRLF to LF on read, so a file written back would have
+    had its line endings silently changed — a claim of byte preservation that the reading step had
+    already broken.
+    """
     if not path.is_file():
         return "---\n---\n"
-    return path.read_text(encoding="utf-8")
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def frontmatter_span(text):
+    """`(start, end)` of the frontmatter body, or None. The pointer lives only here.
+
+    Scoping matters: an earlier version searched the **whole document** for the pointer key, so a body
+    line reading `issue2pr_profile: other` — in a code block, or a sentence about configuration — was
+    mistaken for configuration and could demand `--force` for no reason.
+    """
+    if not text.startswith("---"):
+        return None
+    first = text.find("\n", 3)
+    if first == -1:
+        return None
+    end = text.find("\n---", first)
+    return (first + 1, end + 1) if end != -1 else None
+
+
+def current_pointer(text):
+    span = frontmatter_span(text)
+    if not span:
+        return None
+    match = re.search(r"(?m)^issue2pr_profile:[ \t]*(\S+)[ \t]*$", text[span[0]:span[1]])
+    return match.group(1) if match else None
 
 
 def set_pointer(text, profile_id):
-    """Set or replace `issue2pr_profile`, preserving every other key and the body byte for byte."""
-    if not text.startswith("---"):
-        return "---\nissue2pr_profile: %s\n---\n\n%s" % (profile_id, text)
-    end = text.find("\n---", 3)
-    if end == -1:
-        return "---\nissue2pr_profile: %s\n---\n\n%s" % (profile_id, text)
-    head, tail = text[4:end], text[end:]
-    lines = [l for l in head.splitlines() if not re.match(r"^issue2pr_profile:", l)]
-    lines.append("issue2pr_profile: %s" % profile_id)
-    return "---\n" + "\n".join(l for l in lines if l.strip() or True) + tail
+    """Set or replace `issue2pr_profile`, leaving every other byte alone.
+
+    Only the matched line is rewritten, or one line is inserted. The rest of the document — including
+    its line endings, its body, and any key this command knows nothing about — is untouched, because
+    it is never split and rejoined.
+    """
+    span = frontmatter_span(text)
+    entry = "issue2pr_profile: %s" % profile_id
+    if not span:
+        return "---\n%s\n---\n\n%s" % (entry, text)
+
+    start, end = span
+    head, body, tail = text[:start], text[start:end], text[end:]
+    replaced, count = re.subn(r"(?m)^issue2pr_profile:[ \t]*\S*[ \t]*$", entry, body, count=1)
+    if count:
+        return head + replaced + tail
+    newline = "\r\n" if "\r\n" in body or "\r\n" in head else "\n"
+    return head + body + entry + newline + tail
 
 
 def main(argv=None):
@@ -131,14 +199,8 @@ def main(argv=None):
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
-    raw = sys.stdin.read() if args.fields == "-" else Path(args.fields).read_text(encoding="utf-8")
-    try:
-        fields = json.loads(raw)
-    except ValueError as exc:
-        print("write_profile: %s" % exc, file=sys.stderr)
-        return EXIT_BAD_INPUT
-
-    # 1. Pin before reading, not merely before writing.
+    # 1. Pin before ANY read. The previous order read the fields file first, which contradicted this
+    #    program's own stated invariant — and the fields file may itself be inside the root.
     root = Path(args.root).absolute()
     try:
         bridge.assert_root(root)
@@ -146,6 +208,24 @@ def main(argv=None):
     except bridge.BridgeError as exc:
         print("write_profile: %s" % exc, file=sys.stderr)
         return EXIT_GUARD
+
+    raw = sys.stdin.read() if args.fields == "-" else Path(args.fields).read_text(encoding="utf-8")
+    try:
+        fields = json.loads(raw)
+    except ValueError as exc:
+        print("write_profile: %s" % exc, file=sys.stderr)
+        return EXIT_BAD_INPUT
+
+    # An unrecognised key must be **refused**, not dropped: rendering only the fields it knows would
+    # silently swallow a misspelled optional field, which is precisely what the contract's
+    # unknown-field rule exists to prevent — and the writer would be defeating the lint it then runs.
+    known = set(SCALAR_FIELDS) | set(LIST_FIELDS) | set(MAP_FIELDS) | set(WRITER_METADATA)
+    unknown = sorted(set(fields) - known)
+    if unknown:
+        print("write_profile: unrecognised field(s): %s" % ", ".join(unknown), file=sys.stderr)
+        print("  A misspelled optional field would otherwise be dropped and never apply.",
+              file=sys.stderr)
+        return EXIT_BAD_INPUT
 
     problems = unrenderable(fields)
     if problems:
@@ -174,10 +254,10 @@ def main(argv=None):
         return EXIT_GUARD
 
     existing = read_pointer(pointer_path)
-    current = re.search(r"(?m)^issue2pr_profile:\s*(\S+)\s*$", existing)
-    if current and current.group(1) != profile_id and not args.force:
+    current = current_pointer(existing)
+    if current and current != profile_id and not args.force:
         print("write_profile: %s already points at %r; pass --force to repoint it"
-              % (POINTER, current.group(1)), file=sys.stderr)
+              % (POINTER, current), file=sys.stderr)
         return EXIT_GUARD
 
     # 3. Render and lint the candidate BEFORE publishing anything.
@@ -191,7 +271,11 @@ def main(argv=None):
         return EXIT_INVALID
 
     # 4. Profile first — a pointer to a missing profile is the worse residue.
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    # No path-based `mkdir`. If the pinned root were swapped for a symlink, a path-based create could
+    # make a directory outside the workspace before `write_atomic` noticed. `write_atomic` descends
+    # component by component with `O_NOFOLLOW` and creates as it goes, so the parent comes into
+    # existence through the same audited chain the write uses — and an explicit call here was both
+    # redundant and, passing a Path where components were wanted, wrong.
     try:
         bridge.write_atomic(root, profile_path, document)
     except (bridge.BridgeError, ValueError) as exc:

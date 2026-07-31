@@ -57,6 +57,12 @@ def preconditions(facts):
     """
     missing = []
 
+    # The first of the three documented preconditions, and it was absent: the fixture that stands for
+    # "a complete repository" is not a git repository at all and passed anyway. A precondition nothing
+    # checks is a sentence.
+    if not facts.get("is_git_repository", False):
+        missing.append("not a git repository — issue2pr cuts a work branch, so it needs one")
+
     remote = facts.get("remote")
     if not remote:
         missing.append("no `origin` remote — issue2pr needs a source repository to work against")

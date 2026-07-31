@@ -44,8 +44,19 @@ from pathlib import Path
 
 EXIT_OK, EXIT_VIOLATION = 0, 1
 
-#: The one place `gh` belongs.
+#: The one place `gh` belongs *once a driver has been selected*.
 DRIVER = Path("skills") / "issue2pr" / "drivers" / "github.md"
+
+#: And the one place it belongs *before* that. `profile init` runs when no profile exists — and the
+#: driver is chosen by `source_driver` **in a profile**, so routing this through a driver would require
+#: the profile the command is being run to create. The circularity is real, not an excuse, which is why
+#: this is a named second exemption rather than a widened first one.
+#:
+#: The exemption is narrow deliberately: this file, and only the identity and reachability probes it
+#: documents. It publishes nothing and reads nothing about a work item.
+PRE_PROFILE = Path("skills") / "issue2pr" / "references" / "profile-init.md"
+
+EXEMPT = (DRIVER, PRE_PROFILE)
 
 #: Enumerated, not inferred. `tests/**` is excluded because a fixture must be able to contain the
 #: thing being prohibited.
@@ -151,15 +162,15 @@ def main(argv=None):
         except ValueError:
             violations.append("%s  (outside --root; refusing to judge it)" % path)
             continue
-        if relative == DRIVER:
+        if relative in EXEMPT:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for number, snippet in scan(path, text):
             violations.append("%s:%d  %s" % (relative, number, snippet[:100]))
 
     if violations:
-        print("gh_boundary_lint: %d invocation(s) outside %s" % (len(violations), DRIVER),
-              file=sys.stderr)
+        print("gh_boundary_lint: %d invocation(s) outside %s"
+              % (len(violations), " and ".join(str(path) for path in EXEMPT)), file=sys.stderr)
         for violation in violations:
             print("  - %s" % violation, file=sys.stderr)
         return EXIT_VIOLATION

@@ -131,6 +131,22 @@ present and the fallback engages, the round records `reviewer: "self"`, carries 
 is flagged in the run's summary. An unmarked self-review is the precise failure this rule exists to
 prevent.
 
+### Gating reviews and advisory passes
+
+The refusal above governs a review whose verdict **gates** the run — one whose absence changes what the
+run is entitled to conclude. A loop may also run an **advisory pass**, whose absence costs information
+and nothing else. For those, an unavailable backend without `--allow-self-review` is a **recorded
+skip**: the work completes and the summary states that the pass did not run.
+
+The distinction is stated here rather than left to each loop, because "this one is only advisory" is
+exactly the argument that would erode the refusal if every loop got to make it locally. A pass is
+advisory only if the run's conclusions are the same with and without it. A gating review that
+degrades to a skip produces a result that looks reviewed and is not; an advisory pass that refuses
+turns an optional feature into a load-bearing one. Both are failures, and they are opposite ones.
+
+Either way the outcome is **recorded**. A skip nobody can see is indistinguishable from a pass that
+found nothing.
+
 ## Model resolution
 
 Precedence: **user > project configuration > tool default.**

@@ -55,7 +55,49 @@ MATRIX_DIMENSIONS = ("dispatch", "read-only guard", "output capture",
 CLOSURE_STATES = ("open", "fixed", "declined", "accepted_decline", "challenged_once", "final_decline")
 REVIEW_MODES = ("none", "single", "full")
 
-PINNED_TERMS = (CAP_KEY, CAP_FLAG) + MATRIX_DIMENSIONS + CLOSURE_STATES + REVIEW_MODES
+#: Terms distinctive enough that seeing one is evidence the contract is the subject.
+DISTINCTIVE_TERMS = (CAP_KEY, CAP_FLAG, "read-only guard", "output capture", "token accounting",
+                     "pre-flight", "quota signature", "accepted_decline", "challenged_once",
+                     "final_decline")
+
+#: Terms that are also ordinary English: `open`, `fixed`, `declined`, `none`, `single`, `full`,
+#: `dispatch`. The first real consumer this registry graded produced a false positive on
+#: "no **open** finding sits at or above the named severity … default `major`" — `open` used as an
+#: adjective, beside an unrelated `default`.
+AMBIGUOUS_TERMS = ("open", "fixed", "declined") + REVIEW_MODES + ("dispatch",)
+
+#: The narrow exclusion that closes that false positive **without blinding the check**.
+#:
+#: A first attempt required every ambiguous term to be backticked. That was far too broad: it also
+#: stopped detecting "The full mode defaults to three review rounds" and "A finding must be open by
+#: default", which are exactly the bare redefinitions the rule exists to catch. Markdown formatting is
+#: a house convention, not a statement about whether prose is definitional.
+#:
+#: So the exclusion is by *grammatical role* instead: an ambiguous term immediately followed by one of
+#: these nouns is being used as an adjective describing that noun, not defined as a term. Kept
+#: deliberately short — every entry is a word the contract's own states attach to.
+ADJECTIVAL_HEADS = ("finding", "findings", "issue", "issues", "question", "questions", "item", "items")
+
+def mentions_pinned_term(unit):
+    """Whether a lexical unit is talking about a contract term, as opposed to using the same word.
+
+    Distinctive terms count wherever they appear. An ambiguous term counts unless **every** occurrence
+    of it in the unit is adjectival — immediately followed by a noun from `ADJECTIVAL_HEADS`. One
+    non-adjectival occurrence is enough, so a sentence that both uses and defines a term is still
+    reported.
+    """
+    low = unit.lower()
+    if any(term.lower() in low for term in DISTINCTIVE_TERMS):
+        return True
+    for term in AMBIGUOUS_TERMS:
+        occurrences = list(re.finditer(r"\b%s\b" % re.escape(term.lower()), low))
+        if not occurrences:
+            continue
+        for match in occurrences:
+            tail = low[match.end():match.end() + 40].lstrip("*`_ ")
+            if not any(re.match(r"%s\b" % head, tail) for head in ADJECTIVAL_HEADS):
+                return True
+    return False
 
 #: A definition marker: a range, a definitional verb, or a gloss. Rejected everywhere but the domain
 #: block — including inside interface contexts, which is the fix for the loophole above.
@@ -196,7 +238,7 @@ def redefinitions(text):
         if count == 1 and first >= start and last < end:
             continue                  # wholly inside the one legal block
         low = unit.lower()
-        names_term = any(term.lower() in low for term in PINNED_TERMS)
+        names_term = mentions_pinned_term(unit)
         has_marker = bool(DEFINITION_MARKER.search(low))
         if has_marker and (names_term or (carried and ANAPHOR.match(unit))):
             hits.append((first + 1, unit.strip()))
@@ -414,6 +456,46 @@ class TestPolicy(unittest.TestCase):
 
     def test_case_does_not_evade_the_rule(self):
         doc = ("# c\n\nThe flag --MAX-REVIEW-ROUNDS has VALID VALUES 1..5.\n\n"
+               "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
+        self.assertTrue(redefinitions(doc))
+
+    def test_an_ordinary_english_use_of_a_contract_word_is_not_a_redefinition(self):
+        """The false positive the first real consumer produced.
+
+        "Stops early when no **open** finding sits at or above the named severity: `blocker` |
+        `major` | `minor`, default `major`." uses `open` as an adjective and `default` as a noun. It
+        is not a definition of the closure state `open`, and treating it as one would push a consumer
+        to write worse prose to satisfy a grader.
+        """
+        doc = ("# c\n\nStops early when no **open** finding sits at or above the named severity: "
+               "`blocker` | `major` | `minor`, default `major`.\n\n"
+               "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
+        self.assertEqual(redefinitions(doc), [])
+
+    def test_a_backticked_contract_term_still_counts(self):
+        """The narrowing must not blind the rule: as a term of art, it is in scope again."""
+        doc = ("# c\n\nA finding in `open` must be 1..5 by default.\n\n"
+               "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
+        self.assertTrue(redefinitions(doc))
+
+    def test_a_bare_redefinition_of_an_ambiguous_term_is_still_caught(self):
+        """The counterexamples that showed a backticks-only rule was far too broad.
+
+        Neither of these is marked up, and both are exactly what the check exists to stop: one
+        redefines a review mode's cap, the other redefines a closure state's default.
+        """
+        for sentence in ("The full mode defaults to three review rounds.",
+                         "A finding must be open by default."):
+            with self.subTest(sentence=sentence):
+                doc = ("# c\n\n%s\n\n## Round bounds\n\n"
+                       "Floor 1, ceiling 5, default 3, because reasons.\n" % sentence)
+                self.assertTrue(redefinitions(doc),
+                                "a bare redefinition must be caught; markdown formatting is a house "
+                                "convention, not a statement about whether prose is definitional")
+
+    def test_the_exclusion_is_adjectival_role_not_formatting(self):
+        """One non-adjectival occurrence is enough, even alongside an adjectival one."""
+        doc = ("# c\n\nAn open finding stays open until it must be 1..5.\n\n"
                "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
         self.assertTrue(redefinitions(doc))
 

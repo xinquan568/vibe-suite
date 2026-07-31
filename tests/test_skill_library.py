@@ -36,6 +36,7 @@ ROSTER = (
     "conventions-codex",
     "orchestration",
     "patterns",
+    "refine-proposal",
     "roasting",
     "rules",
     "scoring",

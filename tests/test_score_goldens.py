@@ -200,7 +200,12 @@ class DeliverablesShip(unittest.TestCase):
         for band in ("Excellent", "Good", "Adequate", "Weak", "Rewrite"):
             self.assertIn(band, body)
         self.assertRegex(body, r"(?i)batch(es)? of (at most )?5|≤5")
-        self.assertNotIn("--engine", body, "cross-model lanes are E4.5's, not this command's")
+        # E4.5 (vibe-39) is the issue this assertion named as entitled to invert it. The lanes are
+        # here now, so the guard becomes its opposite: the flag must be present, and the sentence
+        # that makes score *score* must have survived the addition.
+        self.assertIn("--engine", body, "E4.5 added the cross-model lanes")
+        self.assertIn("the only penalty authority", body,
+                      "a lane addition must not weaken the determinism sentence")
         self.assertIn("vibe-history.json", body)
 
 

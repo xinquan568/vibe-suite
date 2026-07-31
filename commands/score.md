@@ -1,6 +1,6 @@
 ---
-description: "Score NL artifacts on the 100-point deterministic rubric (the suite's lint): dispatches the scorer and vague-scanner agents, computes every penalty through the deterministic scoring engine, renders a findings table with score bands, and appends a scope-tagged snapshot to the scanned project's history. Same input, same score. Arguments: an optional path (default: the current working directory) and --changed to score only git-modified artifacts. No cross-model lanes here."
-argument-hint: "[path] [--changed]"
+description: "Score NL artifacts on the 100-point deterministic rubric (the suite's lint): dispatches the scorer and vague-scanner agents, computes every penalty through the deterministic scoring engine, renders a findings table with score bands, and appends a scope-tagged snapshot to the scanned project's history. Same input, same score. Optionally adds a cross-model second opinion on the same rubric, with disagreements listed. Arguments: an optional path, --changed to score only git-modified artifacts, and --engine to select the second-opinion lane."
+argument-hint: "[path] [--changed] [--engine claude|codex|agy|both]"
 ---
 
 # /vibe-suite:score — deterministic quality scoring
@@ -16,8 +16,8 @@ no agent may add or resize a deduction.
   Refuse a path that is not a readable directory or file.
 - `--changed` — restrict the target set to artifacts modified per `git status --porcelain`
   (requires the target to be inside a git repository; refuse otherwise).
-- **No engine-selection flag exists here.** Cross-model score lanes are a later stage's surface
-  (E4.5); this command is the claude lane only.
+- `--engine claude|codex|agy|both` — whether to add a cross-model **second opinion** on the same
+  rubric. Default `claude`. See § Engine lanes.
 
 ## Step 1 — discover and batch
 
@@ -80,6 +80,60 @@ at zero penalty. Bands: 90–100 **Excellent** · 80–89 **Good** · 70–79 **
 **Weak** · <60 **Rewrite**. The run summary states the pass verdict against
 `score_threshold` and where the history snapshot went (`.claude/vibe-history.json` inside
 the scanned project).
+
+## Engine lanes — the second opinion
+
+**The deterministic engine runs in every mode.** `--engine` selects what is *added*, never what is
+replaced: a score command that sometimes could not answer "does this pass" would be a different command
+depending on a flag, and the engine is a local Python process with no model call, so always having a
+reproducible baseline costs nothing.
+
+| `--engine` | Runs | Report | Threshold verdict |
+|---|---|---|---|
+| `claude` (default) | the deterministic engine | one score, labelled `computed` | on the computed score |
+| `codex` | the engine **and** a codex second opinion | both numbers, each labelled | on the **computed** score |
+| `agy` | pre-gate: **refuses**, naming the gate status and `docs/agy-flip-checklist.md`. post-gate: as `codex` | — | — |
+| `both` | as `codex`, **plus** the disagreement listing | both numbers + disagreements | on the **computed** score |
+
+Engine resolution is [`commands/shared/model-selection.md`](shared/model-selection.md)'s ladder — this
+command never parses `.vibe-suite.md` itself. The cross-model lane dispatches
+`scripts/codex-runner.mjs --sandbox read-only` **directly**, never `scripts/agy-audit-cli.mjs`, which
+refuses before dispatching while the agy gate is shut. No model is named on any dispatch (P9), and the
+prompt opens with a provenance line (P4).
+
+**`computed` and `opinion` are never merged.** The deterministic engine remains the only penalty
+authority; the cross-model number is a reading of the same rubric, not a second computation of it. The
+pass/fail verdict against `score_threshold` is always the **computed** score's, because a threshold
+applied to an unreproducible number would make the verdict unreproducible too.
+
+### What the prompt carries
+
+The scoring skill — so the second opinion is on the same rubric, which is the whole point — **and the
+engine's check catalog**, so the two lanes can be compared at all. The catalog is **generated from
+`scripts/score_engine.py`**, never written out here: a hand-kept list would be a second source of truth
+that rots the first time a rule is added. Extraction resolves both shapes the engine uses — a literal
+`check` argument at an `emit(...)` call site, and one propagated through a helper that takes it as a
+parameter (`_load_json` does).
+
+The lane is asked to return findings as `{rule, check, line, penalty}` records, using that vocabulary.
+
+### Disagreements — `--engine both`
+
+Compared on the engine's structured **record**, not the rendered table: the table drops `check` and adds
+`Issue` and `Fix`, which are narrative, so comparing tables would make a rewording a disagreement and
+hide two rubric rows that share a rule id.
+
+A disagreement is a difference in the **multiset** of `(rule, check, line, penalty)`, plus any
+difference in the final score. Multiset, so the same finding raised twice by one lane and once by the
+other is a difference. A file whose totals match but whose finding sets differ **is** listed — matching
+totals is the interesting case, not a reason to stay quiet.
+
+**A lane whose findings are not in record shape, or whose `check` is outside the catalog, is an
+unusable second opinion — not a set of disagreements.** It takes
+[`commands/shared/fallback.md`](shared/fallback.md)'s "reachable but returned nothing usable" path: the
+report says the second opinion was unusable, with no diagnostic header, because nothing is broken to
+restore. Listing every finding as a disagreement would manufacture a hundred of them out of one
+vocabulary mismatch.
 
 ## Boundaries
 

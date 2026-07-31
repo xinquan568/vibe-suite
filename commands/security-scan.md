@@ -1,6 +1,6 @@
 ---
-description: "Scan a plugin directory for security risks in its executable artifacts: validates the target looks like a plugin, dispatches the security-scanner agent over the shared security pattern skill, and appends a PASS/REVIEW/BLOCK gate banner below the agent's verbatim report. Never commits and never edits the target. Arguments: an optional path, defaulting to the current directory."
-argument-hint: "[path]"
+description: "Scan a plugin directory for security risks in its executable artifacts: validates the target looks like a plugin, dispatches the security-scanner agent over the shared security pattern skill, and appends a PASS/REVIEW/BLOCK gate banner below the agent's verbatim report. Optionally adds a cross-model second opinion. Never commits and never edits the target. Arguments: an optional path defaulting to the current directory, and --second-opinion."
+argument-hint: "[path] [--second-opinion]"
 ---
 
 # /vibe-suite:security-scan — plugin security scan
@@ -28,15 +28,25 @@ banner. Research is the agent's; gating is this command's.
 ## Step 3 — present
 
 The agent's report is the body, **verbatim** — do not re-order it, summarise it, or correct
-it. Append the gate banner as the footer, and append nothing else:
+it, and **insert nothing into it**. The report has exactly these parts, in this order, and nothing
+else is added:
 
 ```
+[F9.5 diagnostic header]              ← only when an engine was unreachable
+
 {security-scanner agent report — verbatim}
+
+[## Second opinion — <engine>]        ← only when --second-opinion was requested
 
 ────────────────────────────────────────────────────────────
 SECURITY GATE: <PASSED|REVIEW NEEDED|BLOCKED>
 ────────────────────────────────────────────────────────────
 ```
+
+The rule that the body is verbatim protects the **scanner's findings** from being re-ordered,
+summarised or corrected. A header above the body and a second opinion below it do none of those, so
+they are permitted — and the permission is an enumeration rather than an exception, which is a tighter
+rule than forbidding an unenumerated everything.
 
 The rule is 60 `─` characters, above and below the banner line.
 
@@ -51,15 +61,49 @@ The rule is 60 `─` characters, above and below the banner line.
 The agent derives that recommendation from an ordered ladder, first match wins: BLOCK on any
 Critical or High finding; otherwise REVIEW on any Medium; otherwise PASS.
 
-**When the recommendation and the findings disagree** — the agent recommended one thing but
-its own severity counts imply another — print **no banner** and report exactly:
+**The in-session scan gates; the second opinion is advisory.** F5.1 makes it *requested*, so gating on
+it would make the same scan `PASS` unrequested and `BLOCK` requested — the gate's meaning would depend
+on whether someone asked for it.
+
+| Second opinion | Banner |
+|---|---|
+| not requested, or agreeing | the in-session lane's banner, unchanged |
+| **less** severe than the in-session lane | the in-session lane's banner; the disagreement is listed |
+| **more** severe than the in-session lane | **no banner** — the inconsistency rule below |
+
+Severity is compared on the `PASS < REVIEW < BLOCK` ordering of the two recommendations.
+
+**When two derivations of the recommendation disagree** — the agent recommended one thing but its
+own severity counts imply another, **or** the second opinion is more severe than the in-session scan —
+print **no banner** and report exactly:
 
 ```
 Scan inconsistent: agent recommended <X>, findings imply <Y>. Not gating; rerun /vibe-suite:security-scan.
 ```
 
 A gate banner asserts a verified state. With the two derivations in conflict, neither banner
-is honest, so the run declines to gate rather than picking one.
+is honest, so the run declines to gate rather than picking one. A second opinion finding something
+worse than the in-session scan is the same shape of conflict reached a different way, so it takes the
+same branch rather than a second policy.
+
+## The second opinion — `--second-opinion`
+
+Requested, never a default. It runs on the P8-resolved audit engine via
+[`commands/shared/model-selection.md`](shared/model-selection.md) — `codex` in v1, `agy` after the gate
+flips — dispatching `scripts/codex-runner.mjs --sandbox read-only` **directly**, never
+`scripts/agy-audit-cli.mjs`, which refuses before dispatching while the gate is shut. No model is named
+(P9); the prompt opens with a provenance line (P4) and carries the same
+[`skills/security/SKILL.md`](../skills/security/SKILL.md) pattern database the agent uses, so both lanes
+grade against one severity table.
+
+Its findings render under `## Second opinion — <engine>` in the same six-field shape, below the verbatim
+body.
+
+**When the engine is unreachable** — missing binary, auth failure, timeout, quota —
+[`commands/shared/fallback.md`](shared/fallback.md)'s diagnostic header **opens the report**, carrying
+binary-on-`PATH`, authentication state and an actionable fix. When the engine is reachable but returns
+nothing usable, the second-opinion section says so and **no header appears**: nothing is broken to
+restore. The in-session scan and its banner are unaffected either way.
 
 ## Step 4 — failure
 

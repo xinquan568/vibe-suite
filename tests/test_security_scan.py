@@ -130,9 +130,12 @@ FROZEN_PATTERN_NAMES = {
 #: findings, PASS allowed for a Medium-only report. Presence checks cannot see that; only
 #: pinning the text can. This lives in test code, not a fixture, so re-blessing a fixture
 #: does not re-bless it.
+#: Re-blessed by E4.5 (vibe-39), which added the --second-opinion lane. The clause tests above were
+#: updated FIRST, in the same commit, so this hash was recomputed over text a clause test already
+#: accepts -- re-blessing before that would silence the outer layer while the inner one still failed.
 CONTRACT_SHA256 = {
     "agent": "50764f2c774362617a14dbc0aa26a85c3a5fff2260804d66390c8722a0253b47",
-    "command": "84fc84fdba5121922a4692e80fac9eb6611c178f4f23dd863c8f521670fc23c0",
+    "command": "f26d3f99c6b4aaff471bc9b642d9cd91f30b6a72deba871666cc89eac338e13f",
 }
 
 
@@ -227,9 +230,29 @@ class CommandContract(unittest.TestCase):
         self.assertIn("Directory not found: {path}", self.flat)
         self.assertIn("Not a Claude Code plugin directory", self.flat)
 
-    def test_body_is_verbatim_and_only_the_banner_is_appended(self):
+    def test_body_is_verbatim_and_surrounding_sections_are_enumerated(self):
+        """E4.5 (vibe-39) narrowed this clause, and the rewrite ADDS assertions rather than trading
+        one for another.
+
+        The old rule was `verbatim` + "append nothing else". The second phrase forbade an
+        unenumerated everything, which also forbade F9.5's diagnostic header -- a run-level
+        disclosure the fallback partial requires to OPEN the report. The guarantee the phrase was
+        protecting is that nobody edits the scanner's findings, so it is now stated as
+        "insert nothing into it" plus an explicit enumeration of what may surround the body, in a
+        fixed order. Enumerating is tighter than forbidding-everything, not looser.
+        """
         self.assertIn("verbatim", self.flat)
-        self.assertIn("append nothing else", self.flat)
+        self.assertIn("insert nothing into it", self.flat)
+        for part in ("diagnostic header", "Second opinion", "SECURITY GATE"):
+            self.assertIn(part, self.flat, f"the report's parts must be enumerated: {part}")
+        body = self.flat
+        header_at = body.index("diagnostic header")
+        report_at = body.index("security-scanner agent report")
+        opinion_at = body.index("## Second opinion")
+        banner_at = body.index("SECURITY GATE:")
+        self.assertLess(header_at, report_at, "the F9.5 header opens the report")
+        self.assertLess(report_at, opinion_at, "the second opinion follows the verbatim body")
+        self.assertLess(opinion_at, banner_at, "the banner is last")
         self.assertIn("Never mutates the target", self.flat)
 
     def test_banner_strings_and_rule(self):

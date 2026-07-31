@@ -30,8 +30,10 @@ is required.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -61,11 +63,21 @@ CORE_FILES = (SKILL, CONTRACT_REF, COMMAND, PR_TEMPLATE, LINT, MANIFEST)
 #: in configuration. The same distinction as `vibe-suite`-the-namespace versus
 #: `xinquan568/vibe-suite`-the-target, one level down. What is forbidden is the value a profile would
 #: supply: a repo slug, an id prefix, a branch template, a checkout path.
-FORBIDDEN_IN_CORE = (
-    "roam-", "example-org/roamex", "codes/roamex", "chromium_src",
-    "xinquan568/vibe-suite", "codes/vibe-suite", "vibe-suite-pr-body",
-    "acme/fixture-repo", "fx-", "acme/ai/",
-)
+def _source_literals():
+    """The forbidden set, **derived from the boundary inventory** rather than kept here.
+
+    A blacklist maintained in the test file and an inventory maintained in the artifact are two
+    statements of one set, and they diverge the first time someone updates only the one they were
+    looking at. The inventory is the reviewed artifact, so it is the source.
+    """
+    text = INVENTORY.read_text(encoding="utf-8")
+    match = re.search(r"(?s)<!--\s*source-literals\s*-->\s*```json\s*(\[.*?\])\s*```", text)
+    if not match:
+        return ()
+    return tuple(json.loads(match.group(1)))
+
+
+FORBIDDEN_IN_CORE = _source_literals()
 
 CITED_FRAGMENTS = (
     "reviewer-backends", "review-modes", "round-bounds", "verdict-parsing",
@@ -572,6 +584,255 @@ class TestGoldenRuns(unittest.TestCase):
         self.assertIn("VIBE_TEST_STUB_VERDICT", text,
                       "the verdict must be selectable, or #45 cannot reuse this")
         self.assertIn("approve_with_revisions", text)
+
+
+class TestParserIsClosed(LintCase):
+    """The grammar rejects rather than guesses. A profile carries commands this pipeline will run."""
+
+    def profile_text(self, text):
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = directory / "candidate.md"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def base(self):
+        return (PROFILES / "fixture.md").read_text(encoding="utf-8")
+
+    def test_a_duplicate_top_level_key_is_refused(self):
+        """Last-wins silently discards a value someone wrote deliberately."""
+        broken = self.base().replace("base_branch: trunk", "base_branch: trunk\nbase_branch: main")
+        result = self.lint(self.profile_text(broken))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("duplicate", result.stderr)
+
+    def test_a_duplicate_mapping_member_is_refused(self):
+        broken = self.base().replace(
+            "gates:", "category_extensions:\n  step-2: a\n  step-2: b\ngates:")
+        result = self.lint(self.profile_text(broken))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("duplicate", result.stderr)
+
+    def test_an_unbalanced_quote_is_refused(self):
+        broken = self.base().replace("id_pattern: '^fx-(\\d+)$'", "id_pattern: '^fx-(\\d+)$")
+        result = self.lint(self.profile_text(broken))
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_odd_indentation_is_refused(self):
+        broken = self.base().replace("gates:\n  - 'make lint'", "gates:\n   - 'make lint'")
+        result = self.lint(self.profile_text(broken))
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_a_mapping_where_a_regex_belongs_refuses_rather_than_crashes(self):
+        broken = self.base().replace("id_pattern: '^fx-(\\d+)$'", "id_pattern:\n  a: b")
+        result = self.lint(self.profile_text(broken))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr, "a type error must refuse, not crash")
+
+    def test_an_unknown_backend_domain_is_an_error_not_permission(self):
+        """The domain is read from the installed plugin, and an unreadable one fails **closed**.
+
+        The earlier lookup resolved under `--root` — the *target* workspace — which has no
+        `skills/vibe-core/SKILL.md` in any consumer repository, so the check silently allowed anything.
+        """
+        import os
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        (directory / "scripts").mkdir()
+        stray = directory / "scripts" / "profile_lint.py"
+        stray.write_text(LINT.read_text(encoding="utf-8"), encoding="utf-8")
+        broken = self.base().replace("base_branch: trunk",
+                                     "base_branch: trunk\nreviewer_backend: codex")
+        profile = self.profile_text(broken)
+        result = subprocess.run(
+            [sys.executable, str(stray), "--root", str(REPO_ROOT), str(profile), "--structural-only"],
+            capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(result.returncode, 0,
+                            "an unreadable domain must fail closed, not allow every value")
+        self.assertIn("domain is unknown", result.stderr)
+
+
+class TestManifestWritePath(unittest.TestCase):
+    """The write surface had no tests at all — only reads were exercised.
+
+    A mutation that misrouted the destination or bypassed containment was invisible. Every case below
+    is a refusal that must happen *before* anything is written.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ws = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+
+    def write(self, target, payload, root=None):
+        return subprocess.run(
+            [sys.executable, str(MANIFEST), "write", str(target), "--root", str(root or self.ws)],
+            input=json.dumps(payload), capture_output=True, text=True, timeout=60)
+
+    def test_an_in_root_write_succeeds_and_round_trips(self):
+        target = self.ws / "manifest.json"
+        result = self.write(target, {"schema_version": 2, "areas_confirmed": ["a"]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(target.read_text())["areas_confirmed"], ["a"])
+
+    def test_the_legacy_spelling_normalises_on_write_too(self):
+        target = self.ws / "legacy.json"
+        result = self.write(target, {"schema_version": 1, "crates_confirmed": ["a"]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        written = json.loads(target.read_text())
+        self.assertEqual(written["areas_confirmed"], ["a"])
+        self.assertNotIn("crates_confirmed", written)
+
+    def test_both_spellings_are_refused_on_the_write_path(self):
+        result = self.write(self.ws / "both.json",
+                            {"crates_confirmed": ["a"], "areas_confirmed": ["b"]})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.ws / "both.json").exists(), "nothing may be written before the refusal")
+
+    def test_a_destination_outside_the_root_is_refused(self):
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, True)
+        result = self.write(outside / "escape.json", {"areas_confirmed": []})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr, "it must refuse in words, not by traceback")
+        self.assertFalse((outside / "escape.json").exists())
+
+    def test_a_parent_traversal_destination_is_refused(self):
+        nested = self.ws / "nested"
+        nested.mkdir()
+        result = self.write(nested / ".." / ".." / "escape.json", {"areas_confirmed": []},
+                            root=nested)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_malformed_json_on_stdin_is_refused(self):
+        result = subprocess.run(
+            [sys.executable, str(MANIFEST), "write", str(self.ws / "x.json"), "--root", str(self.ws)],
+            input="{not json", capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+
+
+class TestRepoPathContainment(LintCase):
+    """`repo_path` names a checkout inside the workspace. Existence alone accepted `..` and `/tmp`."""
+
+    def profile_with(self, repo_path):
+        base = (PROFILES / "fixture.md").read_text(encoding="utf-8")
+        broken = base.replace("repo_path: ./tests/fixtures/issue2pr/fixture-repo",
+                              "repo_path: %s" % repo_path)
+        assert broken != base
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = directory / "candidate.md"
+        path.write_text(broken, encoding="utf-8")
+        return path
+
+    def test_an_absolute_repo_path_is_refused(self):
+        result = self.lint(self.profile_with("/tmp"))
+        self.assertNotEqual(result.returncode, 0, "an absolute path is not a workspace checkout")
+        self.assertIn("absolute", result.stderr)
+
+    def test_a_parent_traversal_repo_path_is_refused_as_an_escape(self):
+        """Refused for the right reason. `..` also happens to fail the looks-like-a-checkout test, so
+        asserting only a non-zero exit passed even with the containment check removed."""
+        result = self.lint(self.profile_with(".."))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("escapes the workspace root", result.stderr,
+                      "traversal must be refused as an escape, not incidentally")
+
+    def test_a_symlink_escape_is_refused(self):
+        """The case a lexical check alone would miss."""
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, target, True)
+        (target / "README.md").write_text("outside\n", encoding="utf-8")
+        link = REPO_ROOT / "tests" / "fixtures" / "issue2pr" / "escape-link"
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(target)
+        self.addCleanup(lambda: link.unlink(missing_ok=True))
+        result = self.lint(self.profile_with("./tests/fixtures/issue2pr/escape-link"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("escapes the workspace root", result.stderr)
+
+    def test_an_existing_directory_that_is_not_a_checkout_is_refused(self):
+        result = self.lint(self.profile_with("./scripts/lib"))
+        self.assertNotEqual(result.returncode, 0,
+                            "an arbitrary existing directory is not a repository")
+
+
+class TestDriverSeam(unittest.TestCase):
+    """The seam #43 extracts. Without it that issue rewrites the pipeline instead."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = SKILL.read_text(encoding="utf-8")
+        cls.protocol = json_block(cls.text, "driver-protocol")
+
+    def test_the_protocol_is_declared(self):
+        self.assertIsNotNone(self.protocol,
+                             "a `source_driver` field with no protocol behind it is a name, not a seam")
+
+    def test_every_operation_declares_its_inputs_outputs_and_errors(self):
+        for name, spec in self.protocol.items():
+            with self.subTest(operation=name):
+                self.assertEqual(set(spec), {"in", "out", "errors"})
+                self.assertIsInstance(spec["in"], list)
+                self.assertIsInstance(spec["errors"], list)
+                self.assertTrue(spec["errors"], f"{name} declares no failure mode")
+
+    def test_the_lifecycle_operations_are_present(self):
+        for operation in ("fetch_item", "refresh_item", "open_change", "update_change",
+                          "read_change_state", "link_closure"):
+            with self.subTest(operation=operation):
+                self.assertIn(operation, self.protocol)
+
+    def test_every_declared_output_names_a_shape_the_core_declares(self):
+        """An operation returning a shape nothing defines is a seam with a hole in it."""
+        for name, spec in self.protocol.items():
+            out = spec["out"]
+            if out.endswith(("snapshot", "delta")):
+                with self.subTest(operation=name):
+                    self.assertIsNotNone(json_block(self.text, out),
+                                         f"{name} returns {out}, which the core does not declare")
+
+    def test_the_steps_bind_to_operations_rather_than_commands(self):
+        low = norm(self.text)
+        for operation in ("fetch_item", "open_change", "read_change_state", "update_change"):
+            with self.subTest(operation=operation):
+                self.assertIn(operation, low)
+        self.assertNotIn("gh issue view", low, "a step naming a command has bypassed the seam")
+        self.assertNotIn("gh pr create", low)
+
+
+class TestTerminalState(unittest.TestCase):
+    def test_the_pipeline_does_not_merge(self):
+        """Merging changes the default branch on the strength of a review the pipeline produced.
+        Every other artifact said the machine terminates in a reviewed PR; step 9 said 'then merge'."""
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertRegex(norm(text), r"does not merge")
+        # The real property: no step in the nine-step list performs a merge. Asserting the absence of
+        # one phrasing let "and then merges." through while the disclaimer above it stayed put — the
+        # document would have contradicted itself and passed.
+        steps = text[text.index("## The nine steps"):]
+        offenders = [line for line in steps.splitlines()
+                     if re.match(r"^\d\.", line.strip()) and "merge" in line.lower()]
+        self.assertEqual(offenders, [], f"a step performs a merge: {offenders}")
+
+
+class TestDisclosureHonesty(unittest.TestCase):
+    """A fixed disclosure is false under `none` and an overstatement under `single`."""
+
+    def test_the_disclosure_is_rendered_per_mode(self):
+        text = PR_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn("{disclosure}", text)
+        for mode in ("none", "single", "full"):
+            with self.subTest(mode=mode):
+                self.assertRegex(text, r"(?m)^\s*%s\s+Produced by" % mode)
+
+    def test_no_fixed_sentence_claims_verified_closure(self):
+        body = PR_TEMPLATE.read_text(encoding="utf-8").split("<!--")[0]
+        self.assertNotIn("verified finding", body,
+                         "the unconditional claim is what made this false in two of three modes")
 
 
 if __name__ == "__main__":

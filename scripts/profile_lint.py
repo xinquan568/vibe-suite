@@ -62,10 +62,20 @@ SOURCE_DRIVERS = ("github",)
 #: what the shared reviewer contract was written to prevent. Read it from the schema instead.
 VIBE_CORE_SKILL = ("skills", "vibe-core", "SKILL.md")
 
+HERE = Path(__file__).resolve().parent
 
-def reviewer_backend_domain(root):
-    """The enum's members, read from the configuration schema rather than duplicated."""
-    path = root.joinpath(*VIBE_CORE_SKILL)
+
+def reviewer_backend_domain():
+    """The enum's members, read from the configuration schema rather than duplicated.
+
+    Resolved from **this file's own installed location**, not from the target workspace. An earlier
+    version looked under `--root`, which is the repository being worked on — a consumer repository has
+    no `skills/vibe-core/SKILL.md`, so the lookup returned nothing and the check **failed open**. Any
+    backend value passed outside this repository's own self-hosting tests.
+
+    A domain that cannot be read is an error, not permission.
+    """
+    path = HERE.parent.joinpath(*VIBE_CORE_SKILL)
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
@@ -79,76 +89,117 @@ def reviewer_backend_domain(root):
 
 
 def parse_frontmatter(text):
-    """The closed YAML subset the suite accepts: scalars, block sequences, one nesting level.
+    """A **closed** grammar: scalars, block sequences, one level of mapping. Anything else is an error.
 
-    A full YAML parser would accept anchors, aliases and flow collections that no profile should use,
-    and every one of those is a way for a profile to say something the contract cannot check.
+    Closed is the operative word. A profile carries gate commands — strings this pipeline will run — so
+    an ambiguity here is not a formatting nicety. Every rule below rejects rather than guesses:
+
+    - the document opens with `---` on its own line and the block ends with `---` on its own line;
+    - indentation is exactly two spaces, and only under a key that introduced a collection;
+    - a **duplicate key is an error**, at either level. Last-wins silently discards a value someone
+      wrote deliberately, and there is no way to tell which they meant;
+    - a quoted scalar's quotes must balance;
+    - a key may introduce a sequence or a mapping, never both.
     """
-    if not text.startswith("---"):
-        raise ValueError("no frontmatter: a profile opens with ---")
+    if not text.startswith("---\n"):
+        raise ValueError("no frontmatter: a profile opens with --- on its own line")
     end = text.find("\n---", 3)
     if end == -1:
-        raise ValueError("unterminated frontmatter")
+        raise ValueError("unterminated frontmatter: no closing --- on its own line")
+    tail = text[end + 1:]
+    if not (tail.startswith("---\n") or tail.rstrip() == "---"):
+        raise ValueError("malformed closing delimiter")
+
     fields, key = {}, None
-    for raw in text[3:end].splitlines():
+    for number, raw in enumerate(text[4:end].splitlines(), 2):
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
 
-        indented = raw.startswith("  ") and not raw.startswith("  - ")
-        if raw.startswith("  - ") or raw.startswith("- "):
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent not in (0, 2):
+            raise ValueError("line %d: indentation must be 0 or 2 spaces, got %d" % (number, indent))
+        if raw.lstrip(" ") != raw.lstrip():
+            raise ValueError("line %d: tabs are not accepted" % number)
+
+        stripped = raw.strip()
+
+        if stripped.startswith("- "):
             if key is None:
-                raise ValueError("sequence item before any key")
+                raise ValueError("line %d: sequence item before any key" % number)
+            existing = fields.get(key)
+            if isinstance(existing, dict):
+                raise ValueError("line %d: %s is a mapping and cannot also hold a sequence"
+                                 % (number, key))
+            if isinstance(existing, str):
+                # `.append` on a string raised AttributeError out of the parser — an uncaught crash
+                # where a refusal belongs. Reached by deleting a `gates:` line and orphaning its items.
+                raise ValueError("line %d: %s already holds a scalar; a key is a scalar or a "
+                                 "sequence, never both" % (number, key))
             fields.setdefault(key, [])
-            if not isinstance(fields[key], list):
-                raise ValueError("%s: scalar then sequence" % key)
-            fields[key].append(raw.split("- ", 1)[1].strip().strip("'\""))
+            fields[key].append(_scalar(stripped[2:], number))
             continue
 
-        if ":" not in raw:
-            raise ValueError("not a key: %r" % raw.strip())
+        if ":" not in stripped:
+            raise ValueError("line %d: not a key: %r" % (number, stripped))
 
-        if indented:
-            # A map's member. Without this branch an indented `step-2: overlay-discipline` under
-            # `category_extensions:` was read as a *top-level* key — and then rejected as unknown,
-            # which is how the Roamex reference failed its own structural validation.
+        name, _, value = stripped.partition(":")
+        name, value = name.strip(), value.strip()
+
+        if indent == 2:
             if key is None:
-                raise ValueError("indented key before any parent")
+                raise ValueError("line %d: indented key before any parent" % number)
             if not isinstance(fields.get(key), dict):
                 if fields.get(key) not in ([], None):
-                    raise ValueError("%s: scalar then map" % key)
+                    raise ValueError("line %d: %s already holds a scalar or sequence" % (number, key))
                 fields[key] = {}
-            member, _, value = raw.partition(":")
-            fields[key][member.strip()] = value.strip().strip("'\"")
+            if name in fields[key]:
+                raise ValueError("line %d: duplicate key %r under %s" % (number, name, key))
+            fields[key][name] = _scalar(value, number)
             continue
 
-        key, _, value = raw.partition(":")
-        key, value = key.strip(), value.strip()
-        if value == "":
-            fields[key] = []            # a key introducing a sequence or a map
-        else:
-            fields[key] = value.strip("'\"")
+        if name in fields:
+            raise ValueError("line %d: duplicate key %r — last-wins would discard a value someone "
+                             "wrote deliberately" % (number, name))
+        key = name
+        fields[name] = [] if value == "" else _scalar(value, number)
     return fields
+
+
+def _scalar(raw, number):
+    """A scalar, with its quotes checked rather than stripped hopefully."""
+    if raw[:1] in ("'", '"'):
+        quote = raw[0]
+        if len(raw) < 2 or raw[-1] != quote:
+            raise ValueError("line %d: unbalanced %s quote" % (number, quote))
+        return raw[1:-1]
+    if raw[-1:] in ("'", '"'):
+        raise ValueError("line %d: closing quote with no opening quote" % number)
+    return raw
 
 
 def check_type(name, value, kind, errors, root, structural):
     if kind == "int":
-        if not re.fullmatch(r"-?\d+", str(value)):
+        if not isinstance(value, str) or not re.fullmatch(r"-?\d+", value):
             errors.append("%s: expected an integer, got %r" % (name, value))
     elif kind == "list":
         if not isinstance(value, list):
-            errors.append("%s: expected a list, got a scalar" % name)
+            errors.append("%s: expected a list, got a %s"
+                          % (name, "mapping" if isinstance(value, dict) else "scalar"))
     elif kind == "map":
         # `[]` is the empty parse of a key with no members yet; a scalar is a real type error.
         if not isinstance(value, (dict, list)):
             errors.append("%s: expected a map, got a scalar" % name)
     elif kind == "str":
-        if isinstance(value, list):
-            errors.append("%s: expected a scalar, got a list" % name)
+        if not isinstance(value, str):
+            errors.append("%s: expected a scalar, got a %s"
+                          % (name, "mapping" if isinstance(value, dict) else "list"))
     elif kind == "str-or-list":
-        pass                            # both arities are the same fact
+        if isinstance(value, dict):
+            errors.append("%s: expected a scalar or a list, got a mapping" % name)
     elif kind == "regex":
-        if isinstance(value, list):
-            errors.append("%s: expected a scalar regex, got a list" % name)
+        if not isinstance(value, str):
+            errors.append("%s: expected a scalar regex, got a %s"
+                          % (name, "mapping" if isinstance(value, dict) else "list"))
             return
         try:
             re.compile(value)
@@ -158,8 +209,11 @@ def check_type(name, value, kind, errors, root, structural):
         if name == "source_driver" and value not in SOURCE_DRIVERS:
             errors.append("%s: %r is not one of %s" % (name, value, ", ".join(SOURCE_DRIVERS)))
         if name == "reviewer_backend":
-            domain = reviewer_backend_domain(root)
-            if domain and value not in domain:
+            domain = reviewer_backend_domain()
+            if not domain:
+                errors.append("%s: the configuration schema could not be read, so the backend "
+                              "domain is unknown — that is an error, not permission" % name)
+            elif value not in domain:
                 errors.append("%s: %r is not one of %s (from the configuration schema)"
                               % (name, value, ", ".join(domain)))
 
@@ -192,9 +246,37 @@ def validate(path, root, structural):
 
     if not structural:
         for candidate in _as_list(fields.get("repo_path")):
-            if not (root / candidate).exists():
-                errors.append("repo_path: %r does not resolve under %s" % (candidate, root))
+            errors.extend(_check_repo_path(candidate, root))
 
+    return errors
+
+
+def _check_repo_path(candidate, root):
+    """`repo_path` names a checkout **inside the workspace**, and nothing else.
+
+    Existence alone was the whole check, which accepted `..` and `/tmp` — a checked-in profile could
+    have redirected every later branch, gate and source operation outside the workspace. Three
+    properties now hold, and each fails on its own:
+
+    - **relative**, so a profile cannot name an absolute location;
+    - **contained** after resolution, so neither `..` nor a symlink escapes;
+    - **a git checkout**, so an arbitrary existing directory is not mistaken for a repository.
+    """
+    errors = []
+    path = Path(candidate)
+    if path.is_absolute():
+        return ["repo_path: %r is absolute; a profile names a checkout inside the workspace" % candidate]
+
+    resolved = (root / path).resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return ["repo_path: %r escapes the workspace root" % candidate]
+
+    if not resolved.is_dir():
+        return ["repo_path: %r does not resolve to a directory under %s" % (candidate, root)]
+    if not (resolved / ".git").exists() and not (resolved / "README.md").exists():
+        errors.append("repo_path: %r resolves, but does not look like a checkout" % candidate)
     return errors
 
 

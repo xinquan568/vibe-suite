@@ -12,7 +12,7 @@ Nine steps in three phases. Each phase is the same shape: the **worker** produce
 |---|---|---|
 | Analyze | 1–3 | what the work item actually asks for, and what constrains it |
 | Plan | 4–6 | decisions, a work breakdown, a test strategy, acceptance mapping |
-| Execute | 7–9 | the change, its tests, and a pull request |
+| Execute | 7–9 | the change, its tests, and a reviewed pull request — **not** a merge |
 
 <!-- phases -->
 ```json
@@ -148,6 +148,44 @@ A run freezes what the work item said when it started, so a later re-read is com
 A fresh round re-fetches and diffs against the previous snapshot. The delta is what a new round is
 *for* — without it, iterating means re-reading the same text and hoping to think differently.
 
+## The source driver
+
+Every touch of the source system goes through one **driver protocol**. The core names the operations
+and what they mean; a driver implements them. `source_driver` in the profile selects which.
+
+This seam exists so that adding a source system changes no core logic. It is also what #43 extracts
+rather than invents — a boundary drawn only in a profile field would have left that issue rewriting the
+pipeline instead.
+
+<!-- driver-protocol -->
+```json
+{
+  "fetch_item": {"in": ["source_id"], "out": "source-snapshot", "errors": ["not_found", "not_an_item"]},
+  "refresh_item": {"in": ["source_id", "since"], "out": "source-delta", "errors": ["not_found"]},
+  "open_change": {"in": ["branch", "title", "body", "base_branch"], "out": "change_ref", "errors": ["exists", "rejected"]},
+  "update_change": {"in": ["change_ref", "body"], "out": "change_ref", "errors": ["not_found", "rejected"]},
+  "read_change_state": {"in": ["change_ref"], "out": "change_state", "errors": ["not_found"]},
+  "link_closure": {"in": ["change_ref", "source_id"], "out": "change_ref", "errors": ["not_found"]}
+}
+```
+
+Every step that reaches the source system names its operation, and **no step names a command**:
+
+| Step | Operation |
+|---|---|
+| 1 | `fetch_item` — the snapshot a run freezes |
+| 7 | `open_change`, then `link_closure` |
+| 8 | `read_change_state` — the change as the reviewer sees it |
+| 9 | `update_change` — the record of what closed |
+| a fresh round | `refresh_item` — the delta a new round is *for* |
+
+**A driver never runs a gate and never writes to the worktree.** It answers about the source system and
+publishes to it; everything else belongs to the pipeline. Keeping that line is what stops a driver from
+becoming a second implementation of the machine.
+
+`github` is the implemented driver. Its commands and response shapes live behind this protocol, not in
+the steps.
+
 ## The nine steps
 
 1. **Analyze.** What the item asks, what the repository currently does, what constrains the work.
@@ -160,7 +198,13 @@ A fresh round re-fetches and diffs against the previous snapshot. The delta is w
 7. **Execute.** Tests first where the profile's `tdd_policy` says so, then the change, then the gates.
    Open the pull request.
 8. **Review the execution.** The diff, against the frozen plan.
-9. **Update and verify**, then merge.
+9. **Update and verify.** The worker closes what step 8 raised; the reviewer confirms. The run then
+   **stops with a reviewed change.**
+
+**The pipeline does not merge.** Merging is a separate, materially broader action: it changes the
+default branch on the strength of a review the pipeline itself produced. An earlier draft of this step
+said "then merge", which contradicted the command, the phase table and the boundary inventory — all of
+which say the machine terminates in a reviewed pull request. It terminates in a reviewed pull request.
 
 ## Gates
 

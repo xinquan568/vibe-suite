@@ -74,3 +74,35 @@ parameterised, or stated in the core as an assumption a profile may override.
 The last two are the honest ones: they are project-shaped, they were **not** removed, and the reason is
 stated. An inventory that classified everything as parameterised would be a claim that the core is
 universal, which it is not — it is neutral across projects that deliver through reviewed pull requests.
+
+
+## Source literals — the enumerated set the check ranges over
+
+Machine-readable, because the zero-literals test derives its forbidden set from here rather than from a
+list maintained separately in the test file. Two statements of one set is how they diverge.
+
+<!-- source-literals -->
+```json
+[
+  "roam-",
+  "example-org/roamex",
+  "codes/roamex",
+  "chromium_src",
+  "xinquan568/vibe-suite",
+  "codes/vibe-suite",
+  "vibe-suite-pr-body",
+  "acme/fixture-repo",
+  "fx-",
+  "acme/ai/"
+]
+```
+
+**What this set is, exactly.** Every target-project value that passed through this port: Roamex's, this
+repository's *in its role as a target* in the source skill, and the fixture's. It is **enumerated, not
+inferred** — a literal from some fourth project would pass the check, and the check claims only that
+these left nothing behind.
+
+**What is deliberately absent.** The bare word `roamex`: core legitimately points at
+`examples/profiles/roamex.md`, and a filename is not a configuration value. Likewise `vibe-suite` — the
+plugin namespace, the config filename, and a component of every core path. The distinction throughout
+is *value a profile would supply* versus *name the product goes by*.

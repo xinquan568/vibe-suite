@@ -273,6 +273,55 @@ class TestReportContract(RoastTestCase):
         self.assertRegex(self.cmd_norm, r"continues?")
 
 
+class TestFindingIdsAndHeadings(RoastTestCase):
+    """The connective contracts the execution review found missing: without them a live report can be
+    valid prose and ungradeable."""
+
+    def test_the_command_defines_the_finding_id_scheme(self):
+        """A schema finding has no id field, so the ids are a property of the report. Without an
+        assigned scheme the fixing plan has nothing to cite and traceability is unenforceable."""
+        self.assertRegex(self.cmd_norm, r"f-1[^.]*f-2|number the survivors")
+        self.assertIn("F-", self.cmd)
+
+    def test_the_command_and_the_grader_agree_on_the_id_format(self):
+        """Bound explicitly: the grader's regex and the command's rendering are two halves of one
+        contract, and nothing else would catch them drifting apart."""
+        grader = (REPO_ROOT / "tools" / "roast-acceptance.py").read_text(encoding="utf-8")
+        self.assertIn(r"F-\d+", grader, "the grader must recognise the F-<n> form")
+        self.assertRegex(self.cmd, r"\bF-\d+\b")
+
+    def test_the_cross_model_section_heading_is_exact(self):
+        """The heading is the machine-readable part of the report. The skill numbers its own layout
+        with `###`; the report's form is `## Dimension: <name>` and the command must say so."""
+        self.assertIn("## Dimension: <name>", self.cmd)
+        grader = (REPO_ROOT / "tools" / "roast-acceptance.py").read_text(encoding="utf-8")
+        self.assertIn("Dimension:", grader)
+
+    def test_the_prescribed_phase_names_appear_in_the_command(self):
+        for phase in ("Phase 1 — now", "Phase 2 — next", "Phase 3 — later"):
+            with self.subTest(phase=phase):
+                self.assertIn(phase, self.cmd)
+
+    def test_the_executive_summary_introduces_no_new_id(self):
+        self.assertRegex(self.cmd_norm, r"cites ids but introduces none")
+
+
+class TestFallbackBeforeNoteAndProceed(RoastTestCase):
+    """A failed batch must degrade through the manual lane before it is written off as a gap;
+    recording a gap first would skip analysis the fallback contract still owes."""
+
+    def test_a_failed_batch_falls_back_before_it_is_recorded_as_a_gap(self):
+        self.assertRegex(self.cmd_norm,
+                         r"falls back to the manual[^.]*lane|manual[^.]*lane for that batch")
+        self.assertRegex(self.cmd_norm, r"note-and-proceed applies only after")
+
+    def test_the_two_hop_conditions_are_distinguished(self):
+        """fallback.md: a header when the engine was unreachable, none when it merely came back
+        empty."""
+        self.assertRegex(self.cmd_norm, r"unreachable[^.]*header")
+        self.assertRegex(self.cmd_norm, r"without one when it merely came back empty|empty")
+
+
 class TestWriteBoundaries(RoastTestCase):
     def test_the_report_is_the_only_mutation(self):
         self.assertRegex(self.cmd_norm, r"only thing this command creates|"

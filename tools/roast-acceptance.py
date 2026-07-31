@@ -48,7 +48,11 @@ CLAUDE_AGENTS_PARANOID = CLAUDE_AGENTS_BASE + ("edge-cases",)
 
 AGENT_SECTION = re.compile(r"(?m)^##\s+\[Agent:\s*vibe-suite:([a-z-]+)\]\s+Findings\s*$")
 DIMENSION_SECTION = re.compile(r"(?m)^##\s+Dimension:\s*(.+?)\s*$")
-FINDING_ID = re.compile(r"\b([A-Z]{1,4}-\d+)\b")
+FINDING_ID = re.compile(r"\b(F-\d+)\b")
+
+#: The phases `commands/roast.md` prescribes, in order. Accepting any `###` heading as a phase would
+#: let an arbitrary or reordered set pass while the command fixes both the names and the sequence.
+PHASES = ("Phase 1 — now", "Phase 2 — next", "Phase 3 — later")
 
 
 class Malformed(Exception):
@@ -68,6 +72,27 @@ def split_frontmatter(text):
             k, _, v = line.partition(":")
             keys[k.strip()] = v.strip()
     return keys, parts[2]
+
+
+def finding_sections(body):
+    """The text of the agent/dimension sections only.
+
+    Not "everything before the fixing plan": that includes the executive summary and the add-ons, so
+    an id mentioned only in the summary would make an otherwise absent finding look traceable. Ids
+    are a property of the findings, so they are collected from the findings.
+    """
+    starts = [(m.start(), m.end()) for m in AGENT_SECTION.finditer(body)]
+    starts += [(m.start(), m.end()) for m in DIMENSION_SECTION.finditer(body)]
+    if not starts:
+        return ""
+    starts.sort()
+    bounds = [s for s, _ in starts]
+    out = []
+    for i, (start, _) in enumerate(starts):
+        nxt = re.search(r"(?m)^##\s+", body[bounds[i] + 3:])
+        end = bounds[i] + 3 + nxt.start() if nxt else len(body)
+        out.append(body[start:end])
+    return "\n".join(out)
 
 
 def split_plan(body):
@@ -122,16 +147,20 @@ def evaluate(spec, report, lane, style):
     else:
         checks["executive_summary"] = {"passed": True, "detail": "present"}
 
-    findings_text, _ = split_plan(body)
-    reported_ids = set(FINDING_ID.findall(findings_text))
+    reported_ids = set(FINDING_ID.findall(finding_sections(body)))
     items = fixing_plan_items(body)
     unphased = [i for phase, i in items if phase is None]
     untraceable = [i for _, i in items if not (set(FINDING_ID.findall(i)) & reported_ids)]
+    seen_phases = [p for p in dict.fromkeys(p for p, _ in items) if p is not None]
+    bad_phase = [p for p in seen_phases if p not in PHASES]
+    out_of_order = seen_phases != [p for p in PHASES if p in seen_phases]
     checks["fixing_plan_phased"] = {
-        "passed": bool(items) and not unphased,
+        "passed": bool(items) and not unphased and not bad_phase and not out_of_order,
         "detail": "no fixing-plan items" if not items else
-                  ("every item sits in a phase" if not unphased
-                   else "%d item(s) outside any phase" % len(unphased)),
+                  ("%d item(s) outside any phase" % len(unphased) if unphased else
+                   ("unknown phase(s): %s" % ", ".join(bad_phase) if bad_phase else
+                    ("phases are out of order: %s" % ", ".join(seen_phases) if out_of_order
+                     else "every item sits in a prescribed phase, in order"))),
     }
     checks["fixing_plan_traceable"] = {
         "passed": bool(items) and not untraceable,
@@ -140,11 +169,15 @@ def evaluate(spec, report, lane, style):
     }
 
     if lane == "claude":
-        expected = set(CLAUDE_AGENTS_PARANOID if style in (5, 6) else CLAUDE_AGENTS_BASE)
-        found = set(AGENT_SECTION.findall(body))
+        expected = list(CLAUDE_AGENTS_PARANOID if style in (5, 6) else CLAUDE_AGENTS_BASE)
+        found = AGENT_SECTION.findall(body)
+        duplicates = sorted({n for n in found if found.count(n) > 1})
         checks["agent_sections"] = {
-            "passed": found == expected,
-            "detail": "expected %s, found %s" % (sorted(expected), sorted(found)),
+            # Count as well as membership: a set collapses a duplicated section, and "one section per
+            # dispatched agent" is a claim about how many there are.
+            "passed": sorted(found) == sorted(expected),
+            "detail": ("duplicated section(s): %s" % ", ".join(duplicates) if duplicates
+                       else "expected %s, found %s" % (sorted(expected), sorted(set(found)))),
         }
     else:
         found = {d.strip() for d in DIMENSION_SECTION.findall(body)}

@@ -75,15 +75,34 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --sandbox read-only --kind
 **Batching:** more than 20 files goes to the engine in groups of 10, one dispatch per group, findings
 concatenated before synthesis.
 
-**Agent failure is note-and-proceed.** A specialist or a batch that fails is recorded in the report as
-a named gap — which agent or group, and why — and the run continues. A roast that aborts because one
-of six reviewers failed throws away five reviews.
+**A failed cross-model batch degrades before it is written off.** Per
+[`commands/shared/fallback.md`](shared/fallback.md), a Codex dispatch that is unreachable — missing
+binary, auth failure, timeout, quota — or that returns nothing usable **falls back to the manual
+in-session lane for that batch**, with the diagnostic header when it was unreachable and without one
+when it merely came back empty. Note-and-proceed applies only after that hop has also failed.
+Recording a gap without attempting the fallback would skip analysis the contract says is still owed.
 
-## Step 5 — synthesise
+**Then agent failure is note-and-proceed.** A specialist or a batch that fails after its fallback is
+recorded in the report as a named gap — which agent or group, why, and that the manual lane was
+attempted — and the run continues. A roast that aborts because one of six reviewers failed throws away
+five reviews.
+
+## Step 5 — synthesise, and assign finding ids
 
 Parse `## [Agent: vibe-suite:<name>] Findings` sections from the in-session lane, or the engine's
 per-dimension output from a cross-model lane. Dedup per the skill: when two specialists raise the same
 defect, keep the one with the stronger evidence and drop the other.
+
+**Then number the survivors `F-1`, `F-2`, … in report order and render the id as the first token of
+each finding.** The ids are a property of *this report*, not of the finding contract — a schema
+finding has no id field, and adding one would not validate. Without them the fixing plan has nothing
+to cite, and "every item traces to a finding" is unenforceable.
+
+Sections render one finding per bullet, opening with its id:
+
+```
+- **F-3** — `path/to/file.py:88` · `[HIGH]` · <observation>
+```
 
 ## Step 6 — reconcile (`--engine both` only)
 
@@ -111,13 +130,22 @@ version: <read from .claude-plugin/plugin.json>
 ---
 ```
 
-Then, in order: `## Executive summary` — the highest-severity finding, the count by severity, and the
-single thing to do first; the findings sections (one per dispatched agent, or one per dimension);
-each requested add-on's section; and `## Fixing plan`.
+Then, in order:
 
-**The fixing plan is phased**, `### Phase 1 — now`, `### Phase 2 — next`, `### Phase 3 — later`, and
-**every item cites the id of a finding that appears above it**. An item that traces to nothing is a
-suggestion the report did not justify.
+1. `## Executive summary` — the highest-severity finding, the count by severity, and the single thing
+   to do first. **It cites ids but introduces none**: every id it names appears in a findings section
+   below.
+2. The findings sections. In-session lanes use `## [Agent: vibe-suite:<name>] Findings`, one per
+   dispatched agent. **Cross-model lanes use `## Dimension: <name>`, one per dimension, with `<name>`
+   exactly as `skills/roasting/SKILL.md` spells it** — the heading is the machine-readable part of the
+   report, so the numbered form the skill uses for its own layout is not the report's form.
+3. Each requested add-on's section.
+4. `## Fixing plan`.
+
+**The fixing plan is phased** — exactly `### Phase 1 — now`, `### Phase 2 — next`,
+`### Phase 3 — later`, in that order, and no other phase headings — and **every item cites the `F-<n>`
+id of a finding that appears in a findings section above**. An item that traces to nothing is a
+suggestion the report did not justify. A phase with no items is omitted rather than left empty.
 
 ## Step 8 — boundaries on writing
 

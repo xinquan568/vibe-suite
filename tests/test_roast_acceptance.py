@@ -40,11 +40,11 @@ def dimensions():
 
 
 def report(engine="codex", style=6, *, frontmatter=True, summary=True, sections=None,
-           findings=("SR-1",), plan=(("Phase 1 — now", "SR-1"),), plan_present=True):
+           findings=("F-1",), plan=(("Phase 1 — now", "F-1"),), plan_present=True):
     """A synthetic roast report. Every knob corresponds to one assertion the gate makes."""
     out = FRONTMATTER.format(engine=engine, style=style) if frontmatter else ""
     if summary:
-        out += "\n## Executive summary\n\nOne [HIGH] finding; act on SR-1 first.\n"
+        out += "\n## Executive summary\n\nOne [HIGH] finding; act on %s first.\n" % findings[0]
     for section in (sections if sections is not None else
                     ["## Dimension: %s" % d for d in dimensions()]):
         out += "\n%s\n\n- %s: something is wrong here.\n" % (section, findings[0])
@@ -70,6 +70,16 @@ def run(text, lane="codex", style=6, fixture=None):
             capture_output=True, text=True, cwd=REPO_ROOT)
     finally:
         Path(path).unlink(missing_ok=True)
+
+
+class TestGateShips(unittest.TestCase):
+    """Non-skippable. Every other class here skips when the tool is absent, which is right during RED
+    and wrong afterwards: deleting the shipped gate would otherwise turn this whole module green."""
+
+    def test_the_gate_and_its_fixture_exist(self):
+        self.assertTrue(TOOL.is_file(), "tools/roast-acceptance.py is a shipped deliverable")
+        self.assertTrue((FIXTURE / "seeded-issues.json").is_file(),
+                        "the sample-repo fixture is a required acceptance artifact")
 
 
 class GateTestCase(unittest.TestCase):
@@ -145,13 +155,13 @@ class TestReportStructure(GateTestCase):
         self.assertIn("executive_summary", proc.stdout + proc.stderr)
 
     def test_an_unphased_fixing_plan_item_fails(self):
-        proc = run(report(plan=((None, "SR-1"),)))
+        proc = run(report(plan=((None, "F-1"),)))
         self.assertEqual(proc.returncode, EXIT_FAILED)
         self.assertIn("phase", proc.stdout + proc.stderr)
 
     def test_an_item_citing_a_finding_that_is_not_in_the_report_fails(self):
         """Traceability: an item may cite only a finding the report actually raised."""
-        proc = run(report(findings=("SR-1",), plan=(("Phase 1 — now", "SR-9"),)))
+        proc = run(report(findings=("F-1",), plan=(("Phase 1 — now", "F-9"),)))
         self.assertEqual(proc.returncode, EXIT_FAILED)
         self.assertIn("cite", proc.stdout + proc.stderr)
 
@@ -160,7 +170,7 @@ class TestReportStructure(GateTestCase):
         assertion cannot catch both, so each is checked on its own."""
         proc = subprocess.run(
             [sys.executable, str(TOOL), str(FIXTURE), "--lane", "codex", "--json", "--report",
-             self._write(report(plan=((None, "SR-1"),)))],
+             self._write(report(plan=((None, "F-1"),)))],
             capture_output=True, text=True, cwd=REPO_ROOT)
         checks = json.loads(proc.stdout)["checks"]
         self.assertFalse(checks["fixing_plan_phased"]["passed"])
@@ -172,6 +182,46 @@ class TestReportStructure(GateTestCase):
         fh.close()
         self.addCleanup(lambda: Path(fh.name).unlink(missing_ok=True))
         return fh.name
+
+
+class TestGuardsAddedInReview(GateTestCase):
+    """One seeded failure per defect the execution review found in the gate itself."""
+
+    def test_an_id_only_in_the_executive_summary_is_not_traceable(self):
+        """F4: ids are collected from the finding sections, not from everything before the plan --
+        otherwise a stale id in the summary makes an absent finding look cited."""
+        text = report(findings=("F-1",), plan=(("Phase 1 — now", "F-7"),))
+        text = text.replace("act on F-1 first.", "act on F-1 first; see also F-7.")
+        proc = run(text)
+        self.assertEqual(proc.returncode, EXIT_FAILED)
+        self.assertIn("cite", proc.stdout + proc.stderr)
+
+    def test_a_duplicated_agent_section_fails(self):
+        """F5: a set collapses duplicates, and 'one section per dispatched agent' is about count."""
+        four = ("architecture", "error-handling", "security", "testing")
+        sections = ["## [Agent: vibe-suite:%s] Findings" % n for n in four]
+        sections.append("## [Agent: vibe-suite:security] Findings")
+        proc = run(report(engine="claude", sections=sections), lane="claude", style=2)
+        self.assertEqual(proc.returncode, EXIT_FAILED)
+        self.assertIn("duplicat", proc.stdout + proc.stderr)
+
+    def test_an_unrecognised_phase_name_fails(self):
+        """F6: any ### heading used to count as a phase."""
+        proc = run(report(plan=(("Sometime later", "F-1"),)))
+        self.assertEqual(proc.returncode, EXIT_FAILED)
+        self.assertIn("unknown phase", proc.stdout + proc.stderr)
+
+    def test_phases_out_of_order_fail(self):
+        proc = run(report(findings=("F-1", "F-2"),
+                          plan=(("Phase 2 — next", "F-1"), ("Phase 1 — now", "F-2"))))
+        self.assertEqual(proc.returncode, EXIT_FAILED)
+        self.assertIn("out of order", proc.stdout + proc.stderr)
+
+    def test_the_prescribed_phases_in_order_pass(self):
+        proc = run(report(findings=("F-1", "F-2", "F-3"),
+                          plan=(("Phase 1 — now", "F-1"), ("Phase 2 — next", "F-2"),
+                                ("Phase 3 — later", "F-3"))))
+        self.assertEqual(proc.returncode, EXIT_OK, proc.stdout + proc.stderr)
 
 
 class TestMalformedInput(GateTestCase):

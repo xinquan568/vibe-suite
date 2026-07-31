@@ -93,9 +93,10 @@ One critic pass over the translation runs by default (`--review-translation`;
 are applied as fixes, with no closure machine and no challenges — a translation is either faithful or
 it is corrected, and there is nothing for a decline to mean.
 
-**The translation review never aborts finalize**, and that is this loop's rule rather than the
-contract's — the contract says an unavailable backend is a refusal, which is right for a review that
-gates and wrong for one that garnishes. Here:
+**The translation review is an advisory pass, not a gating review** — finalize's conclusions are the
+same with and without it — so it takes the contract's
+[advisory branch](../vibe-core/references/reviewer-contract.md#gating-reviews-and-advisory-passes)
+rather than the refusal that governs the main loop:
 
 - **with `--allow-self-review`** → the pass is self-reviewed and marked as the contract requires:
   `reviewer: "self"`, no usage figures, said so in the summary;

@@ -63,8 +63,21 @@ V6_FIELDS = frozenset({
     "reviewer", "carried_forward",
 })
 
+#: Exact key sets per nesting level. Membership testing let a bumped `schema_version`, arbitrary extra
+#: fields, and a key moved between levels all pass — the same class of hole the round-bounds domain
+#: check had in link 1.
+TOP_LEVEL_V6 = frozenset({
+    "schema_version", "slug", "review_mode", "max_review_rounds", "stop_severity",
+    "second_language", "review_translation", "translation_review", "rounds",
+    "carried_forward", "findings",
+})
+ROUND_V6 = frozenset({"id", "reviewer", "verdict", "usage"})
+TRANSLATION_V6 = frozenset({"status", "reviewer"})
+
 STOP_SEVERITIES = ("blocker", "major", "minor")
 REVIEW_MODES = ("none", "single", "full")
+
+FALLBACK_MARKER_TEXT = "pandoc unavailable"
 
 MODEL_PIN = re.compile(
     r"\b(?:gpt-\d|o\d-|gemini-\d|claude-(?:opus|sonnet|haiku|fable)-\d|claude-[a-z]+-20\d{2})", re.I)
@@ -170,18 +183,22 @@ class TestSkillContract(unittest.TestCase):
 
         self.assertEqual(state.get("schema_version"), 6,
                          "the port carries schema_version 6; a bump needs a migration, not an edit")
-        self.assertEqual(set(state) & V6_FIELDS, V6_FIELDS - {"reviewer"},
-                         f"top level is missing {sorted(V6_FIELDS - {'reviewer'} - set(state))}")
+        self.assertEqual(set(state), TOP_LEVEL_V6,
+                         "the top level must be exactly v6: missing %s, unexpected %s"
+                         % (sorted(TOP_LEVEL_V6 - set(state)), sorted(set(state) - TOP_LEVEL_V6)))
 
         self.assertIsInstance(state.get("rounds"), list)
         self.assertTrue(state["rounds"], "the example must show at least one round")
-        self.assertIn("reviewer", state["rounds"][0],
+        self.assertEqual(set(state["rounds"][0]), ROUND_V6,
+                         "a round must be exactly v6: missing %s, unexpected %s"
+                         % (sorted(ROUND_V6 - set(state["rounds"][0])),
+                            sorted(set(state["rounds"][0]) - ROUND_V6)))
+        self.assertIn("reviewer", ROUND_V6,
                       "`reviewer` is per round: one run can mix a dispatched critic with a "
                       "self-reviewed round, and a summary reporting only one would misdescribe it")
 
-        self.assertIsInstance(state.get("carried_forward"), list)
-        self.assertIsInstance(state.get("translation_review"), dict)
-        self.assertIn("reviewer", state["translation_review"])
+        self.assertIsInstance(state["carried_forward"], list)
+        self.assertEqual(set(state["translation_review"]), TRANSLATION_V6)
 
     def test_stop_severity_domain_and_default(self):
         self.assertIn("--stop-severity", self.text)
@@ -205,11 +222,25 @@ class TestSkillContract(unittest.TestCase):
         self.assertIn("final-bilingual.md", self.text)
 
     def test_translation_review_degradation_is_a_conditional(self):
-        """Both branches. With the flag, self-review; without it, a recorded skip — and neither
-        aborts finalize, or an optional feature becomes load-bearing."""
-        self.assertRegex(self.norm, r"--allow-self-review")
+        """Both branches, and finalize completing in each.
+
+        With `--allow-self-review` the pass is self-reviewed and marked; without it there is a recorded
+        skip. Either way the document is produced — an advisory pass that could fail finalize would
+        make an optional feature load-bearing.
+        """
+        self.assertIn("--allow-self-review", self.text)
         self.assertIn("recorded skip", self.norm)
-        self.assertRegex(self.norm, r"never abort|does not abort|without aborting")
+        self.assertRegex(self.norm, r"either way the document is produced|finalize (still )?completes")
+
+    def test_the_translation_pass_is_declared_advisory_rather_than_argued_local(self):
+        """The contract owns the gating-versus-advisory distinction.
+
+        An earlier draft asserted locally that the no-abort rule was "this loop's rather than the
+        contract's" — which is the argument that would erode the refusal if every loop got to make it.
+        The boundary now lives in the contract and this skill cites it.
+        """
+        self.assertIn("reviewer-contract.md#gating-reviews-and-advisory-passes", self.text)
+        self.assertIn("advisory", self.norm)
 
     def test_a_self_reviewed_round_is_marked(self):
         """An unmarked self-review produces a run that looks reviewed and is not."""
@@ -319,6 +350,40 @@ class TestRenderer(unittest.TestCase):
                       "case-insensitive lookup")
         self.assertIn("alpha beta", pointer, "the source content must survive the fallback")
         self.assertLess(len(pointer), 4096, "the fallback must not have written into itself")
+
+    def test_relative_paths_do_not_crash_the_containment_check(self):
+        """`--root . docs/run/final.md` raised an uncaught ValueError from `relative_to`.
+
+        An absolute root and a relative destination share no prefix, so containment could not even be
+        computed — an ordinary invocation crashed rather than refusing. Both are now lifted into one
+        lexical frame.
+        """
+        nested = self.ws / "docs" / "run"
+        nested.mkdir(parents=True)
+        (nested / "final.md").write_text("# P\n\nbody\n", encoding="utf-8")
+        env = dict(os.environ)
+        env["VIBE_SUITE_PANDOC_BIN"] = str(self.ws / "no-such-pandoc")
+        result = subprocess.run(
+            [sys.executable, str(RENDERER), "--root", ".", "docs/run/final.md"],
+            cwd=self.ws, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr, "containment must refuse, never crash")
+        self.assertIn(FALLBACK_MARKER_TEXT,
+                      (nested / "FINAL.md").read_text(encoding="utf-8"))
+
+    def test_a_destination_outside_the_root_is_refused_not_crashed(self):
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, True)
+        source = self.write("final.md", "# P\n\nbody\n")
+        env = dict(os.environ)
+        env["VIBE_SUITE_PANDOC_BIN"] = str(self.ws / "no-such-pandoc")
+        result = subprocess.run(
+            [sys.executable, str(RENDERER), "--root", str(self.ws), str(source),
+             "--out", str(outside)],
+            cwd=self.ws, env=env, capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(result.returncode, 0, "a write outside the root must not succeed")
+        self.assertNotIn("Traceback", result.stderr, "it must refuse in words, not by traceback")
+        self.assertIn("refusing", result.stderr.lower())
 
     def test_the_metadata_banner_carries_counts(self):
         source = self.write("final.md", "# Plan\n\nalpha beta gamma delta\n")

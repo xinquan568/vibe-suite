@@ -39,6 +39,33 @@ EXIT_OK, EXIT_BAD_INPUT, EXIT_BAD_ROOT, EXIT_WRITE_FAILED = 0, 2, 3, 4
 FALLBACK_MARKER = "pandoc unavailable"
 
 
+def _lexical(path):
+    """Absolute and lexically normalised — `..` collapsed, symlinks untouched.
+
+    `.resolve()` is wrong here: it follows a caller-supplied final symlink and hands `bridge` the
+    target rather than the thing it was asked to refuse. But `.absolute()` alone leaves `..` in place,
+    so a root spelled `sub/..` and a destination spelled from the real parent do not share a prefix and
+    `relative_to` raises instead of refusing. `normpath` collapses the traversal without resolving
+    anything, which is the only operation that serves both.
+    """
+    return Path(os.path.normpath(os.path.join(os.getcwd(), str(path))))
+
+
+def _write(root, dest, content):
+    """One write path, and a containment failure that refuses rather than crashing.
+
+    `bridge` raises `ValueError` from `relative_to` when a destination shares no prefix with the root —
+    an alias the lexical pass cannot see, for instance. That is a refusal in every sense except the
+    exception type, and an uncaught traceback is a worse way to say it.
+    """
+    try:
+        bridge.write_atomic(root, dest, content)
+    except (bridge.BridgeError, ValueError) as exc:
+        print("render_final: refusing to write %s: %s" % (dest, exc), file=sys.stderr)
+        return False
+    return True
+
+
 def banner(source_text):
     """Counted from the *source*, not the render.
 
@@ -98,7 +125,7 @@ def main(argv=None):
     # target instead of the thing it was asked to check — which is precisely the refusal
     # `assert_root` exists to make. Absolute, not resolved: `absolute()` prefixes the cwd and leaves
     # the identity alone.
-    root = Path(args.root).absolute()
+    root = _lexical(Path(args.root))
     try:
         bridge.assert_root(root)
         bridge.pin_root(root)
@@ -110,9 +137,7 @@ def main(argv=None):
     # computes containment with `relative_to`. A relative `--out` against an absolute root raises
     # `ValueError` rather than refusing — an ordinary invocation like `--root . docs/run/plan.md`
     # crashed before this.
-    source = Path(args.source)
-    if not source.is_absolute():
-        source = (Path.cwd() / source)
+    source = _lexical(Path(args.source))
     if not source.is_file():
         print("render_final: no readable source markdown (%s)" % args.source, file=sys.stderr)
         return EXIT_BAD_INPUT
@@ -121,19 +146,14 @@ def main(argv=None):
     head = banner(text)
     print("render_final: %s" % head)
 
-    outdir = Path(args.out) if args.out else source.parent
-    if not outdir.is_absolute():
-        outdir = Path.cwd() / outdir
+    outdir = _lexical(Path(args.out)) if args.out else source.parent
     document = "*%s*\n\n---\n\n%s" % (head, text)
 
     pandoc = pandoc_binary()
     if pandoc:
         html = render_html(pandoc, document)
         if html is not None:
-            try:
-                bridge.write_atomic(root, outdir / "FINAL.html", html)
-            except bridge.BridgeError as exc:
-                print("render_final: %s" % exc, file=sys.stderr)
+            if not _write(root, outdir / "FINAL.html", html):
                 return EXIT_WRITE_FAILED
             print("render_final: wrote %s" % (outdir / "FINAL.html"))
             return EXIT_OK
@@ -153,10 +173,7 @@ def main(argv=None):
     # (macOS by default). The shell version read the source while redirecting into it and wrote into
     # itself until the process was killed. Reading the source fully before writing — which happened
     # above — is what makes the collision harmless here.
-    try:
-        bridge.write_atomic(root, outdir / "FINAL.md", pointer)
-    except bridge.BridgeError as exc:
-        print("render_final: %s" % exc, file=sys.stderr)
+    if not _write(root, outdir / "FINAL.md", pointer):
         return EXIT_WRITE_FAILED
 
     print("render_final: wrote %s (markdown pointer)" % (outdir / "FINAL.md"))

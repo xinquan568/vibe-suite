@@ -17,18 +17,20 @@ rule is added.
 and five call sites pass `valid syntax` or `valid JSON`. Literal-only extraction finds 28; the engine
 can emit 30.
 
-**What a fake engine can prove, and what it cannot.** A fake codex process is a *stimulus*: it proves
-dispatch arguments, prompt contents, failure classification, and that a divergent payload reaches the
-command. It cannot prove a host session renders the disagreement list or the F9.5 header — no process
-in this repository performs host rendering. Those assertions are command-contract coverage plus
-stimulus coverage; the rendered result is the operator's to check.
+**What a fake engine can prove, and what it cannot.** `TestLaneStimulus` spawns the real runner against
+`fixtures/fake-codex/lane-responder.mjs`, so dispatch arguments, the packaged prompt, the
+unusable-vs-unreachable split, and a divergent payload's trip back through the runner are all observed
+rather than asserted about prose. It cannot prove a host session renders the disagreement list or the
+F9.5 header — no process in this repository performs host rendering. Those two remain command-contract
+coverage; the rendered result is the operator's to check.
 """
 
 import ast
 import json
+import os
 import re
 import subprocess
-import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -274,6 +276,123 @@ class TestSharedLaneDiscipline(unittest.TestCase):
                     if "codex-runner.mjs" in line:
                         self.assertIn("read-only", line)
                 self.assertNotIn("workspace-write", text)
+
+
+class TestLaneStimulus(unittest.TestCase):
+    """Drive the real runner against a fake engine — the coverage the contract tests cannot give.
+
+    Everything above reads Markdown and Python source. That proves the commands *say* the right
+    thing; it cannot prove the lane *does* it, and a review pass caught exactly that gap. These four
+    tests spawn `scripts/codex-runner.mjs` with `VIBE_SUITE_CODEX_BIN` pointed at
+    `tests/fixtures/fake-codex/lane-responder.mjs`, which records the prompt it was handed and
+    returns a payload chosen by `VIBE_TEST_LANE_MODE`.
+
+    Still out of reach, and deliberately so: the *rendered* comparison. No process here runs a host
+    session, so what the operator sees is checked by the command contract, not by this class.
+    """
+
+    RUNNER = REPO_ROOT / "scripts" / "codex-runner.mjs"
+    FIXTURE = REPO_ROOT / "tests" / "fixtures" / "fake-codex" / "lane-responder.mjs"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.ws = Path(self._tmp.name)
+        self.probe = self.ws / "probe.json"
+        self.addCleanup(self._tmp.cleanup)
+
+    def dispatch(self, prompt, mode="agree", bin_path=None):
+        env = dict(os.environ)
+        env["VIBE_SUITE_CODEX_BIN"] = str(bin_path or self.FIXTURE)
+        env["VIBE_TEST_PROBE"] = str(self.probe)
+        env["VIBE_TEST_LANE_MODE"] = mode
+        completed = subprocess.run(
+            ["node", str(self.RUNNER), "--kind", "review", "--effort", "low",
+             "--sandbox", "read-only", "--timeout-ms", "10000", "--", prompt],
+            cwd=self.ws, env=env, capture_output=True, text=True, timeout=60)
+        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, f"expected one result line, got {lines!r}")
+        return completed, json.loads(lines[0])
+
+    @staticmethod
+    def catalog():
+        literal, propagated = emit_catalog(ENGINE.read_text(encoding="utf-8"))
+        return literal | propagated
+
+    @staticmethod
+    def lane_answer(result):
+        """The engine's answer, dug out of the event stream the runner hands back verbatim.
+
+        `rawOutput` is the whole JSONL stream, not the payload — reading it as JSON directly is the
+        mistake this helper exists to stop anyone repeating.
+        """
+        for line in result["rawOutput"].splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if event.get("type") == "item.completed":
+                return event["text"]
+        raise AssertionError("no item.completed event in the stream")
+
+    def lane_prompt(self):
+        """What the command tells the lane to package: the rubric, plus the generated catalog."""
+        catalog = sorted(self.catalog())
+        return ("Score this artifact against the packaged rubric.\n"
+                "Rules: R01-R51, or -- where the row has no rule id.\n"
+                "Return findings as {rule, check, line, penalty} records.\n"
+                "Valid check identifiers:\n" + "\n".join(catalog) + "\n")
+
+    def test_prompt_carries_the_generated_catalog(self):
+        """F4.2's 'same rubric' claim, observed on the wire rather than in prose."""
+        prompt = self.lane_prompt()
+        self.dispatch(prompt)
+        argv = json.loads(self.probe.read_text())["argv"]
+        sent = argv[-1]
+        self.assertIn("valid syntax", sent)
+        self.assertIn("valid JSON", sent)
+        self.assertIn("frontmatter parse", sent)
+        self.assertIn("{rule, check, line, penalty}", sent)
+        for check in self.catalog():
+            self.assertIn(check, sent, f"the lane prompt dropped check identifier {check!r}")
+
+    def test_stdin_is_closed_for_the_lane(self):
+        """An open stdin hangs codex forever — the one failure that looks like a slow review."""
+        self.dispatch(self.lane_prompt())
+        self.assertEqual(json.loads(self.probe.read_text())["stdin"], "eof")
+
+    def test_divergent_payload_compares_as_a_record_multiset(self):
+        """D3, exercised: a differing score AND an extra finding both surface as disagreements."""
+        _, agreed = self.dispatch(self.lane_prompt(), mode="agree")
+        _, diverged = self.dispatch(self.lane_prompt(), mode="diverge")
+
+        def records(result):
+            payload = json.loads(self.lane_answer(result))
+            return payload["score"], [
+                (f["rule"], f["check"], f["line"], f["penalty"]) for f in payload["findings"]]
+
+        agreed_score, agreed_findings = records(agreed)
+        diverged_score, diverged_findings = records(diverged)
+
+        self.assertNotEqual(agreed_score, diverged_score, "the fixture must actually diverge")
+        extra = [r for r in diverged_findings if r not in agreed_findings]
+        self.assertEqual(len(extra), 1)
+        self.assertEqual(extra[0][1], "scope note")
+        for _rule, check, _line, _penalty in agreed_findings:
+            self.assertIn(check, self.catalog(),
+                          "an agreeing lane must speak the engine's vocabulary")
+
+    def test_unusable_and_unreachable_are_different_states(self):
+        """`fallback.md` gives them different hops — collapsing them is the defect to prevent."""
+        _, unusable = self.dispatch(self.lane_prompt(), mode="unusable")
+        self.assertEqual(unusable["status"], "completed",
+                         "a reachable engine that answers uselessly still completed its turn")
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(self.lane_answer(unusable))
+
+        completed, unreachable = self.dispatch(
+            self.lane_prompt(), bin_path=self.ws / "no-such-engine")
+        self.assertEqual(unreachable["status"], "failed")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotEqual(unusable["status"], unreachable["status"])
 
 
 if __name__ == "__main__":

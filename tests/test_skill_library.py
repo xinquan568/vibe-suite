@@ -22,11 +22,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO_ROOT / "skills"
 
 #: The F4.8 roster: nlpm's 17 knowledge skills + cc-suite's 2, minus the conventions-claude
-#: merge, plus vibe-core (E0.2). Asserted as EXACT equality with what is on disk — a later
-#: stage that ships a new skill extends this tuple in the same PR, which keeps the roster an
-#: explicit, reviewed fact rather than a drifting side effect.
+#: merge, plus vibe-core (E0.2) and auditing (E4.1 — the nl-audit dimension corpus).
+#: Asserted as EXACT equality with what is on disk — a later stage that ships a new skill
+#: extends this tuple in the same PR, which keeps the roster an explicit, reviewed fact
+#: rather than a drifting side effect.
 ROSTER = (
     "agent-design",
+    "auditing",
     "conventions",
     "conventions-antigravity",
     "conventions-claude",

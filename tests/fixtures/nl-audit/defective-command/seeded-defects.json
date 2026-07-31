@@ -1,0 +1,41 @@
+{
+  "type": "command",
+  "floor": 6,
+  "classes": [
+    {
+      "id": "bad frontmatter",
+      "dimension": "D0",
+      "description": "'descriptionn' is misspelled, so the command has no description key"
+    },
+    {
+      "id": "muddled workflow",
+      "dimension": "D1",
+      "description": "the steps are reorderable and the stop condition is 'feels done'"
+    },
+    {
+      "id": "over-broad allowed-tools",
+      "dimension": "D2",
+      "description": "ten tools declared for a read-and-report command"
+    },
+    {
+      "id": "missing output spec",
+      "dimension": "D3",
+      "description": "'report whatever you found' fixes no output shape"
+    },
+    {
+      "id": "unhandled empty input",
+      "dimension": "D4",
+      "description": "no branch for empty $ARGUMENTS; the rm expands to /tmp"
+    },
+    {
+      "id": "unsafe arguments interpolation",
+      "dimension": "D5",
+      "description": "$ARGUMENTS is interpolated unquoted into a shell line"
+    },
+    {
+      "id": "duplicated partial logic",
+      "dimension": "D6",
+      "description": "re-implements commands/shared/discover.md inline"
+    }
+  ]
+}

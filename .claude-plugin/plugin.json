@@ -34,7 +34,8 @@
     "./commands/test.md",
     "./commands/vocab.md",
     "./commands/spec-sync.md",
-    "./commands/security-scan.md"
+    "./commands/security-scan.md",
+    "./commands/nl-audit.md"
   ],
   "hooks": "./hooks/hooks.json",
   "agents": [
@@ -49,6 +50,7 @@
   ],
   "skills": [
     "./skills/agent-design",
+    "./skills/auditing",
     "./skills/conventions",
     "./skills/conventions-antigravity",
     "./skills/conventions-claude",

@@ -1,0 +1,41 @@
+{
+  "type": "plugin",
+  "floor": 6,
+  "classes": [
+    {
+      "id": "manifest disk mismatch",
+      "dimension": "D0",
+      "description": "the manifest registers ./commands/absent.md, which is not on disk"
+    },
+    {
+      "id": "spec gaps",
+      "dimension": "D1",
+      "description": "build.md states no inputs, no outputs and no failure behaviour"
+    },
+    {
+      "id": "risky hook",
+      "dimension": "D2",
+      "description": "the PreToolUse hook pipes a remote script into a shell"
+    },
+    {
+      "id": "broken cross-refs",
+      "dimension": "D3",
+      "description": "both commands reference a packager agent and a shared partial that do not exist"
+    },
+    {
+      "id": "contradictory commands",
+      "dimension": "D4",
+      "description": "clean.md both forbids and requires optimized builds"
+    },
+    {
+      "id": "missing error paths",
+      "dimension": "D5",
+      "description": "no command says what happens when the build fails"
+    },
+    {
+      "id": "unmaintainable duplication",
+      "dimension": "D6",
+      "description": "clean.md repeats build.md's body verbatim"
+    }
+  ]
+}

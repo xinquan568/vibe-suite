@@ -24,6 +24,62 @@
 
 export const EXIT = { ok: 0, refused: 2, manual: 3 };
 
+// `commands/shared/fallback.md` specifies the diagnostic header as a *structured* block — three
+// named fields, not a sentence:
+//
+//     **{engine} unavailable — {what ran instead}.** To restore:
+//     - binary on PATH: {yes — <path> / no}
+//     - authentication: {ok / expired / unknown}
+//     - suggested fix: {the hop's restoration guidance}
+//
+// Round 1 of this module emitted only the sentence, which satisfied "a header was emitted" and none
+// of what the header is *for*: a user seeing degraded output learns that something was unreachable
+// but not which of the two ordinary causes it was, so the remedy stays a guess. E4.1 (vibe-35) adds
+// the fields; the sentences are unchanged, so every assertion written against them still holds.
+//
+// The block is appended to the same `emitHeader` call rather than emitted separately — the hand-off
+// count is part of this module's observable contract, and two calls where there was one would read
+// as two hand-offs.
+
+/** Per-edge restoration guidance, transcribed from `fallback.md`'s chain table. */
+const RESTORATION = {
+  agy: "install the agy CLI if the binary is absent; if present, run its login flow and confirm a "
+    + "model is available to the account. /vibe-suite:preflight reports the full lane matrix.",
+  codex: "`npm install -g @openai/codex` if the binary is absent; if present, `codex login` to "
+    + "refresh authentication. /vibe-suite:preflight reports the full lane matrix.",
+};
+
+/**
+ * Authentication state, read from the outcome rather than probed.
+ *
+ * Probing a CLI's auth state means invoking it, and the engine we are describing is the one that
+ * just failed — a second invocation would cost another timeout to learn what the first already
+ * reported. `unknown` is the honest answer when the signature says nothing, and an honest `unknown`
+ * is more useful than a confident guess: the suggested-fix line covers both branches anyway.
+ */
+function authState(outcome) {
+  const signature = String(outcome?.error ?? outcome?.status ?? "").toLowerCase();
+  if (signature.includes("unauthenticated") || signature.includes("auth")) return "expired";
+  if (signature.includes("quota")) return "ok (quota exhausted)";
+  return "unknown";
+}
+
+/**
+ * The three-field block. `probeBinary` is injected so this module stays free of process spawning;
+ * callers that can afford a lookup supply one, and callers that cannot get `unknown` rather than a
+ * fabricated answer.
+ */
+export function restorationBlock(engine, outcome, probeBinary) {
+  const found = typeof probeBinary === "function" ? probeBinary(engine) : null;
+  const onPath = found == null ? "unknown" : (found ? `yes — ${found}` : "no");
+  return [
+    "To restore:",
+    `- binary on PATH: ${onPath}`,
+    `- authentication: ${authState(outcome)}`,
+    `- suggested fix: ${RESTORATION[engine] ?? "check the engine's installation and authentication."}`,
+  ].join("\n");
+}
+
 /**
  * Any non-completion is a hand-off with disclosure.
  *
@@ -46,7 +102,7 @@ const completed = (outcome) => outcome?.status === "completed";
  * or null when the engine is not installed at all; `deps.emitHeader` receives the diagnostic.
  */
 export async function runWithFallback(deps) {
-  const { runAgy, runCodex, emitHeader, gate } = deps;
+  const { runAgy, runCodex, emitHeader, gate, probeBinary } = deps;
 
   // The gate is a REQUIRED dependency, checked before anything is dispatched. Documenting that this
   // chain is post-graduation-only and then calling runAgy unconditionally is how the round-1 code
@@ -64,7 +120,8 @@ export async function runWithFallback(deps) {
   const unreachable = isUnreachable(agy);
   if (unreachable) {
     emitHeader(`agy is unreachable (${agy?.error ?? agy?.status ?? "not installed"}) — handing off `
-      + `to codex. Check the lane with /vibe-suite:preflight.`);
+      + `to codex. Check the lane with /vibe-suite:preflight.\n`
+      + restorationBlock("agy", agy, probeBinary));
   }
 
   const codex = await runCodex();
@@ -73,7 +130,8 @@ export async function runWithFallback(deps) {
   }
 
   emitHeader(`codex is unreachable too (${codex?.error ?? codex?.status ?? "not installed"}) — no `
-    + `engine could run this analysis. Install or authenticate one, or run it in-session.`);
+    + `engine could run this analysis. Install or authenticate one, or run it in-session.\n`
+    + restorationBlock("codex", codex, probeBinary));
   return {
     outcome: "manual",
     result: null,

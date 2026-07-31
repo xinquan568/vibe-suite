@@ -14,6 +14,7 @@
 // **Node floor: 18.** No top-level await.
 
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +22,24 @@ import { agyGate } from "./lib/agy-gate.mjs";
 import { EXIT, runWithFallback } from "./lib/agy-fallback.mjs";
 
 const SELF_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Where an engine's binary actually is, or `false` when it is nowhere on PATH.
+ *
+ * The diagnostic header's first field is "binary on PATH", and the two ordinary causes of an
+ * unreachable engine — not installed, versus installed but not authenticated — need different
+ * remedies. Answering it costs one `command -v`; guessing it costs the user a wrong fix.
+ *
+ * The override seams are honoured first: a run pinned to `VIBE_SUITE_AGY_BIN` is not using PATH, and
+ * reporting a PATH lookup for it would describe a resolution that did not happen.
+ */
+function probeBinary(engine) {
+  const override = process.env[`VIBE_SUITE_${engine.toUpperCase()}_BIN`];
+  if (override) return existsSync(override) ? override : false;
+  const found = spawnSync("sh", ["-c", `command -v ${engine}`], { encoding: "utf8" });
+  const resolved = (found.stdout || "").trim();
+  return resolved || false;
+}
 
 function dispatch(runner, args, cwd) {
   const result = spawnSync(process.execPath, [path.join(SELF_DIR, runner), ...args],
@@ -49,6 +68,7 @@ async function main() {
     runAgy: async () => dispatch("agy-runner.mjs", shared, cwd),
     runCodex: async () => dispatch("codex-runner.mjs", ["--sandbox", "read-only", ...shared], cwd),
     emitHeader: (text) => process.stderr.write(`agy-audit: ${text}\n`),
+    probeBinary,
   });
 
   if (outcome.outcome === "refused") {

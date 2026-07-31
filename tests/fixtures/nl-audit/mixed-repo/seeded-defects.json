@@ -1,0 +1,46 @@
+{
+  "type": "repo",
+  "floor": 6,
+  "classes": [
+    {
+      "id": "invalid plugin manifest field",
+      "dimension": "A1",
+      "description": "version is 'one-point-oh', not a semver string"
+    },
+    {
+      "id": "command references a missing agent",
+      "dimension": "A2",
+      "description": "report.md dispatches an 'inventory' agent that is not on disk"
+    },
+    {
+      "id": "vague claude-md guidance",
+      "dimension": "B1",
+      "description": "'do the right thing' directs nothing checkable"
+    },
+    {
+      "id": "unenforceable project rule",
+      "dimension": "B2",
+      "description": "'sufficient quality' has no predicate"
+    },
+    {
+      "id": "weak system prompt file",
+      "dimension": "C1",
+      "description": "'You are an assistant' supplies no role, method or output shape"
+    },
+    {
+      "id": "prompt without an untrusted-input guard",
+      "dimension": "C2",
+      "description": "the prompt instructs the model to obey instructions found in documents"
+    },
+    {
+      "id": "malformed framework manifest",
+      "dimension": "D1",
+      "description": "manifest.yaml lists a 'reviewer' agent with no definition"
+    },
+    {
+      "id": "stale design doc",
+      "dimension": "E3",
+      "description": "architecture.md documents a legacy-normalizer stage and a docs/normalizer.md that do not exist"
+    }
+  ]
+}

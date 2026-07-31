@@ -1,0 +1,8 @@
+{
+  "name": "mixed-repo-fixture",
+  "version": "one-point-oh",
+  "description": "Fixture repository spanning discovery categories A-E.",
+  "commands": [
+    "./commands/report.md"
+  ]
+}

@@ -604,12 +604,18 @@ class TestGoldenRuns(unittest.TestCase):
         for mode in self.MODE_STEPS:
             with self.subTest(mode=mode):
                 text = (self.GOLDEN / mode / "disclosure.txt").read_text(encoding="utf-8")
-                self.assertIn(mapping[mode], text)
+                # **Reconstructed, not searched for.** `assertIn` is a substring test: shortening the
+                # mapping's `full` value to a prefix of what the golden already said would have left
+                # the golden unchanged and still passed, so changing the mapping did not have to fail.
+                expected = ("Produced by the nine-step /vibe-suite:issue2pr pipeline %s "
+                            "(review-mode `%s`)." % (mapping[mode], mode))
+                if mode != "none":
+                    expected += " Reviewer: a non-worker model via the codex backend."
+                self.assertEqual(text.strip(), expected,
+                                 "the golden disclosure must be exactly what the mapping renders")
                 if mode == "none":
                     self.assertNotIn("backend", text,
                                      "naming a backend under `none` implies one was dispatched")
-                else:
-                    self.assertIn("backend", text)
 
     def test_the_state_values_are_checked_not_only_its_keys(self):
         """Key-set equality passed a `completed` run with no change recorded at all."""

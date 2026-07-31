@@ -1,0 +1,70 @@
+{
+  "name": "sample-repo",
+  "purpose": "AC-3 structural fixture for /vibe-suite:roast (E4.3 / vibe-37). One seeded issue per cc-suite audit dimension.",
+  "dimensions_source": "cc-suite commands/audit.md:126-172 (v1.2.0), supplied by the issue owner",
+  "issues": [
+    {
+      "id": "SR-1",
+      "dimension": "Redundant & Low-Value Code",
+      "file": "app/legacy.py",
+      "line": 9,
+      "detail": "unused import hashlib, unreachable _unused_helper, commented-out old_render"
+    },
+    {
+      "id": "SR-2",
+      "dimension": "Security & Risk Management",
+      "file": "app/deploy.py",
+      "line": 10,
+      "detail": "shell=True with an interpolated target, plus a hard-coded API token"
+    },
+    {
+      "id": "SR-3",
+      "dimension": "Code Correctness & Reliability",
+      "file": "app/report.py",
+      "line": 6,
+      "detail": "off-by-one in last_n, swallowed OSError, file handle never closed"
+    },
+    {
+      "id": "SR-4",
+      "dimension": "Compliance & Standards",
+      "file": "app/Compat.py",
+      "line": 4,
+      "detail": "deprecated imp module; CapWords module and function names against convention"
+    },
+    {
+      "id": "SR-5",
+      "dimension": "Maintainability & Readability",
+      "file": "app/pricing.py",
+      "line": 5,
+      "detail": "five levels of nesting, magic numbers 1.0825 / 0.87 / 4200, 40-line body"
+    },
+    {
+      "id": "SR-6",
+      "dimension": "Performance & Efficiency",
+      "file": "app/store.py",
+      "line": 7,
+      "detail": "N+1 query: one round trip per order id"
+    },
+    {
+      "id": "SR-7",
+      "dimension": "Testing & Validation",
+      "file": "tests/test_pricing.py",
+      "line": 7,
+      "detail": "the only test asserts True and cannot fail"
+    },
+    {
+      "id": "SR-8",
+      "dimension": "Dependency & Environment Safety",
+      "file": "requirements.txt",
+      "line": 1,
+      "detail": "unpinned dependencies, no lockfile, credentials in config/settings.json, no .gitignore"
+    },
+    {
+      "id": "SR-9",
+      "dimension": "Documentation & Knowledge Transfer",
+      "file": "app/api.py",
+      "line": 4,
+      "detail": "six-parameter public API with no docstring; README cites a missing docs/architecture.md and a main.py that does not exist"
+    }
+  ]
+}

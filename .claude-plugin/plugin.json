@@ -35,7 +35,8 @@
     "./commands/vocab.md",
     "./commands/spec-sync.md",
     "./commands/security-scan.md",
-    "./commands/nl-audit.md"
+    "./commands/nl-audit.md",
+    "./commands/roast.md"
   ],
   "hooks": "./hooks/hooks.json",
   "agents": [
@@ -74,6 +75,7 @@
     "./skills/writing-plugins",
     "./skills/writing-prompts",
     "./skills/writing-rules",
-    "./skills/writing-skills"
+    "./skills/writing-skills",
+    "./skills/roasting"
   ]
 }

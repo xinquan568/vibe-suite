@@ -62,19 +62,37 @@ appears, or a second backend, this is the decision to revisit.
 """
 
 
+def _strings(value, label):
+    """Every string that will be rendered, with the path that reaches it.
+
+    Scalars, list items, **and map keys and values**. Missing the map case was an injection: this
+    commit began rendering `scenario_overrides` and `category_extensions` while the check still looked
+    only at scalars and lists, so a value containing a newline wrote a **new top-level field** into the
+    frontmatter — and `validate_text` then saw a syntactically fine document and returned no errors.
+    A check that does not reach everything it renders is not a check.
+    """
+    if isinstance(value, str):
+        yield label, value
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _strings(item, "%s[%d]" % (label, index))
+    elif isinstance(value, dict):
+        for key, item in sorted(value.items()):
+            yield from _strings(key, "%s (key)" % label)
+            yield from _strings(item, "%s.%s" % (label, key))
+
+
 def unrenderable(fields):
-    """Every value the closed grammar cannot carry, named with its field."""
+    """Every value the closed grammar cannot carry, named with the path that reaches it."""
     problems = []
     for name, value in sorted(fields.items()):
-        for item in (value if isinstance(value, list) else [value]):
-            if not isinstance(item, str):
-                continue
+        for label, item in _strings(value, name):
             if UNRENDERABLE.search(item):
                 problems.append("%s: contains a newline or control character, which the profile "
-                                "grammar cannot carry" % name)
+                                "grammar cannot carry — and would inject a field" % label)
             elif item.count("'") % 2 or item.count('"') % 2:
                 problems.append("%s: contains an unbalanced quote, and the grammar has no escaping "
-                                "convention" % name)
+                                "convention" % label)
     return problems
 
 
@@ -167,7 +185,9 @@ def current_pointer(text):
     span = frontmatter_span(text)
     if not span:
         return None
-    match = re.search(r"(?m)^issue2pr_profile:[ \t]*(\S+)[ \t]*$", text[span[0]:span[1]])
+    # `[ \t]*$` cannot consume a carriage return, so a CRLF file matched nothing and the pointer
+    # was appended instead of replaced — a duplicate key in a grammar that forbids them.
+    match = re.search(r"(?m)^issue2pr_profile:[ \t]*(\S+)[ \t\r]*$", text[span[0]:span[1]])
     return match.group(1) if match else None
 
 
@@ -185,7 +205,7 @@ def set_pointer(text, profile_id):
 
     start, end = span
     head, body, tail = text[:start], text[start:end], text[end:]
-    replaced, count = re.subn(r"(?m)^issue2pr_profile:[ \t]*\S*[ \t]*$", entry, body, count=1)
+    replaced, count = re.subn(r"(?m)^issue2pr_profile:[ \t]*\S*[ \t\r]*$", entry, body, count=1)
     if count:
         return head + replaced + tail
     newline = "\r\n" if "\r\n" in body or "\r\n" in head else "\n"

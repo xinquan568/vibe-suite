@@ -579,6 +579,25 @@ class TestBoundaryLint(unittest.TestCase):
         self.assertNotEqual(self.lint(sibling).returncode, 0,
                             "the exemption is one file, not the references directory")
 
+    def test_the_bootstrap_exemption_covers_only_the_two_named_probes(self):
+        """A per-file skip cannot enforce a claim about *which* probes.
+
+        The exemption is argued as "two read-only probes"; skipping the whole file would also have
+        exempted a mutating `gh pr create` placed in it, which is a different and much larger claim.
+        """
+        mutating = self.write("skills/issue2pr/references/profile-init.md",
+                              "# init\n\n```sh\ngh pr create --fill\n```\n")
+        result = self.lint(mutating)
+        self.assertNotEqual(result.returncode, 0,
+                            "a mutating command is not one of the named probes")
+
+    def test_both_named_probes_are_allowed_in_the_bootstrap_file(self):
+        for probe in ("gh api user --jq .login", "gh issue list --repo o/r --limit 1"):
+            with self.subTest(probe=probe):
+                allowed = self.write("skills/issue2pr/references/profile-init.md",
+                                     "# init\n\n```sh\n%s\n```\n" % probe)
+                self.assertEqual(self.lint(allowed).returncode, 0)
+
     def test_the_github_driver_is_the_one_place_it_is_allowed(self):
         allowed = self.write("skills/issue2pr/drivers/github.md",
                              "# github\n\n```sh\ngh pr create --fill\n```\n")

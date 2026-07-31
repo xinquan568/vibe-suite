@@ -52,11 +52,19 @@ DRIVER = Path("skills") / "issue2pr" / "drivers" / "github.md"
 #: the profile the command is being run to create. The circularity is real, not an excuse, which is why
 #: this is a named second exemption rather than a widened first one.
 #:
-#: The exemption is narrow deliberately: this file, and only the identity and reachability probes it
-#: documents. It publishes nothing and reads nothing about a work item.
+#: The exemption is narrow deliberately: this file, and only the probes named below.
 PRE_PROFILE = Path("skills") / "issue2pr" / "references" / "profile-init.md"
 
-EXEMPT = (DRIVER, PRE_PROFILE)
+#: **Exactly which invocations** the bootstrap file may carry. Skipping the file wholesale would have
+#: exempted a mutating `gh pr create` sitting in it — the claim was "two read-only probes", and a
+#: per-file skip cannot enforce a claim about which probes.
+#:
+#: Both are read-only and neither concerns a work item's content: one asks who is authenticated, the
+#: other whether the repository answers at all.
+PRE_PROFILE_ALLOWED = (
+    re.compile(r"^gh\s+api\s+user\b"),
+    re.compile(r"^gh\s+issue\s+list\b"),
+)
 
 #: Enumerated, not inferred. `tests/**` is excluded because a fixture must be able to contain the
 #: thing being prohibited.
@@ -132,6 +140,15 @@ def scan(path, text):
     return markdown_hits(text)
 
 
+def _bootstrap_allowed(snippet):
+    """Whether a bootstrap invocation is one of the two probes the exemption actually names."""
+    command = COMMAND_FORM.search(snippet)
+    if not command:
+        return False
+    tail = snippet[command.start():]
+    return any(pattern.match(tail) for pattern in PRE_PROFILE_ALLOWED)
+
+
 def targets(root, explicit):
     if explicit:
         return [Path(p) for p in explicit]
@@ -162,15 +179,17 @@ def main(argv=None):
         except ValueError:
             violations.append("%s  (outside --root; refusing to judge it)" % path)
             continue
-        if relative in EXEMPT:
+        if relative == DRIVER:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for number, snippet in scan(path, text):
+            if relative == PRE_PROFILE and _bootstrap_allowed(snippet):
+                continue
             violations.append("%s:%d  %s" % (relative, number, snippet[:100]))
 
     if violations:
-        print("gh_boundary_lint: %d invocation(s) outside %s"
-              % (len(violations), " and ".join(str(path) for path in EXEMPT)), file=sys.stderr)
+        print("gh_boundary_lint: %d invocation(s) outside %s (and the two bootstrap probes in %s)"
+              % (len(violations), DRIVER, PRE_PROFILE), file=sys.stderr)
         for violation in violations:
             print("  - %s" % violation, file=sys.stderr)
         return EXIT_VIOLATION

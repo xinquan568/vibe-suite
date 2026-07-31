@@ -483,6 +483,54 @@ class TestSerialization(WriteCase):
         self.assertEqual(parsed["gates"], [gate])
 
 
+class TestInjection(WriteCase):
+    """A check that does not reach everything it renders is not a check."""
+
+    def test_a_newline_in_a_map_value_cannot_inject_a_field(self):
+        """The regression this commit's predecessor introduced.
+
+        Rendering gained map fields while the refusal still looked only at scalars and lists, so a
+        `scenario_overrides` value carrying a newline wrote a **new top-level field** — and the
+        in-memory lint then saw a syntactically fine document and reported nothing.
+        """
+        result = self.write(self.fields(
+            scenario_overrides={"hotfix": "bug-fix'\nreviewer_backend: 'injected"}))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.ws / "profiles" / "demo.md").exists())
+        # The *grammar* check must be what refuses. Asserting only that "inject" appeared passed even
+        # with map inspection removed, because the injected field happened to be one the lint knows
+        # and its own error message contained the word — a coincidence, not a check.
+        report = result.stdout + result.stderr
+        self.assertIn("cannot carry", report,
+                      "the refusal must come from the renderability check, not from the lint "
+                      "happening to dislike whatever got injected")
+        self.assertIn("scenario_overrides", report, "and it must name the path that reaches it")
+
+    def test_a_newline_in_a_map_key_cannot_inject_a_field(self):
+        result = self.write(self.fields(
+            scenario_overrides={"hotfix'\nreviewer_backend: 'x": "bug-fix"}))
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_the_failure_names_the_path_that_reaches_the_value(self):
+        result = self.write(self.fields(anti_patterns=["fine", "bad\nvalue"]))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("anti_patterns[1]", result.stdout + result.stderr)
+
+
+class TestCrlfPointer(WriteCase):
+    def test_an_existing_crlf_pointer_is_replaced_not_duplicated(self):
+        """`[ \t]*$` cannot consume a carriage return, so a CRLF file matched nothing and the entry
+        was appended — a duplicate key in a grammar that forbids them."""
+        config = self.ws / ".vibe-suite.md"
+        config.write_text("---\r\nissue2pr_profile: other\r\n---\r\n",
+                          encoding="utf-8", newline="")
+        result = self.write(None, "--force")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = config.read_text(encoding="utf-8", newline="")
+        self.assertEqual(after.count("issue2pr_profile:"), 1, "the entry must be replaced, not added")
+        self.assertIn("demo", after)
+
+
 class TestReferenceStatesTheInterview(unittest.TestCase):
     """Contract tier: the skill *enumerates* its prompts. Elicitation is the operator's."""
 

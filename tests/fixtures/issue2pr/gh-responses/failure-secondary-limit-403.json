@@ -1,0 +1,13 @@
+{
+  "_invocation": "gh api repos/{owner}/{repo}/issues/{n}/comments",
+  "_docs": "https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit",
+  "_observation": "secondary limit delivered as 403 with Retry-After \u2014 documented alongside the 429 form",
+  "exit_code": 1,
+  "http_status": 403,
+  "headers": {
+    "retry-after": "60",
+    "x-ratelimit-remaining": "4321"
+  },
+  "stderr": "HTTP 403: You have exceeded a secondary rate limit",
+  "body": ""
+}

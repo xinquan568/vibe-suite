@@ -71,7 +71,9 @@ def classify(fixture):
     The rule, and why status alone is insufficient:
 
     - **no response at all** → `unavailable`.
-    - **429, or a documented secondary-limit response** → `rate_limited`, honouring `Retry-After`.
+    - **429 → `rate_limited`**, honouring `Retry-After`.
+    - **403 carrying `Retry-After`** → `rate_limited` too: a secondary limit is documented as *either*
+      status, and the 403 form leaves `remaining` non-zero, so the primary-limit test does not see it.
     - **403 with `x-ratelimit-remaining: 0` and a reset** → `rate_limited` (primary limit).
     - **any other 401/403** → `unauthorized`. A 403 merely *carrying* rate-limit headers is not
       throttling: those headers accompany ordinary responses, so classifying on their presence turns a
@@ -87,6 +89,11 @@ def classify(fixture):
         return "rate_limited", True, headers.get("retry-after")
     if status == 403 and headers.get("x-ratelimit-remaining") == "0" and headers.get("x-ratelimit-reset"):
         return "rate_limited", True, headers.get("x-ratelimit-reset")
+    # A secondary limit is documented as **403 or 429**, and the 403 form carries `Retry-After` while
+    # leaving `remaining` non-zero. Mapping every non-primary 403 to `unauthorized` stopped a run that
+    # would have succeeded after the stated wait.
+    if status == 403 and headers.get("retry-after"):
+        return "rate_limited", True, headers.get("retry-after")
     if status in (401, 403):
         return "unauthorized", False, None
     if 200 <= status < 300 and not isinstance(fixture.get("body"), (list, dict)):
@@ -120,7 +127,7 @@ class TestSpikeFixtures(unittest.TestCase):
         expected = {"new-general-comment", "new-review-comment", "review-submitted",
                     "check-failed", "merged", "failure-transport", "failure-auth",
                     "failure-auth-403", "failure-rate-limit", "failure-secondary-limit",
-                    "failure-malformed"}
+                    "failure-secondary-limit-403", "failure-malformed"}
         self.assertEqual(set(self.fixtures), expected)
 
     def test_every_fixture_records_a_concrete_invocation_and_a_documentation_url(self):
@@ -136,8 +143,8 @@ class TestSpikeFixtures(unittest.TestCase):
     def test_every_fixture_carries_raw_response_facts(self):
         for name, payload in self.fixtures.items():
             with self.subTest(fixture=name):
-                self.assertIn("http_status", payload)
-                self.assertIn("headers", payload)
+                for field in ("http_status", "headers", "exit_code", "body"):
+                    self.assertIn(field, payload, f"{name} omits the raw field {field}")
                 for verdict in ("_class", "_retryable", "_since_supported"):
                     self.assertNotIn(verdict, payload,
                                      f"{name} carries a hand-written verdict; the rule computes it")
@@ -149,6 +156,7 @@ class TestSpikeFixtures(unittest.TestCase):
             "failure-auth-403": ("unauthorized", False),
             "failure-rate-limit": ("rate_limited", True),
             "failure-secondary-limit": ("rate_limited", True),
+            "failure-secondary-limit-403": ("rate_limited", True),
             "failure-malformed": ("unusable", False),
         }
         for name, (want_class, want_retryable) in expected.items():
@@ -175,7 +183,8 @@ class TestSpikeFixtures(unittest.TestCase):
     def test_both_throttling_forms_carry_when_to_retry(self):
         """Without a time, `rate_limited` is indistinguishable from `unavailable` and a wait is a spin.
         Primary limits give a reset; secondary limits give `Retry-After`."""
-        for name in ("failure-rate-limit", "failure-secondary-limit"):
+        for name in ("failure-rate-limit", "failure-secondary-limit",
+                     "failure-secondary-limit-403"):
             with self.subTest(fixture=name):
                 cls, retryable, when = classify(self.fixtures[name])
                 self.assertEqual(cls, "rate_limited")
@@ -199,11 +208,39 @@ class TestSpikeFixtures(unittest.TestCase):
                 self.assertIn("-X GET", payload["_invocation"],
                               "adding a field without -X GET turns the read into a write")
 
-    def test_the_four_observation_collections_are_distinct(self):
-        """The fact that rejected `updated_at`: one timestamp cannot say which of these moved."""
-        collections = {p["_collection"] for p in self.fixtures.values() if "_collection" in p}
-        self.assertGreaterEqual(len(collections & {"comments", "review_comments", "reviews", "checks"}), 4)
+    def test_the_observation_collections_are_separate_endpoints(self):
+        """The fact that rejected `updated_at`, derived from the recorded invocations.
 
+        A first attempt compared timestamp field names and asserted only that they were not *all*
+        identical — which stayed green when two collections were made to agree, because a third still
+        differed. The property that actually matters is upstream of the payloads: these are **four
+        different endpoints**, so a single `updated_at` on the change cannot say which of them moved.
+
+        The endpoint comes from `_invocation`, which is a command someone can run — a raw fact, not a
+        conclusion I wrote down.
+        """
+        endpoints = set()
+        for payload in self.fixtures.values():
+            invocation = payload.get("_invocation", "")
+            match = re.search(r"repos/\{owner\}/\{repo\}/(\S+)", invocation)
+            if match:
+                endpoints.add(re.sub(r"\{[^}]+\}", "*", match.group(1)))
+        observation_endpoints = {e for e in endpoints if not e.endswith("issues/*/comments")} | \
+                                {e for e in endpoints if e.endswith("issues/*/comments")}
+        self.assertGreaterEqual(len(observation_endpoints), 4,
+                                f"expected four distinct endpoints, found {sorted(endpoints)}")
+
+    def test_no_two_observation_scenarios_share_an_endpoint(self):
+        """Two scenarios on one endpoint would be one observation described twice."""
+        seen = {}
+        for name, payload in self.fixtures.items():
+            if "_collection" not in payload:
+                continue
+            endpoint = re.sub(r"\{[^}]+\}", "*", payload["_invocation"])
+            with self.subTest(scenario=name):
+                self.assertNotIn(endpoint, seen,
+                                 f"{name} and {seen.get(endpoint)} read the same endpoint")
+            seen[endpoint] = name
 
 class TestProtocolRefinement(unittest.TestCase):
     """The core's declaration, asserted against exact values rather than names."""

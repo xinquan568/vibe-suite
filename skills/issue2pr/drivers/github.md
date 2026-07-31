@@ -106,7 +106,8 @@ have to know how the record is stored.
 | GitHub signal | Class | What the core does |
 |---|---|---|
 | no response — connection error, DNS failure, timeout | `unavailable` | retry |
-| HTTP 429, or a documented secondary-limit response | `rate_limited` | wait for `Retry-After`, then retry |
+| HTTP 429 | `rate_limited` | wait for `Retry-After`, then retry |
+| HTTP 403 carrying `Retry-After` | `rate_limited` | wait for `Retry-After`, then retry |
 | HTTP 403 with `x-ratelimit-remaining: 0` **and** a reset | `rate_limited` | wait for the reset, then retry |
 | any other HTTP 401 or 403 | `unauthorized` | stop and tell the operator |
 | HTTP 2xx whose body is not the documented shape | `unusable` | stop; the system answered and the answer is the problem |
@@ -115,9 +116,10 @@ have to know how the record is stored.
 carrying `x-ratelimit-remaining: 4998` is a permission failure, and classifying it as throttling would
 retry it forever. Only `remaining: 0` with a reset is the primary limit.
 
-**Secondary limits are a different response**: 429 with `Retry-After` and no reset. A mapping that
-looked only for the reset header would miss them and fall through to `unauthorized`, stopping a run that
-would have succeeded after a minute.
+**A secondary limit arrives as either 403 or 429**, and the 403 form is the trap: it carries
+`Retry-After` while leaving `remaining` non-zero, so the primary-limit test does not see it and a rule
+that mapped every other 403 to `unauthorized` would stop a run that would have succeeded after the
+stated wait. `Retry-After` is what distinguishes it from a permission failure.
 
 **Both throttling forms carry when to retry**, and that is not optional — without a time the class is
 indistinguishable from `unavailable`, and a wait becomes a spin. **Retries are bounded**: the classes

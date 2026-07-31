@@ -1,0 +1,74 @@
+[
+  {
+    "step": 1,
+    "phase": "analyze",
+    "at": "2026-08-01T00:00:00Z",
+    "actor": "worker",
+    "outcome": "completed",
+    "note": ""
+  },
+  {
+    "step": 2,
+    "phase": "analyze",
+    "at": "2026-08-01T00:00:00Z",
+    "actor": "reviewer",
+    "outcome": "completed",
+    "note": ""
+  },
+  {
+    "step": 3,
+    "phase": "analyze",
+    "at": "2026-08-01T00:00:00Z",
+    "actor": "worker",
+    "outcome": "completed",
+    "note": ""
+  },
+  {
+    "step": 4,
+    "phase": "plan",
+    "at": "2026-08-01T00:00:00Z",
+    "actor": "worker",
+    "outcome": "completed",
+    "note": ""
+  },
+  {
+    "step": 5,
+    "phase": "plan",
+    "at": "2026-08-01T00:00:00Z",
+    "actor": "reviewer",
+    "outcome": "completed",
+    "note": ""
+  },
+  {
+    "step": 6,
+    "phase": "plan",
+    "at": "2026-08-01T00:00:00Z",
+    "actor": "worker",
+    "outcome": "completed",
+    "note": ""
+  },
+  {
+    "step": 7,
+    "phase": "execute",
+    "at": "2026-08-01T00:00:00Z",
+    "actor": "worker",
+    "outcome": "completed",
+    "note": ""
+  },
+  {
+    "step": 8,
+    "phase": "execute",
+    "at": "2026-08-01T00:00:00Z",
+    "actor": "reviewer",
+    "outcome": "completed",
+    "note": ""
+  },
+  {
+    "step": 9,
+    "phase": "execute",
+    "at": "2026-08-01T00:00:00Z",
+    "actor": "worker",
+    "outcome": "completed",
+    "note": ""
+  }
+]

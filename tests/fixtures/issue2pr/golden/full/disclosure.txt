@@ -1,0 +1,1 @@
+Produced by the nine-step /vibe-suite:issue2pr pipeline with independent review and reviewer-verified finding closure (review-mode `full`). Reviewer: a non-worker model via the codex backend.

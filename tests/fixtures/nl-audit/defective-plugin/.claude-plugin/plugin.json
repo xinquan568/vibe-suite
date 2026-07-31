@@ -1,0 +1,11 @@
+{
+  "name": "defective-plugin-fixture",
+  "version": "0.1.0",
+  "description": "Fixture plugin with structural and behavioural defects.",
+  "commands": [
+    "./commands/build.md",
+    "./commands/clean.md",
+    "./commands/absent.md"
+  ],
+  "hooks": "./hooks/hooks.json"
+}

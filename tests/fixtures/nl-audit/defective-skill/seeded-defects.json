@@ -1,0 +1,56 @@
+{
+  "type": "skill",
+  "floor": 8,
+  "classes": [
+    {
+      "id": "missing name",
+      "dimension": "D0",
+      "description": "frontmatter has description only; no name key"
+    },
+    {
+      "id": "generic description",
+      "dimension": "D1",
+      "description": "'A helpful skill for working with data.' names no trigger"
+    },
+    {
+      "id": "redundant content",
+      "dimension": "D2",
+      "description": "the Batch Sizing paragraph is repeated verbatim"
+    },
+    {
+      "id": ">500-line body",
+      "dimension": "D3",
+      "description": "580-line body; the skill carries no progressive disclosure"
+    },
+    {
+      "id": "domain mixing",
+      "dimension": "D4",
+      "description": "SQL tuning, CSS styling, email etiquette and CSV validation in one skill"
+    },
+    {
+      "id": "missing scope note",
+      "dimension": "D4",
+      "description": "no scope note and no cross-reference to a sibling skill"
+    },
+    {
+      "id": "broken references link",
+      "dimension": "D5",
+      "description": "links to references/missing.md, which is not on disk"
+    },
+    {
+      "id": "orphaned registration",
+      "dimension": "D5",
+      "description": "the manifest registers ./skills/ghost and omits ./skills/defective"
+    },
+    {
+      "id": "pseudocode example",
+      "dimension": "D6",
+      "description": "the first fence is pseudocode rather than runnable syntax"
+    },
+    {
+      "id": "vague quantifiers",
+      "dimension": "D6",
+      "description": "12 flagged quantifier occurrences with no measurable criteria"
+    }
+  ]
+}

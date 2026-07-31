@@ -1,0 +1,41 @@
+{
+  "type": "rules",
+  "floor": 6,
+  "classes": [
+    {
+      "id": "unparseable rule",
+      "dimension": "D0",
+      "description": "broken.md carries an unterminated YAML sequence in its frontmatter"
+    },
+    {
+      "id": "unenforceable vagueness",
+      "dimension": "D1",
+      "description": "'clean and readable ... where appropriate' has no predicate"
+    },
+    {
+      "id": "token bloat",
+      "dimension": "D2",
+      "description": "the naming rule spends a paragraph restating one sentence"
+    },
+    {
+      "id": "two conflicting rules",
+      "dimension": "D3",
+      "description": "always run the formatter vs never run the formatter"
+    },
+    {
+      "id": "missing path scope",
+      "dimension": "D4",
+      "description": "no rule states which paths it governs"
+    },
+    {
+      "id": "rule duplicating a linter",
+      "dimension": "D5",
+      "description": "the 100-character limit is already a formatter setting"
+    },
+    {
+      "id": "stale reference",
+      "dimension": "D6",
+      "description": "docs/legacy-style-guide.md is not on disk"
+    }
+  ]
+}

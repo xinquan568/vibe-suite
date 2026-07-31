@@ -1,0 +1,8 @@
+{
+  "name": "defective-agent-fixture",
+  "version": "0.1.0",
+  "description": "Fixture plugin holding one deliberately defective agent.",
+  "agents": [
+    "./agents/helper.md"
+  ]
+}

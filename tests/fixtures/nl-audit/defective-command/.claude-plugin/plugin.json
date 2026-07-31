@@ -1,0 +1,8 @@
+{
+  "name": "defective-command-fixture",
+  "version": "0.1.0",
+  "description": "Fixture plugin holding one deliberately defective command.",
+  "commands": [
+    "./commands/process.md"
+  ]
+}

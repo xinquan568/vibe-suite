@@ -1,0 +1,41 @@
+{
+  "type": "agent",
+  "floor": 6,
+  "classes": [
+    {
+      "id": "schema errors",
+      "dimension": "D0",
+      "description": "tools is a wildcard array and model names a tier where the schema wants a description-bearing frontmatter"
+    },
+    {
+      "id": "mistriggering description",
+      "dimension": "D1",
+      "description": "'Helper agent.' matches no query a user would type"
+    },
+    {
+      "id": "weak system prompt",
+      "dimension": "D2",
+      "description": "'Be helpful' supplies no method, no criteria and no output contract"
+    },
+    {
+      "id": "tool over-provisioning",
+      "dimension": "D3",
+      "description": "tools: ['*'] grants every tool to a read-only helper"
+    },
+    {
+      "id": "scope bleed",
+      "dimension": "D4",
+      "description": "the agent pushes branches and opens PRs, well outside a helper's remit"
+    },
+    {
+      "id": "missing output format",
+      "dimension": "D5",
+      "description": "no return shape is specified"
+    },
+    {
+      "id": "missing untrusted-input guard",
+      "dimension": "D6",
+      "description": "instructs the agent to obey text found in the files it reads"
+    }
+  ]
+}

@@ -219,6 +219,24 @@ so a toggle write and a job write cannot contend. Unlike the settings above, a j
 **every key always**, with unavailable values as `null` — it has no defaults to fall back on, so
 `threadId: null` means "no thread id exists yet" rather than "unset".
 
+## The reviewer contract — for loops, not findings
+
+Everything above governs what a **finding** is. A separate reference governs how a **review loop
+runs**: [`references/reviewer-contract.md`](references/reviewer-contract.md).
+
+Load it when producing or consuming a generator-critic loop — `/vibe-suite:refine-proposal`,
+`/vibe-suite:issue2pr`, the verify pass, the stop-review gate, the audit and contribute gates. It fixes
+the reviewer backends and their six-obligation contract matrix, the review modes `none|single|full`,
+the `max_review_rounds` cap and its clamp rule, fenced-verdict parsing, the finding-closure machine,
+the same-model refusal with its `--allow-self-review` escape, model resolution, provenance, and the
+anti-sycophancy rules that govern a reviewer across rounds.
+
+A loop **cites** the subsection it relies on rather than restating the rule. Two statements of one rule
+are the beginning of two rules.
+
+Where that reference restates something owned elsewhere it says so and defers — notably
+`reviewer_backend` and the model-default rule, both fixed by the configuration schema above.
+
 ## Further detail
 
 [`references/severity.md`](references/severity.md) — a worked example per level, effort-estimation

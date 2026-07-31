@@ -1,0 +1,172 @@
+# The shared reviewer contract
+
+Every generator-critic loop in vibe-suite runs on this contract. It exists so that a `major` raised in
+one loop means what a `major` means in another, and so that a run which *looks* reviewed actually was.
+
+The loops that must cite it: `/vibe-suite:refine-proposal`, `/vibe-suite:issue2pr`, the verify pass, the
+stop-review gate, and the audit and contribute gates. A loop cites the subsection it relies on; it does
+not restate the rule, because a second statement of a rule is the beginning of two rules.
+
+**Where this reference and an operative authority disagree, the authority wins.** Three of the rules
+below are owned elsewhere and are reproduced here only for orientation: the backend enum and the
+stored-default rule belong to [`../SKILL.md`](../SKILL.md)'s configuration schema, and the
+no-pinned-model-ids rule belongs to the shipped model-pin lint. Each such rule says so where it appears.
+
+## Reviewer backends
+
+The reviewer must not be the worker. The worker is the session doing the work; the reviewer is reached
+through a **backend**.
+
+`reviewer_backend` is defined by the configuration schema in [`../SKILL.md`](../SKILL.md), and **that
+schema governs** its membership and default. Today it has one member, `codex`. An earlier plan named a
+second, `copilot-cli`; it was dropped because no contract for it existed to port, and the schema has
+never listed it.
+
+### The contract matrix
+
+Six obligations. The left column is what **any** backend must supply — the row is the interface, and a
+new backend adds a column rather than a rewrite.
+
+| Obligation | What it means | `codex` |
+|---|---|---|
+| **Dispatch** | A non-interactive invocation that terminates without a human. | `codex exec … < /dev/null`. The redirect is load-bearing: without it the CLI waits on stdin forever, and a review that never returns looks exactly like a slow one. |
+| **Read-only guard** | The reviewer cannot modify what it reviews. | `-s read-only`. |
+| **Output capture** | The verdict is retrievable, and a run that produced none is distinguishable from one that produced an empty one. | `-o <result>` for the text, `--json` for the event stream. **The exit code is not a success signal** — an upstream outage has been observed exiting 0 with no result file written and a `turn.failed` event in the stream. A completed-turn event is the only positive confirmation. |
+| **Token accounting** | Cost is attributable to the round that incurred it. | Read from the completed-turn event's usage. Bill uncached input plus output. |
+| **Pre-flight** | Unavailability is detected before work depends on it. | A version probe and a trivial round-trip. |
+| **Quota signature** | An exhausted allowance is **distinguishable from a substantive rejection**. | A recognisable refusal in the stream, separate from a verdict. |
+
+The last row is the one most easily collapsed into the others and the one that must not be. An
+exhausted quota is retryable later; a rejection is a judgement. A loop that treats them alike either
+retries a verdict or abandons a round it could have finished.
+
+**An unavailable backend is a refusal, not a downgrade.** A loop that quietly stops reviewing still
+produces output, and that output carries the authority of a review it never had. See *self-review*
+below for the one authorised exception and the mark it must leave.
+
+## Review modes
+
+| Mode | Reviewer dispatched | Update pass | Bounded loop | Cap flag |
+|---|---|---|---|---|
+| `none` | never | none | none | ignored, with a printed notice |
+| `single` | once | one worker pass, self-reported closure | none | ignored, with a printed notice |
+| `full` | once per phase | worker pass plus reviewer verify | yes, bounded by the cap | applies |
+
+Three properties hold in every mode, because they are what the modes *mean* rather than how a
+particular loop spells them:
+
+- **Canonical step numbering is preserved.** A mode that skips a step does not renumber the steps that
+  remain. State, resume, and reporting stay comparable across modes.
+- **`none` requires no backend.** Pre-flight is skipped rather than failed — the one mode where an
+  absent backend is not a problem.
+- **A degraded backend is never a silent downgrade to `none`.** Choosing not to review is the
+  operator's call, expressed by passing `none`. A loop making that choice on their behalf, because
+  something was unavailable, produces work that looks reviewed and is not.
+
+## Round bounds
+
+The cap on review rounds is `max_review_rounds`, set by `--max-review-rounds`. It is an integer.
+
+**Each loop declares its own domain in a `## Round bounds` section** — stating `floor`, `ceiling` and
+`default` as **labelled** values — and says why its floor is what it is. Labels are required because a
+bare list of numbers cannot say which is which, and a reader who guesses wrong gets a cap nobody chose. The floors differ for a real reason, and a loop that declared one without a reason would be
+diverging from this contract even while matching its key.
+
+Clamping is **not** per-loop:
+
+- an out-of-range integer clamps to the nearest bound, with a notice naming the supplied and the
+  clamped value;
+- a **non-integer is an error, not a clamp** — silently rounding a typo produces a cap nobody chose.
+
+## Verdict parsing
+
+A reviewer answers with **one fenced YAML block**, tagged `yaml`:
+
+````
+```yaml
+verdict: approve
+findings: []
+```
+````
+
+The format is fixed by this contract, not chosen per loop. A loop free to pick its own could claim
+conformance while emitting something no other loop can read, which would leave the shared contract
+sharing nothing.
+
+Parsing it is four steps, and the third is the one that gets dropped:
+
+1. The message must **end** with the block, and only the **last** fenced block is parsed. A reviewer
+   that thinks aloud before answering is still parseable; one whose commentary is mistaken for its
+   verdict is not.
+2. Malformed → **re-ask exactly once**, for only the block.
+3. Still malformed → **record the round as failed and continue.**
+4. **Never abort the run** because a verdict would not parse.
+
+Step 3 is more work than raising an error, which is why it is stated as an obligation. A parse failure
+is information about one round, not grounds for discarding the rest.
+
+## The closure machine
+
+```
+open → fixed | declined → accepted_decline | challenged_once → final_decline
+```
+
+A finding carries a **stable id** across rounds, so a challenge refers to the same finding it answers.
+
+**A finding may be challenged at most once.** Without that rule the machine has a cycle — declined,
+challenged, declined again — and bounded rounds stop bounding anything. The single challenge either
+contains a reason to change the finding or it does not; `final_decline` is a terminal state and is
+recorded, not re-litigated.
+
+## Same-model refusal and self-review
+
+The reviewer must not run on the worker's model family. A same-family review is an echo, and an echo
+that reports agreement is worse than no review, because it is indistinguishable from one.
+
+`--allow-self-review` is **two grants at once**: permission for a same-family review, and authorisation
+for the worker to play reviewer when the backend is unavailable.
+
+**It never engages implicitly.** Absent the flag, an unavailable backend is a refusal. When it is
+present and the fallback engages, the round records `reviewer: "self"`, carries no usage figures, and
+is flagged in the run's summary. An unmarked self-review is the precise failure this rule exists to
+prevent.
+
+## Model resolution
+
+Precedence: **user > project configuration > tool default.**
+
+- External CLIs run on their own configured default model unless overridden for that run.
+- In-session agents use tier aliases, which track a tier's current model rather than naming one.
+- An override is **never persisted** into a shipped artifact. A per-run choice that survives into the
+  repository is a pinned model with extra steps.
+
+Two of these are enforced elsewhere and stated here only for orientation: the **model-pin lint** owns
+"no pinned ids in shipped artifacts", and [`../SKILL.md`](../SKILL.md)'s schema owns the rule that every
+model-valued key's stored default is absent so that absence defers to the tool. What this section adds
+is the precedence order and the non-persistence rule.
+
+## Provenance
+
+A dispatched review prompt **opens with a line disclosing that the output is AI-generated and which
+loop produced it.** `commands/score.md` and `commands/security-scan.md` are the shipped precedent.
+
+Disclosure is at the suite level: the repository acknowledges the projects it references, and no
+artifact carries per-part attribution.
+
+## Anti-sycophancy
+
+The [finding contract](../SKILL.md) governs what a finding may contain — no padding, no severity
+inflation, no evidence-free assertion, no refusing to pick a side. These govern what a reviewer does
+**across rounds**, which is a different failure surface:
+
+- **A re-ask is not a signal to soften.** Asking again for a well-formed block is a parsing request.
+  The verdict does not move because it was requested twice.
+- **A challenge is answered on its merits, not on its persistence.** The one permitted challenge is
+  weighed for what it argues, never for the fact that it was made.
+- **Approval is not the cooperative default.** A reviewer that finds nothing says so with a clean
+  verdict. A reviewer that finds something does not discount it because the work is nearly finished.
+- **The worker's confidence is not evidence.** "This was verified" is a claim to check, not a reason to
+  close a finding.
+
+These are stated because they are the ways a review degrades while still producing well-formed output —
+and well-formed output is all the machinery downstream can see.

@@ -1,9 +1,10 @@
 {
-  "_invocation": "any",
-  "_docs": "A 200 whose body is not the documented shape — a proxy interstitial, a truncated stream.",
-  "_observation": "the source system answered and the answer is unusable",
-  "_class": "unusable",
-  "_retryable": false,
+  "_invocation": "gh api repos/{owner}/{repo}/issues/{n}/comments",
+  "_docs": "https://cli.github.com/manual/gh_api",
+  "_observation": "a 200 whose body is not the documented shape",
   "exit_code": 0,
-  "stdout": "<html>upstream timeout</html>"
+  "http_status": 200,
+  "headers": {},
+  "stderr": "",
+  "body": "<html>upstream timeout</html>"
 }

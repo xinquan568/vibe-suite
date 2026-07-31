@@ -161,7 +161,7 @@ pipeline instead.
 ```json
 {
   "fetch_item": {"in": ["source_id"], "out": "source-snapshot", "errors": ["not_found", "not_an_item", "unavailable", "rate_limited", "unauthorized", "unusable"]},
-  "refresh_item": {"in": ["source_id", "since"], "out": "source-delta", "errors": ["not_found", "unavailable", "rate_limited", "unauthorized", "unusable"]},
+  "refresh_item": {"in": ["source_id", "since", "previous_snapshot"], "out": "source-delta", "errors": ["not_found", "unavailable", "rate_limited", "unauthorized", "unusable"]},
   "open_change": {"in": ["branch", "title", "body", "base_branch"], "out": "change_ref", "errors": ["exists", "rejected", "unavailable", "rate_limited", "unauthorized", "unusable"]},
   "update_change": {"in": ["change_ref", "body"], "out": "change_ref", "errors": ["not_found", "rejected", "unavailable", "rate_limited", "unauthorized", "unusable"]},
   "read_change_state": {"in": ["change_ref", "since"], "out": "change_state", "errors": ["not_found", "unavailable", "rate_limited", "unauthorized", "unusable"]},

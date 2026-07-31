@@ -1,0 +1,12 @@
+{
+  "_invocation": "gh api repos/{owner}/{repo}/issues/{n}/comments",
+  "_docs": "https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api",
+  "_observation": "secondary limit: 429 with Retry-After and no reset",
+  "exit_code": 1,
+  "http_status": 429,
+  "headers": {
+    "retry-after": "60"
+  },
+  "stderr": "HTTP 429: You have exceeded a secondary rate limit",
+  "body": ""
+}

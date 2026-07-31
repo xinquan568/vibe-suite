@@ -1,10 +1,17 @@
 {
-  "_invocation": "gh api repos/{owner}/{repo}/commits/{sha}/check-runs",
-  "_docs": "GitHub REST: check runs for a ref. Listing does NOT accept `since`; each run carries completed_at.",
+  "_invocation": "gh api repos/{owner}/{repo}/commits/{sha}/check-runs --paginate",
+  "_docs": "https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference",
   "_observation": "a check moved to failure",
-  "_since_supported": false,
-  "checks": [
-    {"name": "test", "status": "completed", "conclusion": "failure",
-     "completed_at": "2026-08-01T09:15:00Z"}
+  "_collection": "checks",
+  "http_status": 200,
+  "headers": {},
+  "body": [
+    {
+      "name": "test",
+      "status": "completed",
+      "conclusion": "failure",
+      "started_at": "2026-08-01T09:12:00Z",
+      "completed_at": "2026-08-01T09:15:00Z"
+    }
   ]
 }

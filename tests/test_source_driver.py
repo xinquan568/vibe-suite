@@ -28,6 +28,7 @@ and mutation is one side at a time.
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,8 +59,57 @@ def norm(text):
     return re.sub(r"\s+", " ", text.replace("**", "").replace("`", "")).lower()
 
 
+def classify(fixture):
+    """The failure-classification rule, **applied here** rather than read out of the fixture.
+
+    The first version of this spike wrote `_class` and `_retryable` into each fixture and asserted them
+    back — which decorates a decision rather than justifying it, one level deeper than the earlier
+    circularity the plan review caught. The fixtures now carry raw facts (status, headers, exit code,
+    body) and this function is the rule. A wrong rule fails against the facts; a fixture cannot vouch
+    for itself.
+
+    The rule, and why status alone is insufficient:
+
+    - **no response at all** → `unavailable`.
+    - **429, or a documented secondary-limit response** → `rate_limited`, honouring `Retry-After`.
+    - **403 with `x-ratelimit-remaining: 0` and a reset** → `rate_limited` (primary limit).
+    - **any other 401/403** → `unauthorized`. A 403 merely *carrying* rate-limit headers is not
+      throttling: those headers accompany ordinary responses, so classifying on their presence turns a
+      permission failure into an infinite retry.
+    - **2xx whose body is not the documented shape** → `unusable`.
+    """
+    status = fixture.get("http_status")
+    headers = {k.lower(): v for k, v in (fixture.get("headers") or {}).items()}
+
+    if status is None:
+        return "unavailable", True, None
+    if status == 429:
+        return "rate_limited", True, headers.get("retry-after")
+    if status == 403 and headers.get("x-ratelimit-remaining") == "0" and headers.get("x-ratelimit-reset"):
+        return "rate_limited", True, headers.get("x-ratelimit-reset")
+    if status in (401, 403):
+        return "unauthorized", False, None
+    if 200 <= status < 300 and not isinstance(fixture.get("body"), (list, dict)):
+        return "unusable", False, None
+    return None, None, None
+
+
+def takes_since(fixture):
+    """Whether the recorded invocation actually passes a time parameter.
+
+    Derived from the invocation string, not from a hand-written boolean — the boolean was mine, and a
+    test asserting my own label proves only that I wrote it down twice.
+    """
+    return "since=" in fixture.get("_invocation", "")
+
+
 class TestSpikeFixtures(unittest.TestCase):
-    """The evidence. Every protocol claim below must trace to one of these."""
+    """The evidence, and it must be evidence rather than a label.
+
+    Each fixture records the invocation that produces it, a documentation URL for the shape, and the
+    **raw** response facts. Nothing here reads a conclusion out of a fixture: the conclusions are
+    computed above and compared against what the driver and the protocol claim.
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -69,55 +119,90 @@ class TestSpikeFixtures(unittest.TestCase):
     def test_the_scenario_set_is_complete(self):
         expected = {"new-general-comment", "new-review-comment", "review-submitted",
                     "check-failed", "merged", "failure-transport", "failure-auth",
-                    "failure-rate-limit", "failure-malformed"}
+                    "failure-auth-403", "failure-rate-limit", "failure-secondary-limit",
+                    "failure-malformed"}
         self.assertEqual(set(self.fixtures), expected)
 
-    def test_every_fixture_records_how_it_was_obtained(self):
-        """A fixture nobody can reproduce is a guess with a filename."""
+    def test_every_fixture_records_a_concrete_invocation_and_a_documentation_url(self):
+        """`invocation: any` and a prose label are not records — the earlier set had both."""
         for name, payload in self.fixtures.items():
             with self.subTest(fixture=name):
-                for key in ("_invocation", "_docs", "_observation"):
-                    self.assertIn(key, payload, f"{name} does not record {key}")
-                    self.assertTrue(str(payload[key]).strip())
+                invocation = payload.get("_invocation", "")
+                self.assertRegex(invocation, r"^gh\s+\w",
+                                 f"{name}: the invocation must be a concrete gh command")
+                self.assertRegex(payload.get("_docs", ""), r"^https://",
+                                 f"{name}: _docs must be a documentation URL, not a description")
 
-    def test_no_scenario_is_unresolved(self):
-        """An unresolved scenario blocks the refinement that depended on it — that is the gate."""
-        unresolved = [n for n, p in self.fixtures.items() if p.get("_unresolved")]
-        self.assertEqual(unresolved, [],
-                         f"unresolved scenarios block their refinements: {unresolved}")
+    def test_every_fixture_carries_raw_response_facts(self):
+        for name, payload in self.fixtures.items():
+            with self.subTest(fixture=name):
+                self.assertIn("http_status", payload)
+                self.assertIn("headers", payload)
+                for verdict in ("_class", "_retryable", "_since_supported"):
+                    self.assertNotIn(verdict, payload,
+                                     f"{name} carries a hand-written verdict; the rule computes it")
+
+    def test_the_rule_classifies_every_failure_fixture(self):
+        expected = {
+            "failure-transport": ("unavailable", True),
+            "failure-auth": ("unauthorized", False),
+            "failure-auth-403": ("unauthorized", False),
+            "failure-rate-limit": ("rate_limited", True),
+            "failure-secondary-limit": ("rate_limited", True),
+            "failure-malformed": ("unusable", False),
+        }
+        for name, (want_class, want_retryable) in expected.items():
+            with self.subTest(fixture=name):
+                got_class, got_retryable, _when = classify(self.fixtures[name])
+                self.assertEqual(got_class, want_class)
+                self.assertEqual(got_retryable, want_retryable)
+
+    def test_a_403_without_throttling_evidence_is_not_retryable(self):
+        """The fixture that makes status-alone insufficient.
+
+        Rate-limit headers accompany **ordinary** responses, so a 403 that merely carries them is not
+        throttled. Classifying on their presence would turn a permission failure into an infinite
+        retry — which is the failure the four classes exist to prevent.
+        """
+        cls, retryable, _ = classify(self.fixtures["failure-auth-403"])
+        self.assertEqual(cls, "unauthorized")
+        self.assertFalse(retryable)
+        headers = self.fixtures["failure-auth-403"]["headers"]
+        self.assertIn("x-ratelimit-remaining", headers,
+                      "the point of this fixture is that the headers ARE present")
+        self.assertNotEqual(headers["x-ratelimit-remaining"], "0")
+
+    def test_both_throttling_forms_carry_when_to_retry(self):
+        """Without a time, `rate_limited` is indistinguishable from `unavailable` and a wait is a spin.
+        Primary limits give a reset; secondary limits give `Retry-After`."""
+        for name in ("failure-rate-limit", "failure-secondary-limit"):
+            with self.subTest(fixture=name):
+                cls, retryable, when = classify(self.fixtures[name])
+                self.assertEqual(cls, "rate_limited")
+                self.assertTrue(retryable)
+                self.assertIsNotNone(when, "a retryable-later class must say when")
 
     def test_the_observation_scenarios_disagree_about_since(self):
-        """The fact that decided `since`'s meaning: some sources can filter, some cannot."""
-        supported = {n: p["_since_supported"] for n, p in self.fixtures.items()
-                     if "_since_supported" in p}
+        """Derived from the invocations. This is what fixed `since`'s meaning."""
+        supported = {n: takes_since(p) for n, p in self.fixtures.items() if "_collection" in p}
         self.assertEqual(len(supported), 5, "five observation scenarios")
-        self.assertTrue(any(supported.values()), "some source filtering is possible")
+        self.assertTrue(any(supported.values()), "some sources can filter")
         self.assertFalse(all(supported.values()),
                          "if every source could filter, the driver-filters rule would be moot")
 
-    def test_the_failure_fixtures_are_not_one_class(self):
-        """The fact that rejected a single `unavailable`: they differ in what the caller does next."""
-        classes = {p["_class"]: p["_retryable"] for p in self.fixtures.values() if "_class" in p}
-        self.assertEqual(set(classes), set(FAILURE_CLASSES))
-        self.assertTrue(any(classes.values()), "some failures are retryable")
-        self.assertFalse(all(classes.values()), "some are not — which is the whole distinction")
-
-    def test_the_rate_limited_fixture_carries_when_to_retry(self):
-        """`rate_limited` is retryable *later*, and without the time it is indistinguishable from
-        `unavailable` — which would make a wait into a spin."""
-        fixture = self.fixtures["failure-rate-limit"]
-        self.assertTrue(fixture["_retryable"])
-        self.assertIn("_retry_after", fixture)
+    def test_a_since_bearing_invocation_uses_an_explicit_get(self):
+        """`gh api` sends POST once fields are added, so a query parameter needs `-X GET`."""
+        for name, payload in self.fixtures.items():
+            if not takes_since(payload):
+                continue
+            with self.subTest(fixture=name):
+                self.assertIn("-X GET", payload["_invocation"],
+                              "adding a field without -X GET turns the read into a write")
 
     def test_the_four_observation_collections_are_distinct(self):
         """The fact that rejected `updated_at`: one timestamp cannot say which of these moved."""
-        collections = set()
-        for name in ("new-general-comment", "new-review-comment", "review-submitted", "check-failed"):
-            payload = self.fixtures[name]
-            keys = [k for k in payload if not k.startswith("_")]
-            collections.update(keys)
-        self.assertGreaterEqual(len(collections), 4,
-                                f"expected four independent collections, found {sorted(collections)}")
+        collections = {p["_collection"] for p in self.fixtures.values() if "_collection" in p}
+        self.assertGreaterEqual(len(collections & {"comments", "review_comments", "reviews", "checks"}), 4)
 
 
 class TestProtocolRefinement(unittest.TestCase):
@@ -168,19 +253,36 @@ class TestDriverContract(unittest.TestCase):
     def setUpClass(cls):
         cls.text = DRIVER_CONTRACT.read_text(encoding="utf-8")
         cls.protocol = json_block(SKILL.read_text(encoding="utf-8"), "driver-protocol")
-        cls.rows = dict(re.findall(r"(?m)^\|\s*`(\w+)`\s*\|\s*(.+?)\s*\|\s*$", cls.text))
+        # A **list**, not a dict. Converting to a dict collapsed duplicate rows before the test named
+        # "exactly one" could see them — so a contract with two conflicting rows for an operation
+        # passed the check that exists to forbid exactly that.
+        cls.rows = re.findall(r"(?m)^\|\s*`(\w+)`\s*\|\s*(.+?)\s*\|\s*$", cls.text)
+        cls.by_operation = {}
+        for name, obligation in cls.rows:
+            cls.by_operation.setdefault(name, []).append(obligation)
 
     def test_every_operation_has_exactly_one_obligation_row(self):
-        self.assertEqual(set(self.rows) & set(self.protocol), set(self.protocol),
-                         f"operations without a row: {sorted(set(self.protocol) - set(self.rows))}")
+        from collections import Counter
+        counts = Counter(name for name, _ in self.rows)
+        for operation in self.protocol:
+            with self.subTest(operation=operation):
+                self.assertEqual(counts[operation], 1,
+                                 f"{operation} has {counts[operation]} rows; two conflicting "
+                                 f"obligations is worse than none")
 
-    def test_no_row_names_an_operation_the_protocol_does_not_declare(self):
-        strays = [r for r in self.rows if r not in self.protocol and r in OPERATIONS]
-        self.assertEqual(strays, [])
+    def test_no_operation_shaped_row_is_undeclared(self):
+        """Restricting strays to a fixed tuple let an arbitrary invented operation row pass."""
+        declared = set(self.protocol)
+        for name, _obligation in self.rows:
+            if name in FAILURE_CLASSES or not re.fullmatch(r"[a-z]+_[a-z_]+", name):
+                continue                       # a failure class or a field name, not an operation
+            with self.subTest(row=name):
+                self.assertIn(name, declared,
+                              f"{name!r} reads as an operation the protocol does not declare")
 
     def test_each_row_names_its_operation_s_own_errors(self):
         """A row saying 'implement fetch_item' is a row that says nothing."""
-        for name, obligation in self.rows.items():
+        for name, obligation in self.rows:
             if name not in self.protocol:
                 continue
             with self.subTest(operation=name):
@@ -265,6 +367,60 @@ class TestDriverDocuments(unittest.TestCase):
                     self.assertTrue(action.strip(), f"{cls} has no action")
 
 
+class TestDriverTemporalObligations(unittest.TestCase):
+    """The two operations that take a time, and what implementing that actually requires."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = GITHUB_DRIVER.read_text(encoding="utf-8")
+        cls.protocol = json_block(SKILL.read_text(encoding="utf-8"), "driver-protocol")
+
+    def test_the_since_bearing_calls_use_an_explicit_get(self):
+        """`gh api` becomes a POST once a field is added, so the obvious spelling turns a read into a
+        write. This is not a style point."""
+        for line in self.text.splitlines():
+            if "since=" in line and line.strip().startswith("gh api"):
+                with self.subTest(line=line.strip()):
+                    self.assertIn("-X GET", line)
+
+    def test_the_collections_that_cannot_filter_declare_their_predicate(self):
+        """Three of five take no time parameter, so the driver filters — and must say how."""
+        low = norm(self.text)
+        for predicate in ("submitted_at", "completed_at", "started_at", "updatedat"):
+            with self.subTest(predicate=predicate):
+                self.assertIn(predicate, low)
+
+    def test_state_and_mergeable_are_described_as_current_not_deltas(self):
+        """Reporting them unconditionally makes every poll look like a transition."""
+        low = norm(self.text)
+        self.assertRegex(low, r"current values, not deltas|not deltas")
+
+    def test_refresh_item_takes_the_previous_snapshot(self):
+        """`title_changed`/`body_changed` cannot come from a re-read: no per-field history exists, and
+        `updatedAt` moves for any edit. A driver that remembered instead would give answers that
+        depend on which process asked."""
+        self.assertIn("previous_snapshot", self.protocol["refresh_item"]["in"])
+        self.assertIn("previous_snapshot", self.text)
+
+
+class TestFailureMappingMatchesTheRule(unittest.TestCase):
+    """The driver's table and the rule the tests apply must agree, or one of them is decoration."""
+
+    def test_the_driver_distinguishes_a_403_that_is_not_throttling(self):
+        low = norm(GITHUB_DRIVER.read_text(encoding="utf-8"))
+        self.assertIn("x-ratelimit-remaining: 0", low)
+        self.assertRegex(low, r"accompany ordinary responses|proves nothing")
+
+    def test_the_driver_maps_secondary_limits(self):
+        low = norm(GITHUB_DRIVER.read_text(encoding="utf-8"))
+        self.assertIn("429", low)
+        self.assertIn("retry-after", low)
+
+    def test_the_driver_bounds_retries(self):
+        low = norm(GITHUB_DRIVER.read_text(encoding="utf-8"))
+        self.assertRegex(low, r"bounded|not to retry indefinitely")
+
+
 class TestBoundaryLint(unittest.TestCase):
     """`gh` is invoked in one place. The rule is syntactic — no judgement is left in it."""
 
@@ -330,6 +486,38 @@ class TestBoundaryLint(unittest.TestCase):
         path = self.write("core.md", "# core\n\n```sh\ngh\n```\n")
         self.assertEqual(self.lint(path).returncode, 0,
                          "`gh` alone is not a command form and flagging it would be noise")
+
+    def test_only_the_exact_driver_path_is_exempt(self):
+        """A boundary a caller can step around by naming a file is not a boundary.
+
+        The basename fallback exempted any `drivers/github.md` — including one the recursive corpus
+        finds at a nested path, which is a direct route around the check.
+        """
+        nested = self.write("skills/issue2pr/vendor/drivers/github.md",
+                            "# not the driver\n\n```sh\ngh pr create --fill\n```\n")
+        result = self.lint(nested, root=self.ws)
+        self.assertNotEqual(result.returncode, 0,
+                            "only skills/issue2pr/drivers/github.md is exempt")
+
+    def test_a_target_outside_the_root_is_refused_rather_than_judged(self):
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, True)
+        stray = outside / "github.md"
+        stray.write_text("```sh\ngh pr create\n```\n", encoding="utf-8")
+        result = self.lint(stray, root=self.ws)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_a_tilde_fence_is_scanned_too(self):
+        """CommonMark has two fence forms; recognising one let commands through a scanned location."""
+        path = self.write("core.md", "# core\n\n~~~sh\ngh pr create --fill\n~~~\n")
+        self.assertNotEqual(self.lint(path).returncode, 0)
+
+    def test_unparseable_python_fails_closed(self):
+        """Returning no hits treated 'I could not look' as 'there is nothing there'."""
+        path = self.write("broken.py", 'def f(:\n    CMD = "gh pr create"\n')
+        result = self.lint(path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unparseable", (result.stdout + result.stderr).lower())
 
     def test_the_github_driver_is_the_one_place_it_is_allowed(self):
         allowed = self.write("skills/issue2pr/drivers/github.md",

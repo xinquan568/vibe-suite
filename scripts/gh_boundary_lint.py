@@ -25,8 +25,10 @@ and it fails in exactly three places:
 Everywhere else it passes, which is the prose case: `the gh CLI`, `see the github driver`. Bare `gh`
 with no subcommand never fails.
 
-**This admits one false negative on purpose**: an instruction written as unmarked prose — "run gh pr
-create to open it", without backticks — passes. That is unlikely under this repository's conventions,
+**Exactly one false negative is accepted, and it is this**: an instruction written as unmarked prose —
+"run gh pr create to open it", without backticks — passes. Two others found in review are *not*
+accepted and are closed: tilde fences are recognised alongside backticks, and an unparseable Python file
+**fails closed** rather than reporting nothing. That is unlikely under this repository's conventions,
 where a command is written in a code span, and the alternative is a rule that guesses at intent. **A
 lint that guesses gets switched off**, which is the failure this file exists to avoid rather than to
 demonstrate.
@@ -63,7 +65,9 @@ def markdown_hits(text):
     hits = []
     fenced = False
     for number, line in enumerate(text.splitlines(), 1):
-        if line.lstrip().startswith("```"):
+        # CommonMark has two fence forms. Recognising only backticks let a tilde-fenced command
+        # through a location the file claims to scan.
+        if line.lstrip().startswith("```") or line.lstrip().startswith("~~~"):
             fenced = not fenced
             continue
         if fenced:
@@ -85,7 +89,9 @@ def python_hits(text):
     try:
         tree = ast.parse(text)
     except SyntaxError:
-        return []
+        # Fail closed. Returning no hits meant an unparseable file containing `gh pr create` passed
+        # silently — a check that treats "I could not look" as "there is nothing there".
+        return [(0, "unparseable Python; the boundary cannot be checked here")]
     hits = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -136,11 +142,16 @@ def main(argv=None):
     for path in targets(root, args.paths):
         if not path.is_file():
             continue
+        # Every target must resolve beneath --root, and only the ONE exact path is exempt. The
+        # earlier basename fallback exempted any file called `drivers/github.md` anywhere — including
+        # a nested one the recursive corpus finds, and an explicitly supplied path outside the root.
+        # A boundary a caller can step around by naming a file is not a boundary.
         try:
-            relative = path.absolute().relative_to(root)
+            relative = path.resolve().relative_to(root.resolve())
         except ValueError:
-            relative = path
-        if relative == DRIVER or relative.name == DRIVER.name and relative.parent.name == "drivers":
+            violations.append("%s  (outside --root; refusing to judge it)" % path)
+            continue
+        if relative == DRIVER:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for number, snippet in scan(path, text):

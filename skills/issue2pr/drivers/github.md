@@ -26,11 +26,20 @@ driver checks what it got and refuses rather than starting a run against the wro
 ### `refresh_item`
 
 ```sh
-gh issue view <n> --repo <repo_id> --json comments,title,body
+gh api -X GET repos/<repo_id>/issues/<n>/comments -f since=<since> --paginate
+gh issue view <n> --repo <repo_id> --json title,body,updatedAt
 ```
 
-Filtered against `since` by the driver. The delta is the difference from the snapshot, not a re-read
-handed upward.
+**New comments come from the listing's own `since`.** `title_changed` and `body_changed` cannot: GitHub
+exposes no per-field history on this path, and `updatedAt` moves for any edit including a new comment.
+
+So the protocol carries `previous_snapshot`, and the driver compares against it. That is a
+protocol input, not hidden driver state, because the alternative is a driver that remembers — and a
+driver that remembers is one whose answers depend on which process asked. The core already freezes a
+snapshot per run; handing it back is what makes the delta derivable at all.
+
+Without that input this operation cannot return the declared `source-delta`, and saying so would have
+been the honest alternative to computing it somewhere invisible.
 
 ### `open_change`
 
@@ -53,20 +62,34 @@ survives a request body where it may not survive an argument.
 ### `read_change_state`
 
 ```sh
-gh api repos/<repo_id>/issues/<n>/comments --paginate
-gh api repos/<repo_id>/pulls/<n>/comments --paginate
-gh api repos/<repo_id>/pulls/<n>/reviews
-gh api repos/<repo_id>/commits/<sha>/check-runs
-gh pr view <n> --repo <repo_id> --json state,mergeable,mergedAt
+gh api -X GET repos/<repo_id>/issues/<n>/comments -f since=<since> --paginate
+gh api -X GET repos/<repo_id>/pulls/<n>/comments  -f since=<since> --paginate
+gh api repos/<repo_id>/pulls/<n>/reviews --paginate
+gh api repos/<repo_id>/commits/<sha>/check-runs --paginate
+gh pr view <n> --repo <repo_id> --json state,mergeable,mergedAt,updatedAt
 ```
 
-Five calls, because they are four independent collections plus the change itself.
+Five calls: four independent collections plus the change itself.
 
-**Two of the five accept a time parameter and three do not** — the issue-comments and
-pull-review-comments listings do; reviews, check-runs and the change view do not. So the driver
-filters the last three itself, against `since`. That asymmetry is why the obligation is "the driver
-filters", stated in the [driver contract](../references/driver-contract.md), rather than "the source
-filters": a contract written from the two convenient cases would have been wrong about the other three.
+**`-X GET` is required on the two that take `since`.** `gh api` switches to POST as soon as a field is
+added, so the obvious spelling turns a read into a write. Omitting it is not a style slip — it is the
+difference between listing comments and attempting to create one.
+
+**Three of the five cannot filter at the source, so the driver filters them.** Reviews, check-runs and
+the change view take no time parameter, so the driver applies the predicate itself:
+
+| Collection | Predicate applied against `since` |
+|---|---|
+| reviews | `submitted_at > since` |
+| check-runs | `completed_at > since`, or `started_at > since` when a run is still in progress |
+| the change | `updatedAt > since` decides whether `state` and `mergeable` are reported as changed |
+
+`state` and `mergeable` are **current values, not deltas** — a change is open or it is not — and
+`updatedAt` is what says whether that value moved within the window. Reporting them unconditionally
+would make every poll look like a transition.
+
+That asymmetry is exactly why the contract says *the driver filters* rather than *the source filters*.
+A rule written from the two convenient cases would have been wrong about the other three.
 
 ### `link_closure`
 
@@ -82,17 +105,23 @@ have to know how the record is stored.
 
 | GitHub signal | Class | What the core does |
 |---|---|---|
-| connection error, DNS failure, timeout before a response | `unavailable` | retry |
-| HTTP 403 with the rate-limit headers | `rate_limited` | wait until the reset it carries, then retry |
-| HTTP 401, or 403 without rate-limit headers | `unauthorized` | stop and tell the operator |
-| HTTP 200 whose body is not the documented shape | `unusable` | stop; the system answered and the answer is the problem |
+| no response — connection error, DNS failure, timeout | `unavailable` | retry |
+| HTTP 429, or a documented secondary-limit response | `rate_limited` | wait for `Retry-After`, then retry |
+| HTTP 403 with `x-ratelimit-remaining: 0` **and** a reset | `rate_limited` | wait for the reset, then retry |
+| any other HTTP 401 or 403 | `unauthorized` | stop and tell the operator |
+| HTTP 2xx whose body is not the documented shape | `unusable` | stop; the system answered and the answer is the problem |
 
-**`rate_limited` carries its reset time.** Without it the class is indistinguishable from
-`unavailable`, and a wait becomes a spin.
+**Rate-limit headers accompany ordinary responses**, so their mere presence proves nothing. A 403
+carrying `x-ratelimit-remaining: 4998` is a permission failure, and classifying it as throttling would
+retry it forever. Only `remaining: 0` with a reset is the primary limit.
 
-**`unauthorized` and `rate_limited` are both 403 in some responses**, which is exactly why the headers
-decide rather than the status. Reading the status alone would turn a permanent failure into an infinite
-retry.
+**Secondary limits are a different response**: 429 with `Retry-After` and no reset. A mapping that
+looked only for the reset header would miss them and fall through to `unauthorized`, stopping a run that
+would have succeeded after a minute.
+
+**Both throttling forms carry when to retry**, and that is not optional — without a time the class is
+indistinguishable from `unavailable`, and a wait becomes a spin. **Retries are bounded**: the classes
+say whether to retry, not to retry indefinitely.
 
 ## What this driver does not do
 

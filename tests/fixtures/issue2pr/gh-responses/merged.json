@@ -1,9 +1,9 @@
 {
-  "_invocation": "gh pr view {n} --json state,mergedAt,mergeCommit",
-  "_docs": "gh pr view returns state MERGED with mergedAt once the change lands.",
-  "_observation": "the change merged, so a chain link may advance",
-  "_since_supported": false,
-  "state": "MERGED",
-  "merged_at": "2026-08-01T09:20:00Z",
-  "merge_commit": "0000000000000000000000000000000000000000"
+  "_invocation": "gh pr view {n} --repo {repo_id} --json state,mergeable,mergedAt,updatedAt",
+  "_docs": "https://cli.github.com/manual/gh_pr_view",
+  "_observation": "the change landed",
+  "_collection": "state",
+  "http_status": 200,
+  "headers": {},
+  "body": "MERGED"
 }

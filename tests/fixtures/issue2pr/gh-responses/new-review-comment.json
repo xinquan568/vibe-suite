@@ -2,7 +2,6 @@
   "_invocation": "gh api -X GET repos/{owner}/{repo}/pulls/{n}/comments -f since={since} --paginate",
   "_docs": "https://docs.github.com/en/rest/pulls/comments#list-review-comments-on-a-pull-request",
   "_observation": "a new review comment exists after since",
-  "_collection": "review_comments",
   "http_status": 200,
   "headers": {},
   "body": [

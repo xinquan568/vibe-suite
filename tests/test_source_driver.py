@@ -101,6 +101,22 @@ def classify(fixture):
     return None, None, None
 
 
+def is_observation(fixture):
+    """A scenario that succeeded, selected by raw facts rather than by a label.
+
+    `_collection` was a hand-written key doing this job, which made the decisive test depend on a
+    conclusion I had written into the data it was checking. A successful call is `exit_code == 0` with
+    a 2xx — both of which a real invocation produces.
+    """
+    status = fixture.get("http_status")
+    if fixture.get("exit_code") != 0 or not isinstance(status, int) or not 200 <= status < 300:
+        return False
+    # The malformed fixture is *also* a 200 that exited 0 — that is its whole point. What separates an
+    # observation from it is that the body parsed into the documented structure rather than staying a
+    # bare string, which is a fact about the payload and not a label about it.
+    return isinstance(fixture.get("body"), (list, dict))
+
+
 def takes_since(fixture):
     """Whether the recorded invocation actually passes a time parameter.
 
@@ -145,7 +161,7 @@ class TestSpikeFixtures(unittest.TestCase):
             with self.subTest(fixture=name):
                 for field in ("http_status", "headers", "exit_code", "body"):
                     self.assertIn(field, payload, f"{name} omits the raw field {field}")
-                for verdict in ("_class", "_retryable", "_since_supported"):
+                for verdict in ("_class", "_retryable", "_since_supported", "_collection"):
                     self.assertNotIn(verdict, payload,
                                      f"{name} carries a hand-written verdict; the rule computes it")
 
@@ -193,7 +209,7 @@ class TestSpikeFixtures(unittest.TestCase):
 
     def test_the_observation_scenarios_disagree_about_since(self):
         """Derived from the invocations. This is what fixed `since`'s meaning."""
-        supported = {n: takes_since(p) for n, p in self.fixtures.items() if "_collection" in p}
+        supported = {n: takes_since(p) for n, p in self.fixtures.items() if is_observation(p)}
         self.assertEqual(len(supported), 5, "five observation scenarios")
         self.assertTrue(any(supported.values()), "some sources can filter")
         self.assertFalse(all(supported.values()),
@@ -208,33 +224,25 @@ class TestSpikeFixtures(unittest.TestCase):
                 self.assertIn("-X GET", payload["_invocation"],
                               "adding a field without -X GET turns the read into a write")
 
-    def test_the_observation_collections_are_separate_endpoints(self):
-        """The fact that rejected `updated_at`, derived from the recorded invocations.
+    def test_the_observation_scenarios_are_four_or_more_distinct_endpoints(self):
+        """The fact that rejected `updated_at` — and every input to it is raw.
 
-        A first attempt compared timestamp field names and asserted only that they were not *all*
-        identical — which stayed green when two collections were made to agree, because a third still
-        differed. The property that actually matters is upstream of the payloads: these are **four
-        different endpoints**, so a single `updated_at` on the change cannot say which of them moved.
-
-        The endpoint comes from `_invocation`, which is a command someone can run — a raw fact, not a
-        conclusion I wrote down.
+        Scenarios are selected by `exit_code`/`http_status`; endpoints come from `_invocation`. No
+        hand-written label participates, which was the defect the last two attempts kept: the first
+        read `_collection` as a conclusion, the second stopped reading it as a conclusion but still used
+        it to choose which fixtures to look at.
         """
-        endpoints = set()
-        for payload in self.fixtures.values():
-            invocation = payload.get("_invocation", "")
-            match = re.search(r"repos/\{owner\}/\{repo\}/(\S+)", invocation)
-            if match:
-                endpoints.add(re.sub(r"\{[^}]+\}", "*", match.group(1)))
-        observation_endpoints = {e for e in endpoints if not e.endswith("issues/*/comments")} | \
-                                {e for e in endpoints if e.endswith("issues/*/comments")}
-        self.assertGreaterEqual(len(observation_endpoints), 4,
-                                f"expected four distinct endpoints, found {sorted(endpoints)}")
+        endpoints = {re.sub(r"\{[^}]+\}", "*", p["_invocation"])
+                     for p in self.fixtures.values() if is_observation(p)}
+        self.assertGreaterEqual(len(endpoints), 4,
+                                f"a single timestamp cannot speak for {len(endpoints)} endpoints: "
+                                f"{sorted(endpoints)}")
 
     def test_no_two_observation_scenarios_share_an_endpoint(self):
         """Two scenarios on one endpoint would be one observation described twice."""
         seen = {}
         for name, payload in self.fixtures.items():
-            if "_collection" not in payload:
+            if not is_observation(payload):
                 continue
             endpoint = re.sub(r"\{[^}]+\}", "*", payload["_invocation"])
             with self.subTest(scenario=name):

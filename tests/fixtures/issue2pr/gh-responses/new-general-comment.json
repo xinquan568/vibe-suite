@@ -2,7 +2,6 @@
   "_invocation": "gh api -X GET repos/{owner}/{repo}/issues/{n}/comments -f since={since} --paginate",
   "_docs": "https://docs.github.com/en/rest/issues/comments#list-issue-comments",
   "_observation": "a new general comment exists after since",
-  "_collection": "comments",
   "http_status": 200,
   "headers": {},
   "body": [

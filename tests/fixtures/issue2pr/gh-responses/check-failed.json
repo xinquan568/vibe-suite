@@ -2,7 +2,6 @@
   "_invocation": "gh api repos/{owner}/{repo}/commits/{sha}/check-runs --paginate",
   "_docs": "https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference",
   "_observation": "a check moved to failure",
-  "_collection": "checks",
   "http_status": 200,
   "headers": {},
   "body": [

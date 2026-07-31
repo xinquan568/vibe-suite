@@ -110,6 +110,11 @@ FORBIDDEN_HANDOFF = (
     r"attribute it to `?vibe-suite:",
     r"[Hh]and-offs? are named in your findings",
     r"do not grade it yourself",
+    # Round 1 also expressed the same instruction as "let `security` grade the exposure" in
+    # testing.md and edge-cases.md. Those two sections carry no OWNERSHIP deferral and sit outside
+    # the shared-block comparison, so without this pattern reverting either one would pass every
+    # other guard -- a fourth phrasing of an instruction that already reached the artifact three ways.
+    r"let `?[a-z-]+`? grade (it|the exposure)",
 )
 
 #: The blocks the five specialists must share byte-for-byte, each extracted by its own stable anchor.

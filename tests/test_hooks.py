@@ -19,7 +19,7 @@ HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
 PLUGIN_MANIFEST = REPO_ROOT / ".claude-plugin" / "plugin.json"
 STORE = REPO_ROOT / "scripts" / "lib" / "store.py"
 
-EVENTS = ("Stop", "SessionStart", "SessionEnd")
+EVENTS = ["Stop", "SessionStart", "SessionEnd", "PostToolUse"]
 
 
 class TestHookRegistration(unittest.TestCase):
@@ -31,7 +31,7 @@ class TestHookRegistration(unittest.TestCase):
         plugin = json.loads(PLUGIN_MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(plugin.get("hooks"), "./hooks/hooks.json")
 
-    def test_nested_settings_shape_with_exactly_the_three_events(self):
+    def test_nested_settings_shape_with_exactly_the_four_events(self):
         hooks = self.manifest.get("hooks")
         self.assertIsInstance(hooks, dict, "the top level must be a nested `hooks` object")
         self.assertEqual(sorted(hooks), sorted(EVENTS))
@@ -45,6 +45,18 @@ class TestHookRegistration(unittest.TestCase):
                 for handler in handlers:
                     self.assertEqual(handler.get("type"), "command", f"{event}: handler type")
                     self.assertIn("${CLAUDE_PLUGIN_ROOT}", handler.get("command", ""))
+
+    def test_post_tool_use_maps_to_the_advisory_hook(self):
+        # F9.7 fixes the matcher verbatim; conventions-claude records MultiEdit as removed,
+        # but an alternation branch that never matches is inert and dropping it would
+        # deviate from the governing spec
+        groups = self.manifest["hooks"]["PostToolUse"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].get("matcher"), "Write|Edit|MultiEdit")
+        handlers = groups[0]["hooks"]
+        self.assertEqual(len(handlers), 1)
+        self.assertIn("check-artifact.sh", handlers[0]["command"])
+        self.assertEqual(handlers[0].get("timeout"), 5)
 
     def _commands(self, event):
         return [h["command"] for g in self.manifest["hooks"][event] for h in g["hooks"]]

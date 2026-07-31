@@ -3,7 +3,7 @@
 Plugin hook wiring and the scripts it invokes. Hooks are executed by the harness, so treat every
 input as untrusted.
 
-`hooks.json` registers three events (settings-shaped nested schema; commands resolve through
+`hooks.json` registers four events (settings-shaped nested schema; commands resolve through
 `${CLAUDE_PLUGIN_ROOT}`):
 
 | Event | Script | Notes |
@@ -11,6 +11,7 @@ input as untrusted.
 | `Stop` | `scripts/stop-review-gate-hook.mjs` | timeout 900 s; **ships disabled** |
 | `SessionStart` | `scripts/session-lifecycle-hook.mjs --event start` | hygiene; always exits 0 |
 | `SessionEnd` | `scripts/session-lifecycle-hook.mjs --event end` | hygiene; always exits 0 |
+| `PostToolUse` | `scripts/check-artifact.sh` | matcher `Write\|Edit\|MultiEdit`; timeout 5 s; advisory only — fail-open, never blocks, one stderr line on NL-artifact edits |
 
 ## The stop-review gate is opt-in (D3)
 

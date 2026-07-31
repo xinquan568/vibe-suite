@@ -24,6 +24,7 @@ in one change can drift in wording while each reads well alone. The shared parag
 equal across the five.
 """
 
+import ast
 import json
 import re
 import unittest
@@ -81,21 +82,45 @@ OWNERSHIP = {
     },
 }
 
-#: recon's permitted Bash forms. An allowlist of bare verbs would not bound anything -- `find` deletes
-#: through `-delete` and any verb writes through redirection -- so the artifact allowlists complete
-#: forms and refuses the shell outright.
+#: recon's permitted Bash forms, as an EXACT set. An allowlist of bare verbs would bound nothing --
+#: `find` deletes through `-delete` and any verb writes through redirection -- so the artifact
+#: allowlists complete forms and refuses the shell outright. Membership-only assertions were the round-1
+#: weakness: deleting an entry removed an assertion instead of guarding a fix, so the artifact could
+#: keep a row and still pass. `git status --porcelain` is deliberately absent -- it answers none of
+#: the seven survey items, and its read-only status depends on git configuration the artifact cannot
+#: see (optional index locks, index refresh, a configured core.fsmonitor helper).
 RECON_COMMANDS = (
     "git ls-files",
     "git ls-files -- <path>",
     "git rev-parse --abbrev-ref HEAD",
     "git log --oneline -n <N>",
-    "git status --porcelain",
     "wc -l <path>",
 )
 RECON_BANNED_METACHARACTERS = (">>", ">", "<", "||", "|", "&&", "&", ";", "$(", "`")
 RECON_SECRET_GLOBS = (".env", "*.pem", "*.key", "*secret*", "id_rsa")
 RECON_SURVEY_ITEMS = ("language", "framework", "architecture", "database", "CI/CD",
                       "entry point", "size", "notable config")
+
+#: Instructions that describe output the canonical schema cannot express. `schemas/audit-output.schema.json`
+#: is closed at {agent, findings} with one report-level `agent` and no per-finding owner, so an agent
+#: cannot emit a finding attributed to a different agent. Matched semantically rather than as one
+#: literal: round 1 expressed the same instruction three ways, and matching only the first would pass
+#: a rephrasing of the other two.
+FORBIDDEN_HANDOFF = (
+    r"attribute it to `?vibe-suite:",
+    r"[Hh]and-offs? are named in your findings",
+    r"do not grade it yourself",
+)
+
+#: The blocks the five specialists must share byte-for-byte, each extracted by its own stable anchor.
+#: Enumerated rather than discovered: a paragraph that drifts stops matching whatever pattern found
+#: it, so dynamic discovery reports agreement among the paragraphs that still agree.
+SHARED_BLOCKS = {
+    "untrusted-input": (r"\*\*Untrusted input\.\*\*", "blank"),
+    "finding-contract": (r"\*\*The finding contract is not yours\.\*\*", "blank"),
+    "zero-findings": (r"\*\*Zero findings\.\*\*", "blank"),
+    "boundaries": (r"## Boundaries", "heading"),
+}
 
 MODEL_PIN = re.compile(
     r"\b(?:gpt-\d|o\d-|gemini-\d|claude-(?:opus|sonnet|haiku|fable)-\d|claude-[a-z]+-20\d{2})", re.I)
@@ -106,6 +131,14 @@ def read(name):
 
 
 def frontmatter(text):
+    """Key/value view of the frontmatter, with surrounding quotes stripped.
+
+    Unquoting matters: a description containing a colon MUST be quoted to be valid YAML (see
+    `TestPlainScalarColonRule`), so a reader that returned the quotes would report the value as
+    starting with `"` and every content assertion against it would be wrong. This function is a
+    convenience for the assertions below and is deliberately NOT a YAML parser -- the one grammar
+    rule this module enforces is checked separately, against the raw text.
+    """
     if not text.startswith("---\n"):
         return {}
     block = text.split("---\n", 2)[1]
@@ -113,7 +146,10 @@ def frontmatter(text):
     for line in block.splitlines():
         if ":" in line and not line.startswith(" "):
             k, v = line.split(":", 1)
-            out[k.strip()] = v.strip()
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                v = v[1:-1]
+            out[k.strip()] = v
     return out
 
 
@@ -124,6 +160,30 @@ def tool_set(value):
 
 def body(text):
     return text.split("---\n", 2)[2] if text.startswith("---\n") else text
+
+
+def permitted_forms(text):
+    """The allowlist table's first column, as a set. Parsed from the artifact so the test compares
+    what the agent actually permits rather than what a constant says it permits."""
+    forms = set()
+    for line in text.splitlines():
+        m = re.match(r"\|\s*`([^`]+)`\s*\|", line)
+        if m:
+            forms.add(m.group(1).strip())
+    return forms
+
+
+def shared_block(text, anchor, terminator):
+    """One named block, from its anchor to a stable boundary. Returns None when absent -- absence is
+    a failure, not an exclusion."""
+    m = re.search(anchor, text)
+    if not m:
+        return None
+    rest = text[m.start():]
+    end = re.search(r"\n\s*\n", rest) if terminator == "blank" else re.search(r"(?m)^##\s", rest[3:])
+    if terminator == "heading" and end:
+        return rest[: end.start() + 3].strip()
+    return rest[: end.start()].strip() if end else rest.strip()
 
 
 class AgentTestCase(unittest.TestCase):
@@ -251,6 +311,22 @@ class TestPerAgentOwnership(AgentTestCase):
                         window,
                         "%s must defer '%s' to %s in one sentence" % (name, topic, owner))
 
+    def test_no_agent_instructs_cross_attribution(self):
+        """`schemas/audit-output.schema.json` is closed at {agent, findings} with ONE report-level
+        `agent` and no per-finding owner field, so a finding attributed to a different agent is
+        output that cannot be emitted. Deferral is therefore omission: the deferring agent does not
+        report the topic, and coverage comes from the owning agent also running.
+
+        Matched semantically rather than by one literal -- round 1 expressed the same instruction
+        three ways, and matching only the first would pass a rephrasing of the other two."""
+        for name in SIX:
+            text = read(name)
+            for pattern in FORBIDDEN_HANDOFF:
+                with self.subTest(agent=name, pattern=pattern):
+                    self.assertIsNone(
+                        re.search(pattern, text),
+                        "%s instructs a hand-off the finding schema cannot express" % name)
+
     def test_architecture_defers_config_and_error_handling_owns_it(self):
         """The acceptance's named case, asserted as the pair it is: a config finding lands with
         error-handling, not architecture."""
@@ -286,11 +362,18 @@ class TestRecon(AgentTestCase):
     def test_prior_reports_are_excluded(self):
         self.assertIn("vibe-report-", read(RECON))
 
-    def test_bash_allowlist_is_complete_forms_not_bare_verbs(self):
-        text = read(RECON)
-        for form in RECON_COMMANDS:
-            with self.subTest(form=form):
-                self.assertIn(form, text, "recon's allowlist must name the complete form %r" % form)
+    def test_bash_allowlist_is_exactly_the_expected_complete_forms(self):
+        """Equality, not membership. A membership-only assertion is weakened by deleting an entry --
+        the artifact could keep a permitted row and still pass."""
+        self.assertEqual(permitted_forms(read(RECON)), set(RECON_COMMANDS))
+
+    def test_git_status_is_not_permitted(self):
+        """Named separately so the failure says which row leaked. It answers none of the seven survey
+        items, and its read-only status depends on git configuration the artifact cannot see:
+        optional index locks, index-metadata refresh, and a configured core.fsmonitor helper."""
+        for form in permitted_forms(read(RECON)):
+            self.assertNotIn("git status", form,
+                             "git status is not strictly read-only and serves no survey item")
 
     def test_shell_composition_is_refused(self):
         text = read(RECON)
@@ -314,14 +397,21 @@ class TestSharedVocabulary(AgentTestCase):
         match = re.search(pattern, text, re.I)
         return match.group(0).strip() if match else None
 
-    def test_the_untrusted_input_rule_is_worded_identically(self):
-        rule = r"\*\*Untrusted input\.\*\*[^\n]*(?:\n[^\n]+)*?(?=\n\n)"
-        sentences = {n: self._shared_sentence(read(n), rule) for n in SPECIALISTS}
-        for name, text in sentences.items():
-            self.assertIsNotNone(text, "%s has no untrusted-input paragraph" % name)
-        self.assertEqual(len(set(sentences.values())), 1,
-                         "the five specialists' untrusted-input paragraphs have drifted:\n%s"
-                         % json.dumps(sentences, indent=2))
+    def test_every_named_shared_block_is_byte_identical_across_the_five(self):
+        """Enumerated, not discovered. Dynamic discovery is circular: a paragraph that drifts stops
+        matching whatever pattern found it, so it leaves the comparison and the test reports
+        agreement among the paragraphs that still agree. A block missing from any one of the five is
+        a failure here, not an exclusion."""
+        for block, (anchor, terminator) in SHARED_BLOCKS.items():
+            extracted = {n: shared_block(read(n), anchor, terminator) for n in SPECIALISTS}
+            with self.subTest(block=block):
+                missing = [n for n, v in extracted.items() if v is None]
+                self.assertEqual(missing, [],
+                                 "%s block absent from: %s" % (block, ", ".join(missing)))
+                self.assertEqual(
+                    len(set(extracted.values())), 1,
+                    "the %s block has drifted across the five specialists:\n%s"
+                    % (block, json.dumps(extracted, indent=2)))
 
     def test_every_specialist_both_inlines_the_rule_and_loads_vibe_core(self):
         """F3.3-F3.7 require both, deliberately: belt-and-braces against grill's W6, where an
@@ -369,8 +459,10 @@ class TestDeconflictionFixture(unittest.TestCase):
     runtime to dispatch against it."""
 
     def setUp(self):
-        if not (FIXTURE / "ownership.json").is_file():
-            self.skipTest("the deconfliction fixture does not exist yet")
+        # FAIL, never skip. The fixture is a required acceptance artifact, so deleting it must not
+        # be a way for the suite to pass quietly.
+        self.assertTrue((FIXTURE / "ownership.json").is_file(),
+                        "the deconfliction fixture is a required acceptance artifact and is absent")
         self.spec = json.loads((FIXTURE / "ownership.json").read_text(encoding="utf-8"))
 
     def test_the_fixture_declares_owner_and_non_owner(self):
@@ -384,19 +476,119 @@ class TestDeconflictionFixture(unittest.TestCase):
         self.assertIn(self.spec["owner"], enum)
         self.assertIn(self.spec["not_owner"], enum)
 
-    def test_the_fixture_carries_the_seeded_config_defect(self):
-        sources = [p for p in FIXTURE.rglob("*") if p.is_file() and p.suffix in (".py", ".json")]
-        self.assertTrue(sources, "the fixture has no source file carrying the seeded defect")
+    def test_the_declared_source_exists(self):
+        self.assertIn("file", self.spec, "ownership.json must declare the source it refers to")
+        self.assertTrue((FIXTURE / self.spec["file"]).is_file(),
+                        "declared source %r is not on disk" % self.spec["file"])
+
+    def test_the_seeded_construct_is_present_and_proven_by_parsing(self):
+        """Asserted with `ast`, not by matching text: a comment mentioning KeyError would satisfy a
+        string search without the defect existing."""
+        src = (FIXTURE / self.spec["file"]).read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        swallowed = [
+            h for node in ast.walk(tree) if isinstance(node, ast.Try)
+            for h in node.handlers
+            if isinstance(h.type, ast.Name) and h.type.id == "KeyError"
+            and len(h.body) == 1 and isinstance(h.body[0], ast.Pass)
+        ]
+        self.assertTrue(swallowed,
+                        "the seeded defect (try/except KeyError whose handler body is only `pass`) "
+                        "is not present in %s" % self.spec["file"])
+        self.swallowed_lines = {h.lineno for h in swallowed}
+
+    def test_ownership_line_is_nonblank_and_in_the_seeded_construct(self):
+        """A blank or arbitrary line satisfies "the declared line resolves"; it must point at the
+        construct itself."""
+        src = (FIXTURE / self.spec["file"]).read_text(encoding="utf-8").splitlines()
+        line = self.spec.get("line")
+        self.assertIsInstance(line, int, "ownership.json must cite an integer line")
+        self.assertTrue(1 <= line <= len(src), "cited line %s is outside the file" % line)
+        self.assertTrue(src[line - 1].strip(), "cited line %s is blank" % line)
+        tree = ast.parse("\n".join(src))
+        handler_lines = {
+            h.lineno for node in ast.walk(tree) if isinstance(node, ast.Try)
+            for h in node.handlers
+            if isinstance(h.type, ast.Name) and h.type.id == "KeyError"
+            and len(h.body) == 1 and isinstance(h.body[0], ast.Pass)
+        }
+        self.assertIn(line, handler_lines,
+                      "cited line %s does not participate in the seeded construct" % line)
 
     def test_the_artifacts_agree_with_the_fixture(self):
         owner = self.spec["owner"].split(":", 1)[1]
         not_owner = self.spec["not_owner"].split(":", 1)[1]
-        if not (AGENTS / f"{owner}.md").is_file():
-            self.skipTest("agents not written yet")
+        self.assertTrue((AGENTS / f"{owner}.md").is_file(), "%s.md is absent" % owner)
         self.assertRegex(read(owner), r"(?i)config",
                          "the declared owner does not claim config")
         self.assertRegex(read(not_owner), r"(?i)config[^.]*%s" % re.escape(owner),
                          "the declared non-owner does not defer config to the owner")
+
+
+class TestPlainScalarColonRule(unittest.TestCase):
+    """One YAML grammar rule, scanned across every agent in the plugin.
+
+    **What this establishes and what it does not.** A YAML *plain* (unquoted) scalar may not contain
+    a colon followed by whitespace: the parser reads it as a key separator. That is the exact
+    construct that made `agents/recon.md` unloadable in round 1 of this issue. It is **not** a general
+    strict-YAML validation -- that would need a conforming parser, and PyYAML is not a dependency of
+    this repository.
+
+    It is scanned here rather than added to `tests/test_skill_library.py::parse_frontmatter`, which
+    E3.1 owns and the whole corpus consumes: tightening a shared parser could fail artifacts this
+    issue has no remit over. Scanning all fourteen agents from this module gets the coverage without
+    the ownership problem.
+
+    The reason this class exists at all is that the round-1 test *certified* the defect: it split each
+    frontmatter line on its first colon, so it saw a well-formed key and value where a real parser saw
+    a syntax error. A checker more permissive than the thing it stands in for does not merely miss a
+    defect -- it blesses it.
+    """
+
+    def _violations(self, path):
+        text = path.read_text(encoding="utf-8")
+        if not text.startswith("---\n"):
+            return []
+        out = []
+        for lineno, line in enumerate(text.split("---\n", 2)[1].splitlines(), start=2):
+            if not line.strip() or line.startswith((" ", "\t", "#")) or ":" not in line:
+                continue
+            _, _, value = line.partition(":")
+            value = value.strip()
+            if value.startswith(('"', "'")):        # a quoted scalar may contain anything
+                continue
+            if re.search(r":\s", value):
+                out.append((lineno, line.strip()[:100]))
+        return out
+
+    def test_no_agent_has_a_colon_space_in_an_unquoted_frontmatter_value(self):
+        offenders = {}
+        for path in sorted(AGENTS.glob("*.md")):
+            found = self._violations(path)
+            if found:
+                offenders[path.name] = found
+        self.assertEqual(
+            offenders, {},
+            "unquoted frontmatter values containing ': ' are invalid YAML plain scalars; quote them "
+            "as commands/bridge.md does:\n%s" % json.dumps(offenders, indent=2))
+
+    def test_the_rule_is_scanned_over_the_whole_agent_roster(self):
+        """Guards the guard: a scan that silently narrowed to the six new agents would stop covering
+        the eight it also protects."""
+        self.assertEqual(len(list(AGENTS.glob("*.md"))), 14)
+
+    def test_the_checker_rejects_the_construct_it_exists_to_catch(self):
+        """A seeded failure, so the check cannot pass by being inert."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "bad.md"
+            bad.write_text("---\nname: bad\ndescription: A survey, not a review: it records facts.\n---\n\nbody\n",
+                           encoding="utf-8")
+            self.assertTrue(self._violations(bad), "the checker failed to flag a known-bad scalar")
+            good = Path(tmp) / "good.md"
+            good.write_text('---\nname: good\ndescription: "A survey, not a review: it records facts."\n---\n\nbody\n',
+                            encoding="utf-8")
+            self.assertEqual(self._violations(good), [], "the checker flagged a correctly quoted value")
 
 
 class TestManifestRegistration(unittest.TestCase):

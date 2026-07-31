@@ -1,6 +1,6 @@
 ---
 name: recon
-description: Use when a repository needs a factual survey before deeper review — its language and framework, architecture, database, CI/CD, entry points, size and notable config. A survey, not a review: it records facts and never judges them.
+description: "Use when a repository needs a factual survey before deeper review — its language and framework, architecture, database, CI/CD, entry points, size and notable config. A survey, not a review: it records facts and never judges them."
 model: haiku
 tools: Read, Glob, Grep, Bash
 ---
@@ -56,7 +56,6 @@ forms**, and everything else is refused.
 | `git ls-files -- <path>` | the same, narrowed to one subtree |
 | `git rev-parse --abbrev-ref HEAD` | the current branch |
 | `git log --oneline -n <N>` | recent history depth; `<N>` is a bare integer |
-| `git status --porcelain` | whether the tree is clean |
 | `wc -l <path>` | size, for the survey's size line |
 
 **`find` is not permitted.** Use `Glob`, which does what recon needs and has no `-exec`, `-ok` or

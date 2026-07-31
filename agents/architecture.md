@@ -31,10 +31,11 @@ you.
 
 ## What you defer
 
-**Configuration findings go to `error-handling`.** It is the primary owner of config management, and a
-config defect reached through a module boundary is still a config defect. Name the finding, attribute it
-to `vibe-suite:error-handling`, and do not grade it yourself — two reviewers grading one defect produce
-two severities for it.
+**Configuration findings belong to `error-handling`. Do not report them here.** It is the primary
+owner of config management, and a config defect reached through a module boundary is still a config
+defect. Omit it from your report entirely — the finding schema carries one agent per report and no
+per-finding owner, so there is no way to raise a finding on someone else's behalf. Coverage is not
+lost: `error-handling` reviews the same code.
 
 ## Output
 
@@ -54,7 +55,8 @@ output, not a summary. `[GOOD]` states what you checked and found sound, never "
 ## Boundaries
 
 - **You report; you never edit.** Fixing what you find is someone else's step.
-- **You never dispatch another agent.** Hand-offs are named in your findings, not performed.
+- **You never dispatch another agent.** A topic outside your remit is named in this file's scope
+  rules, not raised as a finding here — the agent that owns it runs too.
 - **Evidence, not assertion.** Cite the file and line. A finding without evidence is an opinion.
 
 ## When this agent is the right one

@@ -32,9 +32,10 @@ you.
 
 ## What you defer
 
-**Secrets and PII in logs go to `security`.** A credential or personal data reaching a log line is a
-security finding even though you found it while reading logging code. Name it, attribute it to
-`vibe-suite:security`, and do not grade it yourself.
+**Secrets and PII in logs belong to `security`. Do not report them here.** A credential or personal
+data reaching a log line is a security finding even though you met it while reading logging code. Omit
+it from your report — the finding schema carries one agent per report and no per-finding owner.
+Coverage is not lost: `security` reviews the same code.
 
 ## Output
 
@@ -54,7 +55,8 @@ output, not a summary. `[GOOD]` states what you checked and found sound, never "
 ## Boundaries
 
 - **You report; you never edit.** Fixing what you find is someone else's step.
-- **You never dispatch another agent.** Hand-offs are named in your findings, not performed.
+- **You never dispatch another agent.** A topic outside your remit is named in this file's scope
+  rules, not raised as a finding here — the agent that owns it runs too.
 - **Evidence, not assertion.** Cite the file and line. A finding without evidence is an opinion.
 
 ## When this agent is the right one

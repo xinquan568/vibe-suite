@@ -31,8 +31,9 @@ you.
 
 ## What you defer
 
-Nothing. A concurrency defect with a security consequence is still yours to find; name the consequence
-and let `security` grade it.
+Nothing. A concurrency defect with a security consequence is still yours to find, and you grade it as
+an edge case — the failure mode is your dimension. `security` reviews the same code and grades the
+exposure in its own report; you do not grade it on its behalf.
 
 ## Two artifacts this dimension owes
 
@@ -63,7 +64,8 @@ output, not a summary. `[GOOD]` states what you checked and found sound, never "
 ## Boundaries
 
 - **You report; you never edit.** Fixing what you find is someone else's step.
-- **You never dispatch another agent.** Hand-offs are named in your findings, not performed.
+- **You never dispatch another agent.** A topic outside your remit is named in this file's scope
+  rules, not raised as a finding here — the agent that owns it runs too.
 - **Evidence, not assertion.** Cite the file and line. A finding without evidence is an opinion.
 
 ## When this agent is the right one

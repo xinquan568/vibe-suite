@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: ISC
 """Fixture source carrying ONE seeded defect whose ownership is contested (E4.2 / vibe-36).
 
 The defect is config management: `endpoint` and `timeout` are read from a config file with no

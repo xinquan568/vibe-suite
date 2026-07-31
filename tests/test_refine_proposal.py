@@ -198,7 +198,15 @@ class TestSkillContract(unittest.TestCase):
                       "self-reviewed round, and a summary reporting only one would misdescribe it")
 
         self.assertIsInstance(state["carried_forward"], list)
+        # The type check is not redundant with the key comparison: `set()` of the JSON array
+        # `["status", "reviewer"]` equals the same set as the object with those keys, so equality
+        # alone accepts a list where v6 requires an object. Tightening one assertion dropped this,
+        # which is a neat illustration that a stricter check is not automatically a stronger one.
+        self.assertIsInstance(state["translation_review"], dict,
+                              "translation_review is an object in v6, not an array")
         self.assertEqual(set(state["translation_review"]), TRANSLATION_V6)
+        self.assertIsInstance(state["rounds"][0], dict)
+        self.assertIsInstance(state["findings"], dict)
 
     def test_stop_severity_domain_and_default(self):
         self.assertIn("--stop-severity", self.text)

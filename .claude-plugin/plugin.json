@@ -36,7 +36,8 @@
     "./commands/spec-sync.md",
     "./commands/security-scan.md",
     "./commands/nl-audit.md",
-    "./commands/roast.md"
+    "./commands/roast.md",
+    "./commands/fix.md"
   ],
   "hooks": "./hooks/hooks.json",
   "agents": [

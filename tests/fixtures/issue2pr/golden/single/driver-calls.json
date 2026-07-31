@@ -1,0 +1,27 @@
+[
+  {
+    "step": 1,
+    "operation": "fetch_item",
+    "out": "source-snapshot"
+  },
+  {
+    "step": 7,
+    "operation": "open_change",
+    "out": "change_ref"
+  },
+  {
+    "step": 7,
+    "operation": "link_closure",
+    "out": "change_ref"
+  },
+  {
+    "step": 8,
+    "operation": "read_change_state",
+    "out": "change_state"
+  },
+  {
+    "step": 9,
+    "operation": "update_change",
+    "out": "change_ref"
+  }
+]

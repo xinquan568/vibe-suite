@@ -124,6 +124,9 @@ def parse_frontmatter(text):
         stripped = raw.strip()
 
         if stripped.startswith("- "):
+            if indent != 2:
+                raise ValueError("line %d: a sequence item is indented two spaces under its key"
+                                 % number)
             if key is None:
                 raise ValueError("line %d: sequence item before any key" % number)
             existing = fields.get(key)
@@ -275,8 +278,12 @@ def _check_repo_path(candidate, root):
 
     if not resolved.is_dir():
         return ["repo_path: %r does not resolve to a directory under %s" % (candidate, root)]
-    if not (resolved / ".git").exists() and not (resolved / "README.md").exists():
-        errors.append("repo_path: %r resolves, but does not look like a checkout" % candidate)
+    # Evidence of a project root, not merely of a directory. A README was the earlier test and it
+    # accepted almost anything — most directories under a repository have one.
+    markers = (".git", ".vibe-suite.md")
+    if not any((resolved / marker).exists() for marker in markers):
+        errors.append("repo_path: %r resolves but carries none of %s, so it is not a project root"
+                      % (candidate, ", ".join(markers)))
     return errors
 
 

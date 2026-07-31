@@ -73,8 +73,14 @@ def _source_literals():
     text = INVENTORY.read_text(encoding="utf-8")
     match = re.search(r"(?s)<!--\s*source-literals\s*-->\s*```json\s*(\[.*?\])\s*```", text)
     if not match:
-        return ()
-    return tuple(json.loads(match.group(1)))
+        # Returning an empty tuple made every zero-literals assertion pass vacuously — the check
+        # would report success precisely when its input had gone missing.
+        raise AssertionError("the boundary inventory declares no source-literals block; the "
+                             "zero-literals check has no input and must not pass by default")
+    literals = tuple(json.loads(match.group(1)))
+    if not literals:
+        raise AssertionError("the source-literals block is empty")
+    return literals
 
 
 FORBIDDEN_IN_CORE = _source_literals()
@@ -575,6 +581,59 @@ class TestGoldenRuns(unittest.TestCase):
                 self.assertEqual(result["status"], "completed")
                 self.assertIn("verdict: approve", result["rawOutput"])
 
+    def test_every_driver_call_names_a_declared_operation(self):
+        """The goldens exercise the seam, not just the folder layout.
+
+        They were previously hand-written summaries that would have stayed green through the driver
+        protocol being deleted. Every call is now checked against the core's own declaration.
+        """
+        protocol = json_block(self.core, "driver-protocol")
+        for mode in self.MODE_STEPS:
+            calls = json.loads((self.GOLDEN / mode / "driver-calls.json").read_text(encoding="utf-8"))
+            self.assertTrue(calls, f"the {mode} run recorded no source-system calls")
+            for call in calls:
+                with self.subTest(mode=mode, operation=call["operation"]):
+                    self.assertIn(call["operation"], protocol)
+                    self.assertEqual(call["out"], protocol[call["operation"]]["out"],
+                                     "a golden call disagrees with the declared output shape")
+
+    def test_the_disclosure_matches_the_core_s_mode_mapping(self):
+        """Rendered from the mode, and checked against the mapping rather than against itself."""
+        mapping = json_block(self.core, "disclosure-by-mode")
+        self.assertIsNotNone(mapping, "the core must declare the mode-to-disclosure mapping")
+        for mode in self.MODE_STEPS:
+            with self.subTest(mode=mode):
+                text = (self.GOLDEN / mode / "disclosure.txt").read_text(encoding="utf-8")
+                self.assertIn(mapping[mode], text)
+                if mode == "none":
+                    self.assertNotIn("backend", text,
+                                     "naming a backend under `none` implies one was dispatched")
+                else:
+                    self.assertIn("backend", text)
+
+    def test_the_state_values_are_checked_not_only_its_keys(self):
+        """Key-set equality passed a `completed` run with no change recorded at all."""
+        for mode, steps in self.MODE_STEPS.items():
+            with self.subTest(mode=mode):
+                state = self.state(mode)
+                self.assertEqual(state["review_mode"], mode)
+                self.assertEqual(state["current_step"], steps[-1])
+                self.assertEqual(state["status"], "completed")
+                self.assertIsInstance(state["areas_confirmed"], list)
+                self.assertIsNotNone(state["pr"],
+                                     "every mode reaches step 7, so a completed run has a change")
+                self.assertEqual(set(state["pr"]), set(json_block(self.core, "change-ref")))
+
+    def test_every_step_left_an_artifact(self):
+        for mode, steps in self.MODE_STEPS.items():
+            for step in steps:
+                with self.subTest(mode=mode, step=step):
+                    result = self.GOLDEN / mode / "phases" / f"step-{step}" / "result.md"
+                    self.assertTrue(result.is_file(), f"step {step} left nothing behind")
+                    phase = next(n for n, (lo, hi) in self.phases.items() if lo <= step <= hi)
+                    self.assertIn(phase, result.read_text(encoding="utf-8"),
+                                  "an artifact must name the phase the core assigns its step")
+
     def test_the_stub_is_reusable_by_the_loop_bounds_issue(self):
         """E5.6 (#45) stresses this loop against a reviewer that never returns clean. It should extend
         this fixture rather than build a second one, so the two agree about the dispatch shape."""
@@ -615,6 +674,13 @@ class TestParserIsClosed(LintCase):
 
     def test_an_unbalanced_quote_is_refused(self):
         broken = self.base().replace("id_pattern: '^fx-(\\d+)$'", "id_pattern: '^fx-(\\d+)$")
+        result = self.lint(self.profile_text(broken))
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_an_unindented_sequence_item_is_refused(self):
+        """The grammar says two spaces under the key. The sequence branch did not enforce it, so a
+        flush-left `- item` was accepted by a parser that advertises a closed grammar."""
+        broken = self.base().replace("gates:\n  - 'make lint'", "gates:\n- 'make lint'")
         result = self.lint(self.profile_text(broken))
         self.assertNotEqual(result.returncode, 0)
 
@@ -753,6 +819,16 @@ class TestRepoPathContainment(LintCase):
         result = self.lint(self.profile_with("./tests/fixtures/issue2pr/escape-link"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("escapes the workspace root", result.stderr)
+
+    def test_a_directory_with_only_a_readme_is_not_a_checkout(self):
+        """A README was the earlier evidence of a repository, and most directories have one."""
+        holder = REPO_ROOT / "tests" / "fixtures" / "issue2pr" / "readme-only"
+        holder.mkdir(exist_ok=True)
+        (holder / "README.md").write_text("not a project root\n", encoding="utf-8")
+        self.addCleanup(shutil.rmtree, holder, True)
+        result = self.lint(self.profile_with("./tests/fixtures/issue2pr/readme-only"))
+        self.assertNotEqual(result.returncode, 0, "a README is not evidence of a project root")
+        self.assertIn("project root", result.stderr)
 
     def test_an_existing_directory_that_is_not_a_checkout_is_refused(self):
         result = self.lint(self.profile_with("./scripts/lib"))

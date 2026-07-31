@@ -15,5 +15,10 @@
   "repos_in_scope": [
     "./tests/fixtures/issue2pr/fixture-repo"
   ],
-  "pr": null
+  "pr": {
+    "driver": "github",
+    "id": "1",
+    "url": "https://example.invalid/1",
+    "branch": "acme/ai/fx-1"
+  }
 }

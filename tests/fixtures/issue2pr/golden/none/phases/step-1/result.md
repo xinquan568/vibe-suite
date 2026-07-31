@@ -1,3 +1,3 @@
 # Step 1 (analyze) — worker
 
-Golden artifact from the none run.
+Golden artifact from the `none` run.

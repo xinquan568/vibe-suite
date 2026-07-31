@@ -169,6 +169,22 @@ pipeline instead.
 }
 ```
 
+The two types the protocol passes around are declared here, not left for a driver to invent:
+
+<!-- change-ref -->
+```json
+{"driver": "github", "id": "", "url": "", "branch": ""}
+```
+
+<!-- change-state -->
+```json
+{"state": "open", "mergeable": false, "checks": [], "review_comments": []}
+```
+
+`change_ref` identifies a change without saying what a change *is* in any particular system;
+`change_state` is what step 8 reads. Both are the core's, because two drivers inventing their own
+shapes is how a seam stops being one.
+
 Every step that reaches the source system names its operation, and **no step names a command**:
 
 | Step | Operation |
@@ -205,6 +221,27 @@ the steps.
 default branch on the strength of a review the pipeline itself produced. An earlier draft of this step
 said "then merge", which contradicted the command, the phase table and the boundary inventory — all of
 which say the machine terminates in a reviewed pull request. It terminates in a reviewed pull request.
+
+## Disclosure
+
+The PR body's disclosure is **rendered from the mode**, because one fixed sentence is false in two of
+the three. The mapping is the core's:
+
+<!-- disclosure-by-mode -->
+```json
+{
+  "none": "with no independent review",
+  "single": "with one independent review per phase and self-reported finding closure",
+  "full": "with independent review and reviewer-verified finding closure"
+}
+```
+
+`{backend}` is named only when a reviewer was dispatched — under `none` there was none, and naming one
+implies otherwise. A round that fell back to self-review is named, per
+[the contract](../vibe-core/references/reviewer-contract.md#same-model-refusal-and-self-review).
+
+A disclosure that overstates is worse than none, because it is the part a reader trusts in order to
+know what to distrust.
 
 ## Gates
 

@@ -14,9 +14,12 @@ Authored before the artifacts, from `skills/security/SKILL.md`, F5.1, F9.1, F9.2
 Echo and heredoc are separate rules with separate seeds: a scanner that dropped quoted
 strings but not heredoc bodies would pass a test that seeded only one.
 
-**The pinning distinction.** An unpinned `.mcp.json` server is PR-worthy; an unpinned
-`package.json` dependency is advisory, and is suppressed outright once a lockfile exists.
-The fixture seeds both — `.mcp.json:1` is reported, `package.json:3` is not.
+**The pinning distinction is half-seeded, and only half.** An unpinned `package.json`
+dependency is advisory and is suppressed outright once a lockfile exists; the fixture seeds
+that half at `package.json:3`, and it is not reported. The counterpart — an unpinned
+`.mcp.json` server IS PR-worthy — is **not** seeded, because the MCP family's six named
+checks contain no unpinned-server name, so such a finding could carry no permitted
+`Pattern`. Seeding it would force the oracle to record an unnameable finding.
 
 ## The banner ladder, over four severity mixtures
 

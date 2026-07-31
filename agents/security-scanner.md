@@ -51,9 +51,10 @@ Your report carries all of the following.
 Each finding carries six fields plus an Exploit scenario:
 
 - **File** `path:line`
-- **Observation** — `<Pattern name> — <prose>`, where `<Pattern name>` is the name the
-  security skill gives the check. The name comes before the em-dash so the summary table
-  below can be derived from it rather than re-judged.
+- **Observation** — `<Pattern name> — <prose>`, where `<Pattern name>` MUST be one of the
+  check names enumerated in `skills/security/SKILL.md`, and no other value is permitted.
+  The name comes before the em-dash so the summary table below can be derived from it
+  rather than re-judged.
 - **Severity** — `[CRITICAL]`, `[HIGH]`, `[MEDIUM]` or `[LOW]`
 - **Evidence** — the matched text
 - **Proposed change**

@@ -145,12 +145,18 @@ class HookIO(unittest.TestCase):
                 proc, _ = run_hook(stdin_text, jq_available=jq)
                 self.assertEqual(proc.returncode, 0, f"{label}: hook must never block")
                 self.assertEqual(proc.stdout, "", f"{label}: stdout must stay empty")
-                lines = [ln for ln in proc.stderr.splitlines() if ln.strip()]
                 if expect_reminder:
-                    self.assertEqual(len(lines), 1, f"{label}: expected one reminder")
-                    self.assertIn("Run /vibe-suite:score", lines[0])
+                    # the EXACT line, not a substring: changing the fallback branch's
+                    # message to a different one-line string containing the same substring
+                    # previously passed every row
+                    path = "/r/commands/x.md"
+                    self.assertEqual(
+                        proc.stderr,
+                        f"NL artifact edited: x.md. Run /vibe-suite:score {path} "
+                        "to check quality.\n",
+                        f"{label}: reminder must be byte-identical across branches")
                 else:
-                    self.assertEqual(lines, [], f"{label}: expected silence")
+                    self.assertEqual(proc.stderr, "", f"{label}: expected silence")
 
     def test_no_diagnostics_when_fallback_utilities_are_missing(self):
         # the source suppressed jq's errors but not grep/head/sed's; a diagnostic on stderr

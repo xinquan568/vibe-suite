@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "vetted": {
-      "url": "https://api.anthropic.com/mcp",
-      "auth": { "type": "bearer" }
-    }
-  }
-}

@@ -123,6 +123,29 @@ FROZEN_PATTERN_NAMES = {
 }
 
 
+#: SHA-256 of the two contract texts. The clause tests above assert a required sentence is
+#: PRESENT, and a contract can be broken by ADDING one that contradicts it while every
+#: required sentence stays put — a dash permitted in substantive rows, [GOOD] allowed beside
+#: findings, PASS allowed for a Medium-only report. Presence checks cannot see that; only
+#: pinning the text can. This lives in test code, not a fixture, so re-blessing a fixture
+#: does not re-bless it.
+CONTRACT_SHA256 = {
+    "agent": "50764f2c774362617a14dbc0aa26a85c3a5fff2260804d66390c8722a0253b47",
+    "command": "84fc84fdba5121922a4692e80fac9eb6611c178f4f23dd863c8f521670fc23c0",
+}
+
+
+class FrozenContractSeal(unittest.TestCase):
+    def test_contract_texts_are_sealed(self):
+        for key, path in (("agent", AGENT), ("command", COMMAND)):
+            with self.subTest(artifact=key):
+                self.assertEqual(
+                    hashlib.sha256(path.read_bytes()).hexdigest(), CONTRACT_SHA256[key],
+                    f"{key} text changed. Nothing may be added, removed or reworded in a "
+                    "frozen contract without updating CONTRACT_SHA256 in the same commit — "
+                    "see the clause tests for what each rule requires.")
+
+
 class Deliverables(unittest.TestCase):
     def test_artifacts_and_registration(self):
         self.assertTrue(COMMAND.is_file())
@@ -309,6 +332,14 @@ class SkillIsTheSingleSourceOfTruth(unittest.TestCase):
                             line, r"^- \*\*[^*]+\*\* — ",
                             "every check must carry a name the scanner can cite")
 
+    def test_scanner_permission_rule_is_closed(self):
+        # the rule itself was untested: replacing it with "any name" passed everything,
+        # because only the RECORDED patterns were checked against the skill
+        self.assertIn(
+            "MUST be one of the\n  check names enumerated in `skills/security/SKILL.md`, "
+            "and no other value is permitted.",
+            AGENT.read_text(encoding="utf-8"))
+
     def test_scanner_permits_exactly_the_skill_names(self):
         # the scanner's permitted set is DERIVED from the skill at test time; if it were a
         # separate list in the agent, the two could drift — which is the F5.2 failure
@@ -474,15 +505,13 @@ class SchemaConformance(unittest.TestCase):
 #: meaningless re-bless, and content assertions alone permit additions.
 FIXTURE_SHA256 = {
     "README.md":
-        "7c280348e7e02e88717589922bfb7967d9e7e75306899f07e7d224c716c0aed0",
+        "9b94ca803e62e8dfd3c0c0a27a471306d603a49234344434c0f0382563f27969",
     "expected-findings.md":
-        "c547d03c9f9b36153f57b7686722bf2c4fb59bec96630c0731df6f2ed1a625fd",
+        "5803f43f474069e18c9980f8f31d94f32579465b955cd2838bc3d53476e5aa8e",
     "recorded-scan.md":
-        "3fcf047bff87d00a03fbc4ca3e727031b9141d8bd8048cf99be25b002e026c20",
+        "6e73266f9a93a4dcf86f0e6a3aff87b6f5a0ab364503dfafc961c4f601a33b79",
     "seeded-plugin/.claude-plugin/plugin.json":
         "0ea21b8045f2f6276c6726dfbc633191262bcdea8913642c760547829e088ecc",
-    "seeded-plugin/.mcp.json":
-        "4f8f32ae3b642fca772497ace0cc8a1b83e6da0d6dbb0d3a6921ef8ab65fd70d",
     "seeded-plugin/commands/notes.md":
         "d7b145501ca7fedb2d265b6ee6359319a5426969e79fee068911da8c476244da",
     "seeded-plugin/hooks/hooks.json":

@@ -70,8 +70,9 @@ says which states still justify another round. A run may stop with `minor` findi
    [`scripts/codex-runner.mjs`](../../scripts/codex-runner.mjs) at `read-only`. The prompt carries the
    frozen input, the current plan, and [`references/review-rubric.md`](references/review-rubric.md).
    The round writes **`review.md`** (the critic's prose) and **`review.json`** (its findings).
-4. **Revise.** The worker answers every finding: fixed, or declined with a reason. Findings keep
-   **stable ids** across rounds, so a challenge in round 3 refers to the same finding raised in round 1.
+4. **Revise.** The worker answers every finding. How a finding moves between states, and the stable
+   ids a challenge depends on, are
+   [the closure machine](../vibe-core/references/reviewer-contract.md#the-closure-machine)'s.
 5. **Stop** when the verdict is clean, when no open finding meets `--stop-severity`, or when the cap is
    reached — recording which.
 6. **Finalize.** Assemble `FINAL.md`, then render it.
@@ -92,10 +93,12 @@ One critic pass over the translation runs by default (`--review-translation`;
 are applied as fixes, with no closure machine and no challenges — a translation is either faithful or
 it is corrected, and there is nothing for a decline to mean.
 
-**The translation review never aborts finalize.** When the backend is unavailable:
+**The translation review never aborts finalize**, and that is this loop's rule rather than the
+contract's — the contract says an unavailable backend is a refusal, which is right for a review that
+gates and wrong for one that garnishes. Here:
 
-- **with `--allow-self-review`** → the worker reviews its own translation, the pass records
-  `reviewer: "self"` with no usage figures, and the summary says so;
+- **with `--allow-self-review`** → the pass is self-reviewed and marked as the contract requires:
+  `reviewer: "self"`, no usage figures, said so in the summary;
 - **without it** → a **recorded skip**: finalize continues and the summary states that the translation
   went unreviewed.
 
@@ -160,9 +163,16 @@ iteration's unresolved findings arrive as `carried_forward` rather than being si
 
 ## Guards
 
-- **No input, or two inputs** → refuse.
-- **A backend that is unavailable, without `--allow-self-review`** → refuse. Silently reviewing one's
-  own work produces a run that looks reviewed and is not.
+Only this loop's own. Everything shared is governed by the contract sections cited above and is not
+restated here — a second statement of a rule is the beginning of two rules.
+
+- **No input, or two inputs** → refuse. A run whose subject is ambiguous would produce a document
+  nobody asked for.
 - **A run folder that already exists** → refuse unless `iterate` or `resume` was asked for.
-- **A malformed verdict** → one re-ask, then the round is recorded as failed and the loop continues.
-  The run is never aborted for a parse failure.
+- **An input that is empty after freezing** → refuse. There is nothing to review, and a round against
+  nothing would still cost one.
+
+Backend availability, the self-review escape, and what happens to a malformed verdict are the
+contract's:
+[Same-model refusal and self-review](../vibe-core/references/reviewer-contract.md#same-model-refusal-and-self-review)
+and [Verdict parsing](../vibe-core/references/reviewer-contract.md#verdict-parsing).

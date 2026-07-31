@@ -24,6 +24,7 @@ duplicated here. What it does not reach is: it accepts **any one** valid citatio
 the skill cites *something*. The nine fragments this loop relies on are asserted individually below.
 """
 
+import json
 import os
 import re
 import shutil
@@ -157,12 +158,30 @@ class TestSkillContract(unittest.TestCase):
         cls.norm = norm(cls.text)
 
     def test_the_state_schema_is_exactly_v6(self):
-        """Asserted as an exact set: a field without behaviour, or a behaviour without a field, fails."""
+        """Parsed, not grepped.
+
+        Counting key *names* anywhere in the blob passed a `schema_version` of 7, accepted arbitrary
+        extra fields, and could not tell a top-level key from one nested inside a round. The example is
+        real JSON, so it is loaded and compared level by level.
+        """
         block = re.search(r"(?s)```json\s*(\{.*?\})\s*```", self.text)
         self.assertIsNotNone(block, "the skill must show its state shape as a JSON block")
-        keys = set(re.findall(r'"(\w+)"\s*:', block.group(1)))
-        self.assertEqual(keys & V6_FIELDS, V6_FIELDS,
-                         f"schema v6 is missing {sorted(V6_FIELDS - keys)}")
+        state = json.loads(block.group(1))
+
+        self.assertEqual(state.get("schema_version"), 6,
+                         "the port carries schema_version 6; a bump needs a migration, not an edit")
+        self.assertEqual(set(state) & V6_FIELDS, V6_FIELDS - {"reviewer"},
+                         f"top level is missing {sorted(V6_FIELDS - {'reviewer'} - set(state))}")
+
+        self.assertIsInstance(state.get("rounds"), list)
+        self.assertTrue(state["rounds"], "the example must show at least one round")
+        self.assertIn("reviewer", state["rounds"][0],
+                      "`reviewer` is per round: one run can mix a dispatched critic with a "
+                      "self-reviewed round, and a summary reporting only one would misdescribe it")
+
+        self.assertIsInstance(state.get("carried_forward"), list)
+        self.assertIsInstance(state.get("translation_review"), dict)
+        self.assertIn("reviewer", state["translation_review"])
 
     def test_stop_severity_domain_and_default(self):
         self.assertIn("--stop-severity", self.text)
@@ -318,42 +337,67 @@ class TestRenderer(unittest.TestCase):
 
 
 class TestAcceptanceFixture(unittest.TestCase):
-    """The AC-3 fixture is a **specification** fixture.
+    """The AC-3 fixture is a **specification** fixture, bound to the plan it describes.
 
-    CI checks it is well-formed and that every seeded flaw's category is covered by the skill's stated
-    algorithm. CI does **not** check that a review finds them — that needs the loop to run, and the
-    ≥2-of-3 clause is a reviewer's judgement. It is reported as an operator check, with this fixture as
-    the thing the operator runs against.
+    CI checks it is well-formed, that each row points at real text at the line it names, and that every
+    category is one the rubric can express. CI does **not** check that a review finds the flaws — that
+    needs the loop to run, and the ≥2-of-3 clause is a reviewer's judgement. It is an operator check,
+    with this fixture as the thing the operator runs against.
+
+    The previous version of this class never opened `plan.md`: replacing the plan with flawless prose
+    left every test green, and two of the three line numbers were wrong. A specification fixture that
+    is not bound to its subject specifies nothing.
     """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.plan_lines = (FIXTURE / "plan.md").read_text(encoding="utf-8").splitlines()
+        expected = (FIXTURE / "expected-findings.md").read_text(encoding="utf-8")
+        cls.rows = []
+        for row in re.findall(r"(?m)^\|\s*(F\d+)\s*\|(.+)$", expected):
+            cells = [c.strip() for c in row[1].split("|")]
+            cls.rows.append({"id": row[0], "category": cells[0], "severity": cells[1],
+                             "line": cells[2], "anchor": cells[3].strip("`")})
 
     def test_the_fixture_exists_with_a_plan_and_its_expected_findings(self):
         self.assertTrue((FIXTURE / "plan.md").is_file(), "the flawed plan is missing")
         self.assertTrue((FIXTURE / "expected-findings.md").is_file(),
                         "the expected findings are missing; without them the fixture asserts nothing")
 
-    def test_three_flaws_are_seeded_and_each_has_an_expected_finding(self):
-        expected = (FIXTURE / "expected-findings.md").read_text(encoding="utf-8")
-        ids = re.findall(r"(?m)^\|\s*(F\d+)\s*\|", expected)
+    def test_three_flaws_are_seeded_with_distinct_ids(self):
+        ids = [r["id"] for r in self.rows]
         self.assertEqual(len(ids), 3, f"AC-3 seeds three flaws; found {ids}")
         self.assertEqual(len(set(ids)), 3, "finding ids must be distinct")
 
-    def test_each_expected_finding_names_a_severity_and_a_line(self):
-        for row in re.findall(r"(?m)^\|\s*F\d+\s*\|([^\n]+)$",
-                              (FIXTURE / "expected-findings.md").read_text(encoding="utf-8")):
-            with self.subTest(row=row.strip()):
-                self.assertRegex(row, r"blocker|major|minor")
-                self.assertRegex(row, r"\b\d+\b", "each expected finding must name a line")
+    def test_each_row_points_at_real_text_at_the_line_it_names(self):
+        """This is the binding. Rewrite the plan and these fail, which is the whole point."""
+        for row in self.rows:
+            with self.subTest(finding=row["id"]):
+                self.assertRegex(row["line"], r"^\d+$", "the line cell must be a line number")
+                index = int(row["line"]) - 1
+                self.assertLess(index, len(self.plan_lines),
+                                f"{row['id']} names line {row['line']}, past the end of plan.md")
+                self.assertIn(row["anchor"], self.plan_lines[index],
+                              f"{row['id']}: plan.md line {row['line']} does not contain its anchor")
+
+    def test_each_row_names_a_severity_from_the_scale(self):
+        for row in self.rows:
+            with self.subTest(finding=row["id"]):
+                self.assertIn(row["severity"], ("blocker", "major", "minor"))
 
     def test_the_seeded_flaws_fall_within_the_rubric(self):
         """A seeded flaw the rubric cannot express would be unfindable by construction."""
         rubric = norm(RUBRIC.read_text(encoding="utf-8"))
-        expected = (FIXTURE / "expected-findings.md").read_text(encoding="utf-8")
-        categories = re.findall(r"(?m)^\|\s*F\d+\s*\|\s*([\w -]+?)\s*\|", expected)
-        self.assertTrue(categories, "expected findings must name a category per flaw")
-        for category in categories:
-            with self.subTest(category=category):
-                self.assertIn(category.strip().lower(), rubric,
-                              f"'{category}' is not a rubric dimension, so no review could raise it")
+        for row in self.rows:
+            with self.subTest(category=row["category"]):
+                self.assertIn(row["category"].lower(), rubric,
+                              f"'{row['category']}' is not a rubric dimension, so no review could "
+                              f"raise it")
+
+    def test_the_three_flaws_are_three_different_failure_classes(self):
+        """A fixture whose flaws are all one kind tests one thing three times."""
+        categories = {r["category"] for r in self.rows}
+        self.assertEqual(len(categories), 3, f"expected three distinct categories, got {categories}")
 
 
 if __name__ == "__main__":

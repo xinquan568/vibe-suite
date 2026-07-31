@@ -7,11 +7,11 @@ fixture asserts something rather than merely existing.
 well-formed and that each category below is a dimension the rubric can express. Whether a review
 actually raises them is the operator check that discharges the AC-3 acceptance clause.
 
-| id | category | severity | line | what is wrong |
-|---|---|---|---|---|
-| F1 | measurability | major | 30 | "Throughput stays within normal bounds and error rates do not increase" names no measurable criterion — no baseline, no window, no threshold. Nothing here can be evaluated after the fact, so the plan cannot be said to have succeeded or failed. |
-| F2 | risk coverage | major | 26 | The rollback flips reads back to the legacy queue, but step 6 removes it. After step 6 the stated rollback does not exist, and the plan never says the rollback expires or what replaces it. |
-| F3 | sequencing | minor | 20 | Step 4 compares outputs "across the soak window", after step 3 has already enabled the flag in production. The comparison that would justify the production soak happens after it. |
+| id | category | severity | line | anchor | what is wrong |
+|---|---|---|---|---|---|
+| F1 | measurability | major | 29 | `Throughput stays within normal bounds` | "Throughput stays within normal bounds and error rates do not increase" names no measurable criterion — no baseline, no window, no threshold. Nothing here can be evaluated after the fact, so the plan cannot be said to have succeeded or failed. |
+| F2 | risk coverage | major | 25 | `flip reads back to the legacy queue` | The rollback flips reads back to the legacy queue, but step 6 removes it. After step 6 the stated rollback does not exist, and the plan never says the rollback expires or what replaces it. |
+| F3 | sequencing | minor | 19 | `Compare outputs across the soak window` | Step 4 compares outputs "across the soak window", after step 3 has already enabled the flag in production. The comparison that would justify the production soak happens after it. |
 
 ## Why these three
 

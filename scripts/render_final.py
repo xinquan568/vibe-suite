@@ -66,12 +66,16 @@ def render_html(pandoc, document):
     outside `bridge`". Passing markdown on stdin and taking HTML from stdout removes the question
     instead of arguing it: the only write left is `bridge.write_atomic`.
 
-    Returns the rendered HTML, or `None`. A pandoc that exists but cannot render is, from finalize's
-    point of view, the same as one that is absent — either way the reader gets markdown.
+    Returns the rendered HTML, or `None`. A pandoc that exists but cannot **embed** is, from
+    finalize's point of view, the same as one that is absent — either way the reader gets markdown,
+    which is honest, rather than an HTML file that quietly needs the network.
     """
+    # Only the two embedding spellings. `--standalone` alone produces a document that references
+    # external resources, and `FINAL.html` is contracted to be self-contained — publishing a
+    # non-embedded file under that name would be worse than falling back to markdown, because the
+    # failure would be invisible until someone opened it offline.
     for flags in (["--embed-resources", "--standalone"],
-                  ["--self-contained", "--standalone"],
-                  ["--standalone"]):
+                  ["--self-contained", "--standalone"]):
         try:
             result = subprocess.run(
                 [pandoc, *flags, "-f", "markdown", "-t", "html"],
@@ -90,12 +94,11 @@ def main(argv=None):
     parser.add_argument("--out", help="output directory (default: the source's directory)")
     args = parser.parse_args(argv)
 
-    source = Path(args.source)
-    if not source.is_file():
-        print("render_final: no readable source markdown (%s)" % args.source, file=sys.stderr)
-        return EXIT_BAD_INPUT
-
-    root = Path(args.root).resolve()
+    # `Path.resolve()` on the root would follow a caller-supplied final symlink and hand `bridge` the
+    # target instead of the thing it was asked to check — which is precisely the refusal
+    # `assert_root` exists to make. Absolute, not resolved: `absolute()` prefixes the cwd and leaves
+    # the identity alone.
+    root = Path(args.root).absolute()
     try:
         bridge.assert_root(root)
         bridge.pin_root(root)
@@ -103,11 +106,24 @@ def main(argv=None):
         print("render_final: %s" % exc, file=sys.stderr)
         return EXIT_BAD_ROOT
 
+    # Every path handed onward must be absolute in the same frame as the root, because `bridge`
+    # computes containment with `relative_to`. A relative `--out` against an absolute root raises
+    # `ValueError` rather than refusing — an ordinary invocation like `--root . docs/run/plan.md`
+    # crashed before this.
+    source = Path(args.source)
+    if not source.is_absolute():
+        source = (Path.cwd() / source)
+    if not source.is_file():
+        print("render_final: no readable source markdown (%s)" % args.source, file=sys.stderr)
+        return EXIT_BAD_INPUT
+
     text = source.read_text(encoding="utf-8")
     head = banner(text)
     print("render_final: %s" % head)
 
     outdir = Path(args.out) if args.out else source.parent
+    if not outdir.is_absolute():
+        outdir = Path.cwd() / outdir
     document = "*%s*\n\n---\n\n%s" % (head, text)
 
     pandoc = pandoc_binary()

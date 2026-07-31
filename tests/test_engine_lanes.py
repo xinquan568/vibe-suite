@@ -18,7 +18,7 @@ and five call sites pass `valid syntax` or `valid JSON`. Literal-only extraction
 can emit 30.
 
 **What a fake engine can prove, and what it cannot.** `TestLaneStimulus` spawns the real runner against
-`fixtures/fake-codex/lane-responder.mjs`, so dispatch arguments, the packaged prompt, the
+`fixtures/fake-codex/lane-responder.mjs`, so the forwarded dispatch flags, the packaged prompt, the
 unusable-vs-unreachable split, and a divergent payload's trip back through the runner are all observed
 rather than asserted about prose. It cannot prove a host session renders the disagreement list or the
 F9.5 header — no process in this repository performs host rendering. Those two remain command-contract
@@ -353,6 +353,26 @@ class TestLaneStimulus(unittest.TestCase):
         self.assertIn("{rule, check, line, penalty}", sent)
         for check in self.catalog():
             self.assertIn(check, sent, f"the lane prompt dropped check identifier {check!r}")
+
+    def test_dispatch_arguments_are_forwarded(self):
+        """The flags, not just the prompt — `assertArgvContract` only rejects unknown tokens.
+
+        Without this, dropping `--json` or widening the sandbox to `workspace-write` would leave
+        every other test in this class green: the fixture would still answer, the prompt would still
+        arrive, and the lane would silently be running unsandboxed or unparseable. Asserted as an
+        ordered pair for `-s read-only` because the value belongs to that flag, not merely to argv.
+        """
+        self.dispatch(self.lane_prompt())
+        argv = json.loads(self.probe.read_text())["argv"]
+        self.assertEqual(argv[0], "exec")
+        self.assertIn("--json", argv, "the runner parses an event stream; without --json there is none")
+        self.assertIn("--skip-git-repo-check", argv)
+        self.assertIn(["-s", "read-only"], [argv[i:i + 2] for i in range(len(argv) - 1)],
+                      "the lane never writes, so read-only must be the sandbox it is handed")
+        self.assertNotIn("workspace-write", argv)
+        self.assertIn("reasoning.effort=low", argv, "the effort passed on the command line must reach codex")
+        self.assertNotIn("-m", argv, "P9: no pinned model id — the backend picks its own best model")
+        self.assertNotIn("--model", argv)
 
     def test_stdin_is_closed_for_the_lane(self):
         """An open stdin hangs codex forever — the one failure that looks like a slow review."""

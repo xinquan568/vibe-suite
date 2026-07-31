@@ -23,21 +23,22 @@
     "./commands/continue.md",
     "./commands/delegate.md",
     "./commands/doctor.md",
+    "./commands/fix.md",
     "./commands/init.md",
     "./commands/jobs.md",
     "./commands/ls.md",
+    "./commands/nl-audit.md",
     "./commands/preflight.md",
+    "./commands/refine-proposal.md",
     "./commands/repair.md",
+    "./commands/roast.md",
     "./commands/score.md",
+    "./commands/security-scan.md",
+    "./commands/spec-sync.md",
+    "./commands/test.md",
     "./commands/unbridge.md",
     "./commands/update.md",
-    "./commands/test.md",
-    "./commands/vocab.md",
-    "./commands/spec-sync.md",
-    "./commands/security-scan.md",
-    "./commands/nl-audit.md",
-    "./commands/roast.md",
-    "./commands/fix.md"
+    "./commands/vocab.md"
   ],
   "hooks": "./hooks/hooks.json",
   "agents": [
@@ -65,6 +66,8 @@
     "./skills/conventions-codex",
     "./skills/orchestration",
     "./skills/patterns",
+    "./skills/refine-proposal",
+    "./skills/roasting",
     "./skills/rules",
     "./skills/scoring",
     "./skills/security",
@@ -76,7 +79,6 @@
     "./skills/writing-plugins",
     "./skills/writing-prompts",
     "./skills/writing-rules",
-    "./skills/writing-skills",
-    "./skills/roasting"
+    "./skills/writing-skills"
   ]
 }

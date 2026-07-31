@@ -1,0 +1,10 @@
+{
+  "_invocation": "any",
+  "_docs": "HTTP 403 with x-ratelimit-remaining: 0 and a reset timestamp.",
+  "_observation": "the source system declined to answer now, and a retry after the reset will succeed",
+  "_class": "rate_limited",
+  "_retryable": true,
+  "_retry_after": "2026-08-01T10:00:00Z",
+  "exit_code": 1,
+  "stderr": "HTTP 403: API rate limit exceeded"
+}

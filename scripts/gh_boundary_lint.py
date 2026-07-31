@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: ISC
+"""Nothing outside the source driver invokes `gh` (E5.4 / vibe-43).
+
+    gh_boundary_lint.py --root <dir> [path ...]
+
+E5.4's acceptance: *core calls no `gh` outside the driver*, grep-enforced. A bare substring match would
+report the driver itself, every cross-reference to it, and every sentence containing the letters — so
+the rule distinguishes an **invocation** from a **mention**.
+
+**The rule is purely syntactic**, and that is a deliberate narrowing. An earlier formulation asked
+whether a line was "an imperative" or "an instruction rather than a description", which is a judgement
+no lint can make and a reviewer rightly refused. A command form is:
+
+    gh <lowercase-subcommand>
+
+and it fails in exactly three places:
+
+1. inside a fenced code block;
+2. inside an inline code span;
+3. inside a string literal or subprocess argument in a script, found by **parsing** — the same reason
+   `tests/test_write_discipline.py` gives for its own AST sweep: a textual sweep matches comments and
+   misses what is reached through a name.
+
+Everywhere else it passes, which is the prose case: `the gh CLI`, `see the github driver`. Bare `gh`
+with no subcommand never fails.
+
+**This admits one false negative on purpose**: an instruction written as unmarked prose — "run gh pr
+create to open it", without backticks — passes. That is unlikely under this repository's conventions,
+where a command is written in a code span, and the alternative is a rule that guesses at intent. **A
+lint that guesses gets switched off**, which is the failure this file exists to avoid rather than to
+demonstrate.
+
+This program writes nothing.
+"""
+
+import argparse
+import ast
+import re
+import sys
+from pathlib import Path
+
+EXIT_OK, EXIT_VIOLATION = 0, 1
+
+#: The one place `gh` belongs.
+DRIVER = Path("skills") / "issue2pr" / "drivers" / "github.md"
+
+#: Enumerated, not inferred. `tests/**` is excluded because a fixture must be able to contain the
+#: thing being prohibited.
+CORPUS = (
+    "skills/issue2pr/**/*.md",
+    "commands/issue2pr.md",
+    "scripts/profile_*.py",
+)
+
+COMMAND_FORM = re.compile(r"\bgh\s+[a-z][a-z-]*\b")
+
+SCRIPT_SUFFIXES = (".py", ".mjs", ".sh")
+
+
+def markdown_hits(text):
+    """`(line, snippet)` for command forms inside a fence or an inline code span."""
+    hits = []
+    fenced = False
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            if COMMAND_FORM.search(line):
+                hits.append((number, line.strip()))
+            continue
+        for span in re.findall(r"`([^`]+)`", line):
+            if COMMAND_FORM.search(span):
+                hits.append((number, span.strip()))
+    return hits
+
+
+def python_hits(text):
+    """String literals containing a command form, plus `subprocess` argument lists.
+
+    Parsed rather than matched: a comment mentioning `gh pr` is not an invocation, and a list built as
+    `["gh", "pr", "view"]` contains no substring a text sweep would find.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if COMMAND_FORM.search(node.value):
+                hits.append((getattr(node, "lineno", 0), node.value.strip()))
+        elif isinstance(node, (ast.List, ast.Tuple)):
+            parts = [e.value for e in node.elts
+                     if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+            if len(parts) >= 2 and parts[0] == "gh" and re.fullmatch(r"[a-z][a-z-]*", parts[1]):
+                hits.append((getattr(node, "lineno", 0), " ".join(parts)))
+    return hits
+
+
+def shell_hits(text):
+    """Shell and JS have no cheap AST here, so every line counts — they are executable throughout."""
+    return [(number, line.strip()) for number, line in enumerate(text.splitlines(), 1)
+            if COMMAND_FORM.search(line) and not line.lstrip().startswith("#")]
+
+
+def scan(path, text):
+    if path.suffix == ".md":
+        return markdown_hits(text)
+    if path.suffix == ".py":
+        return python_hits(text)
+    if path.suffix in SCRIPT_SUFFIXES:
+        return shell_hits(text)
+    return markdown_hits(text)
+
+
+def targets(root, explicit):
+    if explicit:
+        return [Path(p) for p in explicit]
+    found = []
+    for pattern in CORPUS:
+        found.extend(sorted(root.glob(pattern)))
+    return found
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Keep `gh` invocations inside the source driver.")
+    parser.add_argument("paths", nargs="*")
+    parser.add_argument("--root", required=True)
+    args = parser.parse_args(argv)
+
+    root = Path(args.root).absolute()
+    violations = []
+
+    for path in targets(root, args.paths):
+        if not path.is_file():
+            continue
+        try:
+            relative = path.absolute().relative_to(root)
+        except ValueError:
+            relative = path
+        if relative == DRIVER or relative.name == DRIVER.name and relative.parent.name == "drivers":
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for number, snippet in scan(path, text):
+            violations.append("%s:%d  %s" % (relative, number, snippet[:100]))
+
+    if violations:
+        print("gh_boundary_lint: %d invocation(s) outside %s" % (len(violations), DRIVER),
+              file=sys.stderr)
+        for violation in violations:
+            print("  - %s" % violation, file=sys.stderr)
+        return EXIT_VIOLATION
+
+    print("gh_boundary_lint: clean")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

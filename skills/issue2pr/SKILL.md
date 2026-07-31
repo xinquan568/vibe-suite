@@ -160,14 +160,20 @@ pipeline instead.
 <!-- driver-protocol -->
 ```json
 {
-  "fetch_item": {"in": ["source_id"], "out": "source-snapshot", "errors": ["not_found", "not_an_item"]},
-  "refresh_item": {"in": ["source_id", "since"], "out": "source-delta", "errors": ["not_found"]},
-  "open_change": {"in": ["branch", "title", "body", "base_branch"], "out": "change_ref", "errors": ["exists", "rejected"]},
-  "update_change": {"in": ["change_ref", "body"], "out": "change_ref", "errors": ["not_found", "rejected"]},
-  "read_change_state": {"in": ["change_ref"], "out": "change_state", "errors": ["not_found"]},
-  "link_closure": {"in": ["change_ref", "source_id"], "out": "change_ref", "errors": ["not_found"]}
+  "fetch_item": {"in": ["source_id"], "out": "source-snapshot", "errors": ["not_found", "not_an_item", "unavailable", "rate_limited", "unauthorized", "unusable"]},
+  "refresh_item": {"in": ["source_id", "since"], "out": "source-delta", "errors": ["not_found", "unavailable", "rate_limited", "unauthorized", "unusable"]},
+  "open_change": {"in": ["branch", "title", "body", "base_branch"], "out": "change_ref", "errors": ["exists", "rejected", "unavailable", "rate_limited", "unauthorized", "unusable"]},
+  "update_change": {"in": ["change_ref", "body"], "out": "change_ref", "errors": ["not_found", "rejected", "unavailable", "rate_limited", "unauthorized", "unusable"]},
+  "read_change_state": {"in": ["change_ref", "since"], "out": "change_state", "errors": ["not_found", "unavailable", "rate_limited", "unauthorized", "unusable"]},
+  "link_closure": {"in": ["change_ref", "source_id"], "out": "change_ref", "errors": ["not_found", "unavailable", "rate_limited", "unauthorized", "unusable"]}
 }
 ```
+
+**The four failure classes are on every operation, and they are not interchangeable** — their whole
+content is what the caller does next. `unavailable` is retried; `rate_limited` is retried *after* the
+time it carries; `unauthorized` stops and tells the operator; `unusable` means the system answered and
+the answer is the problem, which sends someone to look at a different place entirely. Collapsing them
+into one error would make an infinite retry loop indistinguishable from a transient failure.
 
 The two types the protocol passes around are declared here, not left for a driver to invent:
 
@@ -178,11 +184,21 @@ The two types the protocol passes around are declared here, not left for a drive
 
 <!-- change-state -->
 ```json
-{"state": "open", "mergeable": false, "checks": [], "review_comments": []}
+{"state": "open", "mergeable": false, "comments": [], "review_comments": [], "reviews": [], "checks": []}
 ```
 
+**Scoped to the `since` the caller passed.** An earlier shape carried a single `updated_at`, which says
+*that* something changed and not *what* — leaving the caller to re-read everything to find out, which
+is the diffing this seam exists to prevent. Comments, review comments, reviews and checks are four
+independent collections; a question with a time in it gets an answer scoped to that time.
+
+**The driver filters, using its source's own time parameter where one exists and filtering the results
+itself where none does.** The obligation sits on the driver rather than on the source precisely because
+sources differ — of the five collections the github driver reads, two accept a time parameter and three
+do not. What the core never does is receive everything and diff.
+
 `change_ref` identifies a change without saying what a change *is* in any particular system;
-`change_state` is what step 8 reads. Both are the core's, because two drivers inventing their own
+`change_state` is what step 8 reads, and what the babysit trigger polls. Both are the core's, because two drivers inventing their own
 shapes is how a seam stops being one.
 
 Every step that reaches the source system names its operation, and **no step names a command**:
@@ -191,7 +207,7 @@ Every step that reaches the source system names its operation, and **no step nam
 |---|---|
 | 1 | `fetch_item` — the snapshot a run freezes |
 | 7 | `open_change`, then `link_closure` |
-| 8 | `read_change_state` — the change as the reviewer sees it |
+| 8 | `read_change_state` — the change as the reviewer sees it, scoped to `since` |
 | 9 | `update_change` — the record of what closed |
 | a fresh round | `refresh_item` — the delta a new round is *for* |
 

@@ -1,0 +1,10 @@
+{
+  "_invocation": "gh api repos/{owner}/{repo}/pulls/{n}/reviews",
+  "_docs": "GitHub REST: pull request reviews. Listing does NOT accept `since`.",
+  "_observation": "a review changed state without adding any comment",
+  "_since_supported": false,
+  "reviews": [
+    {"id": 3, "submitted_at": "2026-08-01T09:10:00Z", "author": "carol",
+     "state": "CHANGES_REQUESTED", "body": ""}
+  ]
+}

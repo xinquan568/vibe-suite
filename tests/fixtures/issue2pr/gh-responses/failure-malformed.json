@@ -1,0 +1,9 @@
+{
+  "_invocation": "any",
+  "_docs": "A 200 whose body is not the documented shape — a proxy interstitial, a truncated stream.",
+  "_observation": "the source system answered and the answer is unusable",
+  "_class": "unusable",
+  "_retryable": false,
+  "exit_code": 0,
+  "stdout": "<html>upstream timeout</html>"
+}

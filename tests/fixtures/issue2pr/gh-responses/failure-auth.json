@@ -1,0 +1,9 @@
+{
+  "_invocation": "any",
+  "_docs": "HTTP 401. The request was delivered and refused.",
+  "_observation": "the source system refused to answer, and a retry will not change that",
+  "_class": "unauthorized",
+  "_retryable": false,
+  "exit_code": 1,
+  "stderr": "HTTP 401: Bad credentials"
+}

@@ -1,0 +1,10 @@
+{
+  "_invocation": "gh api repos/{owner}/{repo}/commits/{sha}/check-runs",
+  "_docs": "GitHub REST: check runs for a ref. Listing does NOT accept `since`; each run carries completed_at.",
+  "_observation": "a check moved to failure",
+  "_since_supported": false,
+  "checks": [
+    {"name": "test", "status": "completed", "conclusion": "failure",
+     "completed_at": "2026-08-01T09:15:00Z"}
+  ]
+}

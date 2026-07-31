@@ -1,0 +1,9 @@
+{
+  "_invocation": "any",
+  "_docs": "Network failure before a response; the CLI exits non-zero with a connection error on stderr.",
+  "_observation": "the source system could not be asked",
+  "_class": "unavailable",
+  "_retryable": true,
+  "exit_code": 1,
+  "stderr": "dial tcp: lookup api.github.com: no such host"
+}

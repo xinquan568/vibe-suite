@@ -115,7 +115,10 @@ class TestVerifierIsNeverTheFixer(FixTestCase):
         self.assertRegex(table["claude"], r"codex-runner\.mjs.*read-only",
                          "a claude fix must be verified by codex, read-only")
         self.assertRegex(table["codex"], r"(?i)in-session",
-                         "a codex fix must be verified in-session by Claude")
+                         "a codex fix must be verified in-session")
+        self.assertRegex(table["codex"], r"(?i)\bclaude\b",
+                         "the codex row must name Claude as the verifier; 'in-session' alone would "
+                         "be satisfied by an in-session self-verifier")
 
     def test_the_two_mapped_engines_differ(self):
         """The invariant itself, independent of how either row is worded."""

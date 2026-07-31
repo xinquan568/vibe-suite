@@ -125,6 +125,44 @@ class TestEachTransformation(MechanicalTestCase):
                 self.assertNotRegex(self._text(rel), r"(?m)^name:")
 
 
+class TestClassificationIsRelativeToTheRoot(MechanicalTestCase):
+    """The defect this guards recurred once already: classification read the ABSOLUTE path, so a
+    target whose own ancestor was named `shared` or `agents` misclassified every artifact under it.
+    Where the target lives must not change what its artifacts are."""
+
+    def _root_under(self, ancestor):
+        base = Path(self.tmp) / ancestor / "project"
+        shutil.copytree(FIXTURE, base)
+        return base
+
+    def test_an_ancestor_named_shared_does_not_flag_every_artifact(self):
+        root = self._root_under("shared")
+        run_table(root)
+        for rel in ("commands/build.md", "commands/report.md"):
+            with self.subTest(file=rel):
+                self.assertNotIn("user-invocable", (root / rel).read_text(encoding="utf-8"),
+                                 "only commands/shared/ partials may gain the flag")
+        self.assertIn("user-invocable: false",
+                      (root / "commands/shared/paths.md").read_text(encoding="utf-8"),
+                      "the genuine shared partial must still be flagged")
+
+    def test_an_ancestor_named_agents_does_not_give_commands_a_name(self):
+        root = self._root_under("agents")
+        run_table(root)
+        for rel in ("commands/build.md", "commands/report.md", "commands/shared/paths.md"):
+            with self.subTest(file=rel):
+                self.assertNotRegex((root / rel).read_text(encoding="utf-8"), r"(?m)^name:")
+
+    def test_a_real_agent_inside_the_target_does_gain_a_name(self):
+        """The positive half: relative classification must still recognise a genuine agent."""
+        (self.root / "agents").mkdir(exist_ok=True)
+        (self.root / "agents/helper.md").write_text(
+            "---\ndescription: Use when a helper is needed for the build step.\nmodel: haiku\n"
+            "tools: Read\n---\n\n# helper\n\nHelp.\n", encoding="utf-8")
+        run_table(self.root)
+        self.assertIn("name: helper", (self.root / "agents/helper.md").read_text(encoding="utf-8"))
+
+
 class TestConflictsAndIdempotence(MechanicalTestCase):
     def test_both_key_forms_present_is_a_reported_no_op(self):
         """Dropping either would lose a value the author wrote, so neither is touched."""

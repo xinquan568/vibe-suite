@@ -1,0 +1,14 @@
+{
+  "_invocation": "gh pr view {n} --repo {repo_id} --json state,mergeable,mergedAt,updatedAt",
+  "_docs": "https://cli.github.com/manual/gh_pr_view",
+  "_observation": "the change landed",
+  "http_status": 200,
+  "headers": {},
+  "body": {
+    "state": "MERGED",
+    "mergeable": false,
+    "mergedAt": "2026-08-01T09:20:00Z",
+    "updatedAt": "2026-08-01T09:20:00Z"
+  },
+  "exit_code": 0
+}

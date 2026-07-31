@@ -69,6 +69,7 @@ parameterised, or stated in the core as an assumption a profile may override.
 | the work item lives on GitHub | assumption | `source_driver` names it; the github driver is the only one implemented, and #43 extracts the seam |
 | one repository per run | assumption | `repo_path` accepts a list; core never assumes arity |
 | a PR is the unit of delivery | assumption | **not** parameterised. The nine-step machine terminates in a reviewed PR, and a source system without PRs would need a different machine, not a different profile. Stated in core as a scope boundary rather than pretended away. |
+| a core step describing a GitHub-shaped behaviour without naming a command | assumption | **not** detectable by any grep — `gh_boundary_lint.py` catches invocations, and prose like "the pull request's mergeable state" carries no command form. Recorded here because that is what this column is for: the class no test will raise. The [jira obligation](../drivers/jira.md) is the worked example — it names the three places the protocol assumes a pull request. |
 | the reviewer is reached as a subprocess | assumption | **not** parameterised. It follows from the backend contract, which the reviewer contract owns. |
 
 The last two are the honest ones: they are project-shaped, they were **not** removed, and the reason is

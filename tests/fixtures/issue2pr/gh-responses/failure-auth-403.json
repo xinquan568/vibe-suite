@@ -1,0 +1,13 @@
+{
+  "_invocation": "gh api repos/{owner}/{repo}/issues/{n}/comments",
+  "_docs": "https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api",
+  "_observation": "403 WITHOUT throttling evidence \u2014 the case that makes status alone insufficient",
+  "exit_code": 1,
+  "http_status": 403,
+  "headers": {
+    "x-ratelimit-remaining": "4998",
+    "x-ratelimit-reset": "1785000000"
+  },
+  "stderr": "HTTP 403: Resource not accessible by integration",
+  "body": ""
+}

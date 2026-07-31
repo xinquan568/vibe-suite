@@ -1,0 +1,10 @@
+{
+  "_invocation": "gh api repos/{owner}/{repo}/issues/{n}/comments",
+  "_docs": "https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api",
+  "_observation": "the request was delivered and refused",
+  "exit_code": 1,
+  "http_status": 401,
+  "headers": {},
+  "stderr": "HTTP 401: Bad credentials",
+  "body": ""
+}

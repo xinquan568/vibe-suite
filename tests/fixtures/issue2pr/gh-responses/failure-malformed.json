@@ -1,0 +1,10 @@
+{
+  "_invocation": "gh api repos/{owner}/{repo}/issues/{n}/comments",
+  "_docs": "https://cli.github.com/manual/gh_api",
+  "_observation": "a 200 whose body is not the documented shape",
+  "exit_code": 0,
+  "http_status": 200,
+  "headers": {},
+  "stderr": "",
+  "body": "<html>upstream timeout</html>"
+}

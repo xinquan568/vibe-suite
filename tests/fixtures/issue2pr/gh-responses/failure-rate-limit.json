@@ -1,0 +1,13 @@
+{
+  "_invocation": "gh api repos/{owner}/{repo}/issues/{n}/comments",
+  "_docs": "https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api",
+  "_observation": "primary rate limit: remaining is zero and a reset is given",
+  "exit_code": 1,
+  "http_status": 403,
+  "headers": {
+    "x-ratelimit-remaining": "0",
+    "x-ratelimit-reset": "1785000000"
+  },
+  "stderr": "HTTP 403: API rate limit exceeded",
+  "body": ""
+}

@@ -1,0 +1,10 @@
+{
+  "_invocation": "gh api repos/{owner}/{repo}/issues/{n}/comments",
+  "_docs": "https://cli.github.com/manual/gh_api",
+  "_observation": "no response was received",
+  "exit_code": 1,
+  "http_status": null,
+  "headers": {},
+  "stderr": "dial tcp: lookup api.github.com: no such host",
+  "body": ""
+}

@@ -1,0 +1,48 @@
+{
+  "name": "fixable-skill",
+  "purpose": "E4.4 (vibe-38) fixture: defects the mechanical table repairs, plus one it must not touch.",
+  "defects": [
+    {
+      "id": "FX-1",
+      "file": "commands/build.md",
+      "rule": "rename-tools",
+      "mechanical": true,
+      "detail": "frontmatter uses `tools:` where the schema wants `allowed-tools:`"
+    },
+    {
+      "id": "FX-2",
+      "file": "commands/shared/paths.md",
+      "rule": "shared-partial-flag",
+      "mechanical": true,
+      "detail": "a shared partial with no `user-invocable: false`"
+    },
+    {
+      "id": "FX-3",
+      "file": "skills/needsname/SKILL.md",
+      "rule": "insert-heading",
+      "mechanical": true,
+      "detail": "body has no top-level heading"
+    },
+    {
+      "id": "FX-4",
+      "file": "skills/needsname/SKILL.md",
+      "rule": "derive-name",
+      "mechanical": true,
+      "detail": "frontmatter has no `name`; the directory supplies it"
+    },
+    {
+      "id": "FX-5",
+      "file": "commands/build.md",
+      "rule": "add-argument-hint",
+      "mechanical": true,
+      "detail": "body reads $ARGUMENTS with no `argument-hint` declared"
+    },
+    {
+      "id": "FX-6",
+      "file": "commands/report.md",
+      "rule": null,
+      "mechanical": false,
+      "detail": "'Does stuff.' is a vague description - judgement, not a mechanical repair"
+    }
+  ]
+}

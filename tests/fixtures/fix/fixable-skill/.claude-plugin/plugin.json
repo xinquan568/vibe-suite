@@ -1,0 +1,11 @@
+{
+  "name": "fixable-skill",
+  "version": "0.1.0",
+  "description": "Fixture plugin whose defects the mechanical auto-fix table repairs.",
+  "commands": [
+    "./commands/build.md"
+  ],
+  "skills": [
+    "./skills/needsname"
+  ]
+}

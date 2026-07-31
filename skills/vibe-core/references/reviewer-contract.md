@@ -67,8 +67,9 @@ particular loop spells them:
 
 The cap on review rounds is `max_review_rounds`, set by `--max-review-rounds`. It is an integer.
 
-**Each loop declares its own domain** — floor, ceiling, default — and states why its floor is what it
-is. The floors differ for a real reason, and a loop that declared one without a reason would be
+**Each loop declares its own domain in a `## Round bounds` section** — stating `floor`, `ceiling` and
+`default` as **labelled** values — and says why its floor is what it is. Labels are required because a
+bare list of numbers cannot say which is which, and a reader who guesses wrong gets a cap nobody chose. The floors differ for a real reason, and a loop that declared one without a reason would be
 diverging from this contract even while matching its key.
 
 Clamping is **not** per-loop:
@@ -79,8 +80,20 @@ Clamping is **not** per-loop:
 
 ## Verdict parsing
 
-A reviewer answers with one fenced block. Parsing it is four steps, and the third is the one that gets
-dropped:
+A reviewer answers with **one fenced YAML block**, tagged `yaml`:
+
+````
+```yaml
+verdict: approve
+findings: []
+```
+````
+
+The format is fixed by this contract, not chosen per loop. A loop free to pick its own could claim
+conformance while emitting something no other loop can read, which would leave the shared contract
+sharing nothing.
+
+Parsing it is four steps, and the third is the one that gets dropped:
 
 1. The message must **end** with the block, and only the **last** fenced block is parsed. A reviewer
    that thinks aloud before answering is still parseable; one whose commentary is mistaken for its

@@ -75,24 +75,116 @@ def norm(text):
     return re.sub(r"\s+", " ", text.replace("**", "").replace("`", "")).lower()
 
 
-def round_bounds_block(text):
-    """The one legal home for definition-shaped text, located deterministically.
+def round_bounds_span(text):
+    """Locate the one legal home for definition-shaped text, as a **line interval**.
 
-    Returns (block_text, heading_count). Zero headings means the domain was never declared; two means
-    there is no way to say which governs. Both are failures, so the count is returned rather than
-    swallowed.
+    Returns `(start, end, count)` with `start`/`end` as 0-based line indices, half-open. An earlier
+    version returned the block's *text* and the caller exempted lines by string equality — which meant
+    an identical definition line copied anywhere else in the file was exempt too. An interval cannot be
+    forged by repetition.
+
+    `count != 1` is returned rather than swallowed: zero means the domain was never declared, two means
+    there is no way to say which governs, and both are failures.
     """
     lines = text.splitlines()
     starts = [i for i, line in enumerate(lines) if ROUND_BOUNDS_HEADING.match(line)]
     if len(starts) != 1:
-        return "", len(starts)
+        return 0, 0, len(starts)
     start = starts[0]
     end = len(lines)
     for i in range(start + 1, len(lines)):
         if re.match(r"^#{1,2}[ ]", lines[i]):
             end = i
             break
-    return "\n".join(lines[start + 1:end]), 1
+    return start + 1, end, 1
+
+
+def domain_from_block(block):
+    """Read `floor`, `ceiling` and `default` as **labelled** values.
+
+    Membership testing was the bug the execution review found: asserting each expected number appears
+    somewhere in the block let `floor 1, ceiling 5, default 2` satisfy a required floor of 2, because
+    the 2 was supplied by the default. A label binds a number to the thing it is.
+
+    Returns a dict of the labels found; a missing label is simply absent, so the caller's equality
+    check reports it.
+    """
+    found = {}
+    for label in ("floor", "ceiling", "default"):
+        match = re.search(r"\b%s\b\W{0,20}?(\d+)" % label, block, re.I)
+        if match:
+            found[label] = int(match.group(1))
+    return found
+
+
+def paragraphs(text):
+    """Blank-line-separated units as `(first, last, joined)`, line numbers 0-based and inclusive.
+
+    Definition detection runs on a whole paragraph with its newlines collapsed, because a redefinition
+    split across a line wrap — the marker on one line, the pinned term on the next — evades any rule
+    that looks at one line at a time.
+    """
+    units, start = [], None
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip():
+            if start is None:
+                start = i
+        elif start is not None:
+            units.append((start, i - 1, " ".join(lines[start:i])))
+            start = None
+    if start is not None:
+        units.append((start, len(lines) - 1, " ".join(lines[start:])))
+    return units
+
+
+def redefinitions(text):
+    """Every paragraph that defines a pinned term outside the `## Round bounds` block.
+
+    Three properties the execution review found missing from the first implementation:
+
+    - exemption is by **line interval**, so an identical definition line copied elsewhere is not
+      exempt by virtue of matching the block's text;
+    - matching is **case-insensitive**;
+    - the unit is a **paragraph**, so a wrapped definition cannot straddle the rule.
+    """
+    start, end, count = round_bounds_span(text)
+    hits = []
+    for first, last, unit in paragraphs(text):
+        if count == 1 and first >= start and last < end:
+            continue                      # wholly inside the one legal block
+        low = unit.lower()
+        if not DEFINITION_MARKER.search(low):
+            continue
+        if any(term.lower() in low for term in PINNED_TERMS):
+            hits.append((first + 1, unit.strip()))
+    return hits
+
+
+def citation_target_ok(text, containing_dir):
+    """A citation must **resolve** and its fragment must name a real contract heading.
+
+    Substring matching accepted `bogus/references/reviewer-contract.md#does-not-exist`, which is a
+    citation of nothing. Link targets are parsed, resolved relative to the file that wrote them, and
+    checked against the contract's actual headings.
+    """
+    headings = {
+        re.sub(r"[^a-z0-9]+", "-", h.lower()).strip("-")
+        for h in re.findall(r"^#{1,6}[ ]+(.+?)[ ]*$", CONTRACT.read_text(encoding="utf-8"), re.M)
+    }
+    for target in re.findall(r"\]\(([^)\s]+)\)", text):
+        path, _, fragment = target.partition("#")
+        if not path:
+            continue
+        try:
+            resolved = (containing_dir / path).resolve()
+        except (OSError, ValueError):
+            continue
+        if resolved != CONTRACT.resolve():
+            continue
+        if fragment and fragment in headings:
+            return True
+    return False
 
 
 class TestRegistry(unittest.TestCase):
@@ -175,6 +267,12 @@ class TestContractContent(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.norm)
 
+    def test_the_verdict_block_is_required_to_be_yaml(self):
+        """F6.3 says fenced-**YAML**. A contract that said only 'fenced block' would let each loop pick
+        a format no other loop can read — a shared contract sharing nothing."""
+        self.assertIn("```yaml", self.text)
+        self.assertRegex(self.norm, r"fenced yaml block")
+
     def test_self_review_never_engages_implicitly(self):
         self.assertIn("--allow-self-review", self.text)
         self.assertIn("never", self.norm)
@@ -204,6 +302,101 @@ class TestContractContent(unittest.TestCase):
                       "an unreferenced reference is one nothing loads")
 
 
+class TestPolicy(unittest.TestCase):
+    """The lexical policy on literals — every counterexample the execution review produced.
+
+    These are committed rather than demonstrated by hand, because a policy proven once in a terminal is
+    a policy nobody can re-check.
+    """
+
+    REFINE = DOMAINS["skills/refine-proposal"]
+    ISSUE2PR = DOMAINS["skills/issue2pr"]
+
+    def block(self, body):
+        return f"# c\n\nIntro.\n\n## Round bounds\n\n{body}\n\n## After\n\ntail\n"
+
+    def domain_of(self, body):
+        doc = self.block(body)
+        start, end, count = round_bounds_span(doc)
+        self.assertEqual(count, 1)
+        return domain_from_block("\n".join(doc.splitlines()[start:end]))
+
+    def test_labelled_values_bind_to_their_labels(self):
+        self.assertEqual(
+            self.domain_of("Floor 1, ceiling 5, default 3, because a round is a complete unit."),
+            self.REFINE)
+
+    def test_the_membership_counterexample_now_fails(self):
+        """`floor 1, ceiling 5, default 2` satisfied a required floor of 2 under membership testing,
+        because the 2 came from the default. Labels bind a number to the thing it is."""
+        self.assertNotEqual(
+            self.domain_of("Floor 1, ceiling 5, default 2, because reasons."),
+            self.ISSUE2PR)
+
+    def test_swapped_floor_and_default_fail(self):
+        self.assertNotEqual(
+            self.domain_of("Floor 3, ceiling 5, default 1, because reasons."),
+            self.REFINE)
+
+    def test_a_missing_label_is_absent_not_guessed(self):
+        found = self.domain_of("Ceiling 5, default 3, because reasons.")
+        self.assertNotIn("floor", found)
+        self.assertNotEqual(found, self.REFINE)
+
+    def test_unrelated_numbers_do_not_supply_a_label(self):
+        self.assertEqual(
+            self.domain_of("Floor 1, ceiling 5, default 3. See issue 42 and section 7, because reasons."),
+            self.REFINE)
+
+    def test_a_definition_copied_outside_the_block_is_not_exempt(self):
+        """Exempting by line *text* made an identical line legal anywhere it was repeated.
+
+        The line has to name a pinned term to be a redefinition at all — `floor`/`ceiling`/`default`
+        are the labels the block itself uses, not contract vocabulary. So the realistic copy is one
+        that carries the cap flag, which is what a consumer would actually duplicate into its overview.
+        """
+        body = "--max-review-rounds: floor 1, ceiling 5, default 3, because reasons."
+        doc = self.block(body).replace("tail", body)
+        hits = redefinitions(doc)
+        self.assertTrue(hits, "a duplicated definition line outside the block must be caught")
+        self.assertEqual(len(hits), 1, "only the copy outside the block is a violation")
+
+    def test_a_wrapped_redefinition_cannot_straddle_the_rule(self):
+        """The marker on one line and the pinned term on the next evades any per-line check."""
+        doc = ("# c\n\nThe flag --max-review-rounds is an integer whose\n"
+               "valid values are 1..5, default 3.\n\n"
+               "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
+        self.assertTrue(redefinitions(doc), "a wrapped redefinition must still be caught")
+
+    def test_case_does_not_evade_the_rule(self):
+        doc = ("# c\n\nThe flag --MAX-REVIEW-ROUNDS has VALID VALUES 1..5.\n\n"
+               "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
+        self.assertTrue(redefinitions(doc))
+
+    def test_a_bare_usage_line_is_not_a_redefinition(self):
+        """The policy must not fire on a consumer legitimately naming its own flag."""
+        doc = ("# c\n\nRun with --max-review-rounds to bound the loop.\n\n"
+               "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
+        self.assertEqual(redefinitions(doc), [])
+
+    def test_two_round_bounds_blocks_are_ambiguous(self):
+        doc = self.block("Floor 1, ceiling 5, default 3, because reasons.") + "\n## Round bounds\n\nx\n"
+        self.assertEqual(round_bounds_span(doc)[2], 2)
+
+    def test_a_citation_must_resolve(self):
+        """Substring matching accepted a path that points at nothing."""
+        real = CONTRACT.parent
+        self.assertFalse(
+            citation_target_ok("[c](bogus/references/reviewer-contract.md#round-bounds)", real),
+            "a citation whose target does not resolve to the contract is a citation of nothing")
+
+    def test_a_citation_fragment_must_name_a_real_heading(self):
+        self.assertFalse(
+            citation_target_ok("[c](reviewer-contract.md#does-not-exist)", CONTRACT.parent))
+        self.assertTrue(
+            citation_target_ok("[c](reviewer-contract.md#round-bounds)", CONTRACT.parent))
+
+
 class TestConsumerConformance(unittest.TestCase):
     """The acceptance criterion. Absent consumers are reported, not skipped silently."""
 
@@ -213,7 +406,7 @@ class TestConsumerConformance(unittest.TestCase):
             return None
         return sorted(directory.rglob("*.md"))
 
-    def test_each_consumer_is_absent_or_conformant(self):
+    def test_each_consumer_is_absent_or_cites_a_resolvable_subsection(self):
         for rel, issue in sorted(REQUIRED_CONSUMERS.items()):
             with self.subTest(consumer=rel):
                 files = self.consumer_files(rel)
@@ -221,11 +414,11 @@ class TestConsumerConformance(unittest.TestCase):
                     self.assertGreater(issue, 0, f"{rel} pending — ships at #{issue}")
                     continue
                 self.assertTrue(files, f"{rel} exists but holds no markdown to grade")
-                blob = "\n".join(f.read_text(encoding="utf-8") for f in files)
-                self.assertIn(CONTRACT_LINK, blob,
-                              f"{rel} must cite the reviewer contract, not restate it")
-                self.assertRegex(blob, re.escape(CONTRACT_LINK) + r"#\S+",
-                                 f"{rel}'s citation must name the subsection it relies on")
+                cited = any(citation_target_ok(f.read_text(encoding="utf-8"), f.parent)
+                            for f in files)
+                self.assertTrue(cited,
+                                f"{rel} must cite a real subsection of the reviewer contract by a "
+                                f"link that resolves — not restate it, and not point at nothing")
 
     def test_present_consumers_declare_exactly_one_round_bounds_block(self):
         for rel in sorted(REQUIRED_CONSUMERS):
@@ -234,47 +427,39 @@ class TestConsumerConformance(unittest.TestCase):
                 if files is None:
                     continue
                 blob = "\n".join(f.read_text(encoding="utf-8") for f in files)
-                _, count = round_bounds_block(blob)
-                self.assertEqual(count, 1,
-                                 f"{rel} must declare exactly one '## Round bounds' block "
-                                 f"(found {count}); zero is undeclared, two is ambiguous")
+                self.assertEqual(round_bounds_span(blob)[2], 1,
+                                 f"{rel} must declare exactly one '## Round bounds' block; "
+                                 f"zero is undeclared, two is ambiguous")
 
-    def test_present_consumers_match_their_domain_tuple(self):
+    def test_present_consumers_match_their_domain_exactly(self):
         for rel, domain in sorted(DOMAINS.items()):
             with self.subTest(consumer=rel):
                 files = self.consumer_files(rel)
                 if files is None:
                     continue
                 blob = "\n".join(f.read_text(encoding="utf-8") for f in files)
-                block, count = round_bounds_block(blob)
+                start, end, count = round_bounds_span(blob)
                 if count != 1:
-                    continue  # reported by the test above
-                numbers = [int(n) for n in re.findall(r"\d+", block)]
-                for name, value in domain.items():
-                    self.assertIn(value, numbers,
-                                  f"{rel}'s round-bounds block omits its {name} ({value})")
+                    continue                      # reported by the test above
+                block = "\n".join(blob.splitlines()[start:end])
+                self.assertEqual(domain_from_block(block), domain,
+                                 f"{rel}'s round bounds must equal its declared domain exactly")
                 self.assertRegex(norm(block), r"because|since|so that",
                                  f"{rel} must state a reason for its floor; D2 makes the rationale "
                                  f"part of the contract, not a courtesy")
 
-    def test_definition_markers_appear_only_in_the_round_bounds_block(self):
-        """The inverted exemption order: a marker fails wherever it appears but there."""
+    def test_no_consumer_redefines_a_contract_term(self):
         for rel in sorted(REQUIRED_CONSUMERS):
             with self.subTest(consumer=rel):
                 files = self.consumer_files(rel)
                 if files is None:
                     continue
                 for path in files:
-                    text = path.read_text(encoding="utf-8")
-                    block, count = round_bounds_block(text)
-                    block_lines = set(block.splitlines()) if count == 1 else set()
-                    for lineno, line in enumerate(text.splitlines(), 1):
-                        if line in block_lines or not DEFINITION_MARKER.search(line):
-                            continue
-                        if any(term in line for term in PINNED_TERMS):
-                            self.fail(
-                                f"{path.relative_to(REPO_ROOT)}:{lineno} redefines a contract term "
-                                f"outside the '## Round bounds' block: {line.strip()!r}")
+                    hits = redefinitions(path.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        hits, [],
+                        f"{path.relative_to(REPO_ROOT)} redefines a contract term outside its "
+                        f"'## Round bounds' block: {hits}")
 
 
 if __name__ == "__main__":

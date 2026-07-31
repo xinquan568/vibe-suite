@@ -364,13 +364,16 @@ class TestLaneStimulus(unittest.TestCase):
         """
         self.dispatch(self.lane_prompt())
         argv = json.loads(self.probe.read_text())["argv"]
+        pairs = [argv[i:i + 2] for i in range(len(argv) - 1)]
         self.assertEqual(argv[0], "exec")
         self.assertIn("--json", argv, "the runner parses an event stream; without --json there is none")
         self.assertIn("--skip-git-repo-check", argv)
-        self.assertIn(["-s", "read-only"], [argv[i:i + 2] for i in range(len(argv) - 1)],
+        self.assertIn(["-s", "read-only"], pairs,
                       "the lane never writes, so read-only must be the sandbox it is handed")
         self.assertNotIn("workspace-write", argv)
-        self.assertIn("reasoning.effort=low", argv, "the effort passed on the command line must reach codex")
+        self.assertIn(["-c", "reasoning.effort=low"], pairs,
+                      "a bare reasoning.effort=low with no -c in front of it is an argument codex "
+                      "would ignore, not a setting it would apply")
         self.assertNotIn("-m", argv, "P9: no pinned model id — the backend picks its own best model")
         self.assertNotIn("--model", argv)
 

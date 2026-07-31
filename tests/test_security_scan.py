@@ -99,7 +99,7 @@ def skill_pattern_names():
     return names
 
 
-#: The 39 permitted pattern names, frozen. Parsed from the skill at test time and compared
+#: The 40 permitted pattern names, frozen. Parsed from the skill at test time and compared
 #: to this set: a count alone cannot see a rename, and set equality alone cannot see a check
 #: added without a name — both failures are tested separately below.
 FROZEN_PATTERN_NAMES = {
@@ -112,6 +112,7 @@ FROZEN_PATTERN_NAMES = {
     "Remote server (`url` not localhost)", "Server domain not on the safe list",
     "Broad `permissions` (wildcard or extensive grant)", "`fs` / `filesystem` capability",
     "`shell` / exec capability", "Remote server missing `auth`",
+    "Unpinned server (`npx -y`, or a versionless remote)",
     "Hook references a script", "Hook interpolates unsanitized input",
     "Hook without a tool filter", "Hook writes on every tool call",
     "Hook makes network calls",
@@ -144,6 +145,41 @@ class FrozenContractSeal(unittest.TestCase):
                     f"{key} text changed. Nothing may be added, removed or reworded in a "
                     "frozen contract without updating CONTRACT_SHA256 in the same commit — "
                     "see the clause tests for what each rule requires.")
+
+
+#: SHA-256 of the two security-skill SECTIONS this item consumes. The skill is the declared
+#: single source of truth for the report shape and the gate ladder, so a contradicting
+#: sentence added THERE defeats the scanner's contract without touching the scanner — and
+#: the agent/command seals cannot see it.
+#:
+#: Only these two sections are sealed, not the file. The skill is a living pattern database
+#: that other items extend; freezing it whole would make every future pattern addition fail
+#: this item's tests. What is frozen is exactly what this item depends on.
+SKILL_SECTION_SHA256 = {
+    "report-contract": "ddd0adabd3f336ec5ed7c51c4c9699e6ef480ab4701825c6d91574cd128e3127",
+    "risk-gate": "666ffa37b979d12183e8f74ea79792a7aa6aa020f2299f307b1f2a661d3fc1d6",
+}
+
+SKILL_SECTION_BOUNDS = {
+    "report-contract": ("## Report contract", "## Risk gate and banner semantics"),
+    "risk-gate": ("## Risk gate and banner semantics", "## Related skills"),
+}
+
+
+class SkillSectionSeal(unittest.TestCase):
+    def test_consumed_sections_are_sealed(self):
+        text = SKILL.read_text(encoding="utf-8")
+        for key, (start, end) in SKILL_SECTION_BOUNDS.items():
+            with self.subTest(section=key):
+                self.assertIn(start, text)
+                begin = text.index(start)
+                body = text[begin:text.index(end, begin)]
+                self.assertEqual(
+                    hashlib.sha256(body.encode()).hexdigest(),
+                    SKILL_SECTION_SHA256[key],
+                    f"the skill's {key} section changed. It is the source of truth the "
+                    "scanner consumes, so a change here is a contract change — update "
+                    "SKILL_SECTION_SHA256 in the same commit.")
 
 
 class Deliverables(unittest.TestCase):
@@ -306,7 +342,7 @@ class SkillIsTheSingleSourceOfTruth(unittest.TestCase):
         # a count is not a set: renaming an unused check keeps 39 and would pass, so the
         # names themselves are frozen here and compared by equality
         self.assertEqual(set(skill_pattern_names()), FROZEN_PATTERN_NAMES)
-        self.assertEqual(len(skill_pattern_names()), 39, "names must not duplicate")
+        self.assertEqual(len(skill_pattern_names()), 40, "names must not duplicate")
 
     def test_no_check_in_any_family_is_left_unnamed(self):
         """Adding an unnamed bullet to a prose family previously passed everything.
@@ -505,13 +541,15 @@ class SchemaConformance(unittest.TestCase):
 #: meaningless re-bless, and content assertions alone permit additions.
 FIXTURE_SHA256 = {
     "README.md":
-        "9b94ca803e62e8dfd3c0c0a27a471306d603a49234344434c0f0382563f27969",
+        "7192b912ecb308c4a46951edc5e1e82382912d522bedd7851556733086af071a",
     "expected-findings.md":
-        "5803f43f474069e18c9980f8f31d94f32579465b955cd2838bc3d53476e5aa8e",
+        "d9c77b16a5d139fad12751f59f2872c84bf26b9a96176c3bf5f68a835138d256",
     "recorded-scan.md":
-        "6e73266f9a93a4dcf86f0e6a3aff87b6f5a0ab364503dfafc961c4f601a33b79",
+        "b6f0846fe9ce125a2e237cc75060b55962b778cf65b52cef042cf1b3e2615edf",
     "seeded-plugin/.claude-plugin/plugin.json":
         "0ea21b8045f2f6276c6726dfbc633191262bcdea8913642c760547829e088ecc",
+    "seeded-plugin/.mcp.json":
+        "a07f1baa288a87dd916f7a8bd3085c5c8d0ea36b07578f9e54f99cc74256b6cb",
     "seeded-plugin/commands/notes.md":
         "d7b145501ca7fedb2d265b6ee6359319a5426969e79fee068911da8c476244da",
     "seeded-plugin/hooks/hooks.json":

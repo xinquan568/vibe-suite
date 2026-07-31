@@ -40,6 +40,15 @@ sudo grant, turning user-level execution into root.
 **Tradeoff** Setup stops being automatic.
 **Exploit scenario** A dependency-tree install runs this without the user reading anything.
 
+**File** `.mcp.json:5`
+**Observation** Unpinned server (`npx -y`, or a versionless remote) — `npx -y` launches whatever the registry serves today
+**Severity** [HIGH]
+**Evidence** `"args": ["-y", "some-mcp-server"]`
+**Proposed change** Pin the server to an exact version, or vendor it.
+**Tradeoff** Updates become a deliberate change rather than automatic.
+**Exploit scenario** Whoever publishes that package name next controls a process the agent
+launches, with no lockfile to pin what was reviewed.
+
 **File** `hooks/hooks.json:4`
 **Observation** Hook references a script — hook command invokes a shell script
 **Severity** [MEDIUM]
@@ -69,7 +78,7 @@ that is why the skill caps `.md` matches to Low rather than dropping them.
 
 | Critical | High | Medium | Low |
 |---|---|---|---|
-| 1 | 2 | 2 | 1 |
+| 1 | 3 | 2 | 1 |
 
 ### Findings
 
@@ -78,9 +87,10 @@ that is why the skill caps `.md` matches to Low rather than dropping them.
 | 1 | [CRITICAL] | scripts/install.sh | 3 | Pipe to shell | fetches remote code and runs it unreviewed |
 | 2 | [HIGH] | scripts/install.sh | 14 | sudo | escalates privilege during install |
 | 3 | [HIGH] | package.json | 4 | postinstall script | runs on every install, before review |
-| 4 | [MEDIUM] | hooks/hooks.json | 4 | Hook references a script | hook command invokes a shell script |
-| 5 | [MEDIUM] | hooks/hooks.json | 4 | Hook without a tool filter | PostToolUse with no matcher fires on every tool call |
-| 6 | [LOW] | commands/notes.md | 5 | Pipe to shell | capped: a Critical signature inside a `.md` file |
+| 4 | [HIGH] | .mcp.json | 5 | Unpinned server (`npx -y`, or a versionless remote) | `npx -y` launches whatever the registry serves today |
+| 5 | [MEDIUM] | hooks/hooks.json | 4 | Hook references a script | hook command invokes a shell script |
+| 6 | [MEDIUM] | hooks/hooks.json | 4 | Hook without a tool filter | PostToolUse with no matcher fires on every tool call |
+| 7 | [LOW] | commands/notes.md | 5 | Pipe to shell | capped: a Critical signature inside a `.md` file |
 
 ## Surface inventory
 
@@ -88,7 +98,7 @@ that is why the skill caps `.md` matches to Low rather than dropping them.
 |---|---|
 | hooks | 1 |
 | scripts | 1 |
-| MCP configs | 0 |
+| MCP configs | 1 |
 | dependencies | 1 |
 | commands-with-Bash | 0 |
 
@@ -103,4 +113,5 @@ Recommendation: BLOCK
 - `scripts/install.sh:10` — heredoc body containing the same signature: dropped.
 - `package.json:3` — `"left-pad": "*"` unpinned: suppressed entirely, `package-lock.json`
   is present.
-- no `.mcp.json` is present, so the MCP family contributes nothing to this scan.
+- `.mcp.json:5` — the remote, safe-list and `auth` checks do not fire: the server is a
+  local launcher with no `url`, so only the unpinned check applies.

@@ -9,9 +9,10 @@ comparison.
 | 1 | [CRITICAL] | scripts/install.sh | 3 | Pipe to shell | fetches remote code and runs it unreviewed |
 | 2 | [HIGH] | scripts/install.sh | 14 | sudo | escalates privilege during install |
 | 3 | [HIGH] | package.json | 4 | postinstall script | runs on every install, before review |
-| 4 | [MEDIUM] | hooks/hooks.json | 4 | Hook references a script | hook command invokes a shell script |
-| 5 | [MEDIUM] | hooks/hooks.json | 4 | Hook without a tool filter | PostToolUse with no matcher fires on every tool call |
-| 6 | [LOW] | commands/notes.md | 5 | Pipe to shell | capped: a Critical signature inside a `.md` file |
+| 4 | [HIGH] | .mcp.json | 5 | Unpinned server (`npx -y`, or a versionless remote) | `npx -y` launches whatever the registry serves today |
+| 5 | [MEDIUM] | hooks/hooks.json | 4 | Hook references a script | hook command invokes a shell script |
+| 6 | [MEDIUM] | hooks/hooks.json | 4 | Hook without a tool filter | PostToolUse with no matcher fires on every tool call |
+| 7 | [LOW] | commands/notes.md | 5 | Pipe to shell | capped: a Critical signature inside a `.md` file |
 
 ## Required absences
 
@@ -23,26 +24,23 @@ Each is a capping or suppression rule with its own seed, asserted by absence:
 | D2 | `scripts/install.sh:10` | heredoc drop | the signature is inside a quoted heredoc body |
 | L1 | `package.json:3` (`left-pad: "*"`) | lockfile suppression | `package-lock.json` is present, so unpinned findings are suppressed entirely |
 
-**No `.mcp.json` is seeded, deliberately.** Every MCP server this fixture could carry is
-either local — firing nothing — or remote, and a remote server is simultaneously subject to
-`Remote server (url not localhost)`, the safe-list check, the `auth` check, AND the skill's
-unpinned-MCP rule, which has no name in the family's six. A seed that triggers an unnameable
-finding cannot be recorded with a permitted `Pattern`, so it would make the oracle wrong
-whichever way it was written. The four severity bands and all four capping rules are
-exercised without it.
+**The pinning distinction is seeded on BOTH sides**, which is what makes it a distinction
+rather than a rule with one example. `package.json:3`'s unpinned `left-pad` is suppressed
+entirely (L1) because a lockfile governs it; `.mcp.json:5`'s `npx -y` launcher is reported
+at High, because no lockfile governs what `.mcp.json` launches.
 
-**The pinning distinction is therefore half-seeded, and the worksheet says so.**
-`package.json`'s unpinned `left-pad` is suppressed by the lockfile (L1); the `.mcp.json`
-counterpart is not seeded, for the reason above. Naming that check belongs to whoever next
-edits the skill.
+The MCP server is a **launcher, not a URL**, and that is deliberate: a remote server would
+also trip `Remote server (url not localhost)`, the safe-list check and the `auth` check, so
+one seed would owe four findings and no count would be unambiguous. A launcher trips exactly
+the unpinned check.
 
-The `.md` cap is asserted as a **presence** at row 7 rather than an absence: the finding is
+The `.md` cap is asserted as a **presence** at row 7 of the table above rather than an absence: the finding is
 reported, at Low, not dropped. Confusing "capped" with "dropped" is the mistake this row
 exists to prevent.
 
 ## Derived report values
 
-- Severity counts — Critical 1, High 2, Medium 2, Low 1
+- Severity counts — Critical 1, High 3, Medium 2, Low 1
 - Highest severity present — Critical
 - `Risk level: CRITICAL`
 - `Recommendation: BLOCK` (ladder: any Critical or High → BLOCK)

@@ -14,12 +14,17 @@ Authored before the artifacts, from `skills/security/SKILL.md`, F5.1, F9.1, F9.2
 Echo and heredoc are separate rules with separate seeds: a scanner that dropped quoted
 strings but not heredoc bodies would pass a test that seeded only one.
 
-**The pinning distinction is half-seeded, and only half.** An unpinned `package.json`
-dependency is advisory and is suppressed outright once a lockfile exists; the fixture seeds
-that half at `package.json:3`, and it is not reported. The counterpart — an unpinned
-`.mcp.json` server IS PR-worthy — is **not** seeded, because the MCP family's six named
-checks contain no unpinned-server name, so such a finding could carry no permitted
-`Pattern`. Seeding it would force the oracle to record an unnameable finding.
+**The pinning distinction, seeded on both sides.** An unpinned `package.json` dependency is
+advisory and is suppressed outright once a lockfile exists (`package.json:3`, not reported).
+An unpinned `.mcp.json` server IS PR-worthy, because no lockfile governs what `.mcp.json`
+launches (`.mcp.json:5`, reported at High). The MCP seed is a **launcher, not a URL**: a
+remote server would also trip the remote, safe-list and `auth` checks, so one seed would owe
+four findings and no count would be unambiguous.
+
+This item **names** that check in the skill — `Unpinned server (npx -y, or a versionless
+remote)` — because the rule existed in prose without a name, and a finding cannot cite a
+`Pattern` the pattern DB does not carry. The MCP family therefore has seven named checks and
+the permitted set is 40, not 39.
 
 ## The banner ladder, over four severity mixtures
 
@@ -66,9 +71,9 @@ Only a `[GOOD]` row may carry `—` there. Zero counts, `Risk level: CLEAR`,
 | High | HIGH | BLOCK |
 | Critical | CRITICAL | BLOCK |
 
-## The permitted pattern names — 39, parsed from the skill
+## The permitted pattern names — 40, parsed from the skill
 
-18 pattern-database rows + 6 MCP rows + 5 hook-safety + 7 dependency + 3 prompt-injection.
+18 pattern-database rows + 7 MCP rows + 5 hook-safety + 7 dependency + 3 prompt-injection.
 The last fifteen were unnamed prose bullets; this item names them **in the skill**, so the
 set stays derivable from the single pattern DB rather than restated here. The tests parse
 the skill and compare; this worksheet records the count, not the list.

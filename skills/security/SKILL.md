@@ -109,7 +109,7 @@ A plugin with zero execution surfaces is clean: say so and stop.
 
 ## MCP configuration risks (`.mcp.json`)
 
-Six checks:
+Seven checks:
 
 | Check | Severity |
 |---|---|
@@ -119,6 +119,7 @@ Six checks:
 | `fs` / `filesystem` capability | Medium |
 | `shell` / exec capability | Critical |
 | Remote server missing `auth` | High |
+| Unpinned server (`npx -y`, or a versionless remote) | High |
 
 The safe list holds exactly five domains: `api.anthropic.com`, `github.com`,
 `modelcontextprotocol.io`, `127.0.0.1`, and `localhost`.
@@ -159,8 +160,9 @@ ranges as deliberate policy, and a lockfile pins the resolved tree anyway
 (maintainer pushback on record: krodak/clickup-cli#63, avifenesh/agentsys#340).
 
 Exception: an unpinned server in `.mcp.json` — an `npx` launch with `-y`, or a
-versionless remote server — IS PR-worthy. No lockfile governs what `.mcp.json`
-launches, so the advisory downgrade does not apply there.
+versionless remote server — IS PR-worthy, and is reported under the MCP family's
+**Unpinned server (`npx -y`, or a versionless remote)** check. No lockfile governs what
+`.mcp.json` launches, so the advisory downgrade does not apply there.
 
 ## Prompt injection surfaces
 

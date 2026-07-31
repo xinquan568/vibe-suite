@@ -83,18 +83,27 @@ Per issue, exactly one of four verdicts — and no fifth:
 `REGRESSED` means the fix broke something it was not aimed at. It is deliberately distinct from
 `NOT FIXED`: a change making the artifact worse must not be retried like one that merely failed.
 
-### When the verifier engine is unreachable
+### When no usable verification comes back
 
 Only the `claude` fixer lane can reach this state — a codex fix is verified in-session, which is
 always available.
 
-[`commands/shared/fallback.md`](shared/fallback.md)'s `codex → manual` hop still runs: perform the
-in-session assessment, and disclose it with the three-field diagnostic header. But **it does not
-satisfy verification**, because the assessing engine is the one that made the fix. So:
+**Two conditions reach it, and [`commands/shared/fallback.md`](shared/fallback.md)
+distinguishes them:** the verifier was **unreachable**
+(missing binary, auth failure, timeout, quota), or it was reachable and returned **nothing usable** —
+empty, truncated, or not covering the issues it was asked about. The hop fires for both; the
+three-field diagnostic header accompanies only the first, because nothing is broken to restore when an
+engine simply answered badly.
+
+The `codex → manual` hop still runs in both cases: perform the in-session assessment and disclose it.
+But **it does not satisfy verification** in either case, because the assessing engine is the one that
+made the fix. An engine that returned nothing has not verified anything, so treating its silence as a
+pass would be the same defect as self-review wearing a different hat. So, for **both** conditions:
 
 - the assessment is rendered in its own section, labelled **"in-session assessment — not
   verification"**;
-- the run header records `verification: unavailable`;
+- the run header records `verification: unavailable`, naming which condition applied —
+  `unreachable` or `no usable result`;
 - **per-issue verdicts are absent** — not a fifth value. "Nobody looked" and "the verifier looked and
   it is still broken" are different states and must not share a field;
 - **the loop stops after this round.** The assessment never drives another round;

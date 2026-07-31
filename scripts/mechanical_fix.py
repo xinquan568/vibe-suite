@@ -85,10 +85,11 @@ def derive_name(path):
 
 
 # --- the five rules ------------------------------------------------------------------------------
-# Each takes (path, fm_lines, body) and returns (fm_lines, body, note) where note is None for a
-# no-op, a string for an applied change, or a "conflict: ..." string for a reported refusal.
+# Each takes (path, fm_lines, body, rel) -- `rel` being the path RELATIVE to the target root -- and
+# returns (fm_lines, body, note): None for a no-op, a string for an applied change, or a
+# "conflict: ..." string for a reported refusal.
 
-def rule_rename_tools(path, fm, body):
+def rule_rename_tools(path, fm, body, rel):
     if not has_key(fm, "tools"):
         return fm, body, None
     if has_key(fm, "allowed-tools"):
@@ -99,8 +100,15 @@ def rule_rename_tools(path, fm, body):
     return fm, body, "renamed `tools` to `allowed-tools`"
 
 
-def rule_shared_partial_not_user_invocable(path, fm, body):
-    if "shared" not in path.parts or has_key(fm, "user-invocable"):
+def rule_shared_partial_not_user_invocable(path, fm, body, rel):
+    """Keyed on the path RELATIVE to the target root.
+
+    An earlier revision tested `"shared" in path.parts`, which examines the whole absolute path: a
+    target whose own ancestor happened to be named `shared` gave every artifact under it
+    `user-invocable: false`. Classification must depend on the artifact's place inside the target,
+    never on where the target itself lives.
+    """
+    if rel.parts[:2] != ("commands", "shared") or has_key(fm, "user-invocable"):
         return fm, body, None
     return fm + ["user-invocable: false"], body, "added `user-invocable: false`"
 
@@ -111,17 +119,19 @@ def rule_shared_partial_not_user_invocable(path, fm, body):
 NAMED_ARTIFACTS = ("SKILL.md",)
 
 
-def _needs_name(path):
-    return path.name in NAMED_ARTIFACTS or "agents" in path.parts
+def _needs_name(path, rel):
+    """Relative-path classification, for the same reason as rule 2: an ancestor named `agents`
+    outside the target must not make the target's commands look like agents."""
+    return path.name in NAMED_ARTIFACTS or rel.parts[:1] == ("agents",)
 
 
-def rule_derive_name(path, fm, body):
-    if not _needs_name(path) or has_key(fm, "name"):
+def rule_derive_name(path, fm, body, rel):
+    if not _needs_name(path, rel) or has_key(fm, "name"):
         return fm, body, None
     return ["name: %s" % derive_name(path)] + fm, body, "derived `name` from the path"
 
 
-def rule_insert_heading(path, fm, body):
+def rule_insert_heading(path, fm, body, rel):
     """Uses the derived name, so `derive-name` runs before it -- the one ordering the table fixes."""
     if re.search(r"(?m)^#{1,6}\s+\S", body):
         return fm, body, None
@@ -136,7 +146,7 @@ def rule_insert_heading(path, fm, body):
 ARGS_IN_BODY = re.compile(r"\$ARGUMENTS\b|\$\d\b")
 
 
-def rule_add_argument_hint(path, fm, body):
+def rule_add_argument_hint(path, fm, body, rel):
     if has_key(fm, "argument-hint") or not ARGS_IN_BODY.search(body):
         return fm, body, None
     fm = list(fm)
@@ -157,14 +167,18 @@ RULES = (
 )
 
 
-def fix_text(path, text):
-    """Apply the table to one artifact. Returns (new_text, [(rule, note), ...])."""
+def fix_text(path, text, rel=None):
+    """Apply the table to one artifact. Returns (new_text, [(rule, note), ...]).
+
+    `rel` is the path relative to the target root and is what the classification rules key on.
+    """
+    rel = Path(rel) if rel is not None else Path(path.name)
     fm, body = split_frontmatter(text)
     if fm is None:
         return text, []
     notes = []
     for name, rule in RULES:
-        fm, body, note = rule(path, fm, body)
+        fm, body, note = rule(path, fm, body, rel)
         if note:
             notes.append((name, note))
     return join(fm, body), notes
@@ -192,12 +206,24 @@ def main(argv=None):
         sys.stderr.write("mechanical_fix: not a directory: %s\n" % root)
         return EXIT_BAD_ROOT
 
+    # Pin the root's identity BEFORE discovery and before any path-based read. `write_atomic` would
+    # otherwise pin it at the first write -- after the reads that decide the mutations -- so a root
+    # swapped in between would receive content derived from the original tree. `pin_root`'s own
+    # docstring describes exactly this window.
+    try:
+        bridge.assert_root(root)
+        bridge.pin_root(root)
+    except bridge.BridgeError as exc:
+        sys.stderr.write("mechanical_fix: %s\n" % exc)
+        return EXIT_BAD_ROOT
+
     changed = []
     for path in discover(root):
+        rel = path.relative_to(root)
         text = path.read_text(encoding="utf-8")
-        new_text, notes = fix_text(path, text)
+        new_text, notes = fix_text(path, text, rel)
         if notes:
-            changed.append({"file": str(path.relative_to(root)),
+            changed.append({"file": str(rel),
                             "changes": [{"rule": r, "note": n} for r, n in notes]})
         if new_text != text and not args.dry_run:
             try:

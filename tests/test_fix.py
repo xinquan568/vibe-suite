@@ -30,7 +30,15 @@ MANIFEST = REPO_ROOT / ".claude-plugin" / "plugin.json"
 SCRIPT_REL = "scripts/mechanical_fix.py"
 
 VERDICTS = ("FIXED", "NOT FIXED", "PARTIAL", "REGRESSED")
-FORBIDDEN_VERDICTS = ("UNVERIFIED", "SKIPPED", "UNKNOWN")
+
+#: The declared verdict list is extracted from the artifact and compared as a SET. An earlier
+#: revision rejected three hand-picked sentinels, so an arbitrary fifth such as `DEFERRED` passed --
+#: a test that enumerates what it forbids can only ever catch what someone thought of.
+VERDICT_LINE = re.compile(r"^`FIXED`(.+)$", re.M)
+
+#: The fixer/verifier table, parsed rather than regex-sniffed: a loose pattern matched any occurrence
+#: of "in-session" anywhere in the artifact, which a mutation to the table itself would not disturb.
+TABLE_ROW = re.compile(r"^\|\s*`(claude|codex)`\s*\|\s*(.+?)\s*\|\s*$", re.M)
 MODEL_PIN = re.compile(
     r"\b(?:gpt-\d|o\d-|gemini-\d|claude-(?:opus|sonnet|haiku|fable)-\d|claude-[a-z]+-20\d{2})", re.I)
 
@@ -87,9 +95,36 @@ class TestFixerLanes(FixTestCase):
 
 
 class TestVerifierIsNeverTheFixer(FixTestCase):
-    def test_both_pairings_are_stated(self):
-        self.assertRegex(self.norm, r"claude[^|]*read-only|read-only[^|]*claude")
-        self.assertRegex(self.norm, r"codex[^|]*in-session claude|in-session")
+    def _verifier_table(self):
+        """The `| fixer | verifier |` rows, parsed from the artifact.
+
+        The verifier table and the fixer table both have a `claude`/`codex` first column, so rows are
+        taken from the section that follows the verification heading.
+        """
+        start = re.search(r"(?m)^## Step 4 —", self.text)
+        self.assertIsNotNone(start, "no verification step to parse")
+        rest = self.text[start.end():]
+        end = re.search(r"(?m)^### ", rest)
+        section = rest[: end.start()] if end else rest
+        return {m.group(1): m.group(2) for m in TABLE_ROW.finditer(section)}
+
+    def test_both_pairings_map_to_the_other_engine(self):
+        table = self._verifier_table()
+        self.assertEqual(set(table), {"claude", "codex"},
+                         "the verifier table must map both fixer lanes")
+        self.assertRegex(table["claude"], r"codex-runner\.mjs.*read-only",
+                         "a claude fix must be verified by codex, read-only")
+        self.assertRegex(table["codex"], r"(?i)in-session",
+                         "a codex fix must be verified in-session by Claude")
+
+    def test_the_two_mapped_engines_differ(self):
+        """The invariant itself, independent of how either row is worded."""
+        table = self._verifier_table()
+        claude_row, codex_row = table["claude"].lower(), table["codex"].lower()
+        self.assertNotIn("in-session", claude_row,
+                         "a claude fix verified in-session would be self-verification")
+        self.assertNotIn("codex-runner", codex_row,
+                         "a codex fix verified by codex would be self-verification")
 
     def test_verification_is_fresh_and_read_only(self):
         self.assertRegex(self.norm, r"fresh[^.]*read-only")
@@ -113,13 +148,15 @@ class TestVerdictSurface(FixTestCase):
             with self.subTest(verdict=verdict):
                 self.assertIn(verdict, self.text)
 
-    def test_no_fifth_verdict_is_introduced(self):
-        """F3.8 fixes the surface at four. 'No verifier was available' is the absence of a verdict,
-        not a fifth outcome, so it must not appear as one."""
-        for bad in FORBIDDEN_VERDICTS:
-            with self.subTest(verdict=bad):
-                self.assertNotIn(bad, self.text,
-                                 "%s would overload the verdict field with a non-verdict" % bad)
+    def test_the_declared_verdict_set_is_exactly_four(self):
+        """Compared as a set, not against a list of forbidden names: enumerating what is banned only
+        ever catches what someone thought to ban."""
+        line = VERDICT_LINE.search(self.text)
+        self.assertIsNotNone(line, "the artifact must declare its verdicts on one line")
+        declared = set(re.findall(r"`([A-Z][A-Z ]+)`", "`FIXED`" + line.group(1)))
+        self.assertEqual(declared, set(VERDICTS),
+                         "the per-issue verdict surface must be exactly F3.8's four; %s is extra"
+                         % sorted(declared - set(VERDICTS)))
 
     def test_regressed_is_distinguished_from_not_fixed(self):
         self.assertRegex(self.norm, r"regressed[^.]*distinct|distinct[^.]*not fixed|"
@@ -129,6 +166,14 @@ class TestVerdictSurface(FixTestCase):
 class TestVerifierOutage(FixTestCase):
     def test_only_the_claude_lane_can_reach_it(self):
         self.assertRegex(self.norm, r"only the claude fixer lane|codex fix is verified in-session")
+
+    def test_both_no_usable_verification_conditions_are_covered(self):
+        """fallback.md fires the hop for an unreachable engine AND for one that returned nothing
+        usable. Scoping the exception to the first would let an empty verification count as a pass."""
+        self.assertRegex(self.norm, r"nothing usable|no usable result")
+        self.assertRegex(self.norm, r"unreachable")
+        self.assertRegex(self.norm, r"header accompanies only the first|"
+                                    r"nothing is broken to restore")
 
     def test_the_manual_hop_still_runs_and_is_disclosed(self):
         self.assertIn("commands/shared/fallback.md", self.text)

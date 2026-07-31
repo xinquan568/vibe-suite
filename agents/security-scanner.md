@@ -62,9 +62,12 @@ Each finding carries six fields plus an Exploit scenario:
 
 **Severity counts** — Critical / High / Medium / Low.
 
-**Summary table**, the audit-report rendering of the same findings, in the same order:
+**Summary table** — the audit-report rendering of the same findings, in the same order,
+under the heading `### Findings`:
 
 ```
+### Findings
+
 | # | Severity | File | Line | Pattern | Description |
 ```
 
@@ -94,12 +97,25 @@ A scan that raises nothing emits **one `[GOOD]` entry** — never an empty list,
 silence, because an empty report cannot be told apart from a scan that failed to run.
 `[GOOD]` is exclusive: it cannot appear beside a substantive finding.
 
-Its summary row carries a literal `—` in File, Line and Pattern, since a `[GOOD]` entry has
-no location and no pattern:
+The `[GOOD]` entry uses the same six-field shape as any other, with the fields that need a
+location or a pattern carrying `—`:
+
+- **File** `—`
+- **Observation** `—`
+- **Severity** `[GOOD]`
+- **Evidence** what you examined
+- **Proposed change** `—`
+- **Tradeoff** `—`
+
+and no Exploit scenario, which is owed only by graded findings. Its summary row matches:
 
 ```
 | 1 | [GOOD] | — | — | — | <what you checked and found clean> |
 ```
+
+**Only a `[GOOD]` row may carry `—` in File, Line or Pattern.** Every row whose Severity is
+`[CRITICAL]`, `[HIGH]`, `[MEDIUM]` or `[LOW]` owes a real location and a real pattern name;
+a dash there means the finding was not actually located, which is not a reportable state.
 
 Severity counts are all zero, `Risk level: CLEAR`, `Recommendation: PASS`. The surface
 inventory is all zeros when discovery found no surfaces, and non-zero when it found

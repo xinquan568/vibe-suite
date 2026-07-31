@@ -169,8 +169,9 @@ class HookIO(unittest.TestCase):
                 capture_output=True, text=True, timeout=TIMEOUT_S, env=env)
             self.assertEqual(proc.returncode, 0)
             self.assertEqual(proc.stdout, "")
-            self.assertNotIn("command not found", proc.stderr)
-            self.assertNotIn("No such file", proc.stderr)
+            # with no extractor available no path can be found, so the correct result is
+            # silence — asserting only "no diagnostic" would accept a spurious reminder
+            self.assertEqual(proc.stderr, "")
         finally:
             shutil.rmtree(empty, ignore_errors=True)
 
@@ -203,6 +204,36 @@ class HookClassification(unittest.TestCase):
         self.assertEqual(len(CLASSIFICATION), 24)
         self.assertEqual(len(matched), 13)
         self.assertEqual(len(CLASSIFICATION) - len(matched), 11)
+
+    #: Two independent witnesses per source pattern. A single representative lets a
+    #: pattern be narrowed to exactly that path — `*/skills/*/SKILL.md` shrunk to
+    #: `*/skills/s/SKILL.md` passed every earlier test while breaking real trees.
+    WITNESSES = [
+        ("*/commands/*.md", ["/r/commands/one.md", "/other/commands/two.md"]),
+        ("*/agents/*.md", ["/r/agents/alpha.md", "/other/agents/beta.md"]),
+        ("*/skills/*/SKILL.md", ["/r/skills/alpha/SKILL.md", "/other/skills/beta/SKILL.md"]),
+        ("*/.claude/rules/*.md", ["/r/.claude/rules/one.md", "/o/.claude/rules/two.md"]),
+        ("*/hooks/*.json", ["/r/hooks/hooks.json", "/other/hooks/extra.json"]),
+        ("*/CLAUDE.md", ["/r/CLAUDE.md", "/other/deep/CLAUDE.md"]),
+        ("*/.claude-plugin/plugin.json",
+         ["/r/.claude-plugin/plugin.json", "/other/.claude-plugin/plugin.json"]),
+        ("*/.mcp.json", ["/r/.mcp.json", "/other/nested/.mcp.json"]),
+    ]
+
+    def test_each_pattern_matches_more_than_its_fixture_path(self):
+        for pattern, paths in self.WITNESSES:
+            for path in paths:
+                with self.subTest(pattern=pattern, path=path):
+                    proc, _ = run_hook(json.dumps({"tool_input": {"file_path": path}}))
+                    self.assertIn("Run /vibe-suite:score", proc.stderr,
+                                  f"{pattern} must match {path}, not just one fixture path")
+
+    def test_reminder_line_is_exact(self):
+        path = "/r/commands/deep/x.md"
+        proc, _ = run_hook(json.dumps({"tool_input": {"file_path": path}}))
+        self.assertEqual(
+            proc.stderr,
+            f"NL artifact edited: x.md. Run /vibe-suite:score {path} to check quality.\n")
 
     def test_reminder_names_the_file_and_the_suite_namespace(self):
         proc, _ = run_hook(

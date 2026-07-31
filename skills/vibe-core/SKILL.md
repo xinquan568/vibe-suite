@@ -76,7 +76,19 @@ Every report opens:
 
 `<name>` is the agent's **qualified** name — `vibe-suite:security`, not `security` — and becomes
 `agent` in the JSON form. The schema constrains it to the seven canonical names, because the
-variant rules key on this value and a bare name would silently bypass them.
+variant rules key on this value and a bare name would silently bypass them. They are:
+
+- `vibe-suite:recon`
+- `vibe-suite:architecture`
+- `vibe-suite:error-handling`
+- `vibe-suite:edge-cases`
+- `vibe-suite:security`
+- `vibe-suite:testing`
+- `vibe-suite:security-scanner`
+
+`vibe-suite:security` and `vibe-suite:security-scanner` share the security variant, so both
+owe an Exploit scenario on every graded finding. A new reviewing agent is registered here
+and in the schema together — adding it to only one is how a variant rule gets bypassed.
 
 ## Zero findings
 

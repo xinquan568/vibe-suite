@@ -99,6 +99,30 @@ def skill_pattern_names():
     return names
 
 
+#: The 39 permitted pattern names, frozen. Parsed from the skill at test time and compared
+#: to this set: a count alone cannot see a rename, and set equality alone cannot see a check
+#: added without a name — both failures are tested separately below.
+FROZEN_PATTERN_NAMES = {
+    "Pipe to shell", "Eval with variables", "Reverse shell", "Base64 decode and execute",
+    "SSH key exfiltration", "Token exfiltration", "subprocess with shell=True",
+    "os.system", "Dynamic require/import", "Dynamic new Function",
+    "File write outside repo", "sudo", "PATH modification", "Network calls",
+    "Environment access", "File reads outside repo", "Runtime package install",
+    "Shell exec helpers",
+    "Remote server (`url` not localhost)", "Server domain not on the safe list",
+    "Broad `permissions` (wildcard or extensive grant)", "`fs` / `filesystem` capability",
+    "`shell` / exec capability", "Remote server missing `auth`",
+    "Hook references a script", "Hook interpolates unsanitized input",
+    "Hook without a tool filter", "Hook writes on every tool call",
+    "Hook makes network calls",
+    "postinstall script", "preinstall script", "Git-URL dependency", "Unpinned version",
+    "Git-protocol Python dependency", "Unpinned Python dependency",
+    "Direct HTTP download URL",
+    "File content into Bash", "Unsanitized command arguments into Bash",
+    "Hook template expansion with user-controlled values",
+}
+
+
 class Deliverables(unittest.TestCase):
     def test_artifacts_and_registration(self):
         self.assertTrue(COMMAND.is_file())
@@ -210,6 +234,35 @@ class CompositeReport(unittest.TestCase):
         self.assertIn("| 1 | [GOOD] | — | — | — |", self.agent)
         self.assertIn("exclusive", self.flat)
         self.assertIn("cannot appear beside a substantive finding", self.flat)
+        # the exemption must be CONFINED — otherwise a substantive finding could carry
+        # `—` where its location should be, and nothing would object
+        self.assertIn("Only a `[GOOD]` row may carry `—` in File, Line or Pattern.",
+                      self.agent)
+        self.assertRegex(self.flat, r"Every row whose Severity is .*owes a real location "
+                                    r"and a real pattern name")
+
+    def test_summary_table_has_its_heading(self):
+        # the heading is named in prose AND shown in the example block; asserting the bare
+        # string passes when either survives, so bind them together as one unit
+        self.assertIn("under the heading `### Findings`", self.agent)
+        self.assertRegex(
+            self.agent,
+            r"### Findings\n\n\| # \| Severity \| File \| Line \| Pattern \| Description \|",
+            "the example must show the heading immediately above the table")
+
+    def test_good_entry_has_a_six_field_shape(self):
+        # the sentinel is a finding, not a special case bolted on; it owes the same fields
+        good = self.agent[self.agent.index("## Zero findings"):]
+        for field in ("**File**", "**Observation**", "**Severity**", "**Evidence**",
+                      "**Proposed change**", "**Tradeoff**"):
+            self.assertIn(field, good, f"the [GOOD] entry must define {field}")
+        self.assertIn("no Exploit scenario", good)
+
+    def test_both_zero_cases_are_distinguished(self):
+        self.assertRegex(
+            self.flat,
+            r"all zeros when discovery found no surfaces, and non-zero when it found "
+            r"surfaces but nothing to report")
 
 
 class SkillIsTheSingleSourceOfTruth(unittest.TestCase):
@@ -226,11 +279,43 @@ class SkillIsTheSingleSourceOfTruth(unittest.TestCase):
         self.assertIn("first four and last four", flat)
         self.assertIn("vibe-core", flat)            # referenced, never restated
 
-    def test_permitted_pattern_names_are_39_and_unique(self):
-        names = skill_pattern_names()
-        self.assertEqual(len(names), 39,
-                         f"expected 18+6+5+7+3 = 39 named checks, got {len(names)}")
-        self.assertEqual(len(set(names)), 39, "pattern names must be unique")
+    def test_permitted_pattern_names_equal_the_frozen_set(self):
+        # a count is not a set: renaming an unused check keeps 39 and would pass, so the
+        # names themselves are frozen here and compared by equality
+        self.assertEqual(set(skill_pattern_names()), FROZEN_PATTERN_NAMES)
+        self.assertEqual(len(skill_pattern_names()), 39, "names must not duplicate")
+
+    def test_no_check_in_any_family_is_left_unnamed(self):
+        """Adding an unnamed bullet to a prose family previously passed everything.
+
+        The count stays 39 because an unnamed check contributes nothing to the parse — so
+        the gap is invisible to a count and to set equality alike. Only reading every
+        bullet in those families catches it.
+        """
+        text = SKILL.read_text(encoding="utf-8")
+
+        def section(start, end):
+            i = text.index(start)
+            return text[i:text.index(end, i)]
+
+        for start, end in (("## Hook safety", "## Dependency supply chain"),
+                           ("## Dependency supply chain", "## Prompt injection surfaces"),
+                           ("## Prompt injection surfaces", "## Severity definitions")):
+            body = section(start, end)
+            for line in body.splitlines():
+                if line.startswith("- ") and "→" in line:
+                    with self.subTest(family=start, check=line[:48]):
+                        self.assertRegex(
+                            line, r"^- \*\*[^*]+\*\* — ",
+                            "every check must carry a name the scanner can cite")
+
+    def test_scanner_permits_exactly_the_skill_names(self):
+        # the scanner's permitted set is DERIVED from the skill at test time; if it were a
+        # separate list in the agent, the two could drift — which is the F5.2 failure
+        recorded_patterns = {row[4] for row in table_rows(RECORDED.read_text(encoding="utf-8"))
+                             if row[1] != "[GOOD]"}
+        self.assertTrue(recorded_patterns)
+        self.assertLessEqual(recorded_patterns, FROZEN_PATTERN_NAMES)
 
     def test_every_recorded_pattern_is_a_skill_name(self):
         permitted = set(skill_pattern_names())
@@ -241,13 +326,15 @@ class SkillIsTheSingleSourceOfTruth(unittest.TestCase):
                 self.assertIn(row[4], permitted,
                               f"pattern {row[4]!r} is not a name the skill carries")
 
-    def test_vibe_core_enumeration_equals_the_schema_enum(self):
+    def test_vibe_core_lists_exactly_the_schema_identities(self):
+        # comparing only the English count let the list and the schema drift; the IDENTITIES
+        # are what the variant rules key on, so they are what must match
         schema_enum = json.loads(SCHEMA.read_text(encoding="utf-8"))["properties"]["agent"]["enum"]
         core = CORE.read_text(encoding="utf-8")
-        # the enum is closed because the variant rules key on it; the prose that states how
-        # many names there are must not drift from the schema that holds them
-        self.assertIn(f"the {['zero','one','two','three','four','five','six','seven','eight'][len(schema_enum)]} canonical names",
-                      core, f"vibe-core must say there are {len(schema_enum)} canonical names")
+        listed = re.findall(r"(?m)^- `(vibe-suite:[a-z-]+)`$", core)
+        self.assertEqual(listed, schema_enum,
+                         "vibe-core must list exactly the schema's agent enum, in order")
+        self.assertIn("seven canonical names", core)
 
     def test_security_skill_carries_the_same_ordered_ladder(self):
         flat = squash(SKILL.read_text(encoding="utf-8"))
@@ -280,8 +367,15 @@ class RecordedScanAgainstTheOracle(unittest.TestCase):
         six_field = re.findall(r"\*\*File\*\* `([^`]+)`\n\*\*Observation\*\* (.+)", text)
         self.assertEqual(len(six_field), len(self.recorded),
                          "the six-field and summary renderings must have equal row counts")
-        for (loc, observation), row in zip(six_field, self.recorded):
+        severities = re.findall(r"(?m)^\*\*Severity\*\* (\S+)$", text)
+        self.assertEqual(len(severities), len(self.recorded))
+        for ordinal, ((loc, observation), row, severity) in enumerate(
+                zip(six_field, self.recorded, severities), start=1):
             with self.subTest(row=row[0]):
+                # ordinal and severity were previously unbound, so the two renderings
+                # could disagree in exactly the columns the summary exists to carry
+                self.assertEqual(row[0], str(ordinal), "summary rows must be in order")
+                self.assertEqual(row[1], severity)
                 path, _, line = loc.rpartition(":")
                 self.assertEqual(row[2], path)
                 self.assertEqual(row[3], line)
@@ -382,13 +476,13 @@ FIXTURE_SHA256 = {
     "README.md":
         "7c280348e7e02e88717589922bfb7967d9e7e75306899f07e7d224c716c0aed0",
     "expected-findings.md":
-        "099ab68f067629e14d3918f2b84663e61419db22f8bb13d97ab033467f35164a",
+        "c547d03c9f9b36153f57b7686722bf2c4fb59bec96630c0731df6f2ed1a625fd",
     "recorded-scan.md":
-        "69cb1cc82f6964748f62ae8f5d1e7eea67d05b353e3cf3c8cd816d84a08ddddb",
+        "3fcf047bff87d00a03fbc4ca3e727031b9141d8bd8048cf99be25b002e026c20",
     "seeded-plugin/.claude-plugin/plugin.json":
         "0ea21b8045f2f6276c6726dfbc633191262bcdea8913642c760547829e088ecc",
     "seeded-plugin/.mcp.json":
-        "a5dd752876a05f6746a7ac8bb722dc3a0bae9cecd674eb96b149d29ecf26758b",
+        "4f8f32ae3b642fca772497ace0cc8a1b83e6da0d6dbb0d3a6921ef8ab65fd70d",
     "seeded-plugin/commands/notes.md":
         "d7b145501ca7fedb2d265b6ee6359319a5426969e79fee068911da8c476244da",
     "seeded-plugin/hooks/hooks.json":

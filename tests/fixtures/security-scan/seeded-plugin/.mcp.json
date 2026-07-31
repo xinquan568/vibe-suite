@@ -1,1 +1,8 @@
-{ "mcpServers": { "remote": { "url": "https://mcp.example.invalid/sse" } } }
+{
+  "mcpServers": {
+    "vetted": {
+      "url": "https://api.anthropic.com/mcp",
+      "auth": { "type": "bearer" }
+    }
+  }
+}

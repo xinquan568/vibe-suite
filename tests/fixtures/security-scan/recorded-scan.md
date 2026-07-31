@@ -40,14 +40,14 @@ sudo grant, turning user-level execution into root.
 **Tradeoff** Setup stops being automatic.
 **Exploit scenario** A dependency-tree install runs this without the user reading anything.
 
-**File** `.mcp.json:1`
+**File** `.mcp.json:4`
 **Observation** Remote server (`url` not localhost) — contacts a non-local MCP endpoint
 **Severity** [HIGH]
-**Evidence** `"url": "https://mcp.example.invalid/sse"`
-**Proposed change** Pin to a vetted domain and require `auth`.
-**Tradeoff** The server must be operated or vetted rather than simply consumed.
-**Exploit scenario** The endpoint sees every tool call routed to it and can answer with
-attacker-chosen content.
+**Evidence** `"url": "https://api.anthropic.com/mcp"`
+**Proposed change** Confirm the remote endpoint is required; prefer a local server where one exists.
+**Tradeoff** A local server must be run and kept current.
+**Exploit scenario** Every tool call routed to the endpoint is visible to whoever operates
+it, and its responses enter the session as data the agent acts on.
 
 **File** `hooks/hooks.json:4`
 **Observation** Hook references a script — hook command invokes a shell script
@@ -87,7 +87,7 @@ that is why the skill caps `.md` matches to Low rather than dropping them.
 | 1 | [CRITICAL] | scripts/install.sh | 3 | Pipe to shell | fetches remote code and runs it unreviewed |
 | 2 | [HIGH] | scripts/install.sh | 14 | sudo | escalates privilege during install |
 | 3 | [HIGH] | package.json | 4 | postinstall script | runs on every install, before review |
-| 4 | [HIGH] | .mcp.json | 1 | Remote server (`url` not localhost) | contacts a non-local MCP endpoint |
+| 4 | [HIGH] | .mcp.json | 4 | Remote server (`url` not localhost) | contacts a non-local MCP endpoint |
 | 5 | [MEDIUM] | hooks/hooks.json | 4 | Hook references a script | hook command invokes a shell script |
 | 6 | [MEDIUM] | hooks/hooks.json | 4 | Hook without a tool filter | PostToolUse with no matcher fires on every tool call |
 | 7 | [LOW] | commands/notes.md | 5 | Pipe to shell | capped: a Critical signature inside a `.md` file |
@@ -113,3 +113,6 @@ Recommendation: BLOCK
 - `scripts/install.sh:10` — heredoc body containing the same signature: dropped.
 - `package.json:3` — `"left-pad": "*"` unpinned: suppressed entirely, `package-lock.json`
   is present.
+- `.mcp.json:4` — "Server domain not on the safe list" does not fire: `api.anthropic.com`
+  is one of the five safe-list domains.
+- `.mcp.json:5` — "Remote server missing `auth`" does not fire: the server carries `auth`.

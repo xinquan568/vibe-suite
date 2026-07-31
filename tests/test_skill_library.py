@@ -34,6 +34,7 @@ ROSTER = (
     "conventions-antigravity",
     "conventions-claude",
     "conventions-codex",
+    "issue2pr",
     "orchestration",
     "patterns",
     "refine-proposal",

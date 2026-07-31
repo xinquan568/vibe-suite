@@ -1,0 +1,7 @@
+{
+  "schema_version": 2,
+  "source_id": "fx-8",
+  "run_id": "fx-8-current-run",
+  "areas_confirmed": ["ingest", "queue"],
+  "scenario": "new-feature"
+}

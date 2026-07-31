@@ -1,0 +1,13 @@
+# Formatter configuration for this fixture.
+#
+# The 100-character limit below is the one .claude/rules/style.md also states as a rule. That overlap
+# is the seeded D5 "rule duplicating a linter" defect: the limit is already enforced mechanically, so
+# restating it as a rule adds nothing and creates a second place for it to drift.
+
+root = true
+
+[*]
+max_line_length = 100
+indent_style = space
+indent_size = 2
+insert_final_newline = true

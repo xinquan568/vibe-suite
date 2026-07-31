@@ -326,6 +326,18 @@ capping rules, and the `PASS`/`REVIEW`/`BLOCK` gate. Report its findings under t
 than re-deriving them; a second, weaker copy of that analysis is worse than none, because it reads as
 a security review and is not one.
 
+What this dimension is therefore responsible for is that the delegation actually happened and that
+its result is carried faithfully:
+
+- The security-scan pass ran over this plugin, and its gate banner is reported.
+- Every finding it raised appears here at **its** severity — capping and re-grading belong to that
+  pass, not to this one.
+- An empty security report is treated as a **failed scan**, not a clean one, and this dimension says
+  so rather than reporting `[GOOD]`.
+- Execution surfaces the pass names — hooks, scripts, `bin/`, `.mcp.json`, dependency manifests,
+  Bash-using commands — are all inside the audited tree; a plugin whose surfaces sit outside the
+  scanned root is reported as partially covered.
+
 Severity: as the security-scan pass grades it. A hook that pipes a remote script into a shell is
 `[CRITICAL]` there and stays `[CRITICAL]` here.
 

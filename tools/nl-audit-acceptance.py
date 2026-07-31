@@ -86,6 +86,19 @@ def load_record(path):
         raise Malformed("findings record is not valid JSON: %s" % exc)
     if not isinstance(record, dict):
         raise Malformed("findings record must be a JSON object")
+    run = record.get("run")
+    if not isinstance(run, dict):
+        raise Malformed("record has no `run` object; a verdict with no provenance cannot be "
+                        "attributed to a lane, and line 627 requires the outcome contract to hold "
+                        "on each engine lane")
+    for field in ("type", "depth", "engine"):
+        if not str(run.get(field) or "").strip():
+            raise Malformed("run.%s is missing; %s" % (field, {
+                "type": "the record must say which --type produced it",
+                "depth": "a full record graded as mini (or the reverse) would be graded by the "
+                         "wrong clauses",
+                "engine": "the lane must be recorded, or the verdict cannot be attributed to one",
+            }[field]))
     findings = record.get("findings")
     if not isinstance(findings, list):
         raise Malformed("findings must be a list; got %s" % type(findings).__name__)
@@ -106,6 +119,16 @@ def evaluate(spec, record, depth):
     seeded = {normalize(c["id"]): c["dimension"] for c in spec["classes"]}
     artifact_type = spec["type"]
     clauses = {}
+
+    # The record must describe the run it claims to be. Grading a `--mini` record with the `--full`
+    # clause set (or the reverse) would produce a confident verdict about a run that never happened.
+    run = record["run"]
+    if run["type"] != artifact_type:
+        raise Malformed("record says type %r but the fixture is %r"
+                        % (run["type"], artifact_type))
+    if run["depth"] != depth:
+        raise Malformed("record says depth %r but the evaluator was invoked with --%s"
+                        % (run["depth"], depth))
 
     reported = {}
     for entry in record["findings"]:

@@ -35,9 +35,12 @@ redirection, which cannot capture a slash command's output — in this shape:
   and punctuation, so `>500-line body` and `over 500 line body` are the same class.
 - `dimension` is the dimension the finding was attributed to — `D0`–`D6`, or an `A1`–`E3` check-set id
   for `--type repo`.
-- `run.engine` is recorded for provenance. No clause reads it, but line 627 requires the outcome
-  contract to hold on **each** engine lane, and a verdict with no lane recorded cannot be attributed
-  to one.
+- **`run.type`, `run.depth` and `run.engine` are all required**, and a record missing any of them is
+  rejected rather than graded. `type` and `depth` are checked against the fixture and against the
+  flag you passed: a `--mini` record graded by the `--full` clause set would be judged against a
+  floor its run never aimed at, which is a confident verdict about a run that did not happen.
+  `run.engine` is not read by any clause, but line 627 requires the outcome contract to hold on
+  **each** engine lane, and a verdict with no lane recorded cannot be attributed to one.
 - A class the fixture never seeded is **rejected**, not ignored: an invented finding would otherwise
   inflate the detection rate.
 

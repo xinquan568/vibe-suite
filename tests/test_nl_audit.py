@@ -16,8 +16,16 @@ Maintainability is mini+full. A test that assumed the regular split would pass a
 the membership table below is transcribed per type rather than generated from a rule.
 
 **A dimension is more than a heading.** Preserving the seven *names* while dropping their check
-bullets and severity rules would satisfy a name-only test and lose exactly what F4.9 says carries over
-"at functional parity". Every dimension is therefore asserted to carry both.
+bullets and severity rules would satisfy a name-only test. Every dimension is therefore asserted to
+carry both.
+
+**What this module does NOT establish.** F4.9 says the source auditors' check bullets and severity
+rules carry over "at functional parity", and nothing here can check that: the six cc-suite command
+files are not vendored in this repository — `tests/source-manifests/cc-suite.json` records their
+paths at the pinned commit, not their content. What is verified is that the **normative dimension
+names and depth memberships** from F4.9 are present and exact, and that each dimension carries
+locally-authored criteria of the right *shape*. Parity with text nobody in this repository can read
+is disclosed in the PR, not asserted here.
 """
 
 import json
@@ -285,16 +293,27 @@ class TestSkillDimensionCorpus(unittest.TestCase):
         self.assertEqual(mini, {"D0", "D1", "D3", "D6"},
                          "plugin's mini+full set is D0, D1, D3, D6 -- not the regular D0-D3")
 
+    def _dimension_body(self, section, did, name):
+        """The slice owned by ONE dimension: from its heading to the next `###`.
+
+        A fixed-width window would bleed into the following dimension, so a dimension with no bullets
+        of its own could be carried by its neighbour's and the test would still pass. The bound has to
+        be the section boundary, not a character count.
+        """
+        head = re.compile(r"(?m)^###\s+%s\b[^\n]*%s" % (re.escape(did), re.escape(name)))
+        match = head.search(section)
+        self.assertIsNotNone(match, "no '### %s ... %s' heading" % (did, name))
+        rest = section[match.end():]
+        nxt = re.search(r"(?m)^###\s+", rest)
+        return rest[: nxt.start()] if nxt else rest
+
     def test_every_dimension_carries_check_bullets_and_a_severity_rule(self):
-        """F4.9 says the per-dimension check bullets and severity rules carry over at functional
-        parity. Names alone are not parity."""
+        """Each dimension must carry criteria of its own, inside its own section."""
         for artifact_type, dims in DIMENSIONS.items():
             section = self._type_section(artifact_type)
             for did, (name, _) in dims.items():
                 with self.subTest(type=artifact_type, dimension=did):
-                    start = section.find(name)
-                    self.assertNotEqual(start, -1)
-                    body = section[start: start + 1400]
+                    body = self._dimension_body(section, did, name)
                     self.assertRegex(body, r"(?m)^\s*[-*]\s+\S",
                                      "%s %s has no check bullets" % (artifact_type, did))
                     self.assertRegex(

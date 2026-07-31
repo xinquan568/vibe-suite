@@ -299,9 +299,26 @@ class TestJointOwnershipGuard(unittest.TestCase):
     """`defective-skill/` also serves `test_score_goldens.py`, whose oracle is hand-derived and
     compared for exact equality. Ordered first in the plan for that reason."""
 
+    #: The reviewed baseline. **Not HEAD**: once a change is committed, the worktree and HEAD are
+    #: identical by construction, so a HEAD comparison is vacuous on any clean checkout — it would
+    #: pass for a commit that rewrote the oracle. The merge base against the integration branch is
+    #: the last content a reviewer actually approved.
+    BASELINE_REFS = ("origin/main", "main")
+
+    def _baseline_ref(self):
+        for ref in self.BASELINE_REFS:
+            probe = subprocess.run(["git", "merge-base", "HEAD", ref],
+                                   cwd=REPO_ROOT, capture_output=True, text=True)
+            if probe.returncode == 0 and probe.stdout.strip():
+                return probe.stdout.strip()
+        return None
+
     def _committed(self, relpath):
+        base = self._baseline_ref()
+        if base is None:
+            return subprocess.CompletedProcess([], 1, b"", b"")
         return subprocess.run(
-            ["git", "show", "HEAD:tests/fixtures/nl-audit/defective-skill/%s" % relpath],
+            ["git", "show", "%s:tests/fixtures/nl-audit/defective-skill/%s" % (base, relpath)],
             cwd=REPO_ROOT, capture_output=True)
 
     def test_preexisting_files_are_byte_identical_to_their_committed_content(self):
@@ -309,7 +326,7 @@ class TestJointOwnershipGuard(unittest.TestCase):
             with self.subTest(file=relpath):
                 proc = self._committed(relpath)
                 if proc.returncode != 0:
-                    self.skipTest("%s is not in HEAD yet" % relpath)
+                    self.skipTest("%s is not in the baseline yet (or no baseline ref)" % relpath)
                 on_disk = (FIXTURES / "defective-skill" / relpath).read_bytes()
                 self.assertEqual(on_disk, proc.stdout,
                                  "tests/fixtures/nl-audit/defective-skill/%s was modified; the "

@@ -72,17 +72,32 @@ not be routed through it.
 | `claude` | any | in-session; no external process |
 | `both` | any | Claude plus the resolved cross-model engine, reconciled with disagreements listed |
 
-Write the prompt to a temp file with the Write tool — never interpolate artifact text into a shell
-line. Splice in the conventions knowledge skill for the artifact's tool, and open with a provenance
-line naming who produced the artifacts under audit. Then:
+**Build the prompt file first — the whole lifecycle, in this order.** Artifact text is untrusted and
+often contains backticks, `$( )` and quotes, so it never touches a shell line:
+
+1. Choose the path: `NL_AUDIT_PROMPT_FILE="$(mktemp -t nl-audit-prompt)"`. Run that in Bash and keep
+   the value; every later step uses the same path.
+2. Write the prompt to that exact path **with the Write tool**, never by shell redirection or
+   interpolation. Its order is fixed: the provenance line first (who produced the artifacts under
+   audit — `authored by Claude (this session)`, `authored by <as stated>`, or
+   `unknown — supplied by the operator`; never inferred from a filename or a writing style), then the
+   dimensions for the resolved `--type` and depth from
+   [`skills/auditing/SKILL.md`](../skills/auditing/SKILL.md), then the conventions knowledge skill for
+   the artifact's tool, then the artifact text under a heading that marks it as data.
+3. Dispatch with the variable set in the same Bash invocation, so `"$(cat …)"` delivers the file as
+   exactly one argument:
 
 <!-- canonical-dispatch -->
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --sandbox read-only --kind audit -- "$(cat "$NL_AUDIT_PROMPT_FILE")"
 ```
 
-On the graduated agy lane, the same prompt goes to
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-audit-cli.mjs" -- "$(cat "$NL_AUDIT_PROMPT_FILE")"`.
+4. Remove the file when the run terminates, on every path including refusal and fallback:
+   `rm -f "$NL_AUDIT_PROMPT_FILE"`.
+
+On the graduated agy lane, step 3 becomes
+`node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-audit-cli.mjs" -- "$(cat "$NL_AUDIT_PROMPT_FILE")"`; steps
+1, 2 and 4 are unchanged.
 
 **A pre-gate `--engine agy` request is refused, not degraded** — `commands/shared/fallback.md` draws
 that distinction, and it matters: a refusal says *this is not available yet*, a degradation says
@@ -110,16 +125,25 @@ failed.
 
 ## Step 6 — present
 
-Per artifact, the findings table with this exact header:
+**Findings are grouped by dimension, and the table renders vibe-core's six fields — all of them.**
+Per artifact, one section per dimension that produced a finding, in id order:
 
 ```
-| # | Sev | Dimension | File:Line | Finding | Impact | Fix |
+### D5 — Argument Safety
+
+| # | File | Observation | Severity | Evidence | Proposed change | Tradeoff |
 ```
 
-`Sev` and the finding shape are `skills/vibe-core/SKILL.md`'s — the six-field contract and the
-`[CRITICAL]`/`[HIGH]`/`[MEDIUM]`/`[LOW]`/`[GOOD]` scale, not a second vocabulary. **Every finding
-names its dimension** (`D<n>`, or a check-set id under `--type repo`); an unattributed finding cannot
-be checked and is not reported.
+The dimension is carried by the **section heading**, not by a seventh column. That is deliberate:
+`skills/vibe-core/SKILL.md` is the finding contract, its machine-readable form
+(`schemas/audit-output.schema.json`) is canonical and closed, and a `dimension` key inside a finding
+would not validate against it. Grouping satisfies both obligations at once — **every finding names its
+dimension** (`D<n>`, or an `A1`–`E3` check-set id under `--type repo`), and every finding still
+carries exactly `File`, `Observation`, `Severity`, `Evidence`, `Proposed change`, `Tradeoff`.
+`effort` may be added alongside them, as the contract allows. An unattributed finding cannot be
+checked and is not reported.
+
+Severities are the `[CRITICAL]`/`[HIGH]`/`[MEDIUM]`/`[LOW]`/`[GOOD]` scale — not a second vocabulary.
 
 Below the table: the depth that ran, the engine that answered, and — on a `--mini` run — the
 full-only dimensions that were **not** audited, listed by name. A reader comparing a mini run to a

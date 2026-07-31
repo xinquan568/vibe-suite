@@ -171,6 +171,32 @@ class TestMalformedInput(EvaluatorTestCase):
         proc = run_tool("defective-skill", "full", payload)
         self.assertEqual(proc.returncode, EXIT_MALFORMED)
 
+    def test_a_record_without_run_metadata_fails_loudly(self):
+        """`ACCEPTANCE.md` requires provenance so a verdict can be attributed to an engine lane.
+        Accepting a record without it would produce a verdict about an unidentified run."""
+        payload = {"findings": [{"class": "missing name", "dimension": "D0"}]}
+        self.assertEqual(run_tool("defective-skill", "full", payload).returncode, EXIT_MALFORMED)
+
+    def test_each_run_field_is_required(self):
+        for missing in ("type", "depth", "engine"):
+            with self.subTest(field=missing):
+                payload = record("defective-skill", "full", all_findings("defective-skill"))
+                del payload["run"][missing]
+                self.assertEqual(run_tool("defective-skill", "full", payload).returncode,
+                                 EXIT_MALFORMED)
+
+    def test_a_depth_mismatch_between_record_and_invocation_fails_loudly(self):
+        """A mini record graded by the full clause set would be judged against a floor its run never
+        aimed at -- a confident verdict about a run that did not happen."""
+        payload = record("defective-skill", "full", all_findings("defective-skill"))
+        payload["run"]["depth"] = "mini"
+        self.assertEqual(run_tool("defective-skill", "full", payload).returncode, EXIT_MALFORMED)
+
+    def test_a_type_mismatch_between_record_and_fixture_fails_loudly(self):
+        payload = record("defective-skill", "full", all_findings("defective-skill"))
+        payload["run"]["type"] = "agent"
+        self.assertEqual(run_tool("defective-skill", "full", payload).returncode, EXIT_MALFORMED)
+
     def test_an_unknown_class_id_fails_loudly(self):
         """A class the fixture never seeded is not a detection -- silently ignoring it would let a
         run inflate its rate with invented findings."""

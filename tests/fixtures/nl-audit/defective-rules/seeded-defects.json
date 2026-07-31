@@ -30,7 +30,7 @@
     {
       "id": "rule duplicating a linter",
       "dimension": "D5",
-      "description": "the 100-character limit is already a formatter setting"
+      "description": "the 100-character limit in style.md is already enforced by .editorconfig's max_line_length in the same fixture"
     },
     {
       "id": "stale reference",

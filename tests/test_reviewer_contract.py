@@ -117,40 +117,62 @@ def domain_from_block(block):
     return found
 
 
-def paragraphs(text):
-    """Blank-line-separated units as `(first, last, joined)`, line numbers 0-based and inclusive.
+def lexical_units(text):
+    """The units definition-detection runs on: `(first_line, last_line, text)`, 0-based inclusive.
 
-    Definition detection runs on a whole paragraph with its newlines collapsed, because a redefinition
-    split across a line wrap — the marker on one line, the pinned term on the next — evades any rule
-    that looks at one line at a time.
+    Getting this granularity right took two attempts in opposite directions.
+
+    **Per line** was too narrow: a definition wrapped across a line break — the term at the end of one
+    line, its range at the start of the next — straddled the rule and escaped.
+
+    **Per paragraph** was too wide: joining a hard-wrapped paragraph puts every sentence in one unit, so
+    `Run with --max-review-rounds to bound the loop.` followed by `All inputs must be validated.`
+    reported a redefinition out of two innocent sentences.
+
+    So: un-wrap first, then split into **sentences**. Wrapping disappears, and no association is made
+    across a sentence boundary. Table rows are their own units — a row is not prose and has no sentence
+    structure to split on.
     """
-    units, start = [], None
+    units, para, start = [], [], None
     lines = text.splitlines()
+
+    def flush(end_index):
+        if start is None:
+            return
+        if any(line.lstrip().startswith("|") for line in lines[start:end_index + 1]):
+            for offset, line in enumerate(lines[start:end_index + 1]):
+                units.append((start + offset, start + offset, line))
+            return
+        joined = " ".join(lines[start:end_index + 1])
+        # `.`/`!`/`?` only. A colon or semicolon usually *introduces* a definition
+        # (`--max-review-rounds: 1..5`), so splitting on either severs a term from the very
+        # definition the rule is looking for.
+        for sentence in re.split(r"(?<=[.!?])\s+", joined):
+            if sentence.strip():
+                units.append((start, end_index, sentence))
+
     for i, line in enumerate(lines):
         if line.strip():
             if start is None:
                 start = i
         elif start is not None:
-            units.append((start, i - 1, " ".join(lines[start:i])))
+            flush(i - 1)
             start = None
     if start is not None:
-        units.append((start, len(lines) - 1, " ".join(lines[start:])))
+        flush(len(lines) - 1)
     return units
 
 
 def redefinitions(text):
-    """Every paragraph that defines a pinned term outside the `## Round bounds` block.
+    """Every place a pinned term is *defined* outside the `## Round bounds` block.
 
-    Three properties the execution review found missing from the first implementation:
-
-    - exemption is by **line interval**, so an identical definition line copied elsewhere is not
-      exempt by virtue of matching the block's text;
-    - matching is **case-insensitive**;
-    - the unit is a **paragraph**, so a wrapped definition cannot straddle the rule.
+    Exemption is by **line interval**, so an identical definition line copied elsewhere is not exempt
+    by matching the block's text. Matching is **case-insensitive**. The unit comes from
+    `lexical_units` — un-wrapped, sentence-scoped.
     """
     start, end, count = round_bounds_span(text)
     hits = []
-    for first, last, unit in paragraphs(text):
+    for first, last, unit in lexical_units(text):
         if count == 1 and first >= start and last < end:
             continue                      # wholly inside the one legal block
         low = unit.lower()
@@ -378,6 +400,23 @@ class TestPolicy(unittest.TestCase):
         doc = ("# c\n\nRun with --max-review-rounds to bound the loop.\n\n"
                "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
         self.assertEqual(redefinitions(doc), [])
+
+    def test_a_marker_in_a_neighbouring_sentence_is_not_a_redefinition(self):
+        """Paragraph-wide matching regressed this: hard-wrapping put a flag and an unrelated
+        `must be` in one unit and manufactured a violation from two innocent sentences."""
+        doc = ("# c\n\nRun with --max-review-rounds to bound the loop.\n"
+               "All inputs must be validated before use.\n\n"
+               "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
+        self.assertEqual(redefinitions(doc), [],
+                         "a marker in the next sentence is not a definition of the flag")
+
+    def test_a_definition_wrapped_within_one_sentence_is_still_caught(self):
+        """The narrowing must not undo finding 3: un-wrapping happens before the sentence split."""
+        doc = ("# c\n\nThe flag --max-review-rounds is an integer whose valid\n"
+               "values are 1..5.\n\n"
+               "## Round bounds\n\nFloor 1, ceiling 5, default 3, because reasons.\n")
+        self.assertTrue(redefinitions(doc),
+                        "a definition split by a line wrap is one sentence and must still fail")
 
     def test_two_round_bounds_blocks_are_ambiguous(self):
         doc = self.block("Floor 1, ceiling 5, default 3, because reasons.") + "\n## Round bounds\n\nx\n"

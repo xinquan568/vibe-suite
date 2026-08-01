@@ -377,15 +377,24 @@ class TestTerminalVocabulary(unittest.TestCase):
                          "update tests/fixtures/loop-bounds/fix-step5-section.md in the same commit "
                          "-- the point is that loop semantics cannot move without a reviewer seeing it")
 
-    def test_the_verdict_literals_are_present_and_uppercase(self):
-        """The golden freezes the section; this pins the vocabulary itself, so a rename anywhere in the
-        document is caught even though the golden only reads one section."""
+    def test_the_verdict_literals_exist_as_uppercase_code_literals(self):
+        """Each verdict appears **at least once** as an uppercase code literal. That is the whole claim.
+
+        An earlier version of this docstring said a rename *anywhere* in the document was caught, and
+        the README repeated it. Both were wrong: each verdict occurs several times, so lowercasing one
+        occurrence outside the frozen section leaves this assertion satisfied. The reviewer found it by
+        doing exactly that.
+
+        Overstating an assertion is the specific mistake this link has now made three times, always in
+        the same direction. What this catches is a verdict vocabulary removed or renamed **wholesale**.
+        Anything narrower is the golden's job, and the golden reads one section.
+        """
         text = document("fix")
         for verdict in ("FIXED", "NOT FIXED", "PARTIAL", "REGRESSED"):
             with self.subTest(verdict=verdict):
                 self.assertIn("`%s`" % verdict, text,
-                              "the verdicts are code literals; lowercasing one makes the document "
-                              "cite a verdict that does not exist")
+                              "the verdicts are code literals; a document that names none of them "
+                              "in backticks has renamed the vocabulary")
 
 
 def norm(text):
@@ -429,7 +438,12 @@ def fix_step5_section():
         elif not fenced and line.startswith("## "):
             break
         body.append(line)
-    return "\n".join(body).strip() + "\n"
+
+    # **No `.strip()`.** Stripping the section's outer whitespace was the ninth refutation: four spaces
+    # before the first line are discarded, so the golden still matches while markdown renders the line
+    # as an indented code block — the same failure as attempt 7, moved to the section boundary.
+    # Leading and trailing whitespace is part of the frozen text like everything else.
+    return "\n".join(body)
 
 
 #: The round-loop declaration in `commands/fix.md`, verbatim after `norm()`. Held as a constant so the

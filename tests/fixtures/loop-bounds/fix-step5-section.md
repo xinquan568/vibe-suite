@@ -1,3 +1,4 @@
+
 `--max-rounds` 1–5, **default 3**. A round is: fix the issues still open → verify → keep going while
 any remain `NOT FIXED` or `PARTIAL`. `FIXED` issues leave the loop; a `REGRESSED` issue stops the loop
 and is reported for a human, because re-running the change that caused it is the wrong move.

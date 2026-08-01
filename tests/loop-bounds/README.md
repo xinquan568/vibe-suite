@@ -115,10 +115,16 @@ failure. It does not catch a document built to defeat it.
 
 | Claim | Status |
 |---|---|
-| the `## Step 5` section cannot change without failing | **holds** — byte equality, fence-aware extraction, heading uniqueness asserted |
-| the verdict literals stay uppercase code literals | **holds** — checked across the whole document, so a rename outside the section is caught |
+| the `## Step 5` section cannot change without failing | **holds** — byte equality with no `strip()`, fence-aware extraction, heading uniqueness asserted |
+| each verdict appears at least once as an uppercase code literal | **holds**, and that is the entire claim — it catches the vocabulary being renamed *wholesale* |
+| a verdict renamed **outside** the frozen section is caught | **not claimed.** Each verdict occurs several times, so lowercasing one occurrence elsewhere satisfies the check. |
 | the document as a whole is free of contradictions | **not claimed.** Content outside the section is not read. |
 | the document cannot be constructed to defeat the check | **not claimed**, and the eight attempts above are why |
+
+The third row previously read as **holds**. It was wrong, and a reviewer found it by lowercasing an
+occurrence outside the section. That is the **third** time this link overstated an assertion, always in
+the same direction — which is why the table now lists what is *not* claimed at greater length than what
+is.
 
 Closing the last row needs a **structured declaration** `fix.md` does not have — a parsed field has no
 neighbouring prose to contradict it, so the arms race ends: the test reads values, not sentences.

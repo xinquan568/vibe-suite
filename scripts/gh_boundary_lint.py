@@ -141,12 +141,17 @@ def scan(path, text):
 
 
 def _bootstrap_allowed(snippet):
-    """Whether a bootstrap invocation is one of the two probes the exemption actually names."""
-    command = COMMAND_FORM.search(snippet)
-    if not command:
+    """Whether **every** `gh` invocation in the snippet is one of the named probes.
+
+    Matching the *first* one and then exempting the whole snippet let
+    `gh api user && gh pr create --fill` through: the prefix matched, and everything after it rode
+    along. An exemption is a claim about a line, so it has to hold for all of it.
+    """
+    occurrences = list(COMMAND_FORM.finditer(snippet))
+    if not occurrences:
         return False
-    tail = snippet[command.start():]
-    return any(pattern.match(tail) for pattern in PRE_PROFILE_ALLOWED)
+    return all(any(pattern.match(snippet[match.start():]) for pattern in PRE_PROFILE_ALLOWED)
+               for match in occurrences)
 
 
 def targets(root, explicit):

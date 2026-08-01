@@ -529,6 +529,10 @@ class TestCrlfPointer(WriteCase):
         after = config.read_text(encoding="utf-8", newline="")
         self.assertEqual(after.count("issue2pr_profile:"), 1, "the entry must be replaced, not added")
         self.assertIn("demo", after)
+        # The pattern consumes the CR, so the replacement must restore it. Otherwise the one line it
+        # touched becomes LF and the document is left with mixed endings.
+        self.assertNotIn("\n", after.replace("\r\n", ""),
+                         "every line ending must still be CRLF")
 
 
 class TestReferenceStatesTheInterview(unittest.TestCase):

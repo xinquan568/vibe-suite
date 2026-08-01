@@ -205,7 +205,12 @@ def set_pointer(text, profile_id):
 
     start, end = span
     head, body, tail = text[:start], text[start:end], text[end:]
-    replaced, count = re.subn(r"(?m)^issue2pr_profile:[ \t]*\S*[ \t\r]*$", entry, body, count=1)
+    # The pattern consumes a trailing CR, so the replacement has to put it back — otherwise replacing
+    # a pointer in a CRLF file turned that one line into LF and left the document mixed.
+    def _replace(match):
+        return entry + ("\r" if match.group(0).endswith("\r") else "")
+
+    replaced, count = re.subn(r"(?m)^issue2pr_profile:[ \t]*\S*[ \t\r]*$", _replace, body, count=1)
     if count:
         return head + replaced + tail
     newline = "\r\n" if "\r\n" in body or "\r\n" in head else "\n"

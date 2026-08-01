@@ -591,6 +591,16 @@ class TestBoundaryLint(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0,
                             "a mutating command is not one of the named probes")
 
+    def test_a_probe_chained_with_a_mutating_command_is_not_allowed(self):
+        """An exemption is a claim about a line, so it has to hold for all of it.
+
+        Matching the first invocation and exempting the whole snippet let everything after `&&` ride
+        along on the prefix.
+        """
+        chained = self.write("skills/issue2pr/references/profile-init.md",
+                             "# init\n\n```sh\ngh api user && gh pr create --fill\n```\n")
+        self.assertNotEqual(self.lint(chained).returncode, 0)
+
     def test_both_named_probes_are_allowed_in_the_bootstrap_file(self):
         for probe in ("gh api user --jq .login", "gh issue list --repo o/r --limit 1"):
             with self.subTest(probe=probe):

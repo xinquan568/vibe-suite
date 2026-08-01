@@ -564,6 +564,50 @@ class TestBoundaryLint(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unparseable", (result.stdout + result.stderr).lower())
 
+    def test_profile_init_is_the_one_pre_profile_exemption(self):
+        """`profile init` runs when no profile exists, and the driver is chosen by `source_driver`
+        **in a profile** — so routing it through a driver would need the profile it is creating.
+
+        The exemption is narrow on purpose: that one file, for identity and reachability probes only.
+        A sibling reference does not inherit it.
+        """
+        allowed = self.write("skills/issue2pr/references/profile-init.md",
+                             "# init\n\n```sh\ngh issue list --limit 1\n```\n")
+        self.assertEqual(self.lint(allowed).returncode, 0)
+        sibling = self.write("skills/issue2pr/references/profile-contract.md",
+                             "# contract\n\n```sh\ngh issue list --limit 1\n```\n")
+        self.assertNotEqual(self.lint(sibling).returncode, 0,
+                            "the exemption is one file, not the references directory")
+
+    def test_the_bootstrap_exemption_covers_only_the_two_named_probes(self):
+        """A per-file skip cannot enforce a claim about *which* probes.
+
+        The exemption is argued as "two read-only probes"; skipping the whole file would also have
+        exempted a mutating `gh pr create` placed in it, which is a different and much larger claim.
+        """
+        mutating = self.write("skills/issue2pr/references/profile-init.md",
+                              "# init\n\n```sh\ngh pr create --fill\n```\n")
+        result = self.lint(mutating)
+        self.assertNotEqual(result.returncode, 0,
+                            "a mutating command is not one of the named probes")
+
+    def test_a_probe_chained_with_a_mutating_command_is_not_allowed(self):
+        """An exemption is a claim about a line, so it has to hold for all of it.
+
+        Matching the first invocation and exempting the whole snippet let everything after `&&` ride
+        along on the prefix.
+        """
+        chained = self.write("skills/issue2pr/references/profile-init.md",
+                             "# init\n\n```sh\ngh api user && gh pr create --fill\n```\n")
+        self.assertNotEqual(self.lint(chained).returncode, 0)
+
+    def test_both_named_probes_are_allowed_in_the_bootstrap_file(self):
+        for probe in ("gh api user --jq .login", "gh issue list --repo o/r --limit 1"):
+            with self.subTest(probe=probe):
+                allowed = self.write("skills/issue2pr/references/profile-init.md",
+                                     "# init\n\n```sh\n%s\n```\n" % probe)
+                self.assertEqual(self.lint(allowed).returncode, 0)
+
     def test_the_github_driver_is_the_one_place_it_is_allowed(self):
         allowed = self.write("skills/issue2pr/drivers/github.md",
                              "# github\n\n```sh\ngh pr create --fill\n```\n")

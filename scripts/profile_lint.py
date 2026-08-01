@@ -221,13 +221,22 @@ def check_type(name, value, kind, errors, root, structural):
                               % (name, value, ", ".join(domain)))
 
 
-def validate(path, root, structural):
+def validate_text(text, root, structural):
+    """Validate a candidate that is not on disk yet.
+
+    `write_profile.py` renders in memory and checks the result **before** publishing, so a profile that
+    would not pass is never written at all — which is stronger than writing and then reporting. That
+    needs the rules without the file, so `validate` is the thin wrapper and this is the body.
+    """
     errors = []
     try:
-        fields = parse_frontmatter(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return ["%s: %s" % (path.name, exc)]
+        fields = parse_frontmatter(text)
+    except ValueError as exc:
+        return ["%s" % exc]
+    return _validate_fields(fields, root, structural, errors)
 
+
+def _validate_fields(fields, root, structural, errors):
     for name in sorted(REQUIRED):
         if name not in fields:
             errors.append("%s: required field is missing" % name)
@@ -252,6 +261,14 @@ def validate(path, root, structural):
             errors.extend(_check_repo_path(candidate, root))
 
     return errors
+
+
+def validate(path, root, structural):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return ["%s: %s" % (path.name, exc)]
+    return validate_text(text, root, structural)
 
 
 def _check_repo_path(candidate, root):

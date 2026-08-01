@@ -44,8 +44,27 @@ from pathlib import Path
 
 EXIT_OK, EXIT_VIOLATION = 0, 1
 
-#: The one place `gh` belongs.
+#: The one place `gh` belongs *once a driver has been selected*.
 DRIVER = Path("skills") / "issue2pr" / "drivers" / "github.md"
+
+#: And the one place it belongs *before* that. `profile init` runs when no profile exists — and the
+#: driver is chosen by `source_driver` **in a profile**, so routing this through a driver would require
+#: the profile the command is being run to create. The circularity is real, not an excuse, which is why
+#: this is a named second exemption rather than a widened first one.
+#:
+#: The exemption is narrow deliberately: this file, and only the probes named below.
+PRE_PROFILE = Path("skills") / "issue2pr" / "references" / "profile-init.md"
+
+#: **Exactly which invocations** the bootstrap file may carry. Skipping the file wholesale would have
+#: exempted a mutating `gh pr create` sitting in it — the claim was "two read-only probes", and a
+#: per-file skip cannot enforce a claim about which probes.
+#:
+#: Both are read-only and neither concerns a work item's content: one asks who is authenticated, the
+#: other whether the repository answers at all.
+PRE_PROFILE_ALLOWED = (
+    re.compile(r"^gh\s+api\s+user\b"),
+    re.compile(r"^gh\s+issue\s+list\b"),
+)
 
 #: Enumerated, not inferred. `tests/**` is excluded because a fixture must be able to contain the
 #: thing being prohibited.
@@ -121,6 +140,20 @@ def scan(path, text):
     return markdown_hits(text)
 
 
+def _bootstrap_allowed(snippet):
+    """Whether **every** `gh` invocation in the snippet is one of the named probes.
+
+    Matching the *first* one and then exempting the whole snippet let
+    `gh api user && gh pr create --fill` through: the prefix matched, and everything after it rode
+    along. An exemption is a claim about a line, so it has to hold for all of it.
+    """
+    occurrences = list(COMMAND_FORM.finditer(snippet))
+    if not occurrences:
+        return False
+    return all(any(pattern.match(snippet[match.start():]) for pattern in PRE_PROFILE_ALLOWED)
+               for match in occurrences)
+
+
 def targets(root, explicit):
     if explicit:
         return [Path(p) for p in explicit]
@@ -155,11 +188,13 @@ def main(argv=None):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         for number, snippet in scan(path, text):
+            if relative == PRE_PROFILE and _bootstrap_allowed(snippet):
+                continue
             violations.append("%s:%d  %s" % (relative, number, snippet[:100]))
 
     if violations:
-        print("gh_boundary_lint: %d invocation(s) outside %s" % (len(violations), DRIVER),
-              file=sys.stderr)
+        print("gh_boundary_lint: %d invocation(s) outside %s (and the two bootstrap probes in %s)"
+              % (len(violations), DRIVER, PRE_PROFILE), file=sys.stderr)
         for violation in violations:
             print("  - %s" % violation, file=sys.stderr)
         return EXIT_VIOLATION

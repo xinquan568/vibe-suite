@@ -61,6 +61,7 @@ Refusing is better than a default, because a default profile is a wrong answer t
 
 **The contract profiles must satisfy:** [`references/profile-contract.md`](references/profile-contract.md).
 What went into it and why: [`references/boundary-inventory.md`](references/boundary-inventory.md).
+How `profile init` produces one: [`references/profile-init.md`](references/profile-init.md).
 
 ## Round bounds
 

@@ -1,0 +1,14 @@
+{
+  "issue2pr": {
+    "document": "skills/issue2pr/SKILL.md",
+    "cap_declaration": "round-bounds-block"
+  },
+  "refine-proposal": {
+    "document": "skills/refine-proposal/SKILL.md",
+    "cap_declaration": "round-bounds-block"
+  },
+  "fix": {
+    "document": "commands/fix.md",
+    "cap_declaration": "prose-flag"
+  }
+}

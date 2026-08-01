@@ -139,6 +139,29 @@ jobs:
           set -euo pipefail
           python3 tools/model-pin-lint.py
 
+  loop-bounds:
+    name: loop bounds (AC-4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      # The full suite discovers this module too, so this job adds no coverage — it adds an
+      # *attributable signal*. AC-4 is an acceptance criterion in its own right, and a failure buried
+      # among 1500 other tests is one nobody reads as "loop bounds regressed".
+      #
+      # The command is exactly what a contributor runs locally, so the job is reproducible before a
+      # push rather than only after one.
+      - name: AC-4 loop bounds
+        run: python3 -m unittest tests.test_loop_bounds -v
+
   test:
     name: test
     runs-on: ubuntu-latest

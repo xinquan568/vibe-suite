@@ -280,15 +280,27 @@ class TestContractDelegation(unittest.TestCase):
         self.assertIn("#123", README.read_text(encoding="utf-8"))
 
 
-#: The shape a run-level terminal status takes in this repository: a SHOUTING_SNAKE token introduced
-#: as something a run stops at. Detecting *any* such token is what makes "names none" checkable —
-#: excluding one known literal leaves every other name free to appear.
-TERMINAL_TOKEN = re.compile(r"\b(EXIT_[A-Z_]+|[A-Z][A-Z_]{4,}_STATUS)\b")
+#: **Any** SHOUTING_SNAKE token. An earlier version matched only `EXIT_*` and `*_STATUS`, which left
+#: `HALT_MAX_ROUNDS` and `MAX_ROUNDS_REACHED` free to appear — a longer list of known names is not the
+#: same as detecting the shape.
+TERMINAL_TOKEN = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
+
+#: Tokens of that shape which are **not** statuses, excluded by their role rather than their name.
+#: An environment variable is introduced as one; a status is not. Excluding backticks as well was the
+#: obvious next thought and wrong — a status is written in backticks precisely because it is a term of
+#: art, so that exclusion removed the one real status and left the check reporting nothing.
+NOT_A_STATUS = re.compile(r"\benvironment\b|\bvariable\b|\bexport\b|\$\{?[A-Z]")
 
 
 def declared_terminal_statuses(name):
-    """Every run-level terminal status a document names, not just the one we expected."""
-    return set(TERMINAL_TOKEN.findall(document(name)))
+    """Every run-level terminal status a document names, not just the ones we thought of."""
+    found = set()
+    for line in document(name).splitlines():
+        for token in TERMINAL_TOKEN.findall(line):
+            if NOT_A_STATUS.search(line):
+                continue
+            found.add(token)
+    return found
 
 
 class TestTerminalVocabulary(unittest.TestCase):
@@ -328,16 +340,24 @@ class TestTerminalVocabulary(unittest.TestCase):
             with self.subTest(verdict=verdict):
                 self.assertIn(verdict, text)
 
-        # The two that continue, and the one that stops. Stated as adjacency because the document
-        # explains them in prose rather than in a table.
-        self.assertRegex(low, r"regressed[^.]{0,120}(stop|halt|abort)",
+        # The two that continue and the one that stops — searched on **both sides** of the verdict.
+        # Looking only after it let "stop while any remain NOT FIXED" through, because the word that
+        # inverts the meaning sits in front.
+        self.assertRegex(low, r"(regressed[^.]{0,120}(stop|halt|abort)|(stop|halt|abort)[^.]{0,120}regressed)",
                          "REGRESSED is the verdict that ends the loop")
-        for verdict in ("not fixed", "partial"):
+        # Matched as the **uppercase verdict token**, not as an English word. Lowercasing first made
+        # "that partial's message" — an ordinary adjective about something else entirely — look like a
+        # claim about the verdict, and the test failed on prose it had no business reading.
+        for verdict in ("NOT FIXED", "PARTIAL"):
             with self.subTest(verdict=verdict):
-                self.assertNotRegex(
-                    low, r"%s[^.]{0,60}(stops the loop|ends the run|terminal)" % verdict,
-                    "%s continues the loop; describing it as terminal inverts AC-4's stimulus"
-                    % verdict)
+                for sentence in re.split(r"(?<=[.!?])\s+", text):
+                    if verdict not in sentence:
+                        continue
+                    with self.subTest(sentence=sentence[:70]):
+                        self.assertNotRegex(
+                            sentence.lower(), r"\b(stops the loop|halts the loop|ends the run)\b",
+                            "%s continues the loop; a sentence saying it stops inverts AC-4's "
+                            "stimulus wherever the word sits" % verdict)
 
 
 def norm(text):

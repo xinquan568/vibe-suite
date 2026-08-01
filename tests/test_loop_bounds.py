@@ -359,27 +359,37 @@ class TestTerminalVocabulary(unittest.TestCase):
         # Matched as the **uppercase verdict token**, not as an English word. Lowercasing first made
         # "that partial's message" — an ordinary adjective about something else entirely — look like a
         # claim about the verdict, and the test failed on prose it had no business reading.
-        # Load-bearing half: the document must **say** these two continue. Presence is a closed
-        # property — the sentence is there or it is not — so an inversion cannot satisfy it. Rewriting
-        # "keep going while any remain NOT FIXED or PARTIAL" into any stopping phrasing deletes the
-        # continuing language, and this fails whatever the replacement says.
-        for verdict in ("NOT FIXED", "PARTIAL"):
-            with self.subTest(verdict=verdict, half="declared-continuing"):
-                self.assertRegex(
-                    low,
-                    r"(%s[^.]{0,120}(keep going|keeps going|continue|continues|another round|"
-                    r"next round|again)|(keep going|keeps going|continue|continues|another round|"
-                    r"next round|again)[^.]{0,120}%s)" % (verdict.lower(), verdict.lower()),
-                    "%s continues the loop, and the document has to say so — asserting only that no "
-                    "sentence calls it terminal leaves 'says nothing at all' passing" % verdict)
+        # Load-bearing half: **the exact declaration**, whitespace-normalised. Not an inference about
+        # meaning — three attempts at inferring meaning from English each passed on inverted text, and
+        # the third *claimed* to be closed:
+        #
+        #   1. "no stopping phrase after the verdict"  — beaten by putting the phrase in front
+        #   2. "no stopping verb stem in the sentence" — beaten by "causes the loop to exit"
+        #   3. "a continuing word near the verdict"    — beaten by "continue to reporting; any
+        #      NOT FIXED or PARTIAL prevents another round", which satisfies the proximity check while
+        #      inverting the meaning, and uses a verb no stop-list contains
+        #
+        # Each fix matched **lexical proximity rather than the relation** between verdict and verb, so
+        # each was evaded by a sentence with the right words in the wrong relation. A string equality
+        # has no relation to get wrong. This is the golden-fixture approach the rest of the repository
+        # already uses, applied to one load-bearing sentence.
+        #
+        # The cost is real and is the point: rewording this clause **fails the test**, so the semantics
+        # of the loop cannot be changed as a side effect of an edit. Whoever rewords it updates the
+        # constant deliberately.
+        with self.subTest(half="declared-continuing"):
+            self.assertIn(
+                REQUIRED_CONTINUE_DECLARATION, low,
+                "commands/fix.md must declare the round loop in exactly these words; any rewording "
+                "is a deliberate change to loop semantics and updates this constant with it")
 
-        # Backstop half, and **it is not a proof**. The set of English words meaning "stops" is open,
-        # so this can always be evaded by a word not listed — review iteration 3 closed four phrasings
-        # and iteration 4 was handed a fifth, "causes the loop to exit". Adding `exit` does not close
-        # the class; `cease` and `conclude` are next. It is kept because a contradiction added
-        # *alongside* the required sentence would satisfy the presence check above, and catching the
-        # common phrasings is worth more than nothing. The README records this as the one assertion
-        # here whose strength cannot be stated exactly.
+        # Backstop half, and **it is not a proof**. The exact-text anchor above fixes what the document
+        # *declares*; it cannot stop a contradiction being added somewhere else in the file. Catching
+        # that needs meaning-detection, which is the thing three iterations established cannot be done
+        # reliably here — the set of English words meaning "stops" is open, so any list is evadable by
+        # a word not on it. `prevents another round`, the phrasing that beat attempt 3, is still not
+        # caught and deliberately so: adding it would restart the enumeration this test just abandoned.
+        # Kept because the common phrasings are worth catching. The README states its strength exactly.
         for verdict in ("NOT FIXED", "PARTIAL"):
             for sentence in re.split(r"(?<=[.!?])\s+", text):
                 if verdict not in sentence:
@@ -396,6 +406,19 @@ class TestTerminalVocabulary(unittest.TestCase):
 
 def norm(text):
     return re.sub(r"\s+", " ", text.replace("**", "").replace("`", "")).lower()
+
+
+#: The round-loop declaration in `commands/fix.md`, verbatim after `norm()`. Held as a constant so the
+#: assertion is a string equality rather than a judgement about English — see the three failed
+#: judgement-based attempts recorded at the call site.
+#:
+#: Normalisation is deliberately minimal: it collapses whitespace so the clause can wrap across lines,
+#: strips `**`/backticks so emphasis can move, and lowercases. It does **not** touch word order,
+#: punctuation, or vocabulary, which is where an inversion has to live.
+REQUIRED_CONTINUE_DECLARATION = (
+    "a round is: fix the issues still open → verify → keep going while "
+    "any remain not fixed or partial."
+)
 
 
 class TestReadmeStatesTheLimit(unittest.TestCase):

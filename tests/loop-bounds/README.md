@@ -64,22 +64,45 @@ An unknown mode makes the stub return a **clean** verdict, which is exactly what
 mode look like a passing one. That is why the assertions are "this mode never returns clean" rather
 than "this mode exists".
 
-## One assertion here has a strength that cannot be stated exactly
+## The verdict-semantics assertion, and what it is worth
 
-`test_fix_verdicts_carry_their_continue_or_stop_meaning` is in two halves, and they are not equally
-strong. The distinction is recorded because every other claim in this directory is stated exactly, and
-an unmarked weak assertion sitting among them would borrow their credibility.
+`test_fix_verdicts_carry_their_continue_or_stop_meaning` is in two halves of unequal strength. The
+difference is recorded because every other claim in this directory states its strength exactly, and an
+unmarked weak assertion sitting among them would borrow their credibility.
 
 | Half | Property | Strength |
 |---|---|---|
-| `declared-continuing` | `commands/fix.md` **must say** `NOT FIXED` and `PARTIAL` keep the loop going | **closed.** Presence — the sentence is there or it is not. No rewording satisfies it, and deleting the claim fails it. |
-| `backstop` | no sentence naming those verdicts also uses stopping language | **open, and evadable by construction.** |
+| `declared-continuing` | `commands/fix.md` declares the round loop in **exactly** the words held in `REQUIRED_CONTINUE_DECLARATION` | **closed**, because it is a string equality. No sentence satisfies it while meaning something else. |
+| `backstop` | no sentence naming `NOT FIXED`/`PARTIAL` also uses stopping language | **open, and evadable by construction.** |
 
-The backstop matches stopping verbs from a list. The set of English words meaning "stops" is not
-finite, so a phrasing outside the list passes. This is not hypothetical: review iteration 3 closed
-four phrasings, and iteration 4 was handed a fifth — *"PARTIAL causes the loop to exit"*. Adding
-`exit` does not close the class. `cease` and `conclude` are next.
+### Three attempts to infer meaning, and why they were abandoned
 
-It is kept anyway, because a contradicting sentence added *alongside* the required one would satisfy
-the closed half, and catching the common phrasings is worth more than nothing. It is **a backstop, not
-a proof**, and no reading of a green suite should treat it as one.
+The first half was rewritten three times, each time as a cleverer regex, and each version passed on
+text that inverted the semantics it was written to protect:
+
+| Attempt | Check | Beaten by |
+|---|---|---|
+| 1 | no stopping phrase *after* the verdict | putting the phrase in front |
+| 2 | no stopping verb stem in the sentence | "causes the loop to **exit**" |
+| 3 | a continuing word *near* the verdict | "**continue** to reporting; any `NOT FIXED` or `PARTIAL` **prevents another round**" |
+
+Attempt 3 was claimed in review to be closed, on the reasoning that presence cannot be faked. It can:
+the counterexample contains `continue` and `another round` within the window while asserting the exact
+opposite, and `prevents` belongs to no stop-list.
+
+Every attempt matched **lexical proximity rather than the relation** between the verdict and the verb,
+so each fell to a sentence with the right words in the wrong relation. A string equality has no
+relation to get wrong, which is why the check is now golden text — the approach the rest of this
+repository already uses for things that must not drift.
+
+**Rewording that clause fails the suite.** That is the cost and it is deliberate: loop semantics cannot
+change as a side effect of an edit, and whoever rewords it updates the constant on purpose.
+
+### What the backstop is, and is not
+
+The anchor fixes what the document *declares*. It cannot stop a contradiction being added elsewhere in
+the file, and catching that needs the meaning-detection the three attempts above established cannot be
+done reliably here. `prevents another round` is **still not caught**, deliberately — adding it would
+restart the enumeration this test just abandoned.
+
+It is **a backstop, not a proof**, and no reading of a green suite should treat it as one.

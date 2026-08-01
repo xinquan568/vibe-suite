@@ -339,79 +339,97 @@ class TestTerminalVocabulary(unittest.TestCase):
                                  "a run-level terminal status here would mean the three loops now "
                                  "share a vocabulary — which is a change, not a detail")
 
-    def test_fix_verdicts_carry_their_continue_or_stop_meaning(self):
-        """Reading `NOT FIXED` as terminal would invert what it means.
+    def test_fix_round_loop_declaration_is_frozen(self):
+        """The `## Step 5` section of `commands/fix.md` must equal its golden, byte for byte.
 
-        Checking only that the four tokens *occur* left the semantics free to flip — a document saying
-        `NOT FIXED` stops the loop would have passed the test named for the opposite.
+        **This is drift detection, not an adversarial guarantee**, and the distinction is the whole
+        point of the exercise that produced it. Eight successive checks tried to establish that the
+        document *means* the right thing, and a reviewer refuted every one:
+
+        | # | Check | Refuted by |
+        |---|---|---|
+        | 1 | no stopping phrase after the verdict | putting the phrase in front |
+        | 2 | no stopping verb stem in the sentence | "causes the loop to exit" |
+        | 3 | a continuing word near the verdict | "prevents another round" |
+        | 4 | exact clause present (substring) | prefixing "It is false that" |
+        | 5 | whole-sentence equality | "viz." splits the sentence |
+        | 6 | section golden via `norm()` | lowercasing hides `NOT FIXED` -> `not fixed` |
+        | 7 | whitespace-collapsed golden | a 4-space indent makes it a code block |
+        | 8 | exact golden, naive extraction | a fenced-code decoy heading |
+
+        Attempts 1-5 were bad checks. 6 and 7 were a sound check whose "only allowance" re-admitted the
+        class it was meant to close. 8 moved the surface from comparison to extraction.
+
+        The lesson is not that a ninth check would have worked. Establishing what a prose document
+        *means*, against a reader actively looking for a way through, is an arms race over extraction
+        and comparison surfaces with no natural end — and AC-4's terminal-status clause for `fix` is
+        **Contract**-tier by this directory's own table, which never promised more than "the
+        specification says so".
+
+        So this asserts exactly what a golden fixture asserts anywhere in this repository: **the text
+        has not changed**. It catches an edit that alters the loop's declared semantics as a side
+        effect of touching something nearby, which is the realistic failure. It does not catch someone
+        deliberately constructing a document to defeat it, and nothing here claims it does — closing
+        that needs a structured declaration `fix.md` does not have, which is filed separately.
         """
+        self.assertEqual(fix_step5_section(), GOLDEN.read_text(),
+                         "commands/fix.md's round-loop section changed. If that was deliberate, "
+                         "update tests/fixtures/loop-bounds/fix-step5-section.md in the same commit "
+                         "-- the point is that loop semantics cannot move without a reviewer seeing it")
+
+    def test_the_verdict_literals_are_present_and_uppercase(self):
+        """The golden freezes the section; this pins the vocabulary itself, so a rename anywhere in the
+        document is caught even though the golden only reads one section."""
         text = document("fix")
-        low = norm(text)
         for verdict in ("FIXED", "NOT FIXED", "PARTIAL", "REGRESSED"):
             with self.subTest(verdict=verdict):
-                self.assertIn(verdict, text)
-
-        # The two that continue and the one that stops — searched on **both sides** of the verdict.
-        # Looking only after it let "stop while any remain NOT FIXED" through, because the word that
-        # inverts the meaning sits in front.
-        self.assertRegex(low, r"(regressed[^.]{0,120}(stop|halt|abort)|(stop|halt|abort)[^.]{0,120}regressed)",
-                         "REGRESSED is the verdict that ends the loop")
-        # Matched as the **uppercase verdict token**, not as an English word. Lowercasing first made
-        # "that partial's message" — an ordinary adjective about something else entirely — look like a
-        # claim about the verdict, and the test failed on prose it had no business reading.
-        # Load-bearing half: **the exact declaration**, whitespace-normalised. Not an inference about
-        # meaning — three attempts at inferring meaning from English each passed on inverted text, and
-        # the third *claimed* to be closed:
-        #
-        #   1. "no stopping phrase after the verdict"  — beaten by putting the phrase in front
-        #   2. "no stopping verb stem in the sentence" — beaten by "causes the loop to exit"
-        #   3. "a continuing word near the verdict"    — beaten by "continue to reporting; any
-        #      NOT FIXED or PARTIAL prevents another round", which satisfies the proximity check while
-        #      inverting the meaning, and uses a verb no stop-list contains
-        #
-        # Each fix matched **lexical proximity rather than the relation** between verdict and verb, so
-        # each was evaded by a sentence with the right words in the wrong relation. A string equality
-        # has no relation to get wrong. This is the golden-fixture approach the rest of the repository
-        # already uses, applied to one load-bearing sentence.
-        #
-        # The cost is real and is the point: rewording this clause **fails the test**, so the semantics
-        # of the loop cannot be changed as a side effect of an edit. Whoever rewords it updates the
-        # constant deliberately.
-        # Compared as a **whole sentence**, not a substring. `assertIn` against the document was the
-        # fourth thing to fall: "It is false that <the exact clause>" contains the anchor and inverts
-        # it. A prefix makes the sentence unequal, so sentence equality closes that; the residual hole
-        # is a contradicting *neighbour* sentence, which no prose check catches and which the README
-        # states rather than papers over.
-        with self.subTest(half="declared-continuing"):
-            self.assertIn(
-                REQUIRED_CONTINUE_DECLARATION,
-                [s.strip() for s in re.split(r"(?<=[.!?])\s+", low)],
-                "commands/fix.md must declare the round loop as exactly this sentence; any rewording "
-                "is a deliberate change to loop semantics and updates this constant with it")
-
-        # Backstop half, and **it is not a proof**. The exact-text anchor above fixes what the document
-        # *declares*; it cannot stop a contradiction being added somewhere else in the file. Catching
-        # that needs meaning-detection, which is the thing three iterations established cannot be done
-        # reliably here — the set of English words meaning "stops" is open, so any list is evadable by
-        # a word not on it. `prevents another round`, the phrasing that beat attempt 3, is still not
-        # caught and deliberately so: adding it would restart the enumeration this test just abandoned.
-        # Kept because the common phrasings are worth catching. The README states its strength exactly.
-        for verdict in ("NOT FIXED", "PARTIAL"):
-            for sentence in re.split(r"(?<=[.!?])\s+", text):
-                if verdict not in sentence:
-                    continue
-                with self.subTest(verdict=verdict, half="backstop", sentence=sentence[:60]):
-                    self.assertNotRegex(
-                        sentence.lower(),
-                        r"\b(stop|stops|stopping|halt|halts|halting|end|ends|ending|exit|exits|"
-                        r"exiting|cease|ceases|ceasing|conclude|concludes|concluding|quit|quits|"
-                        r"terminate|terminates|terminating|abort|aborts|aborting|final)\b",
-                        "%s continues the loop; a sentence pairing it with a stopping verb "
-                        "inverts AC-4's stimulus, whatever the phrasing" % verdict)
+                self.assertIn("`%s`" % verdict, text,
+                              "the verdicts are code literals; lowercasing one makes the document "
+                              "cite a verdict that does not exist")
 
 
 def norm(text):
     return re.sub(r"\s+", " ", text.replace("**", "").replace("`", "")).lower()
+
+
+#: The section whose text is frozen, and the file holding its golden copy.
+SECTION_HEADING = "## Step 5 — the round loop"
+GOLDEN = Path(__file__).parent / "fixtures" / "loop-bounds" / "fix-step5-section.md"
+
+
+def fix_step5_section():
+    """`commands/fix.md`'s round-loop section, extracted **fence-aware** and required to be unique.
+
+    A naive `split(HEADING)[1].split("\\n## ")[0]` is the eighth thing a reviewer broke on this
+    assertion: a fenced code block containing a decoy copy of the heading satisfies a first-match
+    extractor while the operative section is free to change. Markdown headings do not exist inside a
+    fence, so the fence state has to be tracked rather than assumed away.
+
+    Uniqueness is asserted, not resolved by taking the first match — two real headings of the same name
+    is a document problem, and picking one silently is how the decoy worked.
+    """
+    lines = document("fix").splitlines()
+    fenced, starts = False, []
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if not fenced and line.rstrip() == SECTION_HEADING:
+            starts.append(i)
+
+    if len(starts) != 1:
+        raise AssertionError(
+            "expected exactly one %r heading outside a code fence, found %d — a second one means the "
+            "section this test freezes is ambiguous" % (SECTION_HEADING, len(starts)))
+
+    fenced, body = False, []
+    for line in lines[starts[0] + 1:]:
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced and line.startswith("## "):
+            break
+        body.append(line)
+    return "\n".join(body).strip() + "\n"
 
 
 #: The round-loop declaration in `commands/fix.md`, verbatim after `norm()`. Held as a constant so the

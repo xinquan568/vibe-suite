@@ -64,67 +64,66 @@ An unknown mode makes the stub return a **clean** verdict, which is exactly what
 mode look like a passing one. That is why the assertions are "this mode never returns clean" rather
 than "this mode exists".
 
-## The verdict-semantics assertion, and what it is worth
+## The round-loop declaration is frozen, and that is all it is
 
-`test_fix_verdicts_carry_their_continue_or_stop_meaning` is in two halves of unequal strength. The
-difference is recorded because every other claim in this directory states its strength exactly, and an
-unmarked weak assertion sitting among them would borrow their credibility.
+`commands/fix.md`'s `## Step 5 — the round loop` section is compared byte-for-byte against
+`tests/fixtures/loop-bounds/fix-step5-section.md`. Editing the section fails the suite until the golden
+is updated in the same commit.
 
-| Half | Property | Strength |
-|---|---|---|
-| `declared-continuing` | one **whole sentence** of `commands/fix.md` equals `REQUIRED_CONTINUE_DECLARATION` | **bounded, and its one hole is named below.** No edit *to that sentence* survives. |
-| `backstop` | no sentence naming `NOT FIXED`/`PARTIAL` also uses stopping language | **open, and evadable by construction.** |
+**It is drift detection, not an adversarial guarantee.** That sentence is the deliverable of a long
+detour and is worth more than the check itself.
 
-### Four attempts to infer meaning, and why they were abandoned
+### Eight attempts to verify what the document *means*
 
-The first half was rewritten three times, each time as a cleverer regex, and each version passed on
-text that inverted the semantics it was written to protect:
+Each was refuted by the reviewer, and each refutation was verified by running the mutation:
 
-| Attempt | Check | Beaten by |
+| # | Check | Refuted by |
 |---|---|---|
 | 1 | no stopping phrase *after* the verdict | putting the phrase in front |
-| 2 | no stopping verb stem in the sentence | "causes the loop to **exit**" |
-| 3 | a continuing word *near* the verdict | "**continue** to reporting; any `NOT FIXED` or `PARTIAL` **prevents another round**" |
+| 2 | no stopping verb stem in the sentence | "causes the loop to exit" |
+| 3 | a continuing word *near* the verdict | "…`PARTIAL` prevents another round" |
+| 4 | exact clause present (substring) | prefixing "It is false that" |
+| 5 | whole-sentence equality | "viz." splits the sentence |
+| 6 | section golden via `norm()` | `norm()` lowercases, hiding `` `NOT FIXED` `` → `` `not fixed` `` |
+| 7 | whitespace-collapsed golden | a blank line + 4-space indent makes it a code block |
+| 8 | exact golden, naive extraction | a fenced-code decoy heading beats a first-match extractor |
 
-| 4 | the exact clause appears (`assertIn`, substring) | prefixing **"It is false that"**, which preserves the substring |
+Attempts 1–5 were bad checks — each matched **lexical proximity rather than the relation** between the
+verdict and the verb, so each fell to a sentence with the right words in the wrong relation.
 
-Attempts 3 and 4 were each claimed closed when submitted for review, and each was refuted with a
-counterexample. Attempt 3's reasoning was that presence cannot be faked; attempt 4's was that a string
-equality has no meaning to get wrong. Both were wrong in the same direction — a substring says nothing
-about the sentence containing it.
+Attempts 6 and 7 were a *sound* check whose "only allowance" quietly re-admitted the class it was meant
+to close. Both times the flaw sat in the part described as harmless and not tested.
 
-Attempts 1–3 matched **lexical proximity rather than the relation** between verdict and verb, so each
-fell to a sentence with the right words in the wrong relation. Attempt 4 removed the inference but
-compared against the whole document, so a prefix rode along.
+Attempt 8 moved the surface from comparison to **extraction**.
 
-The check is now **whole-sentence equality**: `norm()`-ed text is split on sentence boundaries and one
-sentence must *equal* the constant. A prefix lengthens the sentence and fails. This is the
-golden-fixture approach the rest of this repository uses for things that must not drift.
+### Why there is no attempt 9
 
-**Rewording that clause fails the suite.** That is the cost and it is deliberate: loop semantics cannot
-change as a side effect of an edit, and whoever rewords it updates the constant on purpose.
+Establishing what a prose document *means*, against a reader actively looking for a way through, is an
+arms race over extraction and comparison surfaces with no natural terminus. Three of the eight
+refutations were not even about the property — they were about the machinery for reading the file.
 
-### The hole that remains, stated because four rounds of claiming closure did not survive
+AC-4's terminal-status clause for `fix` is **Contract**-tier by this directory's own table, and Contract
+tier never promised more than "the specification says so". Eight rounds were spent trying to make a
+Contract-tier check adversarially airtight, which is a different and much harder goal — and noticing
+that is the same discipline as the Executable/Contract/Operator split at the top of this file.
 
-**A contradicting *neighbour* sentence is not caught.** Leaving the required sentence intact and adding
-`The preceding sentence is void.` after it passes the suite. This is verified, not theoretical — it is
-one of the mutation cases.
+So the check asserts what a golden fixture asserts anywhere in this repository: **the text has not
+changed.** It catches loop semantics altered as a side effect of an edit, which is the realistic
+failure. It does not catch a document built to defeat it.
 
-No prose check closes it. Catching a contradiction anywhere in a document is the meaning-detection that
-attempts 1–3 established cannot be done reliably, and every attempt to approximate it was evaded within
-one review round. So it is **documented rather than claimed closed**, and the honest statement of what
-this assertion buys is:
+### What is genuinely closed, and what is not
 
-> `commands/fix.md` **declares** the loop semantics AC-4 expects, in fixed words that cannot be edited
-> silently. It does **not** establish that the document is free of contradictions.
+| Claim | Status |
+|---|---|
+| the `## Step 5` section cannot change without failing | **holds** — byte equality, fence-aware extraction, heading uniqueness asserted |
+| the verdict literals stay uppercase code literals | **holds** — checked across the whole document, so a rename outside the section is caught |
+| the document as a whole is free of contradictions | **not claimed.** Content outside the section is not read. |
+| the document cannot be constructed to defeat the check | **not claimed**, and the eight attempts above are why |
 
-That is worth having — the declaration is what every other contract-tier check in this directory reads
-— but it is less than the assertion's name suggests, and the name is the reason this section exists.
+Closing the last row needs a **structured declaration** `fix.md` does not have — a parsed field has no
+neighbouring prose to contradict it, so the arms race ends: the test reads values, not sentences.
 
-### What the backstop is, and is not
-
-It catches common stopping phrasings in the same sentence as a verdict. `prevents another round` — the
-phrasing that beat attempt 3 — is **still not caught**, deliberately: adding it would restart the
-enumeration this test abandoned.
-
-It is **a backstop, not a proof**, and no reading of a green suite should treat it as one.
+**Issue #125 is filed** for it, and it says the golden fixture is *deleted* when that lands rather than
+kept alongside — two mechanisms for one property is how the weaker one gets read as the stronger. It
+changes a shipped command's document, which is why it is not done inside a test-harness issue; #123 is
+the adjacent change bringing `fix` under the reviewer contract, and the two touch the same file.

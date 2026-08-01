@@ -285,21 +285,32 @@ class TestContractDelegation(unittest.TestCase):
 #: same as detecting the shape.
 TERMINAL_TOKEN = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 
-#: Tokens of that shape which are **not** statuses, excluded by their role rather than their name.
-#: An environment variable is introduced as one; a status is not. Excluding backticks as well was the
-#: obvious next thought and wrong — a status is written in backticks precisely because it is a term of
-#: art, so that exclusion removed the one real status and left the check reporting nothing.
-NOT_A_STATUS = re.compile(r"\benvironment\b|\bvariable\b|\bexport\b|\$\{?[A-Z]")
+#: The one signal that separates a status from an environment variable, and it is **syntactic**.
+#:
+#: Three attempts got here. Excluding lines containing a backtick removed the real status, because a
+#: status is written in backticks precisely because it is a term of art. Excluding lines mentioning
+#: `environment` discarded any second status sharing such a line. Scoping that word-search to a window
+#: around the token still excused `HALT_MAX_ROUNDS` in "The environment is noted; the run records
+#: HALT_MAX_ROUNDS at the cap" — prose near a token says nothing reliable about the token.
+#:
+#: A variable is **interpolated** — `${NAME}` or `$NAME` — and a status never is. That is a fact about
+#: the syntax rather than about the surrounding sentence, so no phrasing can talk its way past it.
+INTERPOLATED = re.compile(r"\$\{?\Z")
 
 
 def declared_terminal_statuses(name):
-    """Every run-level terminal status a document names, not just the ones we thought of."""
+    """Every run-level terminal status a document names, not just the ones we thought of.
+
+    Judged by whether the token is interpolated, which is a property of the token rather than of the
+    prose around it — the three earlier attempts all judged by neighbourhood, and each let something
+    through that the neighbourhood happened to excuse.
+    """
+    text = document(name)
     found = set()
-    for line in document(name).splitlines():
-        for token in TERMINAL_TOKEN.findall(line):
-            if NOT_A_STATUS.search(line):
-                continue
-            found.add(token)
+    for match in TERMINAL_TOKEN.finditer(text):
+        if INTERPOLATED.search(text[max(0, match.start() - 3):match.start()]):
+            continue
+        found.add(match.group(0))
     return found
 
 
@@ -354,10 +365,16 @@ class TestTerminalVocabulary(unittest.TestCase):
                     if verdict not in sentence:
                         continue
                     with self.subTest(sentence=sentence[:70]):
+                        # Verb **stems**, not three exact phrases. Enumerating phrasings let
+                        # "terminate the run on PARTIAL" and "the loop ends when PARTIAL remains"
+                        # through — the same enumerate-instead-of-describe mistake the token matcher
+                        # had, one paragraph away.
                         self.assertNotRegex(
-                            sentence.lower(), r"\b(stops the loop|halts the loop|ends the run)\b",
-                            "%s continues the loop; a sentence saying it stops inverts AC-4's "
-                            "stimulus wherever the word sits" % verdict)
+                            sentence.lower(),
+                            r"\b(stop|stops|stopping|halt|halts|halting|end|ends|ending|"
+                            r"terminate|terminates|terminating|abort|aborts|aborting|final)\b",
+                            "%s continues the loop; a sentence pairing it with a stopping verb "
+                            "inverts AC-4's stimulus, whatever the phrasing" % verdict)
 
 
 def norm(text):

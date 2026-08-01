@@ -359,22 +359,39 @@ class TestTerminalVocabulary(unittest.TestCase):
         # Matched as the **uppercase verdict token**, not as an English word. Lowercasing first made
         # "that partial's message" — an ordinary adjective about something else entirely — look like a
         # claim about the verdict, and the test failed on prose it had no business reading.
+        # Load-bearing half: the document must **say** these two continue. Presence is a closed
+        # property — the sentence is there or it is not — so an inversion cannot satisfy it. Rewriting
+        # "keep going while any remain NOT FIXED or PARTIAL" into any stopping phrasing deletes the
+        # continuing language, and this fails whatever the replacement says.
         for verdict in ("NOT FIXED", "PARTIAL"):
-            with self.subTest(verdict=verdict):
-                for sentence in re.split(r"(?<=[.!?])\s+", text):
-                    if verdict not in sentence:
-                        continue
-                    with self.subTest(sentence=sentence[:70]):
-                        # Verb **stems**, not three exact phrases. Enumerating phrasings let
-                        # "terminate the run on PARTIAL" and "the loop ends when PARTIAL remains"
-                        # through — the same enumerate-instead-of-describe mistake the token matcher
-                        # had, one paragraph away.
-                        self.assertNotRegex(
-                            sentence.lower(),
-                            r"\b(stop|stops|stopping|halt|halts|halting|end|ends|ending|"
-                            r"terminate|terminates|terminating|abort|aborts|aborting|final)\b",
-                            "%s continues the loop; a sentence pairing it with a stopping verb "
-                            "inverts AC-4's stimulus, whatever the phrasing" % verdict)
+            with self.subTest(verdict=verdict, half="declared-continuing"):
+                self.assertRegex(
+                    low,
+                    r"(%s[^.]{0,120}(keep going|keeps going|continue|continues|another round|"
+                    r"next round|again)|(keep going|keeps going|continue|continues|another round|"
+                    r"next round|again)[^.]{0,120}%s)" % (verdict.lower(), verdict.lower()),
+                    "%s continues the loop, and the document has to say so — asserting only that no "
+                    "sentence calls it terminal leaves 'says nothing at all' passing" % verdict)
+
+        # Backstop half, and **it is not a proof**. The set of English words meaning "stops" is open,
+        # so this can always be evaded by a word not listed — review iteration 3 closed four phrasings
+        # and iteration 4 was handed a fifth, "causes the loop to exit". Adding `exit` does not close
+        # the class; `cease` and `conclude` are next. It is kept because a contradiction added
+        # *alongside* the required sentence would satisfy the presence check above, and catching the
+        # common phrasings is worth more than nothing. The README records this as the one assertion
+        # here whose strength cannot be stated exactly.
+        for verdict in ("NOT FIXED", "PARTIAL"):
+            for sentence in re.split(r"(?<=[.!?])\s+", text):
+                if verdict not in sentence:
+                    continue
+                with self.subTest(verdict=verdict, half="backstop", sentence=sentence[:60]):
+                    self.assertNotRegex(
+                        sentence.lower(),
+                        r"\b(stop|stops|stopping|halt|halts|halting|end|ends|ending|exit|exits|"
+                        r"exiting|cease|ceases|ceasing|conclude|concludes|concluding|quit|quits|"
+                        r"terminate|terminates|terminating|abort|aborts|aborting|final)\b",
+                        "%s continues the loop; a sentence pairing it with a stopping verb "
+                        "inverts AC-4's stimulus, whatever the phrasing" % verdict)
 
 
 def norm(text):

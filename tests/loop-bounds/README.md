@@ -63,3 +63,23 @@ parser would have to guess. Caps, contract citations and terminal statuses are r
 An unknown mode makes the stub return a **clean** verdict, which is exactly what would make a missing
 mode look like a passing one. That is why the assertions are "this mode never returns clean" rather
 than "this mode exists".
+
+## One assertion here has a strength that cannot be stated exactly
+
+`test_fix_verdicts_carry_their_continue_or_stop_meaning` is in two halves, and they are not equally
+strong. The distinction is recorded because every other claim in this directory is stated exactly, and
+an unmarked weak assertion sitting among them would borrow their credibility.
+
+| Half | Property | Strength |
+|---|---|---|
+| `declared-continuing` | `commands/fix.md` **must say** `NOT FIXED` and `PARTIAL` keep the loop going | **closed.** Presence — the sentence is there or it is not. No rewording satisfies it, and deleting the claim fails it. |
+| `backstop` | no sentence naming those verdicts also uses stopping language | **open, and evadable by construction.** |
+
+The backstop matches stopping verbs from a list. The set of English words meaning "stops" is not
+finite, so a phrasing outside the list passes. This is not hypothetical: review iteration 3 closed
+four phrasings, and iteration 4 was handed a fifth — *"PARTIAL causes the loop to exit"*. Adding
+`exit` does not close the class. `cease` and `conclude` are next.
+
+It is kept anyway, because a contradicting sentence added *alongside* the required one would satisfy
+the closed half, and catching the common phrasings is worth more than nothing. It is **a backstop, not
+a proof**, and no reading of a green suite should treat it as one.

@@ -377,10 +377,16 @@ class TestTerminalVocabulary(unittest.TestCase):
         # The cost is real and is the point: rewording this clause **fails the test**, so the semantics
         # of the loop cannot be changed as a side effect of an edit. Whoever rewords it updates the
         # constant deliberately.
+        # Compared as a **whole sentence**, not a substring. `assertIn` against the document was the
+        # fourth thing to fall: "It is false that <the exact clause>" contains the anchor and inverts
+        # it. A prefix makes the sentence unequal, so sentence equality closes that; the residual hole
+        # is a contradicting *neighbour* sentence, which no prose check catches and which the README
+        # states rather than papers over.
         with self.subTest(half="declared-continuing"):
             self.assertIn(
-                REQUIRED_CONTINUE_DECLARATION, low,
-                "commands/fix.md must declare the round loop in exactly these words; any rewording "
+                REQUIRED_CONTINUE_DECLARATION,
+                [s.strip() for s in re.split(r"(?<=[.!?])\s+", low)],
+                "commands/fix.md must declare the round loop as exactly this sentence; any rewording "
                 "is a deliberate change to loop semantics and updates this constant with it")
 
         # Backstop half, and **it is not a proof**. The exact-text anchor above fixes what the document

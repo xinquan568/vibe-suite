@@ -72,10 +72,10 @@ unmarked weak assertion sitting among them would borrow their credibility.
 
 | Half | Property | Strength |
 |---|---|---|
-| `declared-continuing` | `commands/fix.md` declares the round loop in **exactly** the words held in `REQUIRED_CONTINUE_DECLARATION` | **closed**, because it is a string equality. No sentence satisfies it while meaning something else. |
+| `declared-continuing` | one **whole sentence** of `commands/fix.md` equals `REQUIRED_CONTINUE_DECLARATION` | **bounded, and its one hole is named below.** No edit *to that sentence* survives. |
 | `backstop` | no sentence naming `NOT FIXED`/`PARTIAL` also uses stopping language | **open, and evadable by construction.** |
 
-### Three attempts to infer meaning, and why they were abandoned
+### Four attempts to infer meaning, and why they were abandoned
 
 The first half was rewritten three times, each time as a cleverer regex, and each version passed on
 text that inverted the semantics it was written to protect:
@@ -86,23 +86,45 @@ text that inverted the semantics it was written to protect:
 | 2 | no stopping verb stem in the sentence | "causes the loop to **exit**" |
 | 3 | a continuing word *near* the verdict | "**continue** to reporting; any `NOT FIXED` or `PARTIAL` **prevents another round**" |
 
-Attempt 3 was claimed in review to be closed, on the reasoning that presence cannot be faked. It can:
-the counterexample contains `continue` and `another round` within the window while asserting the exact
-opposite, and `prevents` belongs to no stop-list.
+| 4 | the exact clause appears (`assertIn`, substring) | prefixing **"It is false that"**, which preserves the substring |
 
-Every attempt matched **lexical proximity rather than the relation** between the verdict and the verb,
-so each fell to a sentence with the right words in the wrong relation. A string equality has no
-relation to get wrong, which is why the check is now golden text — the approach the rest of this
-repository already uses for things that must not drift.
+Attempts 3 and 4 were each claimed closed when submitted for review, and each was refuted with a
+counterexample. Attempt 3's reasoning was that presence cannot be faked; attempt 4's was that a string
+equality has no meaning to get wrong. Both were wrong in the same direction — a substring says nothing
+about the sentence containing it.
+
+Attempts 1–3 matched **lexical proximity rather than the relation** between verdict and verb, so each
+fell to a sentence with the right words in the wrong relation. Attempt 4 removed the inference but
+compared against the whole document, so a prefix rode along.
+
+The check is now **whole-sentence equality**: `norm()`-ed text is split on sentence boundaries and one
+sentence must *equal* the constant. A prefix lengthens the sentence and fails. This is the
+golden-fixture approach the rest of this repository uses for things that must not drift.
 
 **Rewording that clause fails the suite.** That is the cost and it is deliberate: loop semantics cannot
 change as a side effect of an edit, and whoever rewords it updates the constant on purpose.
 
+### The hole that remains, stated because four rounds of claiming closure did not survive
+
+**A contradicting *neighbour* sentence is not caught.** Leaving the required sentence intact and adding
+`The preceding sentence is void.` after it passes the suite. This is verified, not theoretical — it is
+one of the mutation cases.
+
+No prose check closes it. Catching a contradiction anywhere in a document is the meaning-detection that
+attempts 1–3 established cannot be done reliably, and every attempt to approximate it was evaded within
+one review round. So it is **documented rather than claimed closed**, and the honest statement of what
+this assertion buys is:
+
+> `commands/fix.md` **declares** the loop semantics AC-4 expects, in fixed words that cannot be edited
+> silently. It does **not** establish that the document is free of contradictions.
+
+That is worth having — the declaration is what every other contract-tier check in this directory reads
+— but it is less than the assertion's name suggests, and the name is the reason this section exists.
+
 ### What the backstop is, and is not
 
-The anchor fixes what the document *declares*. It cannot stop a contradiction being added elsewhere in
-the file, and catching that needs the meaning-detection the three attempts above established cannot be
-done reliably here. `prevents another round` is **still not caught**, deliberately — adding it would
-restart the enumeration this test just abandoned.
+It catches common stopping phrasings in the same sentence as a verdict. `prevents another round` — the
+phrasing that beat attempt 3 — is **still not caught**, deliberately: adding it would restart the
+enumeration this test abandoned.
 
 It is **a backstop, not a proof**, and no reading of a green suite should treat it as one.

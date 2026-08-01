@@ -121,9 +121,14 @@ class StubCase(unittest.TestCase):
         raise AssertionError("no item.completed event")
 
     def verdict_block(self, text):
-        """The last fenced block, as the contract requires."""
-        blocks = re.findall(r"(?s)```(?:yaml)?\s*(.*?)```", text)
-        return blocks[-1] if blocks else None
+        """The last fenced block — **`yaml`-tagged and ending the message**, as the contract requires.
+
+        The first version accepted an untagged fence and allowed text after the closing one, so a
+        wrapper that violated the contract still produced a block and every downstream assertion
+        stayed green. The shape is part of what AC-4 is about, not scaffolding around it.
+        """
+        match = re.search(r"(?s)```yaml\s*(.*?)```\s*\Z", text)
+        return match.group(1) if match else None
 
 
 class TestNeverClean(StubCase):
@@ -147,13 +152,25 @@ class TestNeverClean(StubCase):
 
     def test_never_fixed_returns_the_continuing_verdict(self):
         """`fix` has no severity. `REGRESSED` *stops* its loop, which is the opposite of what AC-4
-        wants observed, so the stimulus is the verdict that continues it."""
+        wants observed, so the stimulus is the verdict that continues it.
+
+        **Parsed, not string-matched.** Searching the raw answer for `NOT FIXED` passed a payload whose
+        `verdict` was `approve` and which merely mentioned the phrase in an issue's state — a clean
+        verdict that would end the loop rather than continue it.
+        """
         for attempt in range(10):
             with self.subTest(attempt=attempt):
-                answer = self.answer(self.dispatch("never-fixed"))
-                self.assertIn("NOT FIXED", answer)
-                self.assertNotIn("REGRESSED", answer)
-                self.assertNotIn("FIXED\n", answer.replace("NOT FIXED", ""))
+                payload = self.dispatch("never-fixed")
+                self.assertEqual(payload["status"], "completed")
+                parsed = _parse_verdict(self.verdict_block(self.answer(payload)))
+                self.assertEqual(parsed["verdict"], "NOT FIXED",
+                                 "the verdict field is what a loop reads; a mention is not a verdict")
+
+    def test_a_clean_verdict_is_recognised_as_clean(self):
+        """A positive control. Without it, a reader that called everything malformed would satisfy
+        every negative assertion in this module."""
+        parsed = _parse_verdict(self.verdict_block(self.answer(self.dispatch("approve"))))
+        self.assertEqual(parsed["verdict"], "approve")
 
 
 class TestMalformed(StubCase):
@@ -163,7 +180,7 @@ class TestMalformed(StubCase):
         """A 'malformed' output that happened to parse would make every downstream claim vacuous."""
         block = self.verdict_block(self.answer(self.dispatch("malformed")))
         self.assertIsNotNone(block, "there must still be a fenced block to fail on")
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValueError):
             _parse_verdict(block)
 
     def test_the_malformed_mode_still_completes_its_turn(self):
@@ -263,11 +280,23 @@ class TestContractDelegation(unittest.TestCase):
         self.assertIn("#123", README.read_text(encoding="utf-8"))
 
 
-class TestTerminalVocabulary(unittest.TestCase):
-    """Only one of the three names a run-level terminal status."""
+#: The shape a run-level terminal status takes in this repository: a SHOUTING_SNAKE token introduced
+#: as something a run stops at. Detecting *any* such token is what makes "names none" checkable —
+#: excluding one known literal leaves every other name free to appear.
+TERMINAL_TOKEN = re.compile(r"\b(EXIT_[A-Z_]+|[A-Z][A-Z_]{4,}_STATUS)\b")
 
-    def test_issue2pr_names_its_terminal_status(self):
-        self.assertIn(TERMINAL_STATUS["issue2pr"], document("issue2pr"))
+
+def declared_terminal_statuses(name):
+    """Every run-level terminal status a document names, not just the one we expected."""
+    return set(TERMINAL_TOKEN.findall(document(name)))
+
+
+class TestTerminalVocabulary(unittest.TestCase):
+    """Only one of the three names a run-level terminal status — and that is checked as a set."""
+
+    def test_issue2pr_names_exactly_its_own_terminal_status(self):
+        """Asserting the expected token is *present* left a second one free to appear beside it."""
+        self.assertEqual(declared_terminal_statuses("issue2pr"), {TERMINAL_STATUS["issue2pr"]})
 
     def test_the_status_is_a_terminal_state_not_a_failure(self):
         """This chain's own runs have hit it, and the core says what it means. A harness asserting it
@@ -277,19 +306,42 @@ class TestTerminalVocabulary(unittest.TestCase):
         self.assertIn("terminal", window)
         self.assertIn("not a failure", window)
 
-    def test_the_other_two_name_none(self):
+    def test_the_other_two_name_none_at_all(self):
+        """Not "none of the one we thought of". A different status introduced in either document is a
+        new shared vocabulary invented without saying so, which is the thing this asserts against."""
         for name in ("refine-proposal", "fix"):
             with self.subTest(loop=name):
                 self.assertIsNone(TERMINAL_STATUS[name])
-                self.assertNotIn("EXIT_MAX_ROUNDS", document(name),
-                                 "borrowing another loop's status would invent a shared vocabulary")
+                self.assertEqual(declared_terminal_statuses(name), set(),
+                                 "a run-level terminal status here would mean the three loops now "
+                                 "share a vocabulary — which is a change, not a detail")
 
-    def test_fix_verdicts_are_per_issue_and_two_of_them_continue(self):
-        """Reading `NOT FIXED` as terminal would invert what it means."""
+    def test_fix_verdicts_carry_their_continue_or_stop_meaning(self):
+        """Reading `NOT FIXED` as terminal would invert what it means.
+
+        Checking only that the four tokens *occur* left the semantics free to flip — a document saying
+        `NOT FIXED` stops the loop would have passed the test named for the opposite.
+        """
         text = document("fix")
+        low = norm(text)
         for verdict in ("FIXED", "NOT FIXED", "PARTIAL", "REGRESSED"):
             with self.subTest(verdict=verdict):
                 self.assertIn(verdict, text)
+
+        # The two that continue, and the one that stops. Stated as adjacency because the document
+        # explains them in prose rather than in a table.
+        self.assertRegex(low, r"regressed[^.]{0,120}(stop|halt|abort)",
+                         "REGRESSED is the verdict that ends the loop")
+        for verdict in ("not fixed", "partial"):
+            with self.subTest(verdict=verdict):
+                self.assertNotRegex(
+                    low, r"%s[^.]{0,60}(stops the loop|ends the run|terminal)" % verdict,
+                    "%s continues the loop; describing it as terminal inverts AC-4's stimulus"
+                    % verdict)
+
+
+def norm(text):
+    return re.sub(r"\s+", " ", text.replace("**", "").replace("`", "")).lower()
 
 
 class TestReadmeStatesTheLimit(unittest.TestCase):

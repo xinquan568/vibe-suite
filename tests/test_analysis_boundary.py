@@ -26,18 +26,24 @@ establishing what a prose document means, against a reader actively looking for 
 arms race over extraction and comparison surfaces with no natural end. The criterion #70 asks for is
 Contract-tier: what is claimable is that the specification says so.
 
-So the two sections are **frozen byte for byte** against goldens, and the rest of this module checks
-only structure that cannot be argued about. What that catches is the realistic failure — an edit
+So the operative sections are **frozen byte for byte** against goldens, and the rest of this module
+checks only structure that cannot be argued about. What that catches is the realistic failure — an edit
 altering the criterion as a side effect of touching something nearby, which cannot happen without a
 reviewer seeing the golden change in the same commit. **It does not catch someone deliberately
 constructing a document to defeat it, and nothing here claims it does.** Closing that needs a
 structured declaration the core does not have; the boundary would have to become parsed data rather
 than prose, which is a different issue.
 
-Extraction is **fence-aware** and asserts **uniqueness**, because a fenced code block containing a
-decoy copy of a heading satisfies a first-match extractor while the operative section is free to
-change — the eighth refutation in the sibling race. There is **no `.strip()`**: four leading spaces
-would be discarded while markdown renders the line as an indented code block, which was the ninth.
+Extraction is **CommonMark-correct**, asserts **uniqueness**, and does not `strip()`. Each of those
+answers a specific refutation: a fenced code block containing a decoy heading satisfies a first-match
+extractor while the operative section is free to change; a naive `startswith("```")` toggle treats
+every backtick run as both opener and closer, so a four-backtick fence containing a literal
+three-backtick line inverts the parser's idea of what is code; and four leading spaces would be
+discarded by `strip()` while markdown renders the line as an indented code block.
+
+**Three sections are frozen, not two.** The nine-step entries carry meaning — "is **not** decided by
+[the boundary](#…)" keeps the anchor the structural check looks for — so freezing only the two new
+sections left the endorsement claim untrue. They are frozen where the meaning is.
 """
 
 import re
@@ -53,9 +59,17 @@ CHECKS_HEADING = "## Two checks before every closure dispatch"
 STEPS_HEADING = "## The nine steps"
 
 #: Frozen sections, and the golden holding each one's text.
+#:
+#: **The nine-step section is frozen too, and that was not the first instinct.** An earlier revision
+#: froze only the two new sections and claimed that whether a step *endorses* the criterion was "the
+#: golden's job". That was false while the step list sat outside the goldens: "is **not** decided by
+#: [the boundary](#…)" and "**never** runs [the two checks](#…)" both kept the anchors the structural
+#: checks look for, and both passed. The step entries carry meaning, so they are frozen where the
+#: meaning is — the claim and the coverage now match.
 FROZEN = (
     (BOUNDARY_HEADING, FIXTURES / "boundary-section.md"),
     (CHECKS_HEADING, FIXTURES / "checks-section.md"),
+    (STEPS_HEADING, FIXTURES / "nine-steps-section.md"),
 )
 
 #: Anchors the nine-step entries must carry. A step entry that merely says the word "boundary" does
@@ -80,6 +94,41 @@ def core_text():
     return CORE.read_text(encoding="utf-8")
 
 
+#: A fence opener/closer: up to three spaces of indent, then three or more backticks or tildes.
+FENCE = re.compile(r"^(?P<indent> {0,3})(?P<delim>`{3,}|~{3,})(?P<info>.*)$")
+
+
+def fence_states(lines):
+    """Yield `(line, inside_fence)` with **CommonMark-correct** fence tracking.
+
+    A naive `startswith("```")` toggle is wrong in a way a reviewer exploited: it treats every
+    backtick run as both opener and closer, so a four-backtick fence containing a literal
+    three-backtick line inverts the parser's idea of what is code. Everything after it is
+    misclassified, and a heading inside rendered code can be taken for the operative one.
+
+    CommonMark's actual rules, which is what this implements: a fence is opened by three or more
+    backticks or tildes indented at most three spaces; a **backtick** opener's info string may not
+    contain a backtick; and the fence is closed only by the **same character**, **at least as long**,
+    with nothing but whitespace after it. A shorter or different-character run is ordinary content.
+    """
+    open_delim = None
+    for line in lines:
+        match = FENCE.match(line)
+        if match:
+            delim, info = match.group("delim"), match.group("info")
+            if open_delim is None:
+                if not (delim[0] == "`" and "`" in info):
+                    open_delim = delim
+                    yield line, True          # the opener itself is fence, not content
+                    continue
+            elif (delim[0] == open_delim[0] and len(delim) >= len(open_delim)
+                  and not info.strip()):
+                yield line, True              # the closer
+                open_delim = None
+                continue
+        yield line, open_delim is not None
+
+
 def section(heading, text=None):
     """A section's body, extracted fence-aware, with its heading required to be unique.
 
@@ -87,22 +136,16 @@ def section(heading, text=None):
     same name is a document problem, and picking one silently is how a decoy heading works.
     """
     lines = (text if text is not None else core_text()).splitlines()
-    fenced, starts = False, []
-    for i, line in enumerate(lines):
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-            continue
-        if not fenced and line.rstrip() == heading:
-            starts.append(i)
+    states = list(fence_states(lines))
+    starts = [i for i, (line, fenced) in enumerate(states)
+              if not fenced and line.rstrip() == heading]
     if len(starts) != 1:
         raise AssertionError(
             "expected exactly one %r heading outside a code fence, found %d — a second one makes the "
             "frozen section ambiguous" % (heading, len(starts)))
-    fenced, body = False, []
-    for line in lines[starts[0] + 1:]:
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-        elif not fenced and line.startswith("## "):
+    body = []
+    for line, fenced in states[starts[0] + 1:]:
+        if not fenced and line.startswith("## "):
             break
         body.append(line)
     # No .strip(): outer whitespace is part of the frozen text like everything else.
@@ -155,8 +198,13 @@ class TestTheStructure(unittest.TestCase):
 
     def test_steps_1_and_2_link_the_criterion(self):
         """One statement, two readers — a criterion only one side holds is not a criterion, and that
-        asymmetry is what made this finding class expensive. A resolving anchor is checkable; whether
-        the surrounding sentence endorses it is not, and is the golden's job."""
+        asymmetry is what made this finding class expensive.
+
+        This checks only that the anchor is present. Whether the surrounding sentence *endorses* it
+        is covered by the nine-step section's golden, which freezes those entries — a claim that was
+        false in an earlier revision, when the step list sat outside the goldens and "is **not**
+        decided by [the boundary](#…)" passed with the anchor intact.
+        """
         for step in ("1", "2"):
             with self.subTest(step=step):
                 entry = step_entry(step)

@@ -222,22 +222,77 @@ the steps.
 ## The nine steps
 
 1. **Analyze.** What the item asks, what the repository currently does, what constrains the work.
-   Not planning: no work breakdown, no file paths, no test strategy.
-2. **Review the analysis.** An independent reviewer, read-only.
+   Not planning: no work breakdown, no file paths, no test strategy. Which side a given sentence
+   falls on is decided by [the boundary](#the-analysis-and-planning-boundary), not by impression.
+2. **Review the analysis.** An independent reviewer, read-only, judging by that same
+   [boundary](#the-analysis-and-planning-boundary) — the one the worker wrote against.
 3. **Update and verify.** The worker answers each finding; the reviewer confirms closure. Bounded.
+   Each iteration runs [the two checks](#two-checks-before-every-closure-dispatch) before dispatch.
 4. **Plan.** Decisions with their reasons, a work breakdown, a test strategy, acceptance mapping.
 5. **Review the plan.**
-6. **Update and verify.**
+6. **Update and verify.** As step 3, including
+   [the two checks](#two-checks-before-every-closure-dispatch).
 7. **Execute.** Tests first where the profile's `tdd_policy` says so, then the change, then the gates.
    Open the pull request.
 8. **Review the execution.** The diff, against the frozen plan.
-9. **Update and verify.** The worker closes what step 8 raised; the reviewer confirms. The run then
+9. **Update and verify.** The worker closes what step 8 raised; the reviewer confirms, after
+   [the two checks](#two-checks-before-every-closure-dispatch). The run then
    **stops with a reviewed change.**
 
 **The pipeline does not merge.** Merging is a separate, materially broader action: it changes the
 default branch on the strength of a review the pipeline itself produced. An earlier draft of this step
 said "then merge", which contradicted the command, the phase table and the boundary inventory — all of
 which say the machine terminates in a reviewed pull request. It terminates in a reviewed pull request.
+
+## The analysis and planning boundary
+
+Step 1 asks what constrains the work and forbids planning. An anti-pattern **is** a constraint on
+implementation, so naming one sits exactly on that line. Stated once here, because the worker writes
+against it and the reviewer judges by it — a criterion only one side holds is not a criterion, and
+that asymmetry is what made this the most expensive finding class in the source corpus.
+
+> **A sentence whose grammatical subject is the rule or the current state is analysis.
+> A sentence whose subject is the work is planning.**
+
+| Analysis ✓ | Planning ✗ |
+|---|---|
+| "The issue-link rule requires one consistent id across branch, title and body; no workflow enforces it yet." | "branch, PR title, body — carrying the id" |
+
+Both describe one rule. Only the second directs work.
+
+**Naming an anti-pattern is analysis; satisfying it is Phase 2.** An analysis that lists the profile's
+`anti_patterns` as constraints is doing what step 1 asked, and must not draw a scope finding. The core
+names the field rather than a quantity, because how many there are is the bound profile's fact.
+
+**The rule is not sufficient on its own, and the exception is specific.** A bare noun phrase has
+**no subject and no verb**, so no query keyed on modals or on grammatical subject can select it — and
+that is the construction that actually recurs. One instance took five closure iterations to shift, then
+reappeared with a number changed in a later run, *inside the document diagnosing the pattern*, after a
+modal sweep and a subject sweep had both returned clean. It was found by reading. That is why the
+enumerated lists in an artifact are **read**, not queried — see below.
+
+## Two checks before every closure dispatch
+
+Steps 3, 6 and 9 run these before the worker's update is dispatched for verification. They are
+**procedure, not advice**: each ends with its output **pasted** into the iteration's record under the
+heading named here, and a record missing either heading is treated by the reviewer as an unaddressed
+finding rather than assumed to have passed.
+
+Both were written down as techniques first and failed anyway — one of them inside the very document
+that recorded it. **Documenting a technique does not cause it to run**, which is the whole reason
+these are steps with visible output rather than guidance.
+
+**`## Direct read of enumerated lists`** — open every enumerated list in the artifact and read **each
+entry**, rather than querying it. The failure mode being looked for is an entry that lists artifacts
+instead of stating a rule; it has no subject and no verb, so no sweep selects it. Table cells are read
+individually. Paste the entries examined and the verdict on each.
+
+**`## Decision↔consequence sweep`** — for **every claim the iteration changed**, search that claim's
+subject across the whole artifact and confirm no other section still carries the superseded reading.
+Paste the terms searched and what each turned up. This exists because the same defect recurred across
+runs — a risk still describing the withdrawn reading after the decision moved — and once because the
+sweep already existed and was skipped. Having a check and not running it is worse than lacking one:
+the remedy was available and the defect shipped anyway.
 
 ## Disclosure
 

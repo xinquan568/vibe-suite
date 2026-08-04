@@ -125,6 +125,13 @@ def parse_definition(text, filename):
     """Validate against the agent-design skill's field table; enforce the documented types."""
     stem = filename[:-3] if filename.endswith(".md") else filename
     fields, body, kinds = _parse_frontmatter(text, filename)
+    for key in ("allowed_tools", "disallowed_tools", "additional_dirs"):
+        if key in fields and kinds.get(key) != "list":
+            raise AdvisorError(f"{filename}: {key} must be a flow list like [Read, Grep, Glob]")
+    for key in ("name", "model", "tool_name", "prompt_mode", "permission_mode", "effort",
+                "cwd", "max_turns", "max_budget_usd"):
+        if key in fields and kinds.get(key) != "scalar":
+            raise AdvisorError(f"{filename}: {key} must be a plain scalar value")
     name = fields.get("name", stem)
     if not NAME_RE.match(name or ""):
         raise AdvisorError(f"{filename}: advisor name {name!r} is not a valid MCP server key")
@@ -133,13 +140,6 @@ def parse_definition(text, filename):
     if kinds.get("description") != "block":
         raise AdvisorError(f"{filename}: description must be a YAML literal block scalar (|) so "
                            "newlines and <example> tags survive")
-    for key in ("allowed_tools", "disallowed_tools", "additional_dirs"):
-        if key in fields and kinds.get(key) != "list":
-            raise AdvisorError(f"{filename}: {key} must be a flow list like [Read, Grep, Glob]")
-    for key in ("name", "model", "tool_name", "prompt_mode", "permission_mode", "effort",
-                "cwd", "max_turns", "max_budget_usd"):
-        if key in fields and kinds.get(key) != "scalar":
-            raise AdvisorError(f"{filename}: {key} must be a plain scalar value")
     model = fields.get("model")
     if model is not None and model not in TIERS:
         raise AdvisorError(
@@ -388,11 +388,31 @@ def _validated_journal(txn_path):
         refuse(f"unknown journal schema {txn.get('schema')!r}")
     if txn.get("intent") not in ("apply", "remove"):
         refuse(f"unknown intent {txn.get('intent')!r}")
+    def _valid_image(v):
+        if v is None:
+            return True
+        if not isinstance(v, dict) or v.get("kind") != "file":
+            return False
+        if not all(isinstance(v.get(k), str) for k in ("path", "mode", "sha256", "content_b64")):
+            return False
+        try:
+            base64.b64decode(v["content_b64"], validate=True)
+            int(v["mode"], 8)
+        except Exception:
+            return False
+        return True
+
     pre = txn.get("pre_images")
     if not isinstance(pre, dict) or set(pre) - {str(MCP_REL), str(TOML_REL), "definition"} \
             or str(MCP_REL) not in pre or str(TOML_REL) not in pre \
-            or not all(v is None or isinstance(v, dict) for v in pre.values()):
+            or not all(_valid_image(v) for v in pre.values()):
         refuse("pre_images do not cover both stores with restorable entries")
+    if not isinstance(txn.get("desired_sha"), str) \
+            or not re.fullmatch(r"[0-9a-f]{64}", txn["desired_sha"]):
+        refuse("desired_sha is not a sha256 hex digest")
+    for key in ("prior_baseline", "post_baseline"):
+        if not _valid_image(txn.get(key)):
+            refuse(f"{key} is not a restorable pre-image record")
     post = txn.get("post_images")
     if not isinstance(post, dict) or set(post) != {str(MCP_REL), str(TOML_REL)} \
             or not isinstance(post.get(str(MCP_REL)), str) \
@@ -407,6 +427,8 @@ def _validated_journal(txn_path):
             refuse(f"remove journal names no valid advisor ({txn.get('remove_name')!r})")
         if not isinstance(txn.get("delete_timeline"), bool):
             refuse("remove journal carries no boolean delete_timeline")
+        if "definition" not in pre:
+            refuse("remove journal carries no definition provenance")
     return txn
 
 
@@ -420,9 +442,11 @@ def recover(ws):
     interrupted recovery is itself recoverable.
     """
     ws = Path(ws)
+    bridge.assert_root(ws)
     txn_path = ws / TXN_REL
     if not txn_path.is_file():
         return None
+    bridge.pin_root(ws)
     txn = _validated_journal(txn_path)
     pre = txn.get("pre_images", {})
 
@@ -648,8 +672,8 @@ def _transact(ws, doc, toml_before, toml_after, defs,
         str(TOML_REL): (bridge.record_pre_image(ws / TOML_REL)
                         if (ws / TOML_REL).is_file() else None),
     }
-    if definition_pre is not None:
-        pre_images["definition"] = definition_pre
+    if intent == "remove":
+        pre_images["definition"] = definition_pre  # None = already gone (timeline-only retry)
     post_baseline = dict(baseline)
     if advisors_left and json_changed and str(MCP_REL) not in post_baseline \
             and mcp_before is not None:

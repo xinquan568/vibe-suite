@@ -877,3 +877,43 @@ class TestScalarFieldKinds(unittest.TestCase):
                       "tool_name: [x]\n"):
             with self.assertRaises(advisors.AdvisorError, msg=extra):
                 advisors.parse_definition(defn_text(extra=extra), "probe_advisor.md")
+
+
+class TestResidueHardening(unittest.TestCase):
+    """Round-3 Step-9 iteration 2: the re-verify's four residues."""
+
+    def test_list_valued_name_rejected_cleanly(self):
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.parse_definition(defn_text(extra="name: [probe_advisor]\n"),
+                                      "probe_advisor.md")
+
+    def test_full_key_crafted_journal_refused(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        state = ws / ".vibe-suite-state"
+        state.mkdir()
+        crafted = {"schema": 1, "intent": "remove", "remove_name": "probe_advisor",
+                   "delete_timeline": True, "desired_sha": "ab" * 32,
+                   "pre_images": {".mcp.json": {}, ".codex/config.toml": None,
+                                  "definition": None},
+                   "post_images": {".mcp.json": "e30=", ".codex/config.toml": ""},
+                   "prior_baseline": None, "post_baseline": None}
+        (state / "advisor-txn.json").write_text(json.dumps(crafted))
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.recover(ws)
+        self.assertTrue((ws / ".vibe-suite" / "agents" / "probe_advisor.md").is_file(),
+                        "a crafted journal must not drive deletions")
+        crafted["pre_images"][".mcp.json"] = None
+        del crafted["pre_images"]["definition"]
+        (state / "advisor-txn.json").write_text(json.dumps(crafted))
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.recover(ws)
+
+    def test_recovery_through_symlink_root_refused(self):
+        real = Path(tempfile.mkdtemp(prefix="advisor-real2-"))
+        (real / ".vibe-suite-state").mkdir()
+        (real / ".vibe-suite-state" / "advisor-txn.json").write_text("{}")
+        link = Path(tempfile.mkdtemp(prefix="advisor-link2-")) / "ws"
+        link.symlink_to(real)
+        with self.assertRaises(bridge.BridgeError):
+            advisors.recover(link)

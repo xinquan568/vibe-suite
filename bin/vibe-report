@@ -101,8 +101,9 @@ def _validate_check_envelope(env, ctx, judgment_lane):
 def validate(blob):
     if not isinstance(blob, dict):
         raise BlobError("blob: expected an object")
-    if blob.get("schema") != 1:
-        raise BlobError(f"blob.schema: unknown schema {blob.get('schema')!r}")
+    schema = blob.get("schema")
+    if not isinstance(schema, int) or isinstance(schema, bool) or schema != 1:
+        raise BlobError(f"blob.schema: unknown schema {schema!r}")
     for key in ("score", "check", "vocab_drift", "vocabulary", "graph", "history"):
         if key not in blob:
             raise BlobError(f"blob: missing {key!r}")
@@ -122,27 +123,39 @@ def validate(blob):
     run = _req(score, "run", dict, "score")
     for k in ("files", "total_penalty", "considered_rows"):
         _req(run, k, int, "score.run")
-    _req_list(run, "skipped", "score.run")
+    for i, sk in enumerate(_req_list(run, "skipped", "score.run")):
+        if not isinstance(sk, str):
+            raise BlobError(f"score.run.skipped[{i}]: expected str")
 
     check = blob["check"]
     _validate_check_envelope(_req(check, "mechanical", dict, "check"), "check.mechanical",
                              judgment_lane=False)
     judgment = _req(check, "judgment", dict, "check")
-    _req(judgment, "available", bool, "check.judgment")
+    available = _req(judgment, "available", bool, "check.judgment")
     status = _req(judgment, "status", str, "check.judgment")
     if status not in ("composed", "skipped", "failed"):
         raise BlobError(f"check.judgment.status: unknown {status!r}")
-    if judgment.get("reason") is not None and not isinstance(judgment["reason"], str):
-        raise BlobError("check.judgment.reason: expected str|null")
-    if judgment.get("data") is not None:
+    if "reason" not in judgment or (judgment["reason"] is not None
+                                    and not isinstance(judgment["reason"], str)):
+        raise BlobError("check.judgment.reason: required, str|null")
+    if "data" not in judgment:
+        raise BlobError("check.judgment.data: required (object or null)")
+    if (status == "composed") != available or (judgment["data"] is None) == (status == "composed"):
+        raise BlobError("check.judgment: available/status/data must agree — composed means "
+                        "available with data; skipped/failed mean unavailable with data null")
+    if judgment["data"] is not None:
         _validate_check_envelope(judgment["data"], "check.judgment.data", judgment_lane=True)
 
     drift = blob["vocab_drift"]
     _req(drift, "available", bool, "vocab_drift")
     if drift.get("reason") is not None and not isinstance(drift["reason"], str):
         raise BlobError("vocab_drift.reason: expected str|null")
+    if "reason" not in drift:
+        raise BlobError("vocab_drift.reason: required, str|null")
     for i, c in enumerate(_req_list(drift, "candidates", "vocab_drift")):
-        if not isinstance(c.get("terms"), list) or not isinstance(c.get("rationale"), str):
+        if not isinstance(c, dict) or not isinstance(c.get("terms"), list) \
+                or any(not isinstance(x, str) for x in c["terms"]) \
+                or not isinstance(c.get("rationale"), str):
             raise BlobError(f"vocab_drift.candidates[{i}]: expected {{terms: [str], rationale}}")
     if drift.get("prose") is not None and not isinstance(drift["prose"], str):
         raise BlobError("vocab_drift.prose: expected str|null")
@@ -152,7 +165,9 @@ def validate(blob):
     for i, s in enumerate(_req_list(registry, "scopes", "vocabulary.registry")):
         for k in ("id", "description"):
             _req(s, k, str, f"vocabulary.registry.scopes[{i}]")
-        _req_list(s, "paths", f"vocabulary.registry.scopes[{i}]")
+        for j, pa in enumerate(_req_list(s, "paths", f"vocabulary.registry.scopes[{i}]")):
+            if not isinstance(pa, str):
+                raise BlobError(f"vocabulary.registry.scopes[{i}].paths[{j}]: expected str")
     verbs = _req(registry, "verbs", dict, "vocabulary.registry")
     for scope, entries in verbs.items():
         for i, v in enumerate(entries):
@@ -160,7 +175,9 @@ def validate(blob):
             for k, t in (("canonical", str), ("output", str), ("notes", str)):
                 _req(v, k, t, ctx)
             _req(v, "judgment", bool, ctx)
-            _req_list(v, "deprecated", ctx)
+            for j, dep in enumerate(_req_list(v, "deprecated", ctx)):
+                if not isinstance(dep, str):
+                    raise BlobError(f"{ctx}.deprecated[{j}]: expected str")
     nouns = _req(registry, "nouns", dict, "vocabulary.registry")
     for group, entries in nouns.items():
         for i, n in enumerate(entries):
@@ -170,7 +187,9 @@ def validate(blob):
                 _req(n, "paired_verb", str, ctx)
             else:
                 _req(n, "definition", str, ctx)
-                _req_list(n, "deprecated", ctx)
+                for j, dep in enumerate(_req_list(n, "deprecated", ctx)):
+                    if not isinstance(dep, str):
+                        raise BlobError(f"{ctx}.deprecated[{j}]: expected str")
     extracted = _req(vocab, "extracted", dict, "vocabulary")
     for i, tm in enumerate(_req_list(extracted, "terms", "vocabulary.extracted")):
         _req(tm, "term", str, f"vocabulary.extracted.terms[{i}]")
@@ -195,11 +214,14 @@ def validate(blob):
             _req(e, k, t, ctx)
         if "run" in e and not isinstance(e["run"], str):
             raise BlobError(f"{ctx}.run: expected str when present")
+    if hstatus in ("missing", "malformed") and (history["entries"] or history["trajectory"]):
+        raise BlobError(f"history: status {hstatus!r} requires empty entries and trajectory")
     for i, p in enumerate(_req_list(history, "trajectory", "history")):
         ctx = f"history.trajectory[{i}]"
         _req(p, "run", str, ctx)
-        if not isinstance(p.get("mean_score"), (int, float)) or isinstance(p.get("mean_score"), bool):
-            raise BlobError(f"{ctx}.mean_score: expected number")
+        if not isinstance(p.get("mean_score"), float):
+            raise BlobError(f"{ctx}.mean_score: expected float (the trajectory rounds to one "
+                            "decimal; an int here means an unrounded producer)")
         _req(p, "files", int, ctx)
 
 
@@ -276,6 +298,28 @@ def _history_section(history):
     return f"<table><tr><th>Run</th><th>Mean score</th><th>Files</th></tr>{rows}</table>"
 
 
+def vocab_graph_data(vocab):
+    """The noun-verb map's nodes and edges, derived deterministically from the registry's own
+    fields: every scoped verb and every noun is a node; a role noun's `paired_verb` links it to
+    each scoped verb of that canonical — the one cross-reference the registry defines."""
+    reg = vocab["registry"]
+    nodes, edges = [], []
+    verb_ids_by_canonical = {}
+    for scope in sorted(reg["verbs"]):
+        for v in reg["verbs"][scope]:
+            vid = f"verb:{scope}:{v['canonical']}"
+            nodes.append({"id": vid, "label": v["canonical"], "group": "verb"})
+            verb_ids_by_canonical.setdefault(v["canonical"], []).append(vid)
+    for group in sorted(reg["nouns"]):
+        for n in reg["nouns"][group]:
+            nid = f"noun:{group}:{n['canonical']}"
+            nodes.append({"id": nid, "label": n["canonical"], "group": group})
+            if group == "role_nouns":
+                for vid in verb_ids_by_canonical.get(n.get("paired_verb", ""), []):
+                    edges.append({"source": nid, "target": vid})
+    return {"nodes": nodes, "edges": edges}
+
+
 def _graph_section(graph):
     return (f"<p>{len(graph['nodes'])} node(s), {len(graph['edges'])} edge(s); orphan candidates "
             f"are nodes with no inbound edge.</p>")
@@ -314,13 +358,15 @@ RENDER_JS = """
                target: p.run + ' (' + p.mean_score + ')' };
     })
   });
-  var verbs = [];
-  Object.keys(blob.vocabulary.registry.verbs).forEach(function (scope) {
-    blob.vocabulary.registry.verbs[scope].forEach(function (v) {
-      verbs.push({ id: scope + ':' + v.canonical, data: v });
+  var vocabEl = document.getElementById('vibe-vocab-graph-data');
+  if (vocabEl) {
+    var vg = JSON.parse(vocabEl.textContent);
+    mount('vibe-vocab-mount', {
+      nodes: vg.nodes.map(function (n) { return { id: n.id, data: n,
+        style: { labelText: n.label } }; }),
+      edges: vg.edges
     });
-  });
-  mount('vibe-vocab-mount', { nodes: verbs, edges: [] });
+  }
 })();
 """
 
@@ -336,6 +382,9 @@ def render_html(blob, template_text, bundle_text):
             .replace("{{VOCAB_SECTION}}", _vocab_section(blob["vocabulary"]))
             .replace("{{DRIFT_SECTION}}", _drift_section(blob["vocab_drift"]))
             .replace("{{DATA_JSON}}", data_json)
+            .replace("{{VOCAB_GRAPH_JSON}}",
+                     json.dumps(vocab_graph_data(blob["vocabulary"]),
+                                sort_keys=True).replace("</", "<\\/"))
             .replace("{{RENDER_JS}}", RENDER_JS))
 
 
@@ -394,6 +443,9 @@ def main(argv=None):
         validate(blob)
     except BlobError as exc:
         print(f"vibe-report: {exc}", file=sys.stderr)
+        return 2
+    except (TypeError, AttributeError, KeyError) as exc:
+        print(f"vibe-report: blob shape unreadable ({exc})", file=sys.stderr)
         return 2
 
     template_text = Path(args.template).read_text(encoding="utf-8")

@@ -149,13 +149,17 @@ class TestBlobValidation(unittest.TestCase):
 
 
 class TestOfflineStructure(unittest.TestCase):
-    def test_single_file_no_external_refs(self):
+    def test_single_file_no_active_external_resource_attributes(self):
+        """The structural gate: no ACTIVE external resource attributes (src/href to another
+        origin). Inactive string constants inside the vendored minified bundle (icon-font URLs
+        the report never dereferences) are outside this gate; the recorded browser evidence's
+        zero-fetch observation covers the runtime half."""
         out = Path(tempfile.mkdtemp(prefix="report-offline-"))
         self.addCleanup(shutil.rmtree, out, ignore_errors=True)
         render(full_blob(), out)
         html = (out / "index.html").read_text()
         self.assertNotRegex(html, r'(?:src|href)\s*=\s*["\'](?:https?:)?//',
-                            "no external URL references")
+                            "no active external resource attributes")
         bundle_head = (VENDOR / "g6.min.js").read_text(encoding="utf-8")[:2000]
         self.assertIn(bundle_head, html, "the vendored bundle is inlined")
         self.assertIn('"schema": 1', html.replace("&quot;", '"'), "the blob is embedded")
@@ -269,16 +273,104 @@ class TestReadOnlyTrajectory(unittest.TestCase):
         self.assertEqual(stored, cli_traj[:-1],
                          "the stored trajectory is the CLI's minus the current-run point")
 
-    def test_report_pass_leaves_history_bytes(self):
-        for fixture in ("history-list.json", "history-dict.json"):
-            src = (REPO_ROOT / "tests" / "fixtures" / "trend" / fixture).read_bytes()
+    def _history_blob_section(self, hist_path):
+        """The command doc's deterministic history-assembly step, as a testable function."""
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import importlib, trend_engine
+        importlib.reload(trend_engine)
+        if not hist_path.is_file():
+            return {"status": "missing", "entries": [], "trajectory": []}
+        try:
+            entries, _ = trend_engine._normalize(
+                json.loads(hist_path.read_bytes().decode("utf-8")))
+        except (json.JSONDecodeError, ValueError):
+            return {"status": "malformed", "entries": [], "trajectory": []}
+        score_entries = [e for e in entries if trend_engine._is_score_entry(e)]
+        return {"status": "present", "entries": score_entries,
+                "trajectory": trend_engine.trajectory_from_entries(entries, "full", 10)}
+
+    def test_full_report_pass_leaves_history_bytes(self):
+        cases = [("history-list.json", "present"), ("history-dict.json", "present"),
+                 (None, "missing"), ("MALFORMED", "malformed")]
+        for fixture, want_status in cases:
             ws = Path(tempfile.mkdtemp(prefix="report-hist-"))
             self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
             hist = ws / "vibe-history.json"
-            hist.write_bytes(src)
-            sys.path.insert(0, str(REPO_ROOT / "scripts"))
-            import importlib, trend_engine
-            importlib.reload(trend_engine)
-            entries, _ = trend_engine._normalize(json.loads(src.decode()))
-            trend_engine.trajectory_from_entries(entries, "full", 10)
-            self.assertEqual(hist.read_bytes(), src, f"{fixture}: read-only means read-only")
+            src = None
+            if fixture == "MALFORMED":
+                src = b"{not json"
+                hist.write_bytes(src)
+            elif fixture:
+                src = (REPO_ROOT / "tests" / "fixtures" / "trend" / fixture).read_bytes()
+                hist.write_bytes(src)
+            blob = full_blob()
+            blob["history"] = self._history_blob_section(hist)
+            self.assertEqual(blob["history"]["status"], want_status, fixture)
+            out = ws / "reports"
+            r = render(blob, out)
+            self.assertEqual(r.returncode, 0, (fixture, r.stderr))
+            self.assertTrue((out / "index.html").is_file())
+            if src is not None:
+                self.assertEqual(hist.read_bytes(), src,
+                                 f"{fixture}: the full assembly->render pass reads only")
+            else:
+                self.assertFalse(hist.exists(), "a missing history stays missing")
+
+
+class TestVocabGraphMapping(unittest.TestCase):
+    """F2 closure: the noun-verb map's nodes and edges are deterministic Python data."""
+
+    def test_counts_and_paired_verb_edges(self):
+        from importlib.machinery import SourceFileLoader
+        mod = SourceFileLoader("vibe_report", str(REPO_ROOT / "bin" / "vibe-report")).load_module()
+        vocab = full_blob()["vocabulary"]
+        data = mod.vocab_graph_data(vocab)
+        verb_nodes = [n for n in data["nodes"] if n["group"] == "verb"]
+        noun_nodes = [n for n in data["nodes"] if n["group"] != "verb"]
+        self.assertEqual(len(verb_nodes), 1)       # operative:score
+        self.assertEqual(len(noun_nodes), 2)       # artifact_class:command + role_nouns:scorer
+        self.assertEqual(data["edges"],
+                         [{"source": "noun:role_nouns:scorer",
+                           "target": "verb:operative:score"}],
+                         "the role noun's paired_verb is the registry's one cross-reference")
+        run2 = mod.vocab_graph_data(vocab)
+        self.assertEqual(data, run2, "deterministic")
+
+
+class TestValidatorRefusalMatrix(unittest.TestCase):
+    """F1 closure: the per-field refusal matrix beyond the earlier cases."""
+
+    def _refused(self, mutate, why):
+        b = full_blob()
+        mutate(b)
+        out = Path(tempfile.mkdtemp(prefix="report-matrix-"))
+        self.addCleanup(shutil.rmtree, out, ignore_errors=True)
+        r = render(b, out)
+        self.assertEqual(r.returncode, 2, why)
+        self.assertEqual(list(out.iterdir()), [], why)
+
+    def test_matrix(self):
+        cases = [
+            (lambda b: b.update(schema=True), "bool schema"),
+            (lambda b: b["score"]["run"]["skipped"].append(7), "non-str skipped"),
+            (lambda b: b["check"]["judgment"].pop("reason"), "missing reason"),
+            (lambda b: b["check"]["judgment"].pop("data"), "missing data"),
+            (lambda b: b["check"]["judgment"].update(available=False),
+             "composed but unavailable (invariant)"),
+            (lambda b: b["check"]["judgment"].update(status="skipped"),
+             "skipped with data present (invariant)"),
+            (lambda b: b["vocab_drift"]["candidates"].append(
+                {"terms": [1], "rationale": "r"}), "non-str drift term"),
+            (lambda b: b["vocab_drift"].pop("reason"), "missing drift reason"),
+            (lambda b: b["vocabulary"]["registry"]["scopes"][0]["paths"].append(3),
+             "non-str scope path"),
+            (lambda b: b["vocabulary"]["registry"]["verbs"]["operative"][0]
+                ["deprecated"].append(9), "non-str deprecated"),
+            (lambda b: b["history"]["trajectory"][0].update(mean_score=85),
+             "int mean_score"),
+            (lambda b: b["history"].update(status="missing"),
+             "missing status with payload present"),
+            (lambda b: b.update(check=[1, 2]), "container of the wrong type -> BlobError not TypeError"),
+        ]
+        for mutate, why in cases:
+            self._refused(mutate, why)

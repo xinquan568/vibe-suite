@@ -172,7 +172,7 @@ def _append(root, history, raw_text, shape, existing_entries, scope, current_fil
         content = raw_text[:open_idx + 1] + insertion + raw_text[close_idx:]
     rel = Path(history).resolve().relative_to(Path(root).resolve())
     bridge.ensure_dir_at(root, rel.parent)
-    bridge.write_atomic(root, Path(root) / rel, content)
+    bridge.write_atomic(root, Path(root) / rel, content.encode("utf-8"))
 
 
 def main(argv=None):
@@ -204,7 +204,9 @@ def main(argv=None):
     if not hist_path.is_file():
         status = "missing"
     else:
-        raw_text = hist_path.read_text(encoding="utf-8")
+        # Bytes first: text mode would translate CRLF to LF and the append would silently
+        # rewrite every line ending the byte-preservation contract protects.
+        raw_text = hist_path.read_bytes().decode("utf-8")
         try:
             entries, shape = _normalize(json.loads(raw_text))
         except (json.JSONDecodeError, ValueError):

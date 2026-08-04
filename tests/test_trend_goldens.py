@@ -95,6 +95,16 @@ class TestScopeTag(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stdout, "")
 
+    def test_inside_symlink_to_outside_target_refused(self):
+        root = Path(tempfile.mkdtemp(prefix="scope3-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        outside = Path(tempfile.mkdtemp(prefix="scope3-out-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (root / "link").symlink_to(outside)
+        r = run_py(SCOPE_TAG, "--root", str(root), "--path", "link")
+        self.assertEqual(r.returncode, 2, "an in-root symlink to an outside target is a refusal")
+        self.assertEqual(r.stdout, "")
+
 
 def load_fixture(name):
     return (FIXTURES / name).read_text(encoding="utf-8")
@@ -206,24 +216,25 @@ class TestRecordContractEdges(TrendCase):
     def setUpClass(cls):
         cls.SCORE_JSON = load_fixture("score-current.json")
 
-    def test_flagless_byte_oracle_and_keyed_then_flagless(self):
+    def test_fixed_byte_oracle_and_keyed_then_flagless(self):
+        """The oracle is a checked-in byte fixture, not a runtime derivation: the keyed append
+        over the mini-root must produce exactly expected-append.json, and a flagless identical
+        re-score must leave those bytes untouched (content-key dedup across keyed entries)."""
         tmp = Path(tempfile.mkdtemp(prefix="trend-oracle-"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         hist = tmp / "vibe-history.json"
-        record = "command\x1fcommands/advisor.md\x00"
-        r = run_py(SCORE, "--root", str(REPO_ROOT), "--history", str(hist),
+        record = "command\x1fcommands/go.md\x00"
+        mini = FIXTURES / "mini-root"
+        r = run_py(SCORE, "--root", str(mini), "--history", str(hist),
                    "--scope", "full", "--run-id", "r1", stdin=record)
         self.assertEqual(r.returncode, 0, r.stderr)
-        keyed = hist.read_bytes()
-        entry = json.loads(keyed)[0]
-        expected_flagless = keyed  # flagless must now DROP (content key matches a keyed entry)
-        r2 = run_py(SCORE, "--root", str(REPO_ROOT), "--history", str(hist),
+        expected = (FIXTURES / "expected-append.json").read_bytes()
+        self.assertEqual(hist.read_bytes(), expected, "the checked-in byte oracle")
+        r2 = run_py(SCORE, "--root", str(mini), "--history", str(hist),
                     "--scope", "full", stdin=record)
         self.assertEqual(r2.returncode, 0, r2.stderr)
-        self.assertEqual(hist.read_bytes(), expected_flagless,
+        self.assertEqual(hist.read_bytes(), expected,
                          "flagless dedup matches content keys across keyed entries")
-        # Fixed byte oracle for the entry itself
-        self.assertEqual({k: entry[k] for k in ("scope", "run")}, {"scope": "full", "run": "r1"})
 
     def test_run_id_bounds_refused_by_both_clis(self):
         tmp = Path(tempfile.mkdtemp(prefix="trend-bounds-"))
@@ -271,20 +282,25 @@ class TestRecordContractEdges(TrendCase):
         runs = [g["run"] for g in json.loads(r.stdout)["trajectory"]]
         self.assertEqual(runs, ["r1", "r2"], "--limit keeps the last N points, current included")
 
-    def test_marker_bytes_preserved_list_and_dict(self):
-        for name in ("noncanonical-list.json", "noncanonical-dict.json"):
-            ws, hist = self.ws_with_history(load_fixture(name))
-            before = hist.read_text()
+    def test_marker_bytes_preserved_list_dict_and_crlf(self):
+        cases = {
+            "noncanonical-list.json": b'{"note":   "marker entry",\n        "weird_spacing": true}',
+            "noncanonical-dict.json": b'{"note":"marker",   "odd": 1}',
+            "noncanonical-crlf-list.json": b'{"note":   "crlf marker"},\r\n',
+        }
+        for name, marker in cases.items():
+            src = (FIXTURES / name).read_bytes()
+            ws = Path(tempfile.mkdtemp(prefix="trend-marker-"))
+            self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
+            hist = ws / ".claude" / "vibe-history.json"
+            hist.parent.mkdir(parents=True)
+            hist.write_bytes(src)
             r = self.trend(ws, hist)
             self.assertEqual(r.returncode, 0, (name, r.stderr))
-            after = hist.read_text()
-            if "list" in name:
-                marker = '{"note":   "marker entry",\n        "weird_spacing": true}'
-            else:
-                marker = '{"note":"marker",   "odd": 1}'
+            after = hist.read_bytes()
             self.assertIn(marker, after,
-                          f"{name}: the noncanonical marker's exact bytes survive the append")
-            self.assertTrue(after.startswith(before[:before.index(marker) + len(marker)]),
+                          f"{name}: the marker's exact bytes (line endings included) survive")
+            self.assertTrue(after.startswith(src[:src.index(marker) + len(marker)]),
                             f"{name}: every byte up to and including the marker is unchanged")
-            if "dict" in name:
-                self.assertIn('"trailing_key": "kept"', after)
+            if b"dict" in name.encode():
+                self.assertIn(b'"trailing_key": "kept"', after)

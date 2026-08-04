@@ -28,7 +28,8 @@ function parseLine(line) {
 /**
  * Reduce a raw `--json` stream to the facts the job engine needs.
  *
- * Returns `{ threadId, terminal, usage, errorMessage, errorCode, malformedLines }` where `terminal` is
+ * Returns `{ threadId, terminal, usage, errorMessage, errorCode, agentMessage, malformedLines }`
+ * where `terminal` is
  * `"completed"`, `"failed"`, or `null` when no terminal event was seen at all.
  */
 export function readEventStream(raw) {
@@ -37,6 +38,9 @@ export function readEventStream(raw) {
   let usage = null;
   let errorMessage = null;
   let errorCode = null;
+  // The verdict text. `null` means no `agent_message` item arrived at all, which is a different
+  // fact from one arriving empty — the distinction the Output capture obligation exists to preserve.
+  let agentMessage = null;
   let malformedLines = 0;
 
   for (const line of String(raw ?? "").split("\n")) {
@@ -44,6 +48,11 @@ export function readEventStream(raw) {
     const event = parseLine(line);
     if (event === null) {
       malformedLines += 1;
+      continue;
+    }
+    if (event.type === "item.completed" && event.item?.type === "agent_message") {
+      // Last one wins: a turn may emit several, and the final assistant message is the verdict.
+      agentMessage = event.item.text ?? agentMessage;
       continue;
     }
     if (event.type === "thread.started") {
@@ -65,7 +74,7 @@ export function readEventStream(raw) {
     }
   }
 
-  return { threadId, terminal, usage, errorMessage, errorCode, malformedLines };
+  return { threadId, terminal, usage, errorMessage, errorCode, agentMessage, malformedLines };
 }
 
 /**

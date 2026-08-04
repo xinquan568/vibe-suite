@@ -31,10 +31,17 @@ new backend adds a column rather than a rewrite.
 |---|---|---|
 | **Dispatch** | A non-interactive invocation that terminates without a human. | `codex exec … < /dev/null`. The redirect is load-bearing: without it the CLI waits on stdin forever, and a review that never returns looks exactly like a slow one. |
 | **Read-only guard** | The reviewer cannot modify what it reviews. | `-s read-only`. |
-| **Output capture** | The verdict is retrievable, and a run that produced none is distinguishable from one that produced an empty one. | `-o <result>` for the text, `--json` for the event stream. **The exit code is not a success signal** — an upstream outage has been observed exiting 0 with no result file written and a `turn.failed` event in the stream. A completed-turn event is the only positive confirmation. |
+| **Output capture** | The verdict is retrievable, and a run that produced none is distinguishable from one that produced an empty one. | `--json`. The verdict is the last `agent_message` item in the stream: no such item is *absent*, one carrying no non-whitespace text is *empty*. **The exit code is not a success signal** — an upstream outage has been observed exiting 0 with a `turn.failed` event and no verdict in the stream. A completed-turn event is the only positive confirmation. |
 | **Token accounting** | Cost is attributable to the round that incurred it. | Read from the completed-turn event's usage. Bill uncached input plus output. |
 | **Pre-flight** | Unavailability is detected before work depends on it. | A version probe and a trivial round-trip. |
 | **Quota signature** | An exhausted allowance is **distinguishable from a substantive rejection**. | A recognisable refusal in the stream, separate from a verdict. |
+
+**One channel, deliberately (vibe-137).** An earlier version of this column named `-o <result>` for
+the text alongside `--json` for the stream. The stream is mandatory — status, thread id, error class
+and token accounting are all read from it — so a second channel for the verdict alone bought
+redundancy against a truncated stream that the stream already guards: without a completed-turn event
+you know not to trust it. What it cost was a result file per job, a path derivation, cleanup
+ownership, concurrency isolation, and two sources of truth that nothing reconciled.
 
 The last row is the one most easily collapsed into the others and the one that must not be. An
 exhausted quota is retryable later; a rejection is a judgement. A loop that treats them alike either

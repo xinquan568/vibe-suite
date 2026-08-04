@@ -1,0 +1,5 @@
+[
+    {"note":   "marker entry",
+        "weird_spacing": true},
+  {"scope": "full", "score": 85, "band": "green", "total_penalty": -15, "file": "commands/a.md", "run": "r1"}
+]

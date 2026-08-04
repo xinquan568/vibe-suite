@@ -65,9 +65,9 @@ def _last_per(entries, key):
 
 
 def compute(history_entries, scope, current_files, run_id, limit):
-    scoped = [e for e in history_entries if _is_score_entry(e) and e["scope"] == scope
-              and e.get("run") != run_id]
-    baseline = _last_per(scoped, lambda e: e["file"])
+    scoped_all = [e for e in history_entries if _is_score_entry(e) and e["scope"] == scope]
+    baseline_input = [e for e in scoped_all if e.get("run") != run_id]
+    baseline = _last_per(baseline_input, lambda e: e["file"])
     files = []
     for f in sorted(current_files, key=lambda f: f["path"]):
         prev = baseline.get(f["path"])
@@ -79,46 +79,100 @@ def compute(history_entries, scope, current_files, run_id, limit):
             flag = "improved" if delta > 0 else "degraded" if delta < 0 else "unchanged"
             files.append({"path": f["path"], "current": f["score"], "previous": prev["score"],
                           "delta": delta, "flag": flag})
-    groups, order = {}, []
-    for e in scoped:
-        run = e.get("run") or LEGACY_RUN
-        if run not in groups:
-            groups[run] = []
-            order.append(run)
-        groups[run].append(e)
+    # Trajectory groups: the legacy bucket is ALWAYS first regardless of physical position;
+    # keyed runs follow in first-appearance order; the current run — existing entries of the
+    # same run id merged with the incoming files, last-wins per (scope, file) — is always last.
+    legacy = [e for e in scoped_all if not e.get("run")]
+    keyed, keyed_order = {}, []
+    for e in scoped_all:
+        r = e.get("run")
+        if not r:
+            continue
+        if r not in keyed:
+            keyed[r] = []
+            keyed_order.append(r)
+        keyed[r].append(e)
+    current_group = keyed.pop(run_id, [])
+    if run_id in keyed_order:
+        keyed_order.remove(run_id)
+    merged = _last_per(current_group, lambda e: (e["scope"], e["file"]))
+    for f in current_files:
+        merged[(scope, f["path"])] = {"scope": scope, "file": f["path"], "score": f["score"]}
+    sequence = ([(LEGACY_RUN, legacy)] if legacy else []) \
+        + [(r, keyed[r]) for r in keyed_order] \
+        + ([(run_id, list(merged.values()))] if merged else [])
     trajectory = []
-    for run in order:
-        last = _last_per(groups[run], lambda e: (e["scope"], e["file"]))
+    for run, group in sequence:
+        last = _last_per(group, lambda e: (e["scope"], e["file"]))
         scores = [e["score"] for e in last.values()]
         trajectory.append({"run": run, "mean_score": round(sum(scores) / len(scores), 1),
                            "files": len(scores)})
-    cur_scores = [f["score"] for f in current_files]
-    if cur_scores:
-        trajectory.append({"run": run_id, "mean_score": round(sum(cur_scores) / len(cur_scores), 1),
-                           "files": len(cur_scores)})
-    return files, trajectory[-limit:], len(scoped)
+    return files, trajectory[-limit:], len(baseline_input)
 
 
-def _append(root, history, raw_container, shape, scope, current_files, run_id):
-    entries = []
+def _array_close_index(text, open_index):
+    """The index of the `]` matching the `[` at open_index — string-aware, so brackets inside
+    JSON strings never count. Deterministic and tiny; a full parse would re-serialize and lose
+    the marker bytes the contract preserves."""
+    depth, i, in_str, esc = 0, open_index, False, False
+    while i < len(text):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise ValueError("unbalanced array")
+
+
+def _append(root, history, raw_text, shape, existing_entries, scope, current_files, run_id):
+    """Byte-preserving append: existing bytes — markers included — are never re-serialized.
+
+    New entries splice in before the entries array's closing bracket; everything before and
+    after that point is the file's original text. A fresh history (missing or malformed) is a
+    canonical new list.
+    """
+    new = []
     for f in current_files:
         penalty = sum(x.get("penalty", 0) for x in f.get("findings", []))
-        entries.append({"scope": scope, "score": f["score"], "band": f["band"],
-                        "total_penalty": penalty, "file": f["path"], "run": run_id})
-    if shape == "list":
-        container, target = raw_container, raw_container
-    elif shape == "dict":
-        container, target = raw_container, raw_container["snapshots"]
-    else:  # fresh (missing or malformed)
-        container = []
-        target = container
-    for entry in entries:
-        if entry not in target:
-            target.append(entry)
+        entry = {"scope": scope, "score": f["score"], "band": f["band"],
+                 "total_penalty": penalty, "file": f["path"], "run": run_id}
+        if entry not in existing_entries and entry not in new:
+            new.append(entry)
+    if shape == "fresh":
+        content = json.dumps(new, indent=2, sort_keys=True) + "\n"
+    elif not new:
+        content = raw_text
+    else:
+        if shape == "list":
+            open_idx = raw_text.index("[")
+        else:
+            key_idx = raw_text.index('"snapshots"')
+            open_idx = raw_text.index("[", key_idx)
+        close_idx = _array_close_index(raw_text, open_idx)
+        body = raw_text[open_idx + 1:close_idx]
+        rendered = ",\n".join(json.dumps(e, sort_keys=True) for e in new)
+        indent = "  " if shape == "list" else "    "
+        rendered = "\n".join(indent + line for line in rendered.splitlines())
+        if body.strip():
+            insertion = body.rstrip() + ",\n" + rendered + "\n" + (" " * (0 if shape == "list" else 2))
+        else:
+            insertion = "\n" + rendered + "\n" + (" " * (0 if shape == "list" else 2))
+        content = raw_text[:open_idx + 1] + insertion + raw_text[close_idx:]
     rel = Path(history).resolve().relative_to(Path(root).resolve())
     bridge.ensure_dir_at(root, rel.parent)
-    bridge.write_atomic(root, Path(root) / rel,
-                        json.dumps(container, indent=2, sort_keys=True) + "\n")
+    bridge.write_atomic(root, Path(root) / rel, content)
 
 
 def main(argv=None):
@@ -130,6 +184,9 @@ def main(argv=None):
     parser.add_argument("--limit", type=int, default=10)
     args = parser.parse_args(argv)
 
+    if not 1 <= len(args.run_id) <= 64:
+        print("trend_engine: --run-id must be 1-64 characters", file=sys.stderr)
+        return 2
     try:
         Path(args.history).resolve().relative_to(Path(args.root).resolve())
     except ValueError:
@@ -143,24 +200,25 @@ def main(argv=None):
         return 2
 
     hist_path = Path(args.history)
-    status, raw, shape, entries = "present", None, "fresh", []
+    status, raw_text, shape, entries = "present", "", "fresh", []
     if not hist_path.is_file():
         status = "missing"
     else:
+        raw_text = hist_path.read_text(encoding="utf-8")
         try:
-            raw = json.loads(hist_path.read_text(encoding="utf-8"))
-            entries, shape = _normalize(raw)
+            entries, shape = _normalize(json.loads(raw_text))
         except (json.JSONDecodeError, ValueError):
             print("trend_engine: history is malformed; treating as empty and starting fresh",
                   file=sys.stderr)
-            status, raw, shape, entries = "malformed", None, "fresh", []
+            status, raw_text, shape, entries = "malformed", "", "fresh", []
 
     files, trajectory, matches = compute(entries, args.scope, current_files,
                                          args.run_id, args.limit)
     out = {"files": files, "trajectory": trajectory,
            "status": {"history": status, "scope_matches": matches}}
     print(json.dumps(out, indent=2, sort_keys=True))
-    _append(args.root, hist_path, raw, shape, args.scope, current_files, args.run_id)
+    _append(args.root, hist_path, raw_text, shape, entries, args.scope, current_files,
+            args.run_id)
     return 0
 
 

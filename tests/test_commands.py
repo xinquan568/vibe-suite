@@ -312,3 +312,13 @@ class TestTrendCommandContract(unittest.TestCase):
     def test_registered_in_manifest(self):
         manifest = json.loads((REPO_ROOT / ".claude-plugin" / "plugin.json").read_text())
         self.assertIn("./commands/trend.md", manifest["commands"])
+
+
+class TestScoreScopeIntegration(unittest.TestCase):
+    """E6.2 (W2): both command docs invoke the one scope derivation verbatim."""
+
+    def test_both_docs_invoke_scope_tag(self):
+        for name in ("score.md", "trend.md"):
+            text = (REPO_ROOT / "commands" / name).read_text(encoding="utf-8")
+            self.assertIn('${CLAUDE_PLUGIN_ROOT}/scripts/lib/scope_tag.py', text, name)
+            self.assertNotIn('"<scope-tag>"', text, name)

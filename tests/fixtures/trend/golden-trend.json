@@ -20,11 +20,18 @@
       "flag": "new",
       "path": "commands/c.md",
       "previous": null
+    },
+    {
+      "current": 95,
+      "delta": 0,
+      "flag": "unchanged",
+      "path": "commands/d.md",
+      "previous": 95
     }
   ],
   "status": {
     "history": "present",
-    "scope_matches": 3
+    "scope_matches": 4
   },
   "trajectory": [
     {
@@ -33,13 +40,13 @@
       "run": "(pre-run-id)"
     },
     {
-      "files": 2,
-      "mean_score": 87.5,
+      "files": 3,
+      "mean_score": 90.0,
       "run": "r1"
     },
     {
-      "files": 3,
-      "mean_score": 91.7,
+      "files": 4,
+      "mean_score": 92.5,
       "run": "r2"
     }
   ]

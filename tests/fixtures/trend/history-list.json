@@ -27,6 +27,14 @@
     "total_penalty": -10
   },
   {
+    "band": "green",
+    "file": "commands/d.md",
+    "run": "r1",
+    "scope": "full",
+    "score": 95,
+    "total_penalty": -5
+  },
+  {
     "band": "amber",
     "file": "commands/other.md",
     "run": "r1",

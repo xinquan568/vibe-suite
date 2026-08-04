@@ -18,12 +18,16 @@ from pathlib import Path
 def derive(root, path=None, changed=False):
     if path is None:
         return "changed" if changed else "full"
-    rel = os.path.relpath(os.path.join(str(root), str(path)), str(root))
-    posix = Path(rel).as_posix()
-    if posix == "..":  # exactly the parent
-        raise ValueError(f"{path!r} resolves outside the root")
-    if posix.startswith("../"):
-        raise ValueError(f"{path!r} resolves outside the root")
+    # Resolved on both sides: a lexical relpath admits a symlink inside the root pointing
+    # outside it, and a tag for a foreign path would poison the history.
+    root_r = Path(root).resolve()
+    candidate = Path(path)
+    candidate = candidate if candidate.is_absolute() else root_r / candidate
+    try:
+        rel = candidate.resolve().relative_to(root_r)
+    except ValueError:
+        raise ValueError(f"{path!r} resolves outside the root") from None
+    posix = rel.as_posix()
     if posix == ".":
         return "changed" if changed else "full"
     prefix = "changed:" if changed else "path:"

@@ -1238,13 +1238,19 @@ def score_text(text, rel, path, artifact_type, tier, overrides, pass_threshold):
     }, total
 
 
+def _content_key(e):
+    return (e.get("scope"), e.get("file"), e.get("score"), e.get("band"),
+            e.get("total_penalty"))
+
+
 def _append_history(history, scope, files, totals, run_id=None):
     """Append per-file snapshots; identical entries dedupe; the write is atomic or nothing.
 
-    Dedup scope is the whole list when no run id is given (the original flagless contract) and
-    one run when `--run-id` is set: the `run` field joins the snapshot, so dict equality drops
-    only a same-content entry of the *same* run — identical content in an earlier run still
-    appends, which is what makes run membership and trajectories reconstructable (E6.2).
+    Dedup compares the CONTENT KEY — (scope, file, score, band, total_penalty) — never whole
+    dicts: flagless, a snapshot matching any existing entry's content key drops, whether or not
+    that entry carries a run field; with `--run-id`, a snapshot drops only when content key AND
+    run both match, so identical content in an earlier run still appends — which is what makes
+    run membership and trajectories reconstructable (E6.2).
     """
     if history.exists():
         existing = json.loads(history.read_text(encoding="utf-8"))
@@ -1256,9 +1262,14 @@ def _append_history(history, scope, files, totals, run_id=None):
     for entry, total in zip(files, totals):
         snapshot = {"scope": scope, "score": entry["score"], "band": entry["band"],
                     "total_penalty": total, "file": entry["path"]}
+        key = _content_key(snapshot)
         if run_id is not None:
             snapshot["run"] = run_id
-        if snapshot not in existing:
+            dup = any(_content_key(e) == key and e.get("run") == run_id
+                      for e in existing if isinstance(e, dict))
+        else:
+            dup = any(_content_key(e) == key for e in existing if isinstance(e, dict))
+        if not dup:
             existing.append(snapshot)
             changed = True
     if changed:
@@ -1274,7 +1285,7 @@ def main(argv=None):
     parser.add_argument("--config")
     parser.add_argument("--history")
     parser.add_argument("--scope")
-    parser.add_argument("--run-id", dest="run_id")
+    parser.add_argument("--run-id", dest="run_id")  # opaque, 1-64 chars (validated below)
     args = parser.parse_args(argv)
 
     root = Path(args.root)
@@ -1356,6 +1367,9 @@ def main(argv=None):
     json.dump(out, sys.stdout, indent=2, sort_keys=True)
     print()
 
+    if args.run_id is not None and not 1 <= len(args.run_id) <= 64:
+        print("score_engine: --run-id must be 1-64 characters", file=sys.stderr)
+        return 2
     if args.history:
         if not args.scope:
             print("score_engine: --history requires --scope", file=sys.stderr)

@@ -132,8 +132,13 @@ class TestTrendGolden(TrendCase):
         self.assertEqual(r.stdout, load_fixture("golden-trend.json"),
                          f"golden mismatch for {hist_fixture}")
         after = json.loads(hist.read_text())
-        entries = after["snapshots"] if isinstance(after, dict) else after
-        self.assertEqual(sum(1 for e in entries if e.get("run") == "r2"), 3,
+        if "dict" in hist_fixture:
+            self.assertIsInstance(after, dict, "the dict container round-trips as a dict")
+            entries = after["snapshots"]
+        else:
+            self.assertIsInstance(after, list)
+            entries = after
+        self.assertEqual(sum(1 for e in entries if e.get("run") == "r2"), 4,
                          "the current run appends after compute")
 
     def test_golden_list_shape(self):
@@ -151,7 +156,8 @@ class TestTrendGolden(TrendCase):
                          "baseline is the pre-append last entry, excluding the current run")
         appended = [e for e in json.loads(hist.read_text()) if e.get("run") == "r2"]
         self.assertEqual({e["file"]: e["score"] for e in appended},
-                         {"commands/a.md": 90, "commands/b.md": 85, "commands/c.md": 100})
+                         {"commands/a.md": 90, "commands/b.md": 85, "commands/c.md": 100,
+                          "commands/d.md": 95})
 
 
 class TestTrendDegenerates(TrendCase):
@@ -170,7 +176,7 @@ class TestTrendDegenerates(TrendCase):
         self.assertTrue(all(f["flag"] == "new" for f in out["files"]))
         self.assertTrue(hist.is_file(), "missing parent + file are created inside the root")
         entries = json.loads(hist.read_text())
-        self.assertEqual(len(entries), 3)
+        self.assertEqual(len(entries), 4)
 
     def test_malformed_history_warns_once_and_starts_fresh(self):
         ws, hist = self.ws_with_history("{not json")
@@ -182,7 +188,7 @@ class TestTrendDegenerates(TrendCase):
         self.assertEqual(out["status"]["history"], "malformed")
         entries = json.loads(hist.read_text())
         self.assertIsInstance(entries, list)
-        self.assertEqual(len(entries), 3, "the fresh history holds exactly the current run")
+        self.assertEqual(len(entries), 4, "the fresh history holds exactly the current run")
 
     def test_scope_filter_is_apples_to_apples(self):
         ws, hist = self.ws_with_history(load_fixture("history-list.json"))
@@ -190,4 +196,95 @@ class TestTrendDegenerates(TrendCase):
         out = json.loads(r.stdout)
         self.assertNotIn("commands/other.md", [f["path"] for f in out["files"]],
                          "entries of other scopes never enter the comparison")
-        self.assertEqual(out["status"]["scope_matches"], 3)
+        self.assertEqual(out["status"]["scope_matches"], 4)
+
+
+class TestRecordContractEdges(TrendCase):
+    """W-F6: the remaining frozen-contract rules, each with its own oracle."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.SCORE_JSON = load_fixture("score-current.json")
+
+    def test_flagless_byte_oracle_and_keyed_then_flagless(self):
+        tmp = Path(tempfile.mkdtemp(prefix="trend-oracle-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        hist = tmp / "vibe-history.json"
+        record = "command\x1fcommands/advisor.md\x00"
+        r = run_py(SCORE, "--root", str(REPO_ROOT), "--history", str(hist),
+                   "--scope", "full", "--run-id", "r1", stdin=record)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        keyed = hist.read_bytes()
+        entry = json.loads(keyed)[0]
+        expected_flagless = keyed  # flagless must now DROP (content key matches a keyed entry)
+        r2 = run_py(SCORE, "--root", str(REPO_ROOT), "--history", str(hist),
+                    "--scope", "full", stdin=record)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertEqual(hist.read_bytes(), expected_flagless,
+                         "flagless dedup matches content keys across keyed entries")
+        # Fixed byte oracle for the entry itself
+        self.assertEqual({k: entry[k] for k in ("scope", "run")}, {"scope": "full", "run": "r1"})
+
+    def test_run_id_bounds_refused_by_both_clis(self):
+        tmp = Path(tempfile.mkdtemp(prefix="trend-bounds-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        hist = tmp / "vibe-history.json"
+        record = "command\x1fcommands/advisor.md\x00"
+        for bad in ("", "x" * 65):
+            r = run_py(SCORE, "--root", str(REPO_ROOT), "--history", str(hist),
+                       "--scope", "full", "--run-id", bad, stdin=record)
+            self.assertEqual(r.returncode, 2, (len(bad), r.stderr))
+            r2 = run_py(TREND, "--root", str(tmp), "--history", str(hist),
+                        "--scope", "full", "--run-id", bad, stdin=self.SCORE_JSON)
+            self.assertEqual(r2.returncode, 2, (len(bad), r2.stderr))
+
+    def test_same_run_conflict_reader_takes_last(self):
+        ws, hist = self.ws_with_history(load_fixture("history-conflict.json"))
+        r = self.trend(ws, hist)
+        out = json.loads(r.stdout)
+        r1 = [g for g in out["trajectory"] if g["run"] == "r1"][0]
+        self.assertEqual(r1["mean_score"], 85.0, "last-wins per (run, scope, file)")
+        self.assertEqual(r1["files"], 1)
+
+    def test_legacy_bucket_orders_first_even_when_physically_last(self):
+        ws, hist = self.ws_with_history(load_fixture("history-legacy-after.json"))
+        r = self.trend(ws, hist)
+        runs = [g["run"] for g in json.loads(r.stdout)["trajectory"]]
+        self.assertEqual(runs[0], "(pre-run-id)")
+        self.assertEqual(runs[-1], "r2")
+
+    def test_existing_current_run_entries_merge_last_wins(self):
+        ws, hist = self.ws_with_history(load_fixture("history-current-run.json"))
+        r = self.trend(ws, hist)
+        out = json.loads(r.stdout)
+        r2 = [g for g in out["trajectory"] if g["run"] == "r2"][0]
+        self.assertEqual(r2["files"], 5, "existing r2 entries merge with incoming (x survives)")
+        # incoming a=90 wins over the existing r2 a=70: (90+85+100+95+70x)/5 = 88.0
+        self.assertEqual(r2["mean_score"], 88.0)
+        by_path = {f["path"]: f for f in out["files"]}
+        self.assertEqual(by_path["commands/a.md"]["flag"], "new",
+                         "the baseline excludes current-run entries entirely")
+
+    def test_limit_keeps_last_n(self):
+        ws, hist = self.ws_with_history(load_fixture("history-list.json"))
+        r = self.trend(ws, hist, "--limit", "2")
+        runs = [g["run"] for g in json.loads(r.stdout)["trajectory"]]
+        self.assertEqual(runs, ["r1", "r2"], "--limit keeps the last N points, current included")
+
+    def test_marker_bytes_preserved_list_and_dict(self):
+        for name in ("noncanonical-list.json", "noncanonical-dict.json"):
+            ws, hist = self.ws_with_history(load_fixture(name))
+            before = hist.read_text()
+            r = self.trend(ws, hist)
+            self.assertEqual(r.returncode, 0, (name, r.stderr))
+            after = hist.read_text()
+            if "list" in name:
+                marker = '{"note":   "marker entry",\n        "weird_spacing": true}'
+            else:
+                marker = '{"note":"marker",   "odd": 1}'
+            self.assertIn(marker, after,
+                          f"{name}: the noncanonical marker's exact bytes survive the append")
+            self.assertTrue(after.startswith(before[:before.index(marker) + len(marker)]),
+                            f"{name}: every byte up to and including the marker is unchanged")
+            if "dict" in name:
+                self.assertIn('"trailing_key": "kept"', after)

@@ -40,12 +40,28 @@
       "score": 100,
       "tier": "T2",
       "verdict": "pass"
+    },
+    {
+      "advisories": [],
+      "band": "green",
+      "findings": [
+        {
+          "check": "c",
+          "line": 3,
+          "penalty": -5,
+          "rule": "R3"
+        }
+      ],
+      "path": "commands/d.md",
+      "score": 95,
+      "tier": "T2",
+      "verdict": "pass"
     }
   ],
   "run": {
-    "considered_rows": 3,
-    "files": 3,
+    "considered_rows": 4,
+    "files": 4,
     "skipped": [],
-    "total_penalty": -25
+    "total_penalty": -30
   }
 }

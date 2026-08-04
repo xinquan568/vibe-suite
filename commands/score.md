@@ -31,9 +31,11 @@ The **scorer** agent (`agents/scorer.md`, sonnet-class) runs the engine — alwa
 plugin-root path, never a relative one:
 
 ```bash
+SCOPE=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lib/scope_tag.py" --root "<abs-target>" \
+  ${PATH_ARG:+--path "$PATH_ARG"} ${CHANGED:+--changed})
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/score_engine.py" --root "<abs-target>" \
   --history "<target>/.claude/vibe-history.json" \
-  --scope "<scope-tag>" < "<record-file>"
+  --scope "$SCOPE" < "<record-file>"
 ```
 
 Add `--config "<target>/.vibe-suite.md"` **only when that file exists**; with the flag

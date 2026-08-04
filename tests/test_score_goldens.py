@@ -12,6 +12,9 @@ Engine CLI contract pinned here:
            ls_counts); a first field of `A`-`F` is a scanner discovery category and the
            engine classifies the path itself, agreeing with commands/shared/classify.md
   args   : --root <dir> [--config <file>] [--history <file>] [--scope <tag>] [--run-id <tag>]
+           (history dedup compares the content key (scope,file,score,band,total_penalty):
+           flagless it matches against every existing entry, keyed or not; with --run-id it
+           matches content key AND run, so cross-run identical content appends)
   stdout : JSON {"files":[{"path","tier","score","band","verdict",
            "findings":[{"rule","check","line","penalty"}],"advisories":[{"rule","note"}]}],
            "run":{"files","total_penalty","considered_rows","skipped"}}

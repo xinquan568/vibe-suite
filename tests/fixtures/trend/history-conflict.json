@@ -1,0 +1,18 @@
+[
+  {
+    "band": "red",
+    "file": "commands/a.md",
+    "run": "r1",
+    "scope": "full",
+    "score": 50,
+    "total_penalty": -50
+  },
+  {
+    "band": "green",
+    "file": "commands/a.md",
+    "run": "r1",
+    "scope": "full",
+    "score": 85,
+    "total_penalty": -15
+  }
+]

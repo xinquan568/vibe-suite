@@ -1,0 +1,7 @@
+{
+  "vibe_suite_owned":    true,
+  "snapshots": [
+      {"note":"marker",   "odd": 1}
+  ],
+  "trailing_key": "kept"
+}

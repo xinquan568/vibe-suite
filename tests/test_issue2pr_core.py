@@ -269,9 +269,11 @@ class TestCoreSchemas(unittest.TestCase):
         self.assertIsNotNone(state, "the core must declare its state schema as a named json block")
         self.assertEqual(set(state), {
             "schema_version", "run_id", "source_id", "profile", "scenario", "review_mode",
-            "max_review_rounds", "current_step", "current_round", "status", "areas_confirmed",
-            "repos_in_scope", "pr",
+            "max_review_rounds", "max_review_rounds_overrides", "current_step", "current_round",
+            "status", "areas_confirmed", "repos_in_scope", "pr",
         })
+        self.assertIsInstance(state["max_review_rounds_overrides"], dict,
+                              "the override map is an object keyed by string round numbers")
         self.assertIsInstance(state["areas_confirmed"], list)
         self.assertIsInstance(state["repos_in_scope"], list)
         self.assertNotIn("crates_confirmed", state, "the fossil does not survive the port")
@@ -312,6 +314,113 @@ class TestCoreSchemas(unittest.TestCase):
         low = norm(self.text)
         self.assertRegex(low, r"blocker[^.]{0,60}stops the round")
         self.assertRegex(low, r"major[^.]{0,60}(bounded|update\+verify|loop)")
+
+
+class TestEffectiveCapResolution(unittest.TestCase):
+    """vibe-69. `iterate` may raise the cap for a new round; something must say which cap applies.
+
+    The field recording that override was improvised as a hand-edit before it was declared, and #131
+    then referenced it from `operational-modes.md` while the schema still did not carry it. These
+    tests close that gap and pin the rule that resolves it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = SKILL.read_text(encoding="utf-8")
+        cls.modes = (REPO_ROOT / "skills" / "issue2pr" / "references"
+                     / "operational-modes.md").read_text(encoding="utf-8")
+
+    def round_bounds_block(self):
+        match = re.search(r"(?ms)^## Round bounds[ ]*$(.*?)(?=^## )", self.text)
+        self.assertIsNotNone(match, "the core must have a `## Round bounds` section")
+        return match.group(1)
+
+    def test_the_schema_declares_the_override_map(self):
+        """`operational-modes.md` names this field twice. A document referring to a field the schema
+        does not define is the defect vibe-127 existed to correct."""
+        state = json_block(self.text, "state-schema")
+        self.assertIn("max_review_rounds_overrides", state)
+        self.assertIsInstance(state["max_review_rounds_overrides"], dict)
+
+    def formula(self):
+        """The fenced resolution, as an ordered list of its fallback terms.
+
+        Extracted structurally rather than matched loosely: an earlier version of this test asserted
+        only that two identifiers *occurred* in the section, which a reversed fallback or a changed
+        default would have satisfied. The order is the whole content of the rule.
+        """
+        block = self.round_bounds_block()
+        fence = re.search(r"(?s)```\n(effective cap =.*?)```", block)
+        self.assertIsNotNone(fence, "the resolution must be a parseable fenced formula")
+        terms = []
+        for line in fence.group(1).splitlines():
+            line = re.sub(r"#.*$", "", line).strip()
+            line = re.sub(r"^effective cap\s*=\s*", "", line)
+            line = re.sub(r"^\?\?\s*", "", line).strip()
+            if line:
+                terms.append(line)
+        return terms
+
+    def test_the_resolution_falls_back_in_the_specified_order(self):
+        """override → base → 2. Reversing the first two makes `iterate` unable to raise the cap at
+        all, which is the entire subject of this issue."""
+        terms = self.formula()
+        self.assertEqual(len(terms), 3, f"three fallback terms expected, got {terms}")
+        self.assertIn("max_review_rounds_overrides[current_round]", terms[0].replace(" ", ""),
+                      "the per-round override is consulted first, or it can never take effect")
+        self.assertRegex(terms[1], r"max_review_rounds\b",
+                         "the run-start value is the second term")
+        self.assertNotIn("overrides", terms[1], "the second term is the base, not the map again")
+        self.assertEqual(terms[2].strip(), "2", "the final fallback is the contract's default of 2")
+
+    def test_the_formula_lives_in_round_bounds_and_nowhere_else(self):
+        """Stated once. Two statements of one rule diverge the first time someone edits one.
+
+        The predicate is the **resolution**, not the field name: the schema must be free to declare
+        `max_review_rounds_overrides`, and prose must be free to name it. What may not appear twice
+        is the ordered fallback that decides which cap applies.
+        """
+        block = self.round_bounds_block()
+        outside = self.text.replace(block, "")
+        self.assertIn("effective cap =", block, "the formula belongs here")
+        self.assertNotIn("effective cap =", outside,
+                         "the core states the resolution once, in `## Round bounds`")
+
+    def test_the_cap_is_defined_as_the_effective_value_not_the_run_start_one(self):
+        """Edit (7). A loop bounded by the run-start cap ignores the override entirely."""
+        self.assertRegex(norm(self.round_bounds_block()), r"effective",
+                         "`## Round bounds` must define the cap the loop uses as the *effective* one")
+
+    def test_an_absent_override_map_means_no_override(self):
+        """Legacy tolerance, which is a different predicate from the goldens carrying `{}`.
+
+        Runs written before the field existed have no such key, and they must still resolve rather
+        than raise.
+        """
+        block = self.round_bounds_block()
+        # "absent" alone would be satisfied by "an absent map is an error". The rule is what an
+        # absent map *resolves to*, so the empty object has to appear with it.
+        self.assertRegex(
+            norm(block), r"absent[^.]*\{\}|\{\}[^.]*absent",
+            "an absent override map must be stated to read as `{}`, not merely mentioned")
+
+    def test_the_override_map_is_keyed_by_string_round_numbers(self):
+        """`{"2": 4}`, not `{2: 4}` — JSON round-trips give strings, and the mechanism this was
+        modelled on already uses them. A test that ignored the key type would let the two diverge."""
+        self.assertRegex(norm(self.text), r'string-typed|"2"',
+                         "the core must state that override keys are string-typed round numbers")
+
+    def test_the_three_reference_sites_cite_the_formula(self):
+        """Comment 1 on #69: stated once and referenced from resume, iterate and pre-flight."""
+        for mode in ("resume", "iterate"):
+            section = re.search(r"(?sm)^##\s+`%s`\s*$(.*?)(?=^##\s|\Z)" % mode, self.modes)
+            with self.subTest(site=mode):
+                self.assertIsNotNone(section)
+                self.assertIn("#round-bounds", section.group(1),
+                              f"`{mode}` must cite the resolution rather than restate it")
+        with self.subTest(site="pre-flight"):
+            self.assertRegex(norm(self.text), r"pre-flight[^.]*effective cap|effective cap[^.]*pre-flight",
+                             "pre-flight resolves the effective cap and must say so")
 
 
 class TestRoundBounds(unittest.TestCase):

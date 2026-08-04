@@ -132,7 +132,7 @@ class TestModeContracts(unittest.TestCase):
     def field(self, mode, name, text=None):
         """A contract field's value — everything up to the next bolded field label."""
         body = mode_section(text or read(MODES_REF), mode) or ""
-        found = re.search(r"(?ms)^\s*[-|]?\s*\*\*%s:?\*\*(.*?)(?=^\s*[-|]?\s*\*\*|\Z)"
+        found = re.search(r"(?ms)^-\s+\*\*%s:?\*\*(.*?)(?=^-\s+\*\*|\Z)"
                           % re.escape(name), body)
         return found.group(1).strip() if found else None
 
@@ -235,6 +235,45 @@ class TestModeContracts(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertRegex(row.group(1), r"(?i)because|since",
                          "`resume` must say why the cap is frozen mid-round")
+
+
+class TestIterateCapOverride(unittest.TestCase):
+    """vibe-69. `iterate` is the only mode that may raise the cap, so it owns the surrounding rules."""
+
+    def field(self, mode, name):
+        body = mode_section(read(MODES_REF), mode) or ""
+        found = re.search(r"(?ms)^-\s+\*\*%s:?\*\*(.*?)(?=^-\s+\*\*|\Z)"
+                          % re.escape(name), body)
+        return found.group(1).strip() if found else ""
+
+    def test_the_run_start_persistence_is_stated_not_only_the_never_rewrite_rule(self):
+        """Edit (4) has two halves. Only the second landed in #131.
+
+        The run-start value is written **write-once** to `00-meta.json` and mirrored into
+        `state.json` so resume honours it; a per-round override goes to `state.json` alone. Without
+        the first half, "never rewritten" describes a file the core never says is written.
+        """
+        writes = self.field("iterate", "Writes")
+        self.assertIn("00-meta.json", writes)
+        self.assertRegex(writes, r"(?i)write-once|written once",
+                         "the run-start write must be named as write-once")
+        self.assertRegex(writes, r"(?i)mirror", "the mirror into state.json must be stated")
+
+    def test_the_flag_is_ignored_with_a_notice_under_the_modes_that_have_no_loop(self):
+        """Edit (5)'s missing half. `none` and `single` run no verify loop, so a cap has nothing to
+        bound — and silently accepting the flag would imply it did something."""
+        bounds = self.field("iterate", "Round bounds")
+        self.assertRegex(bounds, r"(?i)ignored", "the flag's fate under none/single must be stated")
+        self.assertRegex(bounds, r"(?i)notice", "ignoring silently is indistinguishable from acting")
+
+    def test_the_command_surface_advertises_the_flag_on_iterate(self):
+        """Edit (1)'s missing half. The core accepts it; the `argument-hint` a user reads does not."""
+        hint = re.search(r"(?m)^argument-hint:\s*\"(.*)\"\s*$", read(COMMAND))
+        self.assertIsNotNone(hint)
+        iterate = re.search(r"iterate <run-id>([^|]*)", hint.group(1))
+        self.assertIsNotNone(iterate, "`iterate <run-id>` is not in the argument hint")
+        self.assertIn("--max-review-rounds", iterate.group(1),
+                      "iterate accepts the cap flag; the hint must say so")
 
 
 class TestRunStatusEnum(unittest.TestCase):

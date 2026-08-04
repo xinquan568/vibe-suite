@@ -6,6 +6,7 @@
   "scenario": "new-feature",
   "review_mode": "none",
   "max_review_rounds": 2,
+  "max_review_rounds_overrides": {},
   "current_step": 7,
   "current_round": 1,
   "status": "completed",

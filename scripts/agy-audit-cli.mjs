@@ -5,7 +5,7 @@
 // This exists because a state machine that only returns objects is a state machine nobody can
 // verify. Its exit codes and stdout are the contract:
 //
-//   0  an engine answered — its four-key result line is on stdout
+//   0  an engine answered — its result line is on stdout
 //   2  the lane is gated shut, or the invocation was malformed — nothing dispatched
 //   3  no engine could run it — `{"fallback":"manual",...}` on stdout, for the caller to act on
 //

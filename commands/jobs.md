@@ -37,7 +37,7 @@ retrying.
 | `status --all` | terminal jobs included |
 | `status --json` | records verbatim, for tooling |
 | `status --settle-abandoned` | additionally finalise abandoned jobs (stale heartbeat + dead worker) to `failed` — the only status form that writes |
-| `result <job-id>` | a finished job's one-line four-key result contract (`jobId`, `status`, `threadId`, `rawOutput`); exits 1 with the current state if the job is not finished |
+| `result <job-id>` | a finished job's one-line five-key result contract (`jobId`, `status`, `threadId`, `rawOutput`, `verdictState`); exits 1 with the current state if the job is not finished |
 | `cancel <job-id>` | cancel that job (see lifecycle below) |
 | `cancel` | cancel the single running background job; refuses to guess when there are several |
 

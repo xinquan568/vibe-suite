@@ -155,7 +155,7 @@ test("background mode: running receipt, real jobs-result retrieval, findings ide
   assert.equal(bg.status, 0, bg.stderr);
   const receipt = JSON.parse(bg.stdout.trim().split("\n").at(-1));
   assert.equal(receipt.status, "running", "background returns a launch receipt");
-  assert.deepEqual(Object.keys(receipt), ["jobId", "status", "threadId", "rawOutput"]);
+  assert.deepEqual(Object.keys(receipt), ["jobId", "status", "threadId", "rawOutput", "verdictState"]);
   await waitTerminal(repo, receipt.jobId);
 
   const retrieved = spawnSync("node", [path.join(REPO_ROOT, "scripts", "jobs-cli.mjs"),

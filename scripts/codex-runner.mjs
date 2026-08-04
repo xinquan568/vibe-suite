@@ -20,8 +20,8 @@
 // (cc-suite W7 class). `tests/node/no-top-level-await.mjs` enforces that with a checker that reports
 // or refuses on any ambiguity, because `node --check` accepts top-level await and is not an oracle.
 //
-// **The result contract is one line of JSON with exactly four keys** — `jobId`, `status`, `threadId`,
-// `rawOutput` — in every mode. A background launch returns the same shape with `status: "running"`
+// **The result contract is one line of JSON with exactly five keys** — `jobId`, `status`, `threadId`,
+// `rawOutput`, `verdictState` — in every mode. A background launch returns the same shape with `status: "running"`
 // and nulls: the acknowledgement is a *launch receipt*, so a worker that finished early cannot make
 // it lie about the shape. Callers branch on `status`, never on shape.
 //
@@ -38,7 +38,7 @@
 
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48,7 +48,7 @@ import {
   DEFAULT_TIMEOUT_MS, heartbeatInterval, runWithDeadline, signalGroup,
 } from "./lib/process.mjs";
 import {
-  claimWith, createRecord, finaliseRecord, hashToken, newClaimToken, newJobId, newRecord,
+  claimWith, createRecord, finaliseRecord, hashToken, jobsDir, newClaimToken, newJobId, newRecord,
   readRecord, resultLine, TERMINAL_STATUSES, updateRecord,
 } from "./lib/jobs.mjs";
 
@@ -195,7 +195,7 @@ function assertSandboxAllowed(effective, { confirmDanger }) {
 }
 
 /** Build the `codex exec` argument vector. No model flag unless one was explicitly chosen (P9). */
-function codexArgs({ sandbox, effort, model, threadId, prompt }) {
+function codexArgs({ sandbox, effort, model, threadId, prompt, resultPath }) {
   const args = ["exec"];
   if (threadId) {
     // `codex exec resume` accepts no -s/--sandbox — verified against codex-cli 0.144.6, where plain
@@ -206,6 +206,10 @@ function codexArgs({ sandbox, effort, model, threadId, prompt }) {
     args.push("-s", sandbox);
   }
   args.push("--skip-git-repo-check", "--json");
+  // The reviewer contract's Output capture row: `-o <result>` for the text, `--json` for the event
+  // stream. The path derives from the immutable jobId so two concurrent jobs can never read or
+  // clean up each other's verdict.
+  if (resultPath) args.push("-o", resultPath);
   if (effort) args.push("-c", `reasoning.effort=${effort}`);
   if (model) args.push("-m", model);
   args.push(prompt);
@@ -218,13 +222,65 @@ function codexBinary(env = process.env) {
 
 // --------------------------------------------------------------------------- execution
 
+/** An exhausted allowance, or a substantive rejection?
+ *
+ * The contract calls this row "the one most easily collapsed into the others and the one that must
+ * not be": a quota is retryable later, a rejection is a judgement, and a loop that confuses them
+ * either retries a verdict or abandons a round it could have finished.
+ *
+ * **Structured fields first.** A `code` or `type` on the error is machine-set and stable; prose is
+ * neither. Phrase matching is the fallback for backends that supply only a message, and it is a
+ * table so a new variant is a data change.
+ */
+const QUOTA_CODES = new Set([
+  "insufficient_quota", "quota_exceeded", "rate_limit_exceeded", "resource_exhausted",
+  "usage_limit_reached", "too_many_requests",
+]);
+const QUOTA_PHRASES = [
+  /\bquota\b/i, /\brate.?limit/i, /\busage (?:limit|cap)\b/i, /\bexceeded your\b/i,
+  /\btoo many requests\b/i, /\bresource exhausted\b/i, /\bout of credits?\b/i,
+];
+
+function classifyError(events) {
+  const code = String(events.errorCode ?? events.errorType ?? "").toLowerCase();
+  if (code && QUOTA_CODES.has(code)) return "quota";
+  const message = events.errorMessage ?? "";
+  return QUOTA_PHRASES.some((pattern) => pattern.test(message)) ? "quota" : "failure";
+}
+
+/** Read the `-o` result file, distinguishing a run that produced none from one that produced empty.
+ *
+ * `verdictText: null` alone cannot separate those two, which is the property the reviewer contract's
+ * Output capture row exists to preserve — so the state is stored explicitly rather than inferred.
+ */
+function readVerdict(resultPath) {
+  let text;
+  try {
+    text = readFileSync(resultPath, "utf8");
+  } catch {
+    return { verdictText: null, verdictState: "absent" };
+  }
+  return { verdictText: text, verdictState: text.trim() === "" ? "empty" : "present" };
+}
+
+/** Derived from the immutable jobId: two concurrent jobs cannot collide, and cleanup is unambiguous.
+ *
+ * Beside the job records, via `jobsDir` — hard-coding a path here put the result file in a directory
+ * that does not exist, which made a cleanup assertion pass by looking in the wrong place.
+ */
+function resultPathFor(workspace, jobId) {
+  return path.join(jobsDir(workspace), `${jobId}.result`);
+}
+
 async function execute(workspace, record, prompt) {
   const heartbeatMs = heartbeatInterval();
+  const resultPath = resultPathFor(workspace, record.jobId);
+  await mkdir(path.dirname(resultPath), { recursive: true });
   const outcome = await runWithDeadline({
     command: codexBinary(),
     args: codexArgs({
       sandbox: record.sandbox, effort: record.effort, model: record.model,
-      threadId: record.threadId, prompt,
+      threadId: record.threadId, prompt, resultPath,
     }),
     cwd: workspace,
     timeoutMs: record.timeoutMs,
@@ -238,16 +294,28 @@ async function execute(workspace, record, prompt) {
       : null,
   });
 
+  const verdict = readVerdict(resultPath);
+  // Cleanup is owned by the execution that created the file, and only after the child has closed.
+  await rm(resultPath, { force: true }).catch(() => { /* best effort; the jobId makes it unique */ });
+
   const events = readEventStream(outcome.stdout);
   let status;
   if (outcome.timedOut) status = "timed_out";
   else if (events.terminal === "completed") status = "completed";
   else status = "failed";                            // includes "no terminal event at all"
 
+  // Quota signature: the contract calls this "the one most easily collapsed into the others and the
+  // one that must not be." An exhausted allowance is retryable later; a rejection is a judgement.
+  // Both arrive as `turn.failed`, so the message is normalised into a class rather than left as text.
+  const errorClass = status === "completed" ? null : classifyError(events);
+
   const finished = await finaliseRecord(workspace, record.jobId, {
     status,
+    errorClass,
     threadId: events.threadId ?? record.threadId ?? null,
     rawOutput: outcome.stdout,
+    verdictText: verdict.verdictText,
+    verdictState: verdict.verdictState,
     exitCode: outcome.exitCode,
     error: status === "completed"
       ? null
@@ -301,7 +369,7 @@ async function runForeground(workspace, options, timeoutMs) {
     // A spawn failure must still finalise and still emit the contract line — this is the path a
     // misconfigured VIBE_SUITE_CODEX_BIN reaches first.
     const failed = await finaliseRecord(workspace, record.jobId, {
-      status: "failed", error: String(error?.message ?? error),
+      status: "failed", errorClass: "failure", error: String(error?.message ?? error),
     }).catch(() => null);
     process.stdout.write(resultLine(failed ?? { ...record, status: "failed" }) + "\n");
     return 1;
@@ -358,6 +426,7 @@ async function runBackground(workspace, options, timeoutMs) {
       finaliseError = null;
       await finaliseRecord(workspace, record.jobId, {
         status: "failed",
+        errorClass: "failure",
         error: reaped
           ? "worker did not start, or was terminated before claiming"
           : "worker did not start and could not be confirmed reaped",
@@ -423,7 +492,7 @@ async function runWorker(workspace, jobId, token, prompt) {
     return 0;
   } catch (error) {
     await finaliseRecord(workspace, jobId, {
-      status: "failed", error: String(error?.message ?? error),
+      status: "failed", errorClass: "failure", error: String(error?.message ?? error),
     }).catch(() => {});
     return 1;
   }

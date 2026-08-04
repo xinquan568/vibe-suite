@@ -36,7 +36,7 @@ CHECKED_MJS = SHIPPED_MJS + sorted((REPO_ROOT / "tests" / "node").glob("*.mjs"))
     + sorted((REPO_ROOT / "tests" / "fixtures").rglob("*.mjs"))
 
 STATE_DIRNAME = ".vibe-suite-state"
-RESULT_KEYS = {"jobId", "status", "threadId", "rawOutput"}
+RESULT_KEYS = {"jobId", "status", "threadId", "rawOutput", "verdictState"}
 
 
 class RunnerCase(unittest.TestCase):
@@ -446,7 +446,10 @@ class RecordSchema(RunnerCase):
         for field in ("jobId", "version", "kind", "status", "sandbox", "effort", "model",
                       "background", "threadId", "workerPid", "pgid", "claimDigest", "createdAt",
                       "startedAt", "endedAt", "updatedAt", "heartbeatAt", "timeoutMs", "exitCode",
-                      "rawOutput", "error", "tokens"):
+                      "rawOutput", "error", "tokens",
+                      # vibe-46: declared at creation, so a running record and an early terminal
+                      # failure satisfy the same schema as a completed one.
+                      "verdictText", "verdictState", "errorClass"):
             self.assertIn(field, record, f"record must always declare {field}")
 
     def test_background_record_carries_worker_handle(self):
@@ -460,7 +463,7 @@ class RecordSchema(RunnerCase):
 class ErrorBoundary(RunnerCase):
 
     def test_foreground_spawn_failure_finalises_and_emits(self):
-        """A bad binary must still finalise the record AND print the four-key line."""
+        """A bad binary must still finalise the record AND print the five-key line."""
         env = dict(os.environ)
         env["VIBE_SUITE_CODEX_BIN"] = str(self.ws / "does-not-exist")
         completed = subprocess.run(
@@ -618,3 +621,180 @@ class LifecycleRaces(RunnerCase):
         self.assertTrue(gone(job["workerPid"]), "the worker must be reaped")
         self.assertTrue(gone(grandchild),
                         "the Codex grandchild must die with its group, not outlive the failed record")
+
+
+class OutputCaptureAndQuota(RunnerCase):
+    """vibe-46 — the two reviewer-contract rows that had no behavioural coverage.
+
+    The other four were already exercised: `test_stdin_is_devnull` (Dispatch), the `read-only` argv
+    assertion (Read-only guard), `turn.failed`-with-exit-0 plus `tests/node/events.test.mjs`
+    (Token accounting), and `tests/node/preflight-probe.test.mjs` (Pre-flight). Nothing here restates
+    them.
+    """
+
+    #: Everything the fixture reads. Cleared on every call, because two runs inside one test would
+    #: otherwise inherit each other's mode — which is how the reject case first came back as `quota`.
+    FIXTURE_ENV = ("VIBE_TEST_VERDICT_FILE", "VIBE_TEST_QUOTA", "VIBE_TEST_REJECT",
+                   "VIBE_TEST_QUOTA_MESSAGE", "VIBE_TEST_QUOTA_CODE",
+                   "VIBE_TEST_VERDICT_TEXT", "VIBE_TEST_BARRIER")
+
+    def run_with(self, **env):
+        for key in self.FIXTURE_ENV:
+            os.environ.pop(key, None)
+        os.environ.update({k: str(v) for k, v in env.items()})
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in self.FIXTURE_ENV])
+        return self.run_runner(*self.base_args(), fixture="verdict-writer.mjs",
+                               expect_ok=not (env.get("VIBE_TEST_QUOTA") or env.get("VIBE_TEST_REJECT")))
+
+    def test_the_runner_passes_the_result_file_flag(self):
+        """Output capture: `-o <result>` for the text. Nothing passed it before this change."""
+        self.run_with()
+        argv = self.read_probe()["argv"]
+        self.assertIn("-o", argv, "the contract's Output capture row requires -o")
+        self.assertTrue(argv[argv.index("-o") + 1].endswith(".result"))
+
+    def test_a_written_verdict_is_present(self):
+        parsed = self.result_line(self.run_with())
+        self.assertEqual(parsed["verdictState"], "present")
+
+    def test_an_empty_result_file_is_distinguishable_from_an_absent_one(self):
+        """The row's stated property: 'a run that produced none is distinguishable from one that
+        produced an empty one.' `verdictText: null` alone cannot separate those, which is why the
+        state is stored rather than inferred."""
+        empty = self.result_line(self.run_with(VIBE_TEST_VERDICT_FILE="empty"))
+        absent = self.result_line(self.run_with(VIBE_TEST_VERDICT_FILE="absent"))
+        self.assertEqual(empty["verdictState"], "empty")
+        self.assertEqual(absent["verdictState"], "absent")
+        self.assertNotEqual(empty["verdictState"], absent["verdictState"])
+
+    def test_the_verdict_text_is_on_the_record_not_the_result_line(self):
+        """`verdictText` stays off the line because the event stream in `rawOutput` already carries
+        the agent message — duplication, not size."""
+        completed = self.run_with()
+        parsed = self.result_line(completed)
+        self.assertNotIn("verdictText", parsed)
+        record = self.job_record(parsed["jobId"])
+        self.assertEqual(record["verdictText"], "verdict: approve\n")
+        self.assertEqual(record["verdictState"], "present")
+
+    def test_the_result_path_derives_from_the_job_id(self):
+        """Two concurrent jobs must not read or clean up each other's verdict."""
+        parsed = self.result_line(self.run_with())
+        argv = self.read_probe()["argv"]
+        self.assertIn(parsed["jobId"], argv[argv.index("-o") + 1],
+                      "the path must derive from the immutable jobId")
+
+    def test_the_result_file_is_cleaned_up_by_its_own_execution(self):
+        """The path comes from argv, not from a guess.
+
+        An earlier version of this test looked in a directory production never writes to, so it
+        passed whether or not cleanup ran at all.
+        """
+        self.run_with()
+        argv = self.read_probe()["argv"]
+        written = Path(argv[argv.index("-o") + 1])
+        self.assertTrue(written.parent.is_dir(), "the -o directory must be the real jobs dir")
+        self.assertFalse(written.exists(),
+                         f"{written} survived; the creating execution owns its removal")
+
+    def test_two_overlapping_jobs_get_distinct_paths_and_distinct_verdicts(self):
+        """Cross-job verdict substitution is a data-integrity failure, so overlap is *forced*.
+
+        Each fixture writes its own barrier file and spins until it sees the other's, so both children
+        are provably alive at the same moment. An earlier version only started two threads and hoped.
+        Each also writes a **distinct verdict text**, which is what makes substitution detectable at
+        all — distinct ids and paths would not show it.
+        """
+        import threading
+        seen, lock = [], threading.Lock()
+
+        def one(tag, other):
+            probe = self.ws / f"probe-{tag}.json"
+            env = dict(os.environ)
+            env.update({
+                "VIBE_SUITE_CODEX_BIN": str(FIXTURES / "verdict-writer.mjs"),
+                "VIBE_TEST_PROBE": str(probe),
+                "VIBE_TEST_VERDICT_TEXT": f"verdict-{tag}",
+                "VIBE_TEST_BARRIER": f"{self.ws / f'barrier-{tag}'}:{self.ws / f'barrier-{other}'}",
+            })
+            result = subprocess.run(["node", str(RUNNER), *self.base_args()],
+                                    cwd=self.ws, env=env, capture_output=True, text=True, timeout=40)
+            line = [l for l in result.stdout.splitlines() if l.strip()][-1]
+            with lock:
+                seen.append((tag, result.returncode, json.loads(line), json.loads(probe.read_text())))
+
+        threads = [threading.Thread(target=one, args=(a, b)) for a, b in (("a", "b"), ("b", "a"))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+
+        self.assertEqual(len(seen), 2)
+        # The barrier exits 97 on timeout. Ignoring the return code was how a *sequential* pair could
+        # satisfy every other assertion — one run times out, the next sees its leftover barrier file.
+        for tag, code, _, _ in seen:
+            self.assertEqual(code, 0, f"job {tag} exited {code}; 97 means the barrier never met")
+
+        path_of = lambda probe: probe["argv"][probe["argv"].index("-o") + 1]
+        ids = {parsed["jobId"] for _, _, parsed, _ in seen}
+        paths = {path_of(probe) for _, _, _, probe in seen}
+        self.assertEqual(len(ids), 2, "job ids collided")
+        self.assertEqual(len(paths), 2, "two concurrent jobs shared a result path")
+
+        for tag, _, parsed, probe in seen:
+            self.assertEqual(parsed["status"], "completed", f"job {tag} did not complete")
+            self.assertIn(parsed["jobId"], path_of(probe), "each path must carry its own job id")
+            record = self.job_record(parsed["jobId"])
+            self.assertEqual(record["verdictState"], "present")
+            self.assertEqual(record["verdictText"], f"verdict: verdict-{tag}\n",
+                             "a job read another job's verdict")
+
+    QUOTA_VARIANTS = (
+        "You have exceeded your usage limit.",
+        "rate_limit_exceeded: slow down",
+        "Resource exhausted, try later",
+        "429 too many requests",
+        "You are out of credits",
+    )
+
+    NOT_QUOTA = (
+        "The model declined to produce a review.",
+        "The review found the change unacceptable.",
+        "invalid_request_error: prompt too long",
+    )
+
+    def test_quota_variants_are_all_classified_as_quota(self):
+        """One handcrafted phrase is one phrase. The table is the point — a new wording is a data
+        change, not a regex edit."""
+        for message in self.QUOTA_VARIANTS:
+            with self.subTest(message=message):
+                self.setUp()
+                parsed = self.result_line(
+                    self.run_with(VIBE_TEST_QUOTA="1", VIBE_TEST_QUOTA_MESSAGE=message))
+                self.assertEqual(self.job_record(parsed["jobId"])["errorClass"], "quota")
+
+    def test_quota_adjacent_failures_are_not_quota(self):
+        """The negative half. A classifier that says quota to everything separates nothing."""
+        for message in self.NOT_QUOTA:
+            with self.subTest(message=message):
+                self.setUp()
+                parsed = self.result_line(
+                    self.run_with(VIBE_TEST_QUOTA="1", VIBE_TEST_QUOTA_MESSAGE=message))
+                self.assertEqual(self.job_record(parsed["jobId"])["errorClass"], "failure")
+
+    def test_a_structured_quota_code_classifies_without_the_message(self):
+        """The structured path must be reachable, not decorative.
+
+        It was: `readEventStream` discarded the error's `code`/`type`, so the code branch could never
+        fire. The message here is deliberately *not* quota-shaped, so only the code can classify it.
+        """
+        parsed = self.result_line(self.run_with(
+            VIBE_TEST_QUOTA="1", VIBE_TEST_QUOTA_CODE="insufficient_quota",
+            VIBE_TEST_QUOTA_MESSAGE="the request could not be completed"))
+        self.assertEqual(self.job_record(parsed["jobId"])["errorClass"], "quota")
+
+    def test_a_structured_non_quota_code_stays_a_failure(self):
+        parsed = self.result_line(self.run_with(
+            VIBE_TEST_QUOTA="1", VIBE_TEST_QUOTA_CODE="invalid_request_error",
+            VIBE_TEST_QUOTA_MESSAGE="the prompt was malformed"))
+        self.assertEqual(self.job_record(parsed["jobId"])["errorClass"], "failure")

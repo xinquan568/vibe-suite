@@ -35,6 +35,18 @@ async function main() {
   announcePid();
   const stdin = await probeStdin();
   const mode = process.env.VIBE_TEST_STUB_VERDICT || "approve";
+
+// vibe-46: the reviewer contract's Output capture row requires the verdict text in the `-o` file.
+// Without this the goldens' `verdictState: "present"` would not be reproducible from the fixture
+// that generated them — a golden nobody can regenerate is a fixture someone wrote.
+{
+  const argv = process.argv.slice(2);
+  const at = argv.indexOf("-o");
+  if (at >= 0 && argv[at + 1]) {
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(argv[at + 1], `verdict: ${mode}\n`);
+  }
+}
   writeProbe({ stdin, fixture: "issue2pr-stub", mode });
 
   process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "thread_i2p_0001" }) + "\n");

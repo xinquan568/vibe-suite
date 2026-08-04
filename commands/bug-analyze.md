@@ -49,7 +49,7 @@ set -euo pipefail
 node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --kind bug-analyze --sandbox read-only ${BUGA_BACKGROUND:+--background} -- "$(cat "$BUGA_PROMPT_FILE")"
 ```
 
-Branch on the four-key result's `status` — analysis output is used **only for `completed`**.
+Branch on the result line's `status` — analysis output is used **only for `completed`**.
 `failed` and `timed_out` route to §4; `cancelled` is the operator's own stop — report
 it and stop. With `BUGA_BACKGROUND=1` the line above returns a `running` **launch receipt** (a
 receipt, not an outcome): manage the job with `/vibe-suite:jobs`, and assemble the report at

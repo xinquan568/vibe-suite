@@ -4,7 +4,7 @@
 // The renderer's one security property: record fields are DATA. `rawOutput` and `error` come from
 // an external process; they are fenced and truncated, never interpolated into anything that could
 // read as an instruction or blow out a terminal. The result line is not re-rendered at all — it is
-// jobs.mjs's `resultLine`, so the four-key contract lives in exactly one place.
+// jobs.mjs's `resultLine`, so the five-key contract lives in exactly one place.
 
 import { strict as assert } from "node:assert";
 import test from "node:test";
@@ -119,8 +119,8 @@ test("json mode round-trips records verbatim", () => {
   assert.deepEqual(parsed, JSON.parse(JSON.stringify(payload)));
 });
 
-test("the result line is jobs.mjs's resultLine — four keys, contract order", () => {
+test("the result line is jobs.mjs's resultLine — five keys, contract order", () => {
   const rec = record(ID_A, { status: "completed", rawOutput: "out", threadId: "thread_x" });
   const line = resultLine(rec);
-  assert.deepEqual(Object.keys(JSON.parse(line)), ["jobId", "status", "threadId", "rawOutput"]);
+  assert.deepEqual(Object.keys(JSON.parse(line)), ["jobId", "status", "threadId", "rawOutput", "verdictState"]);
 });

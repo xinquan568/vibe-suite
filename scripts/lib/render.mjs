@@ -3,7 +3,7 @@
 //
 // One security property, held everywhere: record fields are DATA. `rawOutput` and `error` were
 // written by an external process; they are fenced and truncated on display, never interpolated
-// where they could read as instructions to the session that runs the command. The four-key result
+// where they could read as instructions to the session that runs the command. The five-key result
 // line is deliberately NOT rendered here — callers print `resultLine` from jobs.mjs, so the
 // contract has exactly one producer.
 

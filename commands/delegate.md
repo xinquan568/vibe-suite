@@ -63,12 +63,12 @@ unset means omit), `DELEGATE_BACKGROUND=1` for background mode, and `DELEGATE_CO
 node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --kind delegate --sandbox "${DELEGATE_SANDBOX:-workspace-write}" ${DELEGATE_EFFORT:+--effort "$DELEGATE_EFFORT"} ${DELEGATE_MODEL:+--model "$DELEGATE_MODEL"} ${DELEGATE_BACKGROUND:+--background} ${DELEGATE_CONFIRM_DANGER:+--confirm-danger} -- "$(cat "$DELEGATE_PROMPT_FILE")"
 ```
 
-`--wait` is the default (the command returns the four-key result line when the job finishes);
+`--wait` is the default (the command returns the result line when the job finishes);
 `--background` returns a launch receipt and the job is managed with `/vibe-suite:jobs`.
 
 ## 5. Verify — never trust
 
-**First, branch on the four-key result's `status` — verification is only for `completed`.**
+**First, branch on the result line's `status` — verification is only for `completed`.**
 `failed` and `timed_out` route to §6's fallback. **`cancelled` is the operator's own stop: report
 it and stop** — re-implementing a plan the operator just cancelled would defy the cancellation,
 so the manual fallback never applies to it. Verifying an unchanged workspace after a failed job

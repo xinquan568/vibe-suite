@@ -99,7 +99,7 @@ test("any non-completion is unreachable — the result line cannot tell us why",
   assert.equal(isUnreachable(timedOut()), true);
   assert.equal(isUnreachable(failed("quota")), true);
   assert.equal(isUnreachable({ status: "failed" }), true,
-    "the four-key line carries no `error`, so a bare failure must still disclose");
+    "the five-key line carries no `error`, so a bare failure must still disclose");
   assert.equal(isUnreachable(done("agy")), false);
   assert.equal(isUnreachable({ status: "completed", rawOutput: "" }), false,
     "completion is the criterion: there is no separate usability judgement to make here");

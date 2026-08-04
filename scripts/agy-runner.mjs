@@ -3,7 +3,7 @@
 // The agy dispatch engine (E1.7 / vibe-17, implements F2.7 behind the D5/D8 contract gate).
 //
 // The third engine lane — headless, read-only-attempted dispatch to the agy (Gemini) CLI — mirrors
-// E1.1's CONTRACT SURFACE (same job store, same four-key one-line result, same seam and deadline
+// E1.1's CONTRACT SURFACE (same job store, same one-line result, same seam and deadline
 // discipline) without mirroring its internals. v1 has no resume and no heartbeat: audit calls are
 // bounded one-shots.
 //
@@ -174,6 +174,11 @@ async function main() {
     status: verdict.status,
     rawOutput: outcome.stdout ?? "",
     error: verdict.reason,
+    // vibe-46: agy already separates an exhausted allowance from other failures in `reason`; the
+    // record carries the same distinction under the shared name, so a caller reading either runner's
+    // record asks one question rather than two.
+    errorClass: verdict.status === "completed" ? null
+      : verdict.reason === "quota" ? "quota" : "failure",
     exitCode: Number.isInteger(outcome.exitCode) ? outcome.exitCode : null,
   });
   const final = finished ?? await readRecord(workspace, record.jobId);

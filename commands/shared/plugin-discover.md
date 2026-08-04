@@ -86,6 +86,11 @@ Build the edges between components so a caller can find what is unreachable or d
 3. **Agent → skill**: skills declared in an agent's frontmatter or referenced by name in its body.
 4. **Hook → script**: the script path in each hook definition's `command` field, read from the
    parsed `hooks/hooks.json`, resolved against the plugin root.
+5. **Command → script** *(orphan input only)*: a `${CLAUDE_PLUGIN_ROOT}/<path>` reference in a
+   command's body — the same shape the hook edge reads — counted as an inbound edge so a
+   dispatched CLI script is not an orphan, but not reported as dangling when it fails to
+   resolve: a command's body is prose plus code fences, and the command→agent precedent already
+   treats body mentions as orphan input rather than reportable references.
 
 The hook edge is the one that most often dangles and the least often noticed: a renamed or deleted
 script leaves a hook that registers cleanly and fails only when the event fires. Resolving it here is

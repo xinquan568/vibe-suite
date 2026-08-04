@@ -84,6 +84,15 @@ def main(argv=None):
     ws = Path(args.workspace)
 
     try:
+        # Heal any interrupted transaction before every operation — including read-only `list`,
+        # so a crashed remove completes (roll-forward) rather than presenting a half-state.
+        recovered = advisors.recover(ws)
+        if recovered:
+            print("recovered an interrupted advisor transaction")
+        if recovered and args.op == "remove" and recovered.get("intent") == "remove" \
+                and recovered.get("remove_name") == args.name:
+            print(f"✓ advisor {args.name!r} removed (completed by recovery)")
+            return 0
         if args.op == "add":
             custom_text = _compose_custom(args) if args.custom else None
             report = advisors.add(ws, args.name, pin=args.pin, plugin_root=_plugin_root(),

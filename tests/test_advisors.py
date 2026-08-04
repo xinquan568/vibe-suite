@@ -13,6 +13,7 @@ placeholders would pass a naive round-trip test while delivering nothing.
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -421,3 +422,281 @@ class TestTemplates(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOwnershipExactness(unittest.TestCase):
+    """W1 (Step-8 F4): the marker predicate is type-exact — coercible equals are not claims."""
+
+    def test_bool_and_float_schema_are_unowned(self):
+        for bad in ({"kind": "advisor", "schema": True}, {"kind": "advisor", "schema": 1.0},
+                    {"kind": "advisor", "schema": 1, "extra": 1}, {"schema": 1},
+                    {"kind": b"advisor", "schema": 1}):
+            entry = {"command": "npx", "_vibe-suite_owned": bad}
+            self.assertFalse(advisors.is_owned_entry(entry), f"marker {bad!r} wrongly owned")
+
+    def test_exact_marker_still_owned(self):
+        self.assertTrue(advisors.is_owned_entry(
+            {"command": "npx", "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}))
+
+
+class TestTransactionJournal(unittest.TestCase):
+    """W2/W3 (Step-8 F1, F2, F3): write-ahead journal, provenance modes, hard-crash recovery."""
+
+    def ws_with(self, mcp, toml=TOML_FOREIGN, mcp_mode=None):
+        ws = make_ws(mcp=mcp, toml=toml)
+        if mcp_mode is not None:
+            os.chmod(ws / ".mcp.json", mcp_mode)
+        add_definition(ws)
+        return ws
+
+    def test_initialized_workspace_bytes_restored(self):
+        vibe_mcp = json.dumps({"mcpServers": {
+            "foreign": {"command": "x"},
+            "vibe-mcp": {"command": "vibe-suite", "args": []}}}, indent=2, sort_keys=True) + "\n"
+        ws = self.ws_with(vibe_mcp)
+        before = (ws / ".mcp.json").read_bytes()
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        advisors.remove(ws, "probe_advisor", delete_timeline=True)
+        self.assertEqual((ws / ".mcp.json").read_bytes(), before,
+                         "vibe-mcp presence must not block advisor-scoped byte restoration")
+        ledger = ws / ".vibe-suite-state" / "advisor-preimages.json"
+        self.assertFalse(ledger.exists(), "ledger entry must clear when the last advisor goes")
+
+    def test_journal_and_ledger_modes_derive_from_source(self):
+        ws = self.ws_with(NONCANONICAL_FOREIGN, mcp_mode=0o400)
+        state = ws / ".vibe-suite-state"
+        state.mkdir(exist_ok=True)
+        os.chmod(state, 0o755)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        self.assertEqual(os.stat(state).st_mode & 0o777, 0o700,
+                         "state dir must be tightened before secret-bearing writes")
+        ledger = state / "advisor-preimages.json"
+        self.assertTrue(ledger.is_file())
+        self.assertEqual(os.stat(ledger).st_mode & 0o777, 0o400,
+                         "ledger mode must AND source modes with 0600")
+
+    def _crash_cli(self, ws, fail_after, *args):
+        env = dict(os.environ, VIBE_ADVISOR_FAIL_AFTER=fail_after)
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "advisor_cli.py"),
+             "--workspace", str(ws), *args],
+            capture_output=True, text=True, env=env)
+
+    def test_crash_after_json_write_recovers_on_rerun(self):
+        ws = self.ws_with(NONCANONICAL_FOREIGN)
+        before = (ws / ".mcp.json").read_bytes()
+        r = self._crash_cli(ws, "json", "add", "probe_advisor", "--pin", PIN)
+        self.assertEqual(r.returncode, 9, r.stderr)
+        self.assertTrue((ws / ".vibe-suite-state" / "advisor-txn.json").is_file(),
+                        "journal must survive the crash")
+        r2 = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "advisor_cli.py"),
+             "--workspace", str(ws), "add", "probe_advisor", "--pin", PIN],
+            capture_output=True, text=True)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertFalse((ws / ".vibe-suite-state" / "advisor-txn.json").exists())
+        doc = json.loads((ws / ".mcp.json").read_text())
+        self.assertIn("probe_advisor", doc["mcpServers"])
+        advisors.remove(ws, "probe_advisor", delete_timeline=True)
+        self.assertEqual((ws / ".mcp.json").read_bytes(), before)
+
+    def test_remove_crash_after_both_stores_rolls_forward(self):
+        ws = self.ws_with(NONCANONICAL_FOREIGN)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        r = self._crash_cli(ws, "toml", "remove", "probe_advisor", "--delete-timeline")
+        self.assertEqual(r.returncode, 9, r.stderr)
+        r2 = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "advisor_cli.py"),
+             "--workspace", str(ws), "list"], capture_output=True, text=True)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertFalse((ws / ".vibe-suite" / "agents" / "probe_advisor.md").exists(),
+                         "roll-forward must complete the definition deletion")
+        self.assertFalse((ws / ".vibe-suite-state" / "advisor-txn.json").exists())
+        self.assertEqual(bridge.owned_names(json.loads((ws / ".mcp.json").read_text())), [])
+
+    def test_remove_crash_mid_timeline_walk_completes_on_retry(self):
+        ws = self.ws_with(NONCANONICAL_FOREIGN)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        tl = ws / ".vibe-suite" / "agents" / "probe_advisor" / "timeline"
+        (tl / "deep").mkdir()
+        (tl / "deep" / "log.md").write_text("x")
+        r = self._crash_cli(ws, "timeline-partial", "remove", "probe_advisor",
+                            "--delete-timeline")
+        self.assertEqual(r.returncode, 9, r.stderr)
+        r2 = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "advisor_cli.py"),
+             "--workspace", str(ws), "remove", "probe_advisor", "--delete-timeline"],
+            capture_output=True, text=True)
+        self.assertEqual(r2.returncode, 0, r2.stderr + r2.stdout)
+        self.assertFalse((ws / ".vibe-suite" / "agents" / "probe_advisor").exists())
+
+    def test_pending_add_leaves_zero_residue(self):
+        ws = make_ws(mcp=NONCANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        before_mcp = (ws / ".mcp.json").read_bytes()
+        before_toml = (ws / ".codex" / "config.toml").read_bytes()
+        with tempfile.TemporaryDirectory() as td:
+            pending = Path(td) / "p.pending"
+            pending.write_text("pending\n")
+            with self.assertRaises(advisors.AdvisorError):
+                advisors.add(ws, "north_star_advisor", plugin_root=REPO_ROOT,
+                             pin_file=Path(td) / "p.txt", pending_file=pending)
+        self.assertEqual((ws / ".mcp.json").read_bytes(), before_mcp)
+        self.assertEqual((ws / ".codex" / "config.toml").read_bytes(), before_toml)
+        self.assertFalse((ws / ".vibe-suite" / "agents").exists(), "no definition residue")
+        self.assertFalse((ws / ".vibe-suite-state").exists(), "no ledger/journal residue")
+        self.assertFalse((ws / ".gitignore").exists(), "no ignore-block residue")
+
+
+class TestSafeCreationAndPrivacy(unittest.TestCase):
+    """W4/W5 (Step-8 F6, F7): descriptor-safe creation; ignore-block retention."""
+
+    def test_symlinked_agents_dir_refused(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        outside = Path(tempfile.mkdtemp(prefix="advisor-outside-"))
+        (ws / ".vibe-suite").mkdir()
+        (ws / ".vibe-suite" / "agents").symlink_to(outside)
+        with self.assertRaises((advisors.AdvisorError, bridge.BridgeError)):
+            advisors.add(ws, "north_star_advisor", plugin_root=REPO_ROOT, pin=PIN)
+        self.assertEqual(list(outside.iterdir()), [], "nothing may be created outside the ws")
+
+    def test_symlinked_advisor_dir_refused(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        outside = Path(tempfile.mkdtemp(prefix="advisor-outside2-"))
+        (ws / ".vibe-suite" / "agents" / "probe_advisor").symlink_to(outside)
+        with self.assertRaises((advisors.AdvisorError, bridge.BridgeError)):
+            advisors.add(ws, "probe_advisor", pin=PIN)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_keep_timeline_retains_ignore_block(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        advisors.remove(ws, "probe_advisor", delete_timeline=False)
+        text = (ws / ".gitignore").read_text()
+        self.assertIn(".vibe-suite/agents/*/timeline/", text,
+                      "kept history must stay private-by-default")
+
+    def test_delete_timeline_of_last_advisor_removes_block(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        advisors.remove(ws, "probe_advisor", delete_timeline=True)
+        gi = ws / ".gitignore"
+        if gi.exists():
+            self.assertNotIn("advisor-ignore", gi.read_text())
+
+
+class TestTargetAndClassification(unittest.TestCase):
+    """W6 (Step-8 F8, F9): resolution order; per-store content classification."""
+
+    def _ws(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        return ws
+
+    def test_explicit_pin_upgrades_existing_target(self):
+        ws = self._ws()
+        advisors.add(ws, "probe_advisor", pin="8.0.0")
+        doc = json.loads((ws / ".mcp.json").read_text())
+        self.assertEqual(doc["mcpServers"]["probe_advisor"]["args"],
+                         ["-y", "claude-octopus@8.0.0"])
+
+    def test_floating_registered_target_refused(self):
+        ws = self._ws()
+        doc = json.loads((ws / ".mcp.json").read_text())
+        doc["mcpServers"]["probe_advisor"]["args"] = ["-y", "claude-octopus@latest"]
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        with tempfile.TemporaryDirectory() as td:
+            pending = Path(td) / "p.pending"
+            pending.write_text("pending\n")
+            with self.assertRaises(advisors.AdvisorError) as ctx:
+                advisors.reconcile(ws, pin_file=Path(td) / "p.txt", pending_file=pending)
+            self.assertIn("latest", str(ctx.exception))
+
+    def test_stale_content_per_store(self):
+        ws = self._ws()
+        # JSON-only staleness
+        doc = json.loads((ws / ".mcp.json").read_text())
+        doc["mcpServers"]["probe_advisor"]["env"]["CLAUDE_MAX_TURNS"] = "99"
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        rows = {r["name"]: r for r in advisors.list_advisors(ws)}
+        self.assertEqual(rows["probe_advisor"]["state"], "stale-registered")
+        advisors.reconcile(ws, pin=PIN)
+        rows = {r["name"]: r for r in advisors.list_advisors(ws)}
+        self.assertEqual(rows["probe_advisor"]["state"], "consistent")
+        # TOML-only staleness
+        toml_path = ws / ".codex" / "config.toml"
+        toml_path.write_text(toml_path.read_text().replace(
+            'CLAUDE_MAX_TURNS = "4"', 'CLAUDE_MAX_TURNS = "77"'))
+        rows = {r["name"]: r for r in advisors.list_advisors(ws)}
+        self.assertEqual(rows["probe_advisor"]["state"], "stale-registered")
+
+    def test_edited_definition_flips_state(self):
+        ws = self._ws()
+        add_definition(ws, extra="effort: high\n")
+        rows = {r["name"]: r for r in advisors.list_advisors(ws)}
+        self.assertEqual(rows["probe_advisor"]["state"], "stale-registered")
+
+    def test_disagreeing_targets_invalid(self):
+        ws = self._ws()
+        toml_path = ws / ".codex" / "config.toml"
+        toml_path.write_text(toml_path.read_text().replace(
+            f'claude-octopus@{PIN}', 'claude-octopus@7.7.7'))
+        with tempfile.TemporaryDirectory() as td:
+            pending = Path(td) / "p.pending"
+            pending.write_text("pending\n")
+            rows = {r["name"]: r for r in advisors.list_advisors(
+                ws, pin_file=Path(td) / "p.txt", pending_file=pending)}
+            self.assertEqual(rows["probe_advisor"]["state"], "invalid-registration")
+
+
+class TestCollisionParsing(unittest.TestCase):
+    """W7 (Step-8 F10): quote-aware, whitespace-tolerant TOML collision detection."""
+
+    def test_single_quoted_and_whitespace_headers_collide(self):
+        for header in ("[mcp_servers.'probe_advisor']", "[ mcp_servers . probe_advisor ]",
+                       '[mcp_servers."probe_advisor"]'):
+            ws = make_ws(mcp=CANONICAL_FOREIGN,
+                         toml=f'{header}\ncommand = "y"\n')
+            add_definition(ws)
+            before = (ws / ".codex" / "config.toml").read_bytes()
+            with self.assertRaises(advisors.AdvisorError, msg=header):
+                advisors.add(ws, "probe_advisor", pin=PIN)
+            self.assertEqual((ws / ".codex" / "config.toml").read_bytes(), before, header)
+
+    def test_both_store_collision_refused(self):
+        ws = make_ws(
+            mcp=json.dumps({"mcpServers": {"probe_advisor": {"command": "x"}}}) + "\n",
+            toml='[mcp_servers.probe_advisor]\ncommand = "y"\n')
+        add_definition(ws)
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.add(ws, "probe_advisor", pin=PIN)
+
+
+class TestFieldValidation(unittest.TestCase):
+    """W7 (Step-8 F11): the documented field types are enforced."""
+
+    def test_inline_description_rejected(self):
+        text = "---\ndescription: inline scalar\nmodel: sonnet\n---\n\nbody\n"
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.parse_definition(text, "probe_advisor.md")
+
+    def test_scalar_list_fields_rejected(self):
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.parse_definition(defn_text(extra="allowed_tools: Read\n"),
+                                      "probe_advisor.md")
+
+    def test_bad_tool_name_and_caps_rejected(self):
+        for extra in ("tool_name: not a name!\n", "max_turns: 0\n", "max_turns: -3\n",
+                      "max_budget_usd: -1\n", "max_budget_usd: free\n"):
+            with self.assertRaises(advisors.AdvisorError, msg=extra):
+                advisors.parse_definition(defn_text(extra=extra), "probe_advisor.md")
+
+    def test_valid_fields_accepted(self):
+        d = advisors.parse_definition(
+            defn_text(extra="tool_name: probe_check\nmax_budget_usd: 1.25\n"),
+            "probe_advisor.md")
+        self.assertEqual(d["tool_name"], "probe_check")
+        self.assertEqual(d["max_budget_usd"], "1.25")

@@ -258,11 +258,19 @@ def check_advisors(ws, out):
     import advisors
     try:
         for row in advisors.list_advisors(ws):
-            if row["state"] != "consistent":
-                out.append(finding("[MEDIUM]", "advisor-state",
-                                   f"advisor '{row['name']}' is {row['state']}; "
-                                   "/vibe-suite:repair reconciles registrations to definitions",
-                                   True))
+            if row["state"] == "consistent":
+                continue
+            if row["state"] == "invalid-registration":
+                out.append(finding("[HIGH]", "advisor-state",
+                                   f"advisor '{row['name']}' is invalid-registration "
+                                   f"({row.get('detail')}); repair cannot guess a target — pass "
+                                   "--pin via /vibe-suite:advisor, or fix the registration",
+                                   False))
+                continue
+            out.append(finding("[MEDIUM]", "advisor-state",
+                               f"advisor '{row['name']}' is {row['state']}; "
+                               "/vibe-suite:repair reconciles registrations to definitions",
+                               True))
     except bridge.BridgeError as exc:
         out.append(finding("[HIGH]", "advisor-state",
                            f"advisor inventory unreadable: {exc}", False))

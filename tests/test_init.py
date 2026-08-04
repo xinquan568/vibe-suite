@@ -680,3 +680,24 @@ class ConfigValidationDoesNotWidenTheWindow(unittest.TestCase):
         """Removing the swap must not remove the validation."""
         with self.assertRaises(bridge.BridgeError):
             init_bridge._verify_config(self.ws, "---\neffort: sonnet\n---\n")
+
+
+class TestAdvisorsCheckpoint(InitCase):
+    """E6.1: init converges pre-declared advisors; an interrupt at the checkpoint re-runs clean."""
+
+    ADVISOR = ("---\ndescription: |\n  Judges probe things.\nmodel: sonnet\n---\n\n"
+               "Value the smallest true answer.\n")
+
+    def test_interrupt_at_advisors_checkpoint_converges_on_rerun(self):
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "probe_advisor.md").write_text(self.ADVISOR, encoding="utf-8")
+        interrupted = run_init(self.ws, *self.answers(),
+                               env={"VIBE_FAIL_AFTER": "advisors"})
+        self.assertNotEqual(interrupted.returncode, 0,
+                            "the advisors checkpoint must honor VIBE_FAIL_AFTER")
+        completed = run_init(self.ws, *self.answers())
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        # The declared advisor survives; with the pin pending init defers rather than fails,
+        # and doctor owns the visible state until a pin exists.
+        self.assertTrue((agents / "probe_advisor.md").is_file())

@@ -162,8 +162,13 @@ def check_mechanical(root, arts, deprecated_terms):
     agent_names = {rel: Path(rel).stem for rel in arts["agent"]}
 
     # command bodies: partial tokens (reportable) + agent references (orphan input only)
+    # + plugin-root script references (orphan input only — plugin-discover.md edge 5): a command
+    # that dispatches a CLI script is that script's inbound reference, exactly as a hook is.
     for rel in arts["command"]:
         body = body_of(read_text(root / rel))
+        for target in HOOK_TARGET.findall(body):
+            if (root / target).is_file():
+                edges.add(target)
         for token in PARTIAL_TOKEN.findall(body):
             target = f"commands/shared/{Path(token).name}"
             if (root / target).is_file():

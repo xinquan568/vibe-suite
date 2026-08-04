@@ -2,34 +2,36 @@
 # SPDX-License-Identifier: ISC
 """Advisor lifecycle for `/vibe-suite:advisor` (E6.1 / vibe-47; F7.1, F7.2).
 
-**One engine, four states.** `add` and `remove` are desired-state edits — a definition file
-appears or disappears under `.vibe-suite/agents/` — followed by `reconcile()`, which converges the
-two MCP stores to the definitions. `init`, `repair` and `update` call the same `reconcile`, so
-there is exactly one code path that writes an advisor registration, whatever invoked it. Each
-advisor is classified `consistent`, `declared-unregistered`, `half-registered`, or
-`registered-undeclared`; the first three converge toward registration, the last removes the
-orphaned registration and never touches definitions or timelines.
+**One engine, six states.** `add` and `remove` are desired-state edits — a definition file
+appears or disappears under `.vibe-suite/agents/` — converged by `reconcile()`, which `init`,
+`repair` and `update` also call. Classification is shared (`_classify`) and content-aware: an
+advisor is `consistent` only when *both* stores hold exactly the desired registration;
+divergent content is `stale-registered`; a target the stores cannot agree on (or a floating or
+malformed one) is `invalid-registration`, which converging refuses to guess about.
 
-**Identity is the bare name; ownership is structural.** The agent-design skill promises the
-callable `mcp__<name>__<tool_name>`, which requires the server key to *be* the advisor name — so
-ownership travels inside the entry (`bridge.ADVISOR_MARKER`) on the JSON side and in the
-`vibe-suite:server:<name>` fence on the TOML side, and `bridge.owned_names` /
-`bridge.toml_owned_names` recognize both. A name held by anything unowned is a collision to
-refuse, never to adopt (the `mcp_pin.collision` posture).
+**Identity is the bare name; ownership is structural.** The callable `mcp__<name>__<tool_name>`
+requires the server key to *be* the advisor name, so ownership travels inside the entry
+(`bridge.ADVISOR_MARKER`, type-exact) and in the `vibe-suite:server:<name>` fence. A name held by
+anything unowned — in either store, under any TOML quoting — is a collision to refuse.
 
-**Sentinel-clean means byte-clean where bytes can be promised.** The TOML fence codec is its own
-exact inverse. `.mcp.json` writes are canonical (`init_bridge._upsert_json`'s contract), so the
-first owned mutation ledgers the file's exact pre-image bytes
-(`.vibe-suite-state/advisor-preimages.json`, the install-provenance pattern); a removal that
-leaves zero owned entries restores those bytes verbatim when the parsed remainder still matches —
-and falls back to the canonical form, reporting the divergence, when the user edited in between.
+**The transaction.** Two records with two lifetimes live under `.vibe-suite-state/`:
+`advisor-preimages.json`, the long-lived baseline for eventual byte restoration of the
+canonicalizing JSON store; and `advisor-txn.json`, a write-ahead journal present only while a
+mutation is in flight. The journal carries both stores' immediate pre-images *and* their computed
+post-images, so recovery after a hard crash is deterministic: an interrupted `apply` rolls back
+to the pre-images; an interrupted `remove` rolls forward by writing the recorded post-images and
+completing the deletions. Both records take the provenance mode discipline — the AND of every
+recorded source's mode and 0600 — and the state directory is tightened to 0700 before any
+secret-bearing byte lands. `VIBE_ADVISOR_FAIL_AFTER` names hard-crash points (`os._exit`) for the
+subprocess test matrix; it exists for tests and does nothing when unset.
 
-**Backend.** A registration executes the pinned `claude-octopus`. Resolution order: an explicit
-exact `--pin` (the P9 escape hatch, validated by `mcp_pin`'s grammar) → the shipped pin file via
-`mcp_pin.resolve_pin` → refusal naming both remedies while the pin is `pending` (E7.1 owns it).
-No path floats.
+**Backend.** Resolution order is fixed: an explicit exact `--pin` (the P9 escape hatch) → the
+shipped pin file → while pending, the single exact target the advisor's own registrations
+already agree on — never a floating value, never a guess between disagreeing ones.
 """
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -39,7 +41,9 @@ import bridge
 import mcp_pin
 
 AGENTS_REL = Path(".vibe-suite/agents")
-LEDGER_REL = Path(".vibe-suite-state/advisor-preimages.json")
+STATE_REL = Path(".vibe-suite-state")
+LEDGER_REL = STATE_REL / "advisor-preimages.json"
+TXN_REL = STATE_REL / "advisor-txn.json"
 MCP_REL = Path(".mcp.json")
 TOML_REL = Path(".codex/config.toml")
 
@@ -48,6 +52,7 @@ PROMPT_MODES = ("append", "replace")
 PERMISSION_MODES = ("default", "acceptEdits", "plan", "dontAsk", "auto", "bypassPermissions")
 EFFORTS = ("low", "medium", "high", "max")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+BUDGET_RE = re.compile(r"^\d+(\.\d+)?$")
 
 IGNORE_BLOCK = "advisor-ignore"
 IGNORE_BODY = ".vibe-suite/agents/*/timeline/"
@@ -65,22 +70,29 @@ def timeline_rel(name):
     return AGENTS_REL / name / "timeline"
 
 
+def _fail_point(name):
+    """Hard-crash injection for the subprocess test matrix — `os._exit` so no guard can run."""
+    if os.environ.get("VIBE_ADVISOR_FAIL_AFTER") == name:
+        os._exit(9)
+
+
 # --------------------------------------------------------------------------------------------
 # Definition files
 # --------------------------------------------------------------------------------------------
 
 def _parse_frontmatter(text, source):
-    """The advisor frontmatter subset: scalars, `|` literal blocks, flow lists. No yaml module —
-    the runtime is stdlib-only, and the grammar the skill documents needs nothing more."""
+    """The advisor frontmatter subset: scalars, `|` literal blocks, flow lists. Returns
+    `(fields, body, kinds)` where kinds records each key's syntactic form, because the schema
+    cares: a description must be a literal block, a list field must be a flow list."""
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         raise AdvisorError(f"{source}: no frontmatter block (--- expected on line 1)")
-    fields, i = {}, 1
+    fields, kinds, i = {}, {}, 1
     while i < len(lines):
         line = lines[i]
         if line.strip() == "---":
             body = "\n".join(lines[i + 1:]).lstrip("\n")
-            return fields, body
+            return fields, body, kinds
         if not line.strip() or line.lstrip().startswith("#"):
             i += 1
             continue
@@ -96,26 +108,31 @@ def _parse_frontmatter(text, source):
                 block.append(lines[i][2:] if lines[i].startswith("  ") else "")
                 i += 1
             fields[key] = "\n".join(block).rstrip("\n")
+            kinds[key] = "block"
             continue
         if value.startswith("[") and value.endswith("]"):
             inner = value[1:-1].strip()
             fields[key] = [p.strip().strip("'\"") for p in inner.split(",") if p.strip()]
+            kinds[key] = "list"
         else:
             fields[key] = value.strip("'\"")
+            kinds[key] = "scalar"
         i += 1
     raise AdvisorError(f"{source}: frontmatter never closed (missing trailing ---)")
 
 
 def parse_definition(text, filename):
-    """Validate a definition against the agent-design skill's field table; apply exact defaults."""
+    """Validate against the agent-design skill's field table; enforce the documented types."""
     stem = filename[:-3] if filename.endswith(".md") else filename
-    fields, body = _parse_frontmatter(text, filename)
+    fields, body, kinds = _parse_frontmatter(text, filename)
     name = fields.get("name", stem)
     if not NAME_RE.match(name or ""):
         raise AdvisorError(f"{filename}: advisor name {name!r} is not a valid MCP server key")
-    description = (fields.get("description") or "").strip()
-    if not description:
+    if "description" not in fields or not (fields["description"] or "").strip():
         raise AdvisorError(f"{filename}: description is required")
+    if kinds.get("description") != "block":
+        raise AdvisorError(f"{filename}: description must be a YAML literal block scalar (|) so "
+                           "newlines and <example> tags survive")
     model = fields.get("model")
     if model is not None and model not in TIERS:
         raise AdvisorError(
@@ -131,24 +148,35 @@ def parse_definition(text, filename):
     effort = fields.get("effort")
     if effort is not None and effort not in EFFORTS:
         raise AdvisorError(f"{filename}: effort {effort!r} not in {EFFORTS}")
+    tool_name = fields.get("tool_name", f"{name}_consult")
+    if not NAME_RE.match(tool_name or ""):
+        raise AdvisorError(f"{filename}: tool_name {tool_name!r} is not a valid MCP tool name")
     try:
         max_turns = int(fields.get("max_turns", 5))
-    except ValueError:
+    except (ValueError, TypeError):
         raise AdvisorError(f"{filename}: max_turns must be an integer") from None
-    allowed = fields.get("allowed_tools", ["Read", "Grep", "Glob"])
-    disallowed = fields.get("disallowed_tools", [])
+    if max_turns <= 0:
+        raise AdvisorError(f"{filename}: max_turns must be positive, got {max_turns}")
+    budget = fields.get("max_budget_usd")
+    if budget is not None:
+        if not isinstance(budget, str) or not BUDGET_RE.match(budget) or float(budget) <= 0:
+            raise AdvisorError(f"{filename}: max_budget_usd must be a positive decimal, "
+                               f"got {budget!r}")
+    for key in ("allowed_tools", "disallowed_tools", "additional_dirs"):
+        if key in fields and kinds.get(key) != "list":
+            raise AdvisorError(f"{filename}: {key} must be a flow list like [Read, Grep, Glob]")
     if not body.strip():
         raise AdvisorError(f"{filename}: the body (system prompt) is empty")
     return {
         "name": name,
-        "description": description,
-        "tool_name": fields.get("tool_name", f"{name}_consult"),
+        "description": fields["description"].strip(),
+        "tool_name": tool_name,
         "model": model,
-        "allowed_tools": list(allowed),
-        "disallowed_tools": list(disallowed),
+        "allowed_tools": list(fields.get("allowed_tools", ["Read", "Grep", "Glob"])),
+        "disallowed_tools": list(fields.get("disallowed_tools", [])),
         "permission_mode": permission_mode,
         "max_turns": max_turns,
-        "max_budget_usd": fields.get("max_budget_usd"),
+        "max_budget_usd": budget,
         "effort": effort,
         "cwd": fields.get("cwd", "."),
         "additional_dirs": list(fields.get("additional_dirs", [])),
@@ -158,7 +186,6 @@ def parse_definition(text, filename):
 
 
 def load_definitions(ws):
-    """Every parsed definition under `.vibe-suite/agents/*.md`, keyed by name."""
     out = {}
     agents = Path(ws) / AGENTS_REL
     if not agents.is_dir():
@@ -173,11 +200,12 @@ def load_definitions(ws):
 
 
 # --------------------------------------------------------------------------------------------
-# Backend resolution (D-c)
+# Backend resolution (D-c; frozen order)
 # --------------------------------------------------------------------------------------------
 
 def resolve_backend(explicit_pin, pin_file=None, pending_file=None):
-    """`claude-octopus@<exact>` from an explicit pin, else the shipped pin file, else refusal."""
+    """`claude-octopus@<exact>` from an explicit pin, else the shipped pin file; a `pending`
+    state without an explicit pin refuses, naming both remedies."""
     if explicit_pin is not None:
         if not mcp_pin._EXACT.match(explicit_pin or ""):
             raise AdvisorError(
@@ -193,6 +221,39 @@ def resolve_backend(explicit_pin, pin_file=None, pending_file=None):
             "the claude-octopus pin is not shipped yet (owner: E7.1). Pass --pin <exact version> "
             "to register advisors now; the zero-flag default activates when E7.1 ships the pin")
     return mcp_pin.target(value)
+
+
+def _entry_target(entry):
+    args = entry.get("args") if isinstance(entry, dict) else None
+    if isinstance(args, list) and args and isinstance(args[-1], str) \
+            and args[-1].startswith(mcp_pin.PACKAGE + "@"):
+        return args[-1]
+    return None
+
+
+def _toml_block_target(toml_text, name):
+    match = bridge._block_re(f"server:{name}", "#", "").search(toml_text)
+    if not match:
+        return None
+    m = re.search(r'args = \["-y", "([^"]+)"\]', match.group(0))
+    return m.group(1) if m else None
+
+
+def _registered_targets(name, servers, toml_text):
+    """Every distinct target the advisor's own registrations carry, across both stores."""
+    targets = set()
+    entry = servers.get(name)
+    if is_owned_entry(entry):
+        t = _entry_target(entry)
+        targets.add(t if t is not None else "<unparseable>")
+    t = _toml_block_target(toml_text, name)
+    if t is not None:
+        targets.add(t)
+    return targets
+
+
+def _target_version(target):
+    return target.split("@", 1)[1] if target and "@" in target else None
 
 
 # --------------------------------------------------------------------------------------------
@@ -230,7 +291,6 @@ def _advisor_env(defn):
 
 
 def json_entry(defn, target):
-    """The exact `.mcp.json` registration: bare-name key's entry, marker included."""
     return {
         "command": "npx",
         "args": ["-y", target],
@@ -246,7 +306,6 @@ def _toml_key(name):
 
 
 def toml_body(defn, target):
-    """The exact `.codex/config.toml` block body: `render_body`'s timeout discipline plus env."""
     key = _toml_key(defn["name"])
     lines = [
         f"[mcp_servers.{key}]",
@@ -261,47 +320,168 @@ def toml_body(defn, target):
     return "\n".join(lines)
 
 
-def _entry_target(entry):
-    args = entry.get("args") if isinstance(entry, dict) else None
-    if isinstance(args, list) and args and isinstance(args[-1], str) \
-            and args[-1].startswith(mcp_pin.PACKAGE + "@"):
-        return args[-1]
-    return None
-
-
 # --------------------------------------------------------------------------------------------
-# Pre-image ledger (byte restoration for the canonicalizing JSON store)
+# Records: baseline ledger + write-ahead journal
 # --------------------------------------------------------------------------------------------
 
-def _load_ledger(ws):
-    path = Path(ws) / LEDGER_REL
-    if not path.is_file():
+def _record_mode(entries):
+    """The provenance discipline: AND every recorded source's mode with 0600."""
+    mode = 0o600
+    for entry in entries:
+        raw = entry.get("mode") if isinstance(entry, dict) else None
+        if raw:
+            mode &= int(raw, 8)
+    return mode
+
+
+def _load_json_file(path):
+    p = Path(path)
+    if not p.is_file():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8") or "{}")
+        return json.loads(p.read_text(encoding="utf-8") or "{}")
     except json.JSONDecodeError:
         return {}
 
 
 def _save_ledger(ws, ledger):
-    dest = Path(ws) / LEDGER_REL
     if not ledger:
         bridge.unlink_at(ws, LEDGER_REL)
+        try:
+            bridge.unlink_at(ws, STATE_REL)   # rmdir when empty; harmless refusal otherwise
+        except (OSError, bridge.BridgeError):
+            pass
         return
-    bridge.write_atomic(ws, dest, json.dumps(ledger, indent=2, sort_keys=True) + "\n")
+    mode = _record_mode(ledger.values())
+    bridge.write_atomic(ws, Path(ws) / LEDGER_REL,
+                        json.dumps(ledger, indent=2, sort_keys=True) + "\n", mode=mode)
+
+
+def recover(ws):
+    """Heal an interrupted transaction. Returns the journal's `{"intent", "remove_name"}` when
+    one was found and resolved, else None — callers can tell *what* recovery completed.
+
+    `apply` rolls back: both stores and the baseline entry return to their journaled pre-state.
+    `remove` rolls forward: the recorded post-images are written (idempotent), the definition and
+    — when flagged — the timeline are deleted, and a fresh `reconcile` converges the leftovers.
+    """
+    ws = Path(ws)
+    txn_path = ws / TXN_REL
+    if not txn_path.is_file():
+        return None
+    try:
+        txn = json.loads(txn_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise AdvisorError(f"{txn_path} is unreadable ({exc}); refusing to guess at recovery — "
+                           "inspect and remove it by hand") from exc
+    pre = txn.get("pre_images", {})
+
+    def restore(rel, entry):
+        if entry is None:
+            bridge.unlink_at(ws, Path(rel))
+        else:
+            bridge.write_atomic(ws, ws / rel, base64.b64decode(entry.get("content_b64", "")))
+
+    if txn.get("intent") == "remove":
+        post = txn.get("post_images", {})
+        if str(MCP_REL) in post:
+            bridge.write_atomic(ws, ws / MCP_REL,
+                                base64.b64decode(post[str(MCP_REL)]))
+        if str(TOML_REL) in post:
+            bridge.write_atomic(ws, ws / TOML_REL, post[str(TOML_REL)])
+        name = txn.get("remove_name")
+        if name and NAME_RE.match(name):
+            bridge.unlink_at(ws, AGENTS_REL / f"{name}.md")
+            if txn.get("delete_timeline"):
+                bridge.remove_tree_at(ws, timeline_rel(name))
+                try:
+                    bridge.unlink_at(ws, AGENTS_REL / name)
+                except (OSError, bridge.BridgeError):
+                    pass
+        baseline = _load_json_file(ws / LEDGER_REL)
+        prior = txn.get("prior_baseline")
+        if prior is None:
+            baseline.pop(str(MCP_REL), None)
+        else:
+            baseline[str(MCP_REL)] = prior
+        bridge.unlink_at(ws, TXN_REL)
+        _reconcile_endstate(ws, load_definitions(ws), baseline)
+    else:
+        for rel in (str(MCP_REL), str(TOML_REL)):
+            if rel in pre:
+                restore(rel, pre[rel])
+        baseline = _load_json_file(ws / LEDGER_REL)
+        prior = txn.get("prior_baseline")
+        if prior is None:
+            baseline.pop(str(MCP_REL), None)
+        else:
+            baseline[str(MCP_REL)] = prior
+        _save_ledger(ws, baseline)
+        bridge.unlink_at(ws, TXN_REL)
+    return {"intent": txn.get("intent"), "remove_name": txn.get("remove_name")}
 
 
 # --------------------------------------------------------------------------------------------
-# Store writers (module-level so a test can inject a failure)
+# Classification — the one function list, doctor and reconcile share
 # --------------------------------------------------------------------------------------------
 
-def _write_json_store(ws, doc):
-    canonical = json.dumps(doc, indent=2, sort_keys=True) + "\n"
-    bridge.write_atomic(ws, Path(ws) / MCP_REL, canonical)
-
-
-def _write_toml_store(ws, text):
-    bridge.write_atomic(ws, Path(ws) / TOML_REL, text)
+def _classify(ws, defs, doc, toml_text, pin=None, pin_file=None, pending_file=None):
+    """`{name: (state, desired_entry, desired_body, detail)}`; desired_* are None when the state
+    needs no content (presence-only) or cannot be computed (invalid-registration)."""
+    servers = doc.get("mcpServers", {}) if isinstance(doc, dict) else {}
+    out = {}
+    names = sorted(set(defs)
+                   | {n for n in servers if is_owned_entry(servers.get(n))}
+                   | {n for n in bridge.toml_owned_names(toml_text)
+                      if n not in bridge.SENTINEL_LITERALS
+                      and not n.startswith(bridge.SENTINEL_PREFIX)})
+    for name in names:
+        in_json = is_owned_entry(servers.get(name))
+        in_toml = bridge.toml_server_has(toml_text, name)
+        defn = defs.get(name)
+        if defn is None:
+            out[name] = ("registered-undeclared", None, None, None)
+            continue
+        if not in_json and not in_toml:
+            out[name] = ("declared-unregistered", None, None, None)
+            continue
+        # A content comparison needs a target: explicit pin → shipped pin → the single exact
+        # target the registrations agree on. Disagreement, floating, malformed → invalid.
+        try:
+            target = resolve_backend(pin, pin_file=pin_file, pending_file=pending_file)
+        except AdvisorError:
+            registered = _registered_targets(name, servers, toml_text)
+            versions = {_target_version(t) for t in registered}
+            if len(registered) == 1:
+                only = next(iter(registered))
+                version = _target_version(only)
+                if version and mcp_pin._EXACT.match(version):
+                    target = only
+                else:
+                    out[name] = ("invalid-registration", None, None,
+                                 f"registered target {only!r} is not an exact version")
+                    continue
+            elif not registered:
+                out[name] = ("invalid-registration", None, None,
+                             "no readable target in either registration")
+                continue
+            else:
+                out[name] = ("invalid-registration", None, None,
+                             f"registrations disagree: {sorted(registered)} "
+                             f"({sorted(v for v in versions if v)})")
+                continue
+        desired_entry = json_entry(defn, target)
+        desired_body = toml_body(defn, target)
+        json_ok = in_json and servers.get(name) == desired_entry
+        toml_ok = in_toml and bridge.text_block_upsert(
+            toml_text, f"server:{name}", desired_body) == toml_text
+        if json_ok and toml_ok:
+            out[name] = ("consistent", desired_entry, desired_body, None)
+        elif in_json and in_toml:
+            out[name] = ("stale-registered", desired_entry, desired_body, None)
+        else:
+            out[name] = ("half-registered", desired_entry, desired_body, None)
+    return out
 
 
 # --------------------------------------------------------------------------------------------
@@ -310,136 +490,197 @@ def _write_toml_store(ws, text):
 
 def _collision_check(defs, doc, toml_text):
     servers = doc.get("mcpServers", {}) if isinstance(doc, dict) else {}
+    tables = set(bridge.toml_table_names(toml_text))
     for name in defs:
         entry = servers.get(name)
         if entry is not None and not is_owned_entry(entry):
             raise AdvisorError(
                 f".mcp.json already has an unowned server named {name!r}; rename the advisor or "
                 "remove the conflicting entry — nothing has been written")
-        if not bridge.toml_server_has(toml_text, name) and re.search(
-                r"^\s*\[mcp_servers\.(?:%s|\"%s\")\]\s*$"
-                % (re.escape(name), re.escape(name)), toml_text, re.M):
+        if name in tables and not bridge.toml_server_has(toml_text, name):
             raise AdvisorError(
                 f".codex/config.toml already has an unfenced server named {name!r}; rename the "
                 "advisor or remove the conflicting table — nothing has been written")
 
 
 def reconcile(ws, pin=None, pin_file=None, pending_file=None):
-    """Converge both stores to the definitions. Returns `{name: transition}`.
-
-    Backend resolution is lazy: a run whose advisors are all consistent (or removal-only) never
-    needs a pin at all.
-    """
+    """Converge both stores to the definitions. Returns `{name: transition}`."""
     ws = Path(ws)
+    bridge.pin_root(ws)
+    recover(ws)
     defs = load_definitions(ws)
     doc = bridge.load_json(ws / MCP_REL)
-    toml_path = ws / TOML_REL
-    toml_before = bridge.read_text_verbatim(toml_path)
+    toml_before = bridge.read_text_verbatim(ws / TOML_REL)
     _collision_check(defs, doc, toml_before)
+
+    classified = _classify(ws, defs, doc, toml_before, pin, pin_file, pending_file)
+    invalid = {n: d for n, (s, _, _, d) in classified.items() if s == "invalid-registration"}
+    if invalid:
+        name, detail = next(iter(invalid.items()))
+        raise AdvisorError(
+            f"advisor {name!r}: {detail}; pass --pin <exact version> to settle the target — "
+            "nothing has been written")
 
     servers = doc.setdefault("mcpServers", {})
     toml_text = toml_before
     report = {}
-    target_cache = {}
-
-    def target_for(name):
-        if name not in target_cache:
-            existing = _entry_target(servers.get(name, {}))
-            target_cache[name] = existing or resolve_backend(
-                pin, pin_file=pin_file, pending_file=pending_file)
-        return target_cache[name]
-
-    for name, defn in defs.items():
-        in_json = is_owned_entry(servers.get(name))
-        in_toml = bridge.toml_server_has(toml_text, name)
-        target = target_for(name)
-        desired_entry = json_entry(defn, target)
-        desired_body = toml_body(defn, target)
-        if in_json and in_toml and servers.get(name) == desired_entry \
-                and bridge.text_block_has(toml_text, f"server:{name}"):
-            current = bridge.text_block_upsert(toml_text, f"server:{name}", desired_body)
-            if current == toml_text:
-                report[name] = "consistent"
-                continue
-        state = ("consistent" if in_json and in_toml
-                 else "half-registered" if in_json or in_toml
-                 else "declared-unregistered")
-        servers[name] = desired_entry
-        toml_text = bridge.toml_server_upsert(toml_text, name, desired_body)
-        report[name] = f"{state}->registered"
-
-    for name in list(servers):
-        if is_owned_entry(servers[name]) and name not in defs:
-            del servers[name]
+    for name, (state, desired_entry, desired_body, _) in classified.items():
+        if state == "consistent":
+            report[name] = "consistent"
+        elif state == "registered-undeclared":
+            if is_owned_entry(servers.get(name)):
+                del servers[name]
             if bridge.toml_server_has(toml_text, name):
                 toml_text = bridge.toml_server_remove(toml_text, name)
             report[name] = "registered-undeclared->removed"
-    for name in bridge.toml_owned_names(toml_text):
-        if name not in defs and name not in bridge.SENTINEL_LITERALS \
-                and not name.startswith(bridge.SENTINEL_PREFIX):
-            toml_text = bridge.toml_server_remove(toml_text, name)
-            report[name] = "registered-undeclared->removed"
+        else:
+            if desired_entry is None:
+                # Presence-only classification carries no content; a write needs it, so the
+                # target resolves here — and a pending pin with no --pin refuses (D-c).
+                target = resolve_backend(pin, pin_file=pin_file, pending_file=pending_file)
+                desired_entry = json_entry(defs[name], target)
+                desired_body = toml_body(defs[name], target)
+            servers[name] = desired_entry
+            toml_text = bridge.toml_server_upsert(toml_text, name, desired_body)
+            report[name] = f"{state}->registered"
 
-    _apply(ws, doc, toml_before, toml_text, defs)
+    _transact(ws, doc, toml_before, toml_text, defs)
     return report
 
 
-def _apply(ws, doc, toml_before, toml_after, defs):
-    """Write JSON then TOML; roll the first back on a second-store failure; keep the ledger."""
+def _endstate_bytes(doc):
+    return (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _transact(ws, doc, toml_before, toml_after, defs,
+              intent="apply", remove_name=None, delete_timeline=False, definition_pre=None):
+    """Journal → JSON → TOML → baseline → ignore-block, with rollback (apply) or the journal left
+    for roll-forward (remove — the caller finishes deletions and cleanup)."""
+    ws = Path(ws)
     mcp_path = ws / MCP_REL
     mcp_before = mcp_path.read_bytes() if mcp_path.is_file() else None
-    canonical_after = json.dumps(doc, indent=2, sort_keys=True) + "\n"
-    json_changed = mcp_before != canonical_after.encode("utf-8")
-    toml_changed = toml_after != toml_before
+    baseline = _load_json_file(ws / LEDGER_REL)
+    prior_baseline = baseline.get(str(MCP_REL))
 
-    ledger = _load_ledger(ws)
-    owned_left = bridge.owned_names(doc)
-
-    if json_changed and owned_left and str(MCP_REL) not in ledger and mcp_before is not None:
-        ledger[str(MCP_REL)] = bridge.record_pre_image(mcp_path)
-
-    restored = False
-    if json_changed and not owned_left and str(MCP_REL) in ledger:
-        import base64 as _b64
-        pre = ledger[str(MCP_REL)]
-        pre_bytes = _b64.b64decode(pre.get("content_b64", ""))
+    advisors_left = [n for n, e in (doc.get("mcpServers") or {}).items()
+                     if bridge.advisor_owned_entry(e)]
+    restore_bytes = None
+    if not advisors_left and prior_baseline is not None:
+        pre_bytes = base64.b64decode(prior_baseline.get("content_b64", ""))
         try:
             pre_doc = json.loads(pre_bytes.decode("utf-8") or "{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
             pre_doc = None
         if pre_doc == doc:
-            bridge.write_atomic(ws, mcp_path, pre_bytes)
-            restored = True
+            restore_bytes = pre_bytes
         else:
             print("advisors: .mcp.json diverged from its pre-image while advisors were "
                   "registered; leaving the canonical form", flush=True)
-        del ledger[str(MCP_REL)]
 
-    if json_changed and not restored:
-        _write_json_store(ws, doc)
     try:
+        before_doc = json.loads(mcp_before.decode("utf-8")) if mcp_before else None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        before_doc = None
+    if restore_bytes is not None:
+        mcp_final = restore_bytes
+    elif before_doc == doc and mcp_before is not None:
+        # Semantically unchanged: never canonicalize a file this transaction does not alter —
+        # the user's formatting is theirs until an advisor mutation actually touches the store.
+        mcp_final = mcp_before
+    else:
+        mcp_final = _endstate_bytes(doc)
+    json_changed = mcp_before != mcp_final
+    toml_changed = toml_after != toml_before
+    if not (json_changed or toml_changed) and intent == "apply":
+        _ignore_block(ws, defs)
+        return
+
+    bridge.secure_dir(ws, STATE_REL)
+    pre_images = {}
+    if mcp_before is not None:
+        pre_images[str(MCP_REL)] = bridge.record_pre_image(mcp_path)
+    if (ws / TOML_REL).is_file():
+        pre_images[str(TOML_REL)] = bridge.record_pre_image(ws / TOML_REL)
+    if definition_pre is not None:
+        pre_images["definition"] = definition_pre
+    journal = {
+        "schema": 1, "intent": intent, "remove_name": remove_name,
+        "delete_timeline": delete_timeline,
+        "desired_sha": hashlib.sha256(
+            "".join(sorted(defs)).encode("utf-8")).hexdigest(),
+        "pre_images": pre_images,
+        "post_images": {str(MCP_REL): base64.b64encode(mcp_final).decode("ascii"),
+                        str(TOML_REL): toml_after},
+        "prior_baseline": prior_baseline,
+    }
+    mode = _record_mode(pre_images.values())
+    bridge.write_atomic(ws, ws / TXN_REL, json.dumps(journal) + "\n", mode=mode)
+    _fail_point("journal")
+
+    try:
+        if json_changed:
+            bridge.write_atomic(ws, mcp_path, mcp_final)
+        _fail_point("json")
         if toml_changed:
             _write_toml_store(ws, toml_after)
+        _fail_point("toml")
+        if advisors_left and json_changed and str(MCP_REL) not in baseline \
+                and mcp_before is not None:
+            baseline[str(MCP_REL)] = pre_images[str(MCP_REL)]
+        if not advisors_left:
+            baseline.pop(str(MCP_REL), None)
+        _save_ledger(ws, baseline)
+        _fail_point("baseline")
+        _ignore_block(ws, defs)
     except BaseException:
-        if json_changed and mcp_before is not None:
-            bridge.write_atomic(ws, mcp_path, mcp_before)
-        elif json_changed:
-            bridge.unlink_at(ws, MCP_REL)
+        if intent == "apply":
+            if mcp_before is not None:
+                bridge.write_atomic(ws, mcp_path, mcp_before)
+            elif json_changed:
+                bridge.unlink_at(ws, MCP_REL)
+            if toml_changed and (ws / TOML_REL).is_file():
+                bridge.write_atomic(ws, ws / TOML_REL, toml_before)
+            _save_ledger(ws, _restore_baseline(ws, prior_baseline))
+            bridge.unlink_at(ws, TXN_REL)
         raise
-    _save_ledger(ws, ledger)
+    if intent == "apply":
+        bridge.unlink_at(ws, TXN_REL)
 
-    gitignore = ws / ".gitignore"
-    existing = bridge.read_text_verbatim(gitignore)
-    if defs:
+
+def _restore_baseline(ws, prior):
+    baseline = _load_json_file(Path(ws) / LEDGER_REL)
+    if prior is None:
+        baseline.pop(str(MCP_REL), None)
+    else:
+        baseline[str(MCP_REL)] = prior
+    return baseline
+
+
+def _reconcile_endstate(ws, defs, baseline):
+    _save_ledger(ws, baseline)
+    _ignore_block(ws, defs)
+
+
+def _ignore_block(ws, defs):
+    """The privacy rule: the ignore block stays while definitions exist **or any timeline
+    directory survives** — a kept history must stay private-by-default."""
+    ws = Path(ws)
+    timelines = list((ws / AGENTS_REL).glob("*/timeline")) if (ws / AGENTS_REL).is_dir() else []
+    existing = bridge.read_text_verbatim(ws / ".gitignore")
+    if defs or timelines:
         updated = bridge.text_block_upsert(existing, IGNORE_BLOCK, IGNORE_BODY)
         if updated != existing:
-            bridge.write_atomic(ws, gitignore, updated)
+            bridge.write_atomic(ws, ws / ".gitignore", updated)
     elif bridge.text_block_has(existing, IGNORE_BLOCK):
         updated = bridge.text_block_remove(existing, IGNORE_BLOCK)
         if updated.strip():
-            bridge.write_atomic(ws, gitignore, updated)
+            bridge.write_atomic(ws, ws / ".gitignore", updated)
         else:
             bridge.unlink_at(ws, Path(".gitignore"))
+
+
+def _write_toml_store(ws, text):
+    bridge.write_atomic(ws, Path(ws) / TOML_REL, text)
 
 
 # --------------------------------------------------------------------------------------------
@@ -448,9 +689,10 @@ def _apply(ws, doc, toml_before, toml_after, defs):
 
 def add(ws, name, pin=None, plugin_root=None, custom_text=None,
         pin_file=None, pending_file=None):
-    """Desired-state edit (definition present) + reconcile. Refuses before writing on collision
-    or an unresolvable backend; removes what it created if the second store fails."""
+    """Preflight everything fallible — backend included — before creating anything."""
     ws = Path(ws)
+    bridge.pin_root(ws)
+    recover(ws)
     if not NAME_RE.match(name or ""):
         raise AdvisorError(f"advisor name {name!r} is not a valid MCP server key")
     def_path = ws / AGENTS_REL / f"{name}.md"
@@ -467,49 +709,108 @@ def add(ws, name, pin=None, plugin_root=None, custom_text=None,
                     "live in templates/advisors/")
             text = preset.read_text(encoding="utf-8")
         parse_definition(text, f"{name}.md")
+        # The backend must resolve BEFORE anything is created: a pending pin with no --pin
+        # refuses with zero residue — no definition, no timeline, no state directory.
+        resolve_backend(pin, pin_file=pin_file, pending_file=pending_file)
         bridge.write_atomic(ws, def_path, text)
         created_def = True
-    tl = ws / timeline_rel(name)
-    created_tl = not tl.exists()
-    tl.mkdir(parents=True, exist_ok=True)
+    tl_rel = timeline_rel(name)
+    created_tl = not (ws / tl_rel).exists()
     try:
+        bridge.ensure_dir_at(ws, tl_rel)
         return reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file)
     except BaseException:
-        # Rollback is best-effort and must never mask the refusal it is cleaning up after.
         try:
             if created_tl:
-                bridge.remove_tree_at(ws, timeline_rel(name))
+                bridge.remove_tree_at(ws, tl_rel)
                 bridge.unlink_at(ws, AGENTS_REL / name)
             if created_def:
                 bridge.unlink_at(ws, AGENTS_REL / f"{name}.md")
+                try:
+                    bridge.unlink_at(ws, AGENTS_REL)
+                    bridge.unlink_at(ws, AGENTS_REL.parent)
+                except (OSError, bridge.BridgeError):
+                    pass
         except (OSError, bridge.BridgeError):
             pass
         raise
 
 
-def remove(ws, name, delete_timeline=False, pin=None):
-    """Desired-state edit (definition gone, timeline optionally gone) + reconcile."""
+def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_file=None):
+    """Preflight → two-store transaction → definition → timeline, journaled for roll-forward."""
     ws = Path(ws)
+    bridge.pin_root(ws)
+    recover(ws)
     if not NAME_RE.match(name or ""):
         raise AdvisorError(f"advisor name {name!r} is not a valid MCP server key")
     def_path = ws / AGENTS_REL / f"{name}.md"
     doc = bridge.load_json(ws / MCP_REL)
     owned = is_owned_entry((doc.get("mcpServers") or {}).get(name))
-    if not def_path.is_file() and not owned:
+    timeline_residue = (ws / timeline_rel(name)).is_dir()
+    if not def_path.is_file() and not owned and not timeline_residue:
         state = ("an unowned server of that name exists — not ours to remove"
                  if (doc.get("mcpServers") or {}).get(name) is not None
                  else "no such advisor")
         raise AdvisorError(f"remove {name!r}: {state}")
+
+    # Preflight the full desired plan with the target excluded, before any destructive step.
+    defs = load_definitions(ws)
+    definition_pre = bridge.record_pre_image(def_path) if def_path.is_file() else None
+    defs_after = {k: v for k, v in defs.items() if k != name}
+    toml_before = bridge.read_text_verbatim(ws / TOML_REL)
+    _collision_check(defs_after, doc, toml_before)
+    classified = _classify(ws, defs_after, doc, toml_before, pin, pin_file, pending_file)
+    for other, (state, _, _, detail) in classified.items():
+        if state == "invalid-registration":
+            raise AdvisorError(
+                f"advisor {other!r}: {detail}; pass --pin <exact version> to settle the target — "
+                f"nothing has been removed")
+
+    servers = doc.setdefault("mcpServers", {})
+    toml_text = toml_before
+    report = {}
+    for other, (state, desired_entry, desired_body, _) in classified.items():
+        if state in ("consistent", "registered-undeclared"):
+            continue
+        if desired_entry is None:
+            target = resolve_backend(pin, pin_file=pin_file, pending_file=pending_file)
+            desired_entry = json_entry(defs_after[other], target)
+            desired_body = toml_body(defs_after[other], target)
+        servers[other] = desired_entry
+        toml_text = bridge.toml_server_upsert(toml_text, other, desired_body)
+        report[other] = f"{state}->registered"
+    if is_owned_entry(servers.get(name)):
+        del servers[name]
+    if bridge.toml_server_has(toml_text, name):
+        toml_text = bridge.toml_server_remove(toml_text, name)
+
+    _transact(ws, doc, toml_before, toml_text, defs_after,
+              intent="remove", remove_name=name, delete_timeline=delete_timeline,
+              definition_pre=definition_pre)
     if def_path.is_file():
         bridge.unlink_at(ws, AGENTS_REL / f"{name}.md")
+    _fail_point("definition")
     if delete_timeline:
+        if os.environ.get("VIBE_ADVISOR_FAIL_AFTER") == "timeline-partial":
+            # Simulate an interruption after deletion has begun: remove one leaf, then die.
+            tl = ws / timeline_rel(name)
+            for leaf in sorted(tl.rglob("*")):
+                if leaf.is_file():
+                    bridge.unlink_at(ws, leaf.relative_to(ws))
+                    break
+            os._exit(9)
         delete_timeline_dir(ws, name)
         try:
             bridge.unlink_at(ws, AGENTS_REL / name)
         except (OSError, bridge.BridgeError):
             pass  # the advisor dir holds user files beyond the timeline; leave them
-    report = reconcile(ws, pin=pin)
-    report.setdefault(name, "removed")
+    _fail_point("timeline")
+    bridge.unlink_at(ws, TXN_REL)
+    # A final pass through the shared engine converges the end-state artifacts the deletions
+    # changed after the transaction (the ignore block once the last timeline is gone) and keeps
+    # add and remove on one lifecycle path.
+    report.update(reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file))
+    report[name] = "removed"
     return report
 
 
@@ -521,37 +822,24 @@ def delete_timeline_dir(ws, name):
     return bridge.remove_tree_at(ws, timeline_rel(name))
 
 
-#: Back-compat alias used by tests and the CLI (`delete_timeline(ws, name)`).
+#: Back-compat alias used by tests and the CLI.
 delete_timeline = delete_timeline_dir
 
 
-def list_advisors(ws):
-    """Definitions ⋈ registrations, with a per-advisor state classification."""
+def list_advisors(ws, pin=None, pin_file=None, pending_file=None):
+    """Definitions ⋈ registrations with content-aware state classification (read-only)."""
     ws = Path(ws)
     defs = load_definitions(ws)
     doc = bridge.load_json(ws / MCP_REL)
-    servers = doc.get("mcpServers", {}) if isinstance(doc, dict) else {}
     toml_text = bridge.read_text_verbatim(ws / TOML_REL)
+    classified = _classify(ws, defs, doc, toml_text, pin, pin_file, pending_file)
     rows = []
-    names = sorted(set(defs) | {n for n in servers if is_owned_entry(servers.get(n))}
-                   | {n for n in bridge.toml_owned_names(toml_text)
-                      if n not in bridge.SENTINEL_LITERALS
-                      and not n.startswith(bridge.SENTINEL_PREFIX)})
-    for name in names:
-        in_json = is_owned_entry(servers.get(name))
-        in_toml = bridge.toml_server_has(toml_text, name)
-        if name in defs and in_json and in_toml:
-            state = "consistent"
-        elif name in defs and not in_json and not in_toml:
-            state = "declared-unregistered"
-        elif name in defs:
-            state = "half-registered"
-        else:
-            state = "registered-undeclared"
+    for name, (state, _, _, detail) in sorted(classified.items()):
         defn = defs.get(name)
         rows.append({
             "name": name,
             "state": state,
+            "detail": detail,
             "model": (defn or {}).get("model"),
             "tool_name": (defn or {}).get("tool_name"),
             "max_turns": (defn or {}).get("max_turns"),

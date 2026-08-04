@@ -260,3 +260,23 @@ class TestRetiredCommandNames(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAdvisorCommandContract(unittest.TestCase):
+    """E6.1: /vibe-suite:advisor dispatches advisor_cli.py and documents the load-bearing flows."""
+
+    def setUp(self):
+        self.text = (REPO_ROOT / "commands" / "advisor.md").read_text(encoding="utf-8")
+
+    def test_frontmatter_and_dispatch(self):
+        self.assertTrue(self.text.startswith("---\n"))
+        self.assertIn("description:", self.text)
+        self.assertIn("argument-hint:", self.text)
+        self.assertIn('${CLAUDE_PLUGIN_ROOT}/scripts/advisor_cli.py', self.text)
+        self.assertIn("${ARGUMENTS}", self.text)
+
+    def test_documents_pin_refusal_and_timeline_choice(self):
+        self.assertIn("--pin", self.text)
+        self.assertIn("E7.1", self.text)
+        self.assertIn("--delete-timeline", self.text)
+        self.assertIn("--keep-timeline", self.text)

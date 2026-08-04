@@ -16,6 +16,7 @@
     "codex"
   ],
   "commands": [
+    "./commands/advisor.md",
     "./commands/bridge.md",
     "./commands/bug-analyze.md",
     "./commands/check.md",

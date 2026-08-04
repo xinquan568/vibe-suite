@@ -313,6 +313,17 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
     _history_baseline(ws, STRICTNESS[strictness])
     checkpoint("history-baseline")
 
+    # advisors — converge any pre-declared advisor definitions to registrations (E6.1). A fresh
+    # workspace has none, so this is a no-op there. A refusal (e.g. a declared advisor with the
+    # claude-octopus pin still pending) is surfaced, not fatal: the install itself is complete,
+    # and doctor reports the advisor state until the operator supplies a pin or E7.1 ships one.
+    import advisors
+    try:
+        advisors.reconcile(ws)
+    except bridge.BridgeError as exc:
+        print(f"note: advisor reconcile deferred — {exc}", file=sys.stderr)
+    checkpoint("advisors")
+
 
 def _history_baseline(ws, threshold):
     ws = Path(ws)

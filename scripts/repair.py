@@ -86,8 +86,19 @@ def repair(ws):
         except Exception as exc:
             record(name, f"failed: {exc}")
 
+    # Advisors converge through the same engine add/remove use (E6.1) — the skill's "re-bridge
+    # happens automatically" contract names repair explicitly. A refusal (collision, pending pin
+    # with an unregistered advisor) is a per-step failure like any other.
+    try:
+        import advisors
+        rep = advisors.reconcile(ws)
+        detail = "; ".join(f"{k}: {v}" for k, v in sorted(rep.items()))
+        record("advisors", "ok" + (f" ({detail})" if detail else ""))
+    except Exception as exc:
+        record("advisors", f"failed: {exc}")
+
     return {"steps": steps,
-            "ok": all(s["outcome"] == "ok" or s["outcome"].startswith("skipped") for s in steps)}
+            "ok": all(s["outcome"].startswith(("ok", "skipped")) for s in steps)}
 
 
 def render(report):

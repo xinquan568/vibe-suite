@@ -901,3 +901,28 @@ class RowSixProvenanceDoesNotPublishSecrets(unittest.TestCase):
         dir_mode = stat.S_IMODE(record.parent.lstat().st_mode)
         self.assertEqual(mode & 0o077, 0, f"the record is readable at {oct(mode)}")
         self.assertEqual(dir_mode & 0o077, 0, f"its directory is traversable at {oct(dir_mode)}")
+
+
+class TestAdvisorTeardown(UnbridgeCase):
+    """E6.1: bare-name advisor registrations are inventory-visible, so teardown removes them."""
+
+    def test_marker_and_fence_registrations_are_torn_down(self):
+        self.install()
+        mcp = self.ws / ".mcp.json"
+        doc = json.loads(mcp.read_text())
+        doc.setdefault("mcpServers", {})["probe_advisor"] = {
+            "command": "npx", "args": ["-y", "claude-octopus@9.9.9"], "env": {},
+            "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}
+        mcp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        toml = self.ws / ".codex" / "config.toml"
+        block = ("# >>> vibe-suite:server:probe_advisor v1 >>>\n"
+                 '[mcp_servers.probe_advisor]\ncommand = "npx"\n'
+                 "# <<< vibe-suite:server:probe_advisor <<<\n")
+        toml.parent.mkdir(exist_ok=True)
+        existing = toml.read_text() if toml.is_file() else ""
+        toml.write_text(existing + ("\n" if existing and not existing.endswith("\n") else "") + block)
+        self.assertEqual(self.unbridge("--confirm").returncode, 0)
+        after = json.loads(mcp.read_text()) if mcp.is_file() else {}
+        self.assertNotIn("probe_advisor", (after.get("mcpServers") or {}))
+        if toml.is_file():
+            self.assertNotIn("probe_advisor", toml.read_text())

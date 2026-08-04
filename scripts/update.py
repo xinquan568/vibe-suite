@@ -125,6 +125,16 @@ def run(workspace, plugin_root, env=None, probe_timeout=30):
     except (subprocess.TimeoutExpired, OSError) as exc:
         report.add("bridges", FAIL, f"bridge refresh did not complete: {exc}")
 
+    # Advisors reconcile in every pin state (E6.1) — removal and consistency need no backend, and
+    # the engine resolves one lazily only when a new registration must be written.
+    try:
+        import advisors
+        rep = advisors.reconcile(ws)
+        detail = "; ".join(f"{k}: {v}" for k, v in sorted(rep.items())) or "no advisors"
+        report.add("advisors", OK, detail)
+    except Exception as exc:
+        report.add("advisors", FAIL, str(exc))
+
     if not pin:
         return report
 

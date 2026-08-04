@@ -201,7 +201,8 @@ class TestCollectAndContinue(RepairCase):
         self.install()
         report = json.loads(self.repair().stdout)
         self.assertEqual({s["step"] for s in report["steps"]},
-                         {"config", "memory", "codex", "mcp", "gitignore", "history"})
+                         {"config", "memory", "codex", "mcp", "gitignore", "history",
+                          "advisors"})
 
     def test_a_failing_step_makes_the_exit_non_zero(self):
         self.install()
@@ -256,3 +257,37 @@ class TestCommandWiring(RepairCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAdvisorReconcile(RepairCase):
+    """E6.1: repair converges advisor registrations through the same engine add/remove use."""
+
+    ORPHAN = {"command": "npx", "args": ["-y", "claude-octopus@9.9.9"], "env": {},
+              "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}
+
+    def test_an_orphaned_advisor_registration_is_removed(self):
+        self.install()
+        mcp = self.ws / ".mcp.json"
+        doc = json.loads(mcp.read_text())
+        doc.setdefault("mcpServers", {})["orphan_advisor"] = dict(self.ORPHAN)
+        mcp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        result = self.repair()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        outcome = {s["step"]: s["outcome"] for s in report["steps"]}.get("advisors", "")
+        self.assertTrue(outcome.startswith("ok"), outcome)
+        self.assertIn("registered-undeclared->removed", outcome)
+        after = json.loads(mcp.read_text())
+        self.assertNotIn("orphan_advisor", after.get("mcpServers", {}))
+
+    def test_a_declared_advisor_with_pending_pin_is_a_recorded_failure(self):
+        self.install()
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "probe_advisor.md").write_text(
+            "---\ndescription: |\n  Judges probe things.\nmodel: sonnet\n---\n\nValue truth.\n",
+            encoding="utf-8")
+        report = json.loads(self.repair().stdout)
+        outcome = {s["step"]: s["outcome"] for s in report["steps"]}.get("advisors", "")
+        self.assertTrue(outcome.startswith("failed:"), outcome)
+        self.assertIn("--pin", outcome)

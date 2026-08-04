@@ -274,3 +274,33 @@ class TestReadOnlyStrict(DoctorCase):
         after = {p: (Path(p).stat().st_mode & 0o777) for p in
                  (str(x) for x in self.ws.rglob("*") if x.is_file())}
         self.assertEqual(after, before, "doctor changed a file mode")
+
+
+ADVISOR_DEFN = """---
+description: |
+  Judges probe things.
+model: sonnet
+---
+
+Value the smallest true answer.
+"""
+
+
+class TestAdvisorState(DoctorCase):
+    """E6.1: a non-consistent advisor is a fixable finding — repair reconciles it."""
+
+    def test_a_declared_unregistered_advisor_is_a_fixable_finding(self):
+        self.install()
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "probe_advisor.md").write_text(ADVISOR_DEFN, encoding="utf-8")
+        report = self.report()
+        rows = [f for f in report["findings"] if f["check"] == "advisor-state"]
+        self.assertEqual(len(rows), 1, report["findings"])
+        self.assertTrue(rows[0]["auto_fixable"])
+        self.assertIn("declared-unregistered", rows[0]["finding"])
+
+    def test_a_consistent_workspace_has_no_advisor_finding(self):
+        self.install()
+        report = self.report()
+        self.assertEqual([f for f in report["findings"] if f["check"] == "advisor-state"], [])

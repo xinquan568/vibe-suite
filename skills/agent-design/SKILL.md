@@ -7,8 +7,8 @@ description: Design advisor agents — file format, value-driven system prompts,
 
 An advisor agent is a project-scoped consultative persona: a markdown file that gives
 one stable point of view its own system prompt, its own tool restrictions, and its own
-model tier. Advisor files live at `.vibe-suite/agents/<name>.md`. A bridge script
-(`scripts/bridge_agents.py`) makes each advisor callable from either client as
+model tier. Advisor files live at `.vibe-suite/agents/<name>.md`. The advisor engine
+(`scripts/advisor_cli.py`) makes each advisor callable from either client as
 `mcp__<name>__<tool_name>` by registering it as an MCP server twice over — in
 `.mcp.json` for Claude and in `.codex/config.toml` for Codex.
 
@@ -254,7 +254,8 @@ as an English action. Good verbs: consult, check, review, audit.
 
 ## Concrete starting points
 
-Ready-made presets ship in `templates/agents/` — copy and edit rather than starting
+Ready-made presets ship in `templates/advisors/` — add one with
+`/vibe-suite:advisor add <preset>` and edit, rather than starting
 from a blank file:
 
 - `north_star_advisor` — holds work to the project's overarching priorities
@@ -272,14 +273,12 @@ you change — the values you edit, the `cwd` you narrow, the tool list you tigh
 Edits to an advisor file do not take effect on their own — re-run the bridge:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/init.sh"
-# or directly:
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/bridge_agents.py"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/advisor_cli.py" --workspace . reconcile
 ```
 
-Bridging happens automatically inside `/vibe-suite:add-agent` and
-`/vibe-suite:remove-agent`; the normal flow of `/vibe-suite:repair` and
-`/vibe-suite:update` includes a re-bridge as well.
+Reconciliation happens automatically inside `/vibe-suite:advisor add` and
+`/vibe-suite:advisor remove`; init, `/vibe-suite:repair` and `/vibe-suite:update`
+run the same reconcile as part of their normal flow.
 
 Propagation differs by client: Claude reads `.mcp.json` at session startup, so a new
 or renamed advisor appears only after a session restart; Codex re-reads
@@ -295,5 +294,6 @@ This skill covers advisor agents only. It does not cover:
 - **Skill authoring** — a separate discipline with its own conventions.
 - **Writing an MCP server from scratch** — the advisor backend *is* the server; this
   skill only configures it per advisor.
-- **Bridge mechanics** — deferred to `scripts/bridge_agents.py` and the init,
-  repair, and update commands that invoke it.
+- **Bridge mechanics** — deferred to `scripts/advisor_cli.py` (and
+  `scripts/lib/advisors.py`) and the init, repair, and update flows that invoke
+  the same reconcile.

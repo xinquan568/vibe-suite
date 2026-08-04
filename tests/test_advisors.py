@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: ISC
+"""Advisor lifecycle: ownership, registration content, round-trip, reconciliation (E6.1 / vibe-47).
+
+The acceptance criterion is behavioral — "add→list→remove round-trip leaves both config files
+sentinel-clean" — so these tests assert byte identity, not just parsed equality, wherever the
+design promises it: always for `.codex/config.toml` (textual fence codec), for canonical
+`.mcp.json` pre-images, and for noncanonical pre-images untouched between add and remove (the
+pre-image ledger restores the exact bytes). A registration must also be *real*: the entry's
+command, args, marker, and environment are pinned exactly, because a round trip of removable
+placeholders would pass a naive round-trip test while delivering nothing.
+"""
+
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+import advisors  # noqa: E402
+import bridge  # noqa: E402
+
+PIN = "9.9.9"
+
+
+def make_ws(mcp=None, toml=None):
+    ws = Path(tempfile.mkdtemp(prefix="advisor-ws-"))
+    if mcp is not None:
+        (ws / ".mcp.json").write_text(mcp, encoding="utf-8")
+    if toml is not None:
+        (ws / ".codex").mkdir(exist_ok=True)
+        (ws / ".codex" / "config.toml").write_text(toml, encoding="utf-8")
+    return ws
+
+
+def defn_text(name="probe_advisor", model="sonnet", extra=""):
+    return (
+        "---\n"
+        "description: |\n"
+        f"  Judges {name} things.\n"
+        "  <example>\n"
+        "  Context: draft done.\n"
+        '  user: "Check this?"\n'
+        f'  assistant: "I\'ll consult {name}."\n'
+        "  </example>\n"
+        "  <example>\n"
+        "  Context: rename sweep.\n"
+        '  user: "Names ok?"\n'
+        f'  assistant: "Consulting {name}."\n'
+        "  </example>\n"
+        f"model: {model}\n"
+        "max_turns: 4\n"
+        "max_budget_usd: 0.40\n"
+        f"{extra}"
+        "---\n"
+        "\n"
+        "Value the smallest true answer.\n"
+    )
+
+
+def add_definition(ws, name="probe_advisor", **kw):
+    d = ws / ".vibe-suite" / "agents"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.md").write_text(defn_text(name=name, **kw), encoding="utf-8")
+
+
+class TestOwnership(unittest.TestCase):
+    def test_marker_entry_is_owned_and_enumerated(self):
+        doc = {"mcpServers": {
+            "my_advisor": {"command": "npx", "_vibe-suite_owned": {"kind": "advisor", "schema": 1}},
+            "foreign": {"command": "x"},
+        }}
+        self.assertTrue(advisors.is_owned_entry(doc["mcpServers"]["my_advisor"]))
+        self.assertFalse(advisors.is_owned_entry(doc["mcpServers"]["foreign"]))
+        self.assertEqual(bridge.owned_names(doc), ["my_advisor"])
+
+    def test_malformed_marker_is_unowned(self):
+        for bad in (1, True, "advisor", {}, {"kind": "advisor"}, {"kind": "other", "schema": 1},
+                    {"kind": "advisor", "schema": 2}, None):
+            entry = {"command": "npx", "_vibe-suite_owned": bad}
+            self.assertFalse(advisors.is_owned_entry(entry), f"marker {bad!r} wrongly owned")
+        self.assertEqual(bridge.owned_names(
+            {"mcpServers": {"a": {"command": "x", "_vibe-suite_owned": "advisor"}}}), [])
+
+    def test_fenced_toml_name_is_enumerated(self):
+        text = ("# user content\n"
+                "# >>> vibe-suite:server:my_advisor v1 >>>\n"
+                '[mcp_servers.my_advisor]\ncommand = "npx"\n'
+                "# <<< vibe-suite:server:my_advisor <<<\n"
+                '[mcp_servers.foreign]\ncommand = "y"\n')
+        self.assertIn("my_advisor", bridge.toml_owned_names(text))
+        self.assertNotIn("foreign", bridge.toml_owned_names(text))
+
+    def test_literal_and_prefix_recognition_unchanged(self):
+        doc = {"mcpServers": {"vibe-mcp": {"command": "a"},
+                              "vibe-agent:x": {"command": "b"},
+                              "plain": {"command": "c"}}}
+        self.assertEqual(bridge.owned_names(doc), ["vibe-agent:x", "vibe-mcp"])
+
+
+class TestDefinitionValidation(unittest.TestCase):
+    def test_defaults_applied(self):
+        d = advisors.parse_definition(defn_text(), "probe_advisor.md")
+        self.assertEqual(d["name"], "probe_advisor")
+        self.assertEqual(d["tool_name"], "probe_advisor_consult")
+        self.assertEqual(d["allowed_tools"], ["Read", "Grep", "Glob"])
+        self.assertEqual(d["max_turns"], 4)
+        self.assertEqual(d["prompt_mode"], "append")
+        self.assertEqual(d["cwd"], ".")
+        self.assertIn("smallest true answer", d["body"])
+
+    def test_versioned_model_id_rejected(self):
+        for bad in ("claude-opus-5", "gpt-5", "opus-20250101"):
+            with self.assertRaises(advisors.AdvisorError):
+                advisors.parse_definition(defn_text(model=bad), "probe_advisor.md")
+
+    def test_invalid_name_and_missing_description_rejected(self):
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.parse_definition(defn_text(), "bad name!.md")
+        no_desc = "---\nmodel: sonnet\n---\nbody\n"
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.parse_definition(no_desc, "probe_advisor.md")
+
+
+class TestRegistrationContent(unittest.TestCase):
+    def setUp(self):
+        self.defn = advisors.parse_definition(defn_text(), "probe_advisor.md")
+
+    def test_json_entry_exact(self):
+        entry = advisors.json_entry(self.defn, f"claude-octopus@{PIN}")
+        self.assertEqual(entry["command"], "npx")
+        self.assertEqual(entry["args"], ["-y", f"claude-octopus@{PIN}"])
+        self.assertEqual(entry["_vibe-suite_owned"], {"kind": "advisor", "schema": 1})
+        env = entry["env"]
+        self.assertEqual(env["CLAUDE_SERVER_NAME"], "probe_advisor")
+        self.assertEqual(env["CLAUDE_TOOL_NAME"], "probe_advisor_consult")
+        self.assertEqual(env["CLAUDE_MODEL"], "sonnet")
+        self.assertEqual(env["CLAUDE_MAX_TURNS"], "4")
+        self.assertEqual(env["CLAUDE_MAX_BUDGET_USD"], "0.40")
+        self.assertEqual(env["CLAUDE_ALLOWED_TOOLS"], "Read,Grep,Glob")
+        self.assertEqual(env["CLAUDE_TIMELINE_DIR"], ".vibe-suite/agents/probe_advisor/timeline")
+        self.assertIn("smallest true answer", env["CLAUDE_APPEND_PROMPT"])
+        self.assertNotIn("CLAUDE_SYSTEM_PROMPT", env)
+
+    def test_replace_mode_uses_system_prompt(self):
+        d = advisors.parse_definition(defn_text(extra="prompt_mode: replace\n"),
+                                      "probe_advisor.md")
+        env = advisors.json_entry(d, f"claude-octopus@{PIN}")["env"]
+        self.assertIn("CLAUDE_SYSTEM_PROMPT", env)
+        self.assertNotIn("CLAUDE_APPEND_PROMPT", env)
+
+    def test_toml_block_exact(self):
+        body = advisors.toml_body(self.defn, f"claude-octopus@{PIN}")
+        self.assertIn('[mcp_servers.probe_advisor]', body)
+        self.assertIn('command = "npx"', body)
+        self.assertIn(f'args = ["-y", "claude-octopus@{PIN}"]', body)
+        self.assertIn("startup_timeout_sec = 60", body)
+        self.assertIn("tool_timeout_sec = 900", body)
+        self.assertIn('[mcp_servers.probe_advisor.env]', body)
+        self.assertIn('CLAUDE_SERVER_NAME = "probe_advisor"', body)
+
+
+class TestPinResolution(unittest.TestCase):
+    def test_explicit_pin_wins_and_is_validated(self):
+        self.assertEqual(advisors.resolve_backend("1.2.3"), "claude-octopus@1.2.3")
+        for bad in ("latest", "^1.2.0", "1.x", ""):
+            with self.assertRaises(advisors.AdvisorError):
+                advisors.resolve_backend(bad)
+
+    def test_pending_without_pin_refuses_naming_remedies(self):
+        with tempfile.TemporaryDirectory() as td:
+            pending = Path(td) / "p.pending"
+            pending.write_text("pending\n")
+            with self.assertRaises(advisors.AdvisorError) as ctx:
+                advisors.resolve_backend(None, pin_file=Path(td) / "p.txt", pending_file=pending)
+            msg = str(ctx.exception)
+            self.assertIn("--pin", msg)
+            self.assertIn("E7.1", msg)
+
+    def test_pin_file_default_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            pin = Path(td) / "p.txt"
+            pin.write_text("2.0.1\n")
+            got = advisors.resolve_backend(None, pin_file=pin, pending_file=Path(td) / "nope")
+            self.assertEqual(got, "claude-octopus@2.0.1")
+
+
+CANONICAL_FOREIGN = json.dumps(
+    {"mcpServers": {"foreign": {"command": "x"}}}, indent=2, sort_keys=True) + "\n"
+NONCANONICAL_FOREIGN = '{ "mcpServers": {\n      "foreign":   {"command":"x"}  } }\n'
+TOML_FOREIGN = '# my notes\n[mcp_servers.foreign]\ncommand = "y"\n'
+
+
+class TestRoundTrip(unittest.TestCase):
+    def run_round(self, mcp_seed):
+        ws = make_ws(mcp=mcp_seed, toml=TOML_FOREIGN)
+        add_definition(ws)
+        before_mcp = (ws / ".mcp.json").read_bytes()
+        before_toml = (ws / ".codex" / "config.toml").read_bytes()
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        doc = json.loads((ws / ".mcp.json").read_text())
+        self.assertIn("probe_advisor", doc["mcpServers"])
+        self.assertTrue((ws / ".vibe-suite" / "agents" / "probe_advisor" / "timeline").is_dir())
+        rows = advisors.list_advisors(ws)
+        self.assertEqual([r["name"] for r in rows], ["probe_advisor"])
+        self.assertEqual(rows[0]["state"], "consistent")
+        advisors.remove(ws, "probe_advisor", delete_timeline=True)
+        return ws, before_mcp, before_toml
+
+    def test_canonical_json_byte_restored(self):
+        ws, before_mcp, before_toml = self.run_round(CANONICAL_FOREIGN)
+        self.assertEqual((ws / ".mcp.json").read_bytes(), before_mcp)
+        self.assertEqual((ws / ".codex" / "config.toml").read_bytes(), before_toml)
+        self.assertFalse((ws / ".vibe-suite" / "agents" / "probe_advisor").exists())
+
+    def test_noncanonical_json_byte_restored_when_untouched(self):
+        ws, before_mcp, before_toml = self.run_round(NONCANONICAL_FOREIGN)
+        self.assertEqual((ws / ".mcp.json").read_bytes(), before_mcp)
+        self.assertEqual((ws / ".codex" / "config.toml").read_bytes(), before_toml)
+
+    def test_edited_between_falls_back_to_canonical_semantics(self):
+        ws = make_ws(mcp=NONCANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        doc = json.loads((ws / ".mcp.json").read_text())
+        doc["mcpServers"]["user_added"] = {"command": "z"}
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        advisors.remove(ws, "probe_advisor", delete_timeline=True)
+        after = json.loads((ws / ".mcp.json").read_text())
+        self.assertEqual(set(after["mcpServers"]), {"foreign", "user_added"})
+        self.assertEqual(bridge.owned_names(after), [])
+
+    def test_keep_timeline(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        tl = ws / ".vibe-suite" / "agents" / "probe_advisor" / "timeline"
+        (tl / "note.md").write_text("history\n")
+        advisors.remove(ws, "probe_advisor", delete_timeline=False)
+        self.assertTrue((tl / "note.md").is_file())
+
+
+class TestTransactionality(unittest.TestCase):
+    def test_second_store_failure_rolls_back_first(self):
+        ws = make_ws(mcp=NONCANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        before = (ws / ".mcp.json").read_bytes()
+        real = advisors._write_toml_store
+        try:
+            def boom(*a, **k):
+                raise bridge.BridgeError("injected failure")
+            advisors._write_toml_store = boom
+            with self.assertRaises(bridge.BridgeError):
+                advisors.add(ws, "probe_advisor", pin=PIN)
+        finally:
+            advisors._write_toml_store = real
+        self.assertEqual((ws / ".mcp.json").read_bytes(), before)
+        self.assertFalse((ws / ".vibe-suite" / "agents" / "probe_advisor" / "timeline").exists())
+
+
+class TestCollisions(unittest.TestCase):
+    def test_foreign_name_refused_nothing_written(self):
+        for mcp, toml in (
+            (json.dumps({"mcpServers": {"probe_advisor": {"command": "x"}}}) + "\n", TOML_FOREIGN),
+            (CANONICAL_FOREIGN, '[mcp_servers.probe_advisor]\ncommand = "y"\n'),
+        ):
+            ws = make_ws(mcp=mcp, toml=toml)
+            add_definition(ws)
+            before_mcp = (ws / ".mcp.json").read_bytes()
+            before_toml = (ws / ".codex" / "config.toml").read_bytes()
+            with self.assertRaises(advisors.AdvisorError):
+                advisors.add(ws, "probe_advisor", pin=PIN)
+            self.assertEqual((ws / ".mcp.json").read_bytes(), before_mcp)
+            self.assertEqual((ws / ".codex" / "config.toml").read_bytes(), before_toml)
+
+    def test_owned_re_add_is_idempotent(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        first = (ws / ".mcp.json").read_bytes()
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        self.assertEqual((ws / ".mcp.json").read_bytes(), first)
+
+    def test_remove_unowned_or_absent_refuses(self):
+        ws = make_ws(mcp=json.dumps(
+            {"mcpServers": {"foreign": {"command": "x"}}}) + "\n", toml="")
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.remove(ws, "foreign")
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.remove(ws, "absent")
+
+
+class TestReconcile(unittest.TestCase):
+    def test_states_classified_and_converged(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws, name="declared_only")
+        report = advisors.reconcile(ws, pin=PIN)
+        self.assertEqual(report["declared_only"], "declared-unregistered->registered")
+        doc = json.loads((ws / ".mcp.json").read_text())
+        self.assertIn("declared_only", doc["mcpServers"])
+        toml = (ws / ".codex" / "config.toml").read_text()
+        self.assertIn("declared_only", toml)
+
+    def test_orphan_registration_removed_definitions_kept(self):
+        entry = {"command": "npx", "args": ["-y", f"claude-octopus@{PIN}"],
+                 "_vibe-suite_owned": {"kind": "advisor", "schema": 1}, "env": {}}
+        ws = make_ws(mcp=json.dumps({"mcpServers": {"orphan": entry}}, indent=2,
+                                    sort_keys=True) + "\n", toml="")
+        report = advisors.reconcile(ws, pin=PIN)
+        self.assertEqual(report["orphan"], "registered-undeclared->removed")
+        self.assertEqual(bridge.owned_names(json.loads((ws / ".mcp.json").read_text())), [])
+
+    def test_half_registered_completed(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws, name="halfway")
+        advisors.add(ws, "halfway", pin=PIN)
+        toml_path = ws / ".codex" / "config.toml"
+        text = toml_path.read_text()
+        toml_path.write_text(bridge.text_block_remove(text, "server:halfway"))
+        report = advisors.reconcile(ws, pin=PIN)
+        self.assertEqual(report["halfway"], "half-registered->registered")
+        self.assertIn("halfway", toml_path.read_text())
+
+    def test_add_and_remove_route_through_reconcile(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        calls = []
+        real = advisors.reconcile
+        try:
+            def spy(*a, **k):
+                calls.append("reconcile")
+                return real(*a, **k)
+            advisors.reconcile = spy
+            advisors.add(ws, "probe_advisor", pin=PIN)
+            advisors.remove(ws, "probe_advisor", delete_timeline=True)
+        finally:
+            advisors.reconcile = real
+        self.assertGreaterEqual(len(calls), 2)
+
+
+class TestTimelineDeletion(unittest.TestCase):
+    def test_populated_nested_timeline_removed(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        tl = ws / ".vibe-suite" / "agents" / "probe_advisor" / "timeline"
+        (tl / "deep" / "deeper").mkdir(parents=True)
+        (tl / "deep" / "deeper" / "log.md").write_text("x")
+        advisors.remove(ws, "probe_advisor", delete_timeline=True)
+        self.assertFalse(tl.exists())
+
+    def test_outward_symlink_target_survives(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        victim = ws / "precious.txt"
+        victim.write_text("keep me\n")
+        tl = ws / ".vibe-suite" / "agents" / "probe_advisor" / "timeline"
+        (tl / "escape").symlink_to(victim)
+        advisors.remove(ws, "probe_advisor", delete_timeline=True)
+        self.assertTrue(victim.is_file())
+        self.assertFalse(tl.exists())
+
+    def test_non_timeline_rel_refused(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        with self.assertRaises(bridge.BridgeError):
+            advisors.delete_timeline(ws, "../../etc")
+        with self.assertRaises(bridge.BridgeError):
+            advisors.delete_timeline(ws, "not_a_name/..")
+
+
+class TestGitignoreRule(unittest.TestCase):
+    def test_ignore_block_added_and_user_content_preserved(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        (ws / ".gitignore").write_text("node_modules/\n")
+        add_definition(ws)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        text = (ws / ".gitignore").read_text()
+        self.assertIn("node_modules/", text)
+        self.assertIn(".vibe-suite/agents/*/timeline/", text)
+        self.assertIn("vibe-suite:advisor-ignore", text)
+
+
+class TestTemplates(unittest.TestCase):
+    TUPLES = {
+        "north_star_advisor": ("opus", 5, "0.50"),
+        "security_skeptic": ("opus", 5, "0.50"),
+        "deletion_advocate": ("sonnet", 5, "0.30"),
+        "clarity_reviewer": ("sonnet", 3, "0.20"),
+        "simplicity_advocate": ("sonnet", 3, "0.20"),
+        "documentation_critic": ("sonnet", 3, "0.20"),
+    }
+    VALUES = {
+        "north_star_advisor": "priorit",
+        "security_skeptic": "adversar",
+        "deletion_advocate": "delet",
+        "clarity_reviewer": "readab",
+        "simplicity_advocate": "simpl",
+        "documentation_critic": "document",
+    }
+
+    def test_six_presets_pinned_to_contract(self):
+        tdir = REPO_ROOT / "templates" / "advisors"
+        found = sorted(p.stem for p in tdir.glob("*.md"))
+        self.assertEqual(found, sorted(self.TUPLES))
+        for name, (tier, turns, budget) in self.TUPLES.items():
+            text = (tdir / f"{name}.md").read_text(encoding="utf-8")
+            d = advisors.parse_definition(text, f"{name}.md")
+            self.assertEqual(d["model"], tier, name)
+            self.assertEqual(d["max_turns"], turns, name)
+            self.assertEqual(f'{d["max_budget_usd"]}', budget, name)
+            self.assertEqual(d["allowed_tools"], ["Read", "Grep", "Glob"], name)
+            self.assertEqual(text.count("<example>"), 2, name)
+            self.assertIn(self.VALUES[name], d["body"].lower(), name)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -94,6 +94,11 @@ def mirror_mcp(ws, report):
             continue
         if spec.get("command") == "vibe-suite":
             continue                      # mirroring our own registration would recurse
+        if bridge.advisor_owned_entry(spec):
+            # Advisors have one writer: the advisor path registers them in BOTH stores in full
+            # (E6.1). Mirroring one here would emit a names-only copy of an entry the owner
+            # already wrote — a duplicate table or a stripped registration, depending on order.
+            continue
         env = spec.get("env")
         declares_env = bool(env)
         if declares_env and _name_repeats_a_value(name, env):

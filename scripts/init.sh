@@ -39,7 +39,7 @@ confirm_sentinels="" non_interactive=0 list_owned=0 list_checkpoints=0
 #: Every bridge step, in order. Each is a checkpoint boundary, so `VIBE_FAIL_AFTER` can interrupt
 #: between any two and the re-run must converge.
 CHECKPOINTS="survey provenance migrate-config migrate-history migrate-state migrate-sentinels \
-config-fill memory codex mcp gitignore history-baseline"
+config-fill memory codex mcp gitignore history-baseline advisors"
 
 while [ $# -gt 0 ]; do
     case "$1" in

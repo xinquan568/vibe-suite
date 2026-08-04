@@ -360,3 +360,23 @@ class Manifest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAdvisorReconcileStage(unittest.TestCase):
+    """E6.1: update reconciles advisors in every pin state; removal needs no backend."""
+
+    def test_orphan_removed_and_stage_reported(self):
+        ws = Path(tempfile.mkdtemp(prefix="vibe-update-advisors-"))
+        self.addCleanup(__import__("shutil").rmtree, ws, ignore_errors=True)
+        orphan = {"command": "npx", "args": ["-y", "claude-octopus@9.9.9"], "env": {},
+                  "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}
+        (ws / ".mcp.json").write_text(json.dumps(
+            {"mcpServers": {"orphan_advisor": orphan}}, indent=2, sort_keys=True) + "\n")
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import update as update_mod
+        report = update_mod.run(ws, REPO_ROOT, probe_timeout=1)
+        stages = {s["stage"]: s for s in report.stages}
+        self.assertIn("advisors", stages)
+        self.assertIn("registered-undeclared->removed", stages["advisors"]["detail"])
+        after = json.loads((ws / ".mcp.json").read_text())
+        self.assertNotIn("orphan_advisor", after.get("mcpServers", {}))

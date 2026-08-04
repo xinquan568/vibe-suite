@@ -34,8 +34,16 @@ O_NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
 SENTINEL_LITERALS = ("vibe-mcp", "vibe-claude-mcp")
 SENTINEL_PREFIX = "vibe-agent:"
 
+#: Advisor ownership is structural, not nominal (E6.1 / vibe-47): an advisor registers under its
+#: bare name — the skill's `mcp__<name>__<tool_name>` callable identity requires the server key to
+#: BE the name — so the claim of ownership travels inside the entry, exactly as owned hook entries
+#: carry theirs. Only this exact marker value is a claim; anything else is a user's key.
+ADVISOR_MARKER_KEY = f"_{MARKER}_owned"
+ADVISOR_MARKER = {"kind": "advisor", "schema": SCHEMA}
+
 OWNED_BLOCKS = (("AGENTS.md", "memory", "md"), ("CLAUDE.md", "import", "md"),
                 ("GEMINI.md", "import", "md"), (".gitignore", "ignore", "text"),
+                (".gitignore", "advisor-ignore", "text"),
                 (".codex/config.toml", "server:vibe-mcp", "text"))
 
 
@@ -202,6 +210,56 @@ def unlink_at(root, rel):
         return True
     finally:
         os.close(fd)
+
+
+def remove_tree_at(root, rel):
+    """Recursively remove the directory at `root/rel` through the audited descent.
+
+    Every destructive step is descriptor-relative with `O_NOFOLLOW`: a symlink inside the tree is
+    unlinked as a link — its target is never opened, so a link pointing outward cannot export the
+    deletion. A `rel` that is itself a symlink is refused rather than followed, and a `rel` with
+    dot/dotdot components never reaches the walk. Returns False when nothing exists at `rel`.
+    """
+    import stat as _stat
+    rel = Path(rel)
+    assert_root(root)
+    assert_inside(root, Path(root) / rel)
+    if not rel.parts or any(p in ("", ".", "..") for p in rel.parts):
+        raise BridgeError(f"{rel} is not a plain workspace-relative directory path; refusing")
+    # Read-only existence probe by path: the destructive walk below is fd-relative regardless, and
+    # probing first keeps `_open_dir_chain` from creating parents for a tree that is not there.
+    if not os.path.lexists(os.path.join(str(root), str(rel))):
+        return False
+    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        info = os.lstat(rel.name, dir_fd=fd)
+        if _stat.S_ISLNK(info.st_mode):
+            raise BridgeError(f"{Path(root) / rel} is a symlink; refusing to remove a tree "
+                              "through it")
+        if not _stat.S_ISDIR(info.st_mode):
+            raise BridgeError(f"{Path(root) / rel} is not a directory; unlink_at removes files")
+        _remove_tree_fd(fd, rel.name)
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
+def _remove_tree_fd(parent_fd, name):
+    """Depth-first removal relative to an already-proven directory descriptor."""
+    import stat as _stat
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | O_NOFOLLOW_FLAG, dir_fd=parent_fd)
+    try:
+        for entry in os.listdir(fd):
+            info = os.lstat(entry, dir_fd=fd)
+            if _stat.S_ISDIR(info.st_mode):
+                _remove_tree_fd(fd, entry)
+            else:
+                os.unlink(entry, dir_fd=fd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
 
 
 #: Identity of each workspace root this process has opened, so a mid-run replacement is detected
@@ -634,6 +692,13 @@ def toml_owned_names(text):
             continue          # a subtable is not a registration
         if name in SENTINEL_LITERALS or name.startswith(SENTINEL_PREFIX):
             found.add(name)
+    # A bare-name advisor block is owned by its fence, not its name: the `server:<name>` markers
+    # `toml_server_upsert` writes are the TOML-side twin of the JSON entry's advisor marker.
+    for fenced in re.findall(
+            rf"^# >>> {re.escape(MARKER)}:server:(.+?) v\d+ >>>$", text, re.M):
+        if re.search(r"^\s*\[mcp_servers\.(?:%s|\"%s\")(?:\.[^]]+)?\]\s*$"
+                     % (re.escape(fenced), re.escape(fenced)), text, re.M):
+            found.add(fenced)
     return sorted(found)
 
 
@@ -673,11 +738,21 @@ def inventory_enumerate(root):
     return sorted(names)
 
 
+def advisor_owned_entry(entry):
+    """Whether a server entry carries the exact advisor ownership marker.
+
+    Exact-match on purpose: a malformed or truncated marker is a user's key we must not claim,
+    because claiming it makes teardown delete an entry the suite never wrote.
+    """
+    return isinstance(entry, dict) and entry.get(ADVISOR_MARKER_KEY) == ADVISOR_MARKER
+
+
 def owned_names(doc):
-    """Every suite-owned server name in a parsed `.mcp.json`: the literals plus every concrete
-    member of the `vibe-agent:` family."""
+    """Every suite-owned server name in a parsed `.mcp.json`: the literals, every concrete member
+    of the `vibe-agent:` family, and every bare-name entry carrying the advisor marker."""
     servers = doc.get("mcpServers", {}) if isinstance(doc, dict) else {}
-    found = [n for n in servers if n in SENTINEL_LITERALS or n.startswith(SENTINEL_PREFIX)]
+    found = [n for n in servers if n in SENTINEL_LITERALS or n.startswith(SENTINEL_PREFIX)
+             or advisor_owned_entry(servers[n])]
     return sorted(found)
 
 

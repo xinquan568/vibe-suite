@@ -251,6 +251,23 @@ def check_retired_names(plugin_root, out):
                            f"{rel} carries retired namespaces: {', '.join(names)}", False))
 
 
+def check_advisors(ws, out):
+    """Advisor registration state (E6.1). Every non-consistent state is auto-fixable — a
+    no-prompt `/vibe-suite:repair` runs the same `reconcile` that add/remove use — except when the
+    inventory itself is unreadable, which needs a human."""
+    import advisors
+    try:
+        for row in advisors.list_advisors(ws):
+            if row["state"] != "consistent":
+                out.append(finding("[MEDIUM]", "advisor-state",
+                                   f"advisor '{row['name']}' is {row['state']}; "
+                                   "/vibe-suite:repair reconciles registrations to definitions",
+                                   True))
+    except bridge.BridgeError as exc:
+        out.append(finding("[HIGH]", "advisor-state",
+                           f"advisor inventory unreadable: {exc}", False))
+
+
 def check_provenance(ws, state, out):
     if state != "partial":
         return
@@ -298,6 +315,7 @@ def diagnose(ws):
         pin_status = check_pins(ws, findings)
         check_config(ws, findings)
         check_provenance(ws, state, findings)
+        check_advisors(ws, findings)
     check_retired_names(HERE.parent, findings)
 
     if state != "uninitialised" and pin_status == "no-version-recorded":

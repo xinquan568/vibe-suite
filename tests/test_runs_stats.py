@@ -228,3 +228,37 @@ class TestArtifactPosture(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProfileIdentityEnforcement(RunsTreeCase):
+    """Step-8 finding: the anchored pattern must bind authoritative ids, not just the
+    folder fallback. Metadata ids that mismatch are warned and ignored (data is
+    warn-never-abort); ad-hoc --ticket tokens are operator input and refuse; legacy
+    records keep their pre-profile ids."""
+
+    def test_mismatched_metadata_ids_are_not_grouped(self):
+        r = run_gen(self.work, "--tz", "Asia/Shanghai",
+                    "--id-pattern", r"^other-(\d+)$", "--reset-history")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"parse warnings: 2",
+                         "vibe-90 and vibe-91 metadata ids must be warned and ignored")
+
+    def test_matching_pattern_produces_no_mismatch_warnings(self):
+        r = self.canonical()
+        self.assertRegex(r.stdout, r"parse warnings: 0")
+
+    def test_adhoc_ticket_not_matching_pattern_refuses(self):
+        self.canonical()
+        r = self.canonical("--ticket", "OTHER-9", "--out", str(self.work / "x.html"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--id-pattern", r.stderr)
+        self.assertEqual(r.stdout, "")
+
+    def test_legacy_ids_stay_exempt(self):
+        work2 = Path(tempfile.mkdtemp(prefix="runs-tree-lex-"))
+        self.addCleanup(shutil.rmtree, work2, ignore_errors=True)
+        shutil.copytree(FIXTURE / "runs", work2 / "runs")
+        r = run_gen(work2, "--tz", "Asia/Shanghai", "--id-pattern", ID_PATTERN,
+                    "--include-legacy")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("QQ-1", (work2 / "runs" / "_reports" / "all-time.html").read_text())

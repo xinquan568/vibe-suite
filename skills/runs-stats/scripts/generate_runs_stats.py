@@ -486,8 +486,23 @@ def build_execution_run(run_dir, rtype, parent_id, warnings):
     # metadata precedence: 00-meta -> manifest -> path-derived -> state
     sub = manifest.get("subtask") or {}
     parent_src = manifest.get("parent_source") or {}
-    source_id = (meta.get("source_id") or sub.get("id") or (legacy or {}).get("ticket_key")
-                 or ticket_key_from(name))
+
+    def profile_id(value):
+        # An authoritative metadata id counts only when it matches the profile pattern
+        # (D3/F8.5 — anchored whole-id match); a mismatch is warned and ignored so the
+        # folder-name fallback, or "(unknown)", takes over. Legacy records are exempt:
+        # their ids predate any profile.
+        if not value:
+            return None
+        value = str(value)
+        if ID_RE and not ID_RE.fullmatch(value):
+            warnings.append(f"id-pattern-mismatch: {name}: metadata id {value!r} "
+                            "does not match --id-pattern; ignored")
+            return None
+        return value
+
+    source_id = (profile_id(meta.get("source_id")) or profile_id(sub.get("id"))
+                 or (legacy or {}).get("ticket_key") or ticket_key_from(name))
     title = meta.get("source_title") or sub.get("title") or ""
     source_url = meta.get("source_url") or sub.get("url") or parent_src.get("url") or ""
     scenario = meta.get("scenario") or manifest.get("scenario") or "unknown"
@@ -1500,6 +1515,13 @@ def main():
 
     # ----- ad-hoc filtered mode: single --out report, never touches the canonical store (G1)
     if args.ticket or args.scenario or args.since or args.until:
+        if args.ticket:
+            bad = [tok.strip() for tok in args.ticket.split(",")
+                   if tok.strip() and not ID_RE.fullmatch(tok.strip())]
+            if bad:
+                print("runs-stats: --ticket value(s) " + ", ".join(repr(b) for b in bad)
+                      + f" do not match --id-pattern {args.id_pattern!r}", file=sys.stderr)
+                raise SystemExit(2)
         tickets_filter = set(t.strip().upper() for t in args.ticket.split(",")) if args.ticket else None
         scen_filter = set(s.strip() for s in args.scenario.split(",")) if args.scenario else None
 

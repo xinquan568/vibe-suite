@@ -1,0 +1,10 @@
+{
+  "_invocation": "gh pr view {n} --repo {repo_id} --json state",
+  "_docs": "https://cli.github.com/manual/gh_pr_view",
+  "_observation": "the state probe itself failed; only this call counts toward exit 6",
+  "http_status": 502,
+  "headers": {},
+  "body": "",
+  "exit_code": 1,
+  "stderr": "HTTP 502: Bad gateway"
+}

@@ -1,0 +1,24 @@
+{
+  "_invocation": "gh pr view {n} --repo {repo_id} --json statusCheckRollup",
+  "_docs": "https://cli.github.com/manual/gh_pr_view",
+  "_observation": "one completed check failed; the rollup mixes CheckRun (.conclusion) and StatusContext (.state)",
+  "http_status": 200,
+  "headers": {},
+  "body": {
+    "statusCheckRollup": [
+      {
+        "name": "test",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "lint",
+        "conclusion": "FAILURE"
+      },
+      {
+        "context": "legacy",
+        "state": "SUCCESS"
+      }
+    ]
+  },
+  "exit_code": 0
+}

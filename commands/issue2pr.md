@@ -1,6 +1,6 @@
 ---
 description: "Drive a tracked work item to a reviewed pull request through a nine-step, three-phase pipeline: analyze, plan, execute, each a worker pass followed by an independent review and a bounded update-and-verify loop. Every project-bound fact comes from a profile, so the same machinery works on any repository that delivers through reviewed pull requests. Ships with no usable profile; a run without one refuses and points at the scaffolder. Arguments: a work-item id, plus --profile, --review-mode, --max-review-rounds --scenario, and --allow-self-review for the same-model escape, or a subcommand."
-argument-hint: "<item-id> [--profile <id>] [--review-mode none|single|full] [--max-review-rounds N] [--scenario auto|new-feature|bug-fix|docs] [--allow-self-review] | profile init | resume <run-id> | list"
+argument-hint: "<item-id> [--profile <id>] [--review-mode none|single|full] [--max-review-rounds N] [--scenario auto|new-feature|bug-fix|docs] [--allow-self-review] | profile init | chain <item-id>... | resume <run-id> | iterate <run-id> | list"
 ---
 
 # /vibe-suite:issue2pr — a tracked item to a reviewed PR
@@ -41,7 +41,9 @@ profile would be a wrong answer that runs.
 | `--scenario` | overrides scenario detection |
 | `--allow-self-review` | permits a same-model-family review, and authorises the fallback when the backend is unavailable. **Never engages implicitly**; every self-reviewed round is marked in the state and named in the PR's disclosure — see [the contract](../skills/vibe-core/references/reviewer-contract.md#same-model-refusal-and-self-review) |
 
-Subcommands: `profile init`, `resume <run-id>`, `list`.
+Subcommands: `profile init`, `chain <item-id>...`, `resume <run-id>`, `iterate <run-id>`, `list`.
+The four operational modes are defined in
+[operational-modes.md](../skills/issue2pr/references/operational-modes.md).
 
 ## What you get
 

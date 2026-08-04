@@ -1,0 +1,11 @@
+{
+  "_invocation": "gh pr view {n} --repo {repo_id} --json state",
+  "_docs": "https://cli.github.com/manual/gh_pr_view",
+  "_observation": "closed without merging",
+  "http_status": 200,
+  "headers": {},
+  "body": {
+    "state": "CLOSED"
+  },
+  "exit_code": 0
+}

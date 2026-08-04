@@ -95,7 +95,9 @@ protocol; there is no partial conformance, because a caller cannot know which ha
   caller that learns to read it has bound itself to one driver — at which point there is no seam,
   only a habit.
 - **A driver decides nothing.** Whether a new comment should trigger a round, whether a merge should
-  advance a chain — those are the core's. The driver reports; the core acts.
+  advance a chain — those are the core's. The driver reports; the core acts. What the core does with
+  each report is stated in [operational-modes.md](operational-modes.md); the watcher exit→chain
+  action map there is the merge case in full.
 
 ## What the core decides, and what a driver reports
 

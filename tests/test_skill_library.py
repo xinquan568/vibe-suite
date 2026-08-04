@@ -40,6 +40,7 @@ ROSTER = (
     "refine-proposal",
     "roasting",
     "rules",
+    "runs-stats",
     "scoring",
     "security",
     "testing",
@@ -167,7 +168,10 @@ def _skill_md_files():
 
 
 def _skill_tree_files():
-    return sorted(p for p in SKILLS_DIR.rglob("*") if p.is_file())
+    # runs-stats (E6.6) put the first .py under skills/, so interpreter-generated
+    # __pycache__ can appear locally; caches are not part of the shipped tree.
+    return sorted(p for p in SKILLS_DIR.rglob("*")
+                  if p.is_file() and "__pycache__" not in p.parts)
 
 
 class SkillLibraryAcceptance(unittest.TestCase):

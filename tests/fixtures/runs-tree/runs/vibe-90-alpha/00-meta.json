@@ -1,0 +1,9 @@
+{
+  "source_id": "vibe-90",
+  "source_title": "Alpha feature",
+  "scenario": "new-feature",
+  "reviewer_backend": "backend-x",
+  "reviewer_model_target": "model-sentinel-1",
+  "review_mode": "full",
+  "created_at": "2026-07-30T10:00:00+00:00"
+}

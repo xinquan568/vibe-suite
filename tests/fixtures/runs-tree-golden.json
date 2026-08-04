@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "config_key": {
+    "tz": "Asia/Shanghai",
+    "include_archived": false,
+    "include_legacy": false,
+    "id_pattern": "^vibe-(\\d+)$"
+  },
+  "buckets": {
+    "all-time": {
+      "kind": "all-time",
+      "as_of": "2026-08-04 22:00 UTC",
+      "frozen": false,
+      "kpis": {
+        "tasks": 3,
+        "runs": 3,
+        "success": 2,
+        "stopped": 1,
+        "failed": 0,
+        "reviewer_tokens": 1200,
+        "worker_tokens_est": 0,
+        "active_seconds": 900,
+        "prs": 0,
+        "findings": 0,
+        "commits": 0
+      }
+    },
+    "2026-07": {
+      "kind": "month",
+      "as_of": "2026-08-04 22:00 UTC",
+      "frozen": true,
+      "window": "2026-07-01 → 2026-07-31",
+      "sig": "bb888dc61c004515",
+      "kpis": {
+        "tasks": 2,
+        "runs": 2,
+        "success": 2,
+        "stopped": 0,
+        "failed": 0,
+        "reviewer_tokens": 1200,
+        "worker_tokens_est": 0,
+        "active_seconds": 900,
+        "prs": 0,
+        "findings": 0,
+        "commits": 0
+      }
+    },
+    "2026-08": {
+      "kind": "month",
+      "as_of": "2026-08-04 22:00 UTC",
+      "frozen": false,
+      "window": "2026-08-01 → 2026-08-31",
+      "sig": "e8b26817c91e944c",
+      "kpis": {
+        "tasks": 1,
+        "runs": 1,
+        "success": 0,
+        "stopped": 1,
+        "failed": 0,
+        "reviewer_tokens": 0,
+        "worker_tokens_est": 0,
+        "active_seconds": 0,
+        "prs": 0,
+        "findings": 0,
+        "commits": 0
+      }
+    },
+    "2026-W31": {
+      "kind": "week",
+      "as_of": "2026-08-04 22:00 UTC",
+      "frozen": true,
+      "window": "2026-07-27 → 2026-08-02",
+      "sig": "b133fb7d1dc54c6f",
+      "kpis": {
+        "tasks": 3,
+        "runs": 3,
+        "success": 2,
+        "stopped": 1,
+        "failed": 0,
+        "reviewer_tokens": 1200,
+        "worker_tokens_est": 0,
+        "active_seconds": 900,
+        "prs": 0,
+        "findings": 0,
+        "commits": 0
+      }
+    },
+    "2026-07-30": {
+      "kind": "day",
+      "as_of": "2026-08-04 22:00 UTC",
+      "frozen": true,
+      "window": "2026-07-30",
+      "sig": "bb888dc61c004515",
+      "kpis": {
+        "tasks": 2,
+        "runs": 2,
+        "success": 2,
+        "stopped": 0,
+        "failed": 0,
+        "reviewer_tokens": 1200,
+        "worker_tokens_est": 0,
+        "active_seconds": 900,
+        "prs": 0,
+        "findings": 0,
+        "commits": 0
+      }
+    },
+    "2026-08-01": {
+      "kind": "day",
+      "as_of": "2026-08-04 22:00 UTC",
+      "frozen": true,
+      "window": "2026-08-01",
+      "sig": "e8b26817c91e944c",
+      "kpis": {
+        "tasks": 1,
+        "runs": 1,
+        "success": 0,
+        "stopped": 1,
+        "failed": 0,
+        "reviewer_tokens": 0,
+        "worker_tokens_est": 0,
+        "active_seconds": 0,
+        "prs": 0,
+        "findings": 0,
+        "commits": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "_invocation": "gh pr view {n} --repo {repo_id} --json statusCheckRollup",
+  "_docs": "https://cli.github.com/manual/gh_pr_view",
+  "_observation": "every registered check passed; NEUTRAL and SKIPPED count as passing",
+  "http_status": 200,
+  "headers": {},
+  "body": {
+    "statusCheckRollup": [
+      {
+        "name": "test",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "docs",
+        "conclusion": "SKIPPED"
+      },
+      {
+        "context": "legacy",
+        "state": "SUCCESS"
+      }
+    ]
+  },
+  "exit_code": 0
+}

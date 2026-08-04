@@ -46,6 +46,9 @@ PR_TEMPLATE = REPO_ROOT / "skills" / "issue2pr" / "templates" / "pr-body.md"
 ROAMEX = REPO_ROOT / "skills" / "issue2pr" / "examples" / "profiles" / "roamex.md"
 LINT = REPO_ROOT / "scripts" / "profile_lint.py"
 MANIFEST = REPO_ROOT / "scripts" / "profile_manifest.py"
+DRIVER_CONTRACT = REPO_ROOT / "skills" / "issue2pr" / "references" / "driver-contract.md"
+OPERATIONAL_MODES = REPO_ROOT / "skills" / "issue2pr" / "references" / "operational-modes.md"
+WATCH = REPO_ROOT / "scripts" / "watch_pr.py"
 REVIEWER_CONTRACT = REPO_ROOT / "skills" / "vibe-core" / "references" / "reviewer-contract.md"
 
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "issue2pr"
@@ -53,8 +56,20 @@ PROFILES = FIXTURES / "profiles"
 MANIFESTS = FIXTURES / "manifests"
 
 #: The core files. `examples/` and `tests/fixtures/` are excluded by construction: a reference profile
-#: is *required* to contain project values.
-CORE_FILES = (SKILL, CONTRACT_REF, COMMAND, PR_TEMPLATE, LINT, MANIFEST)
+#: is *required* to contain project values. `INVENTORY` is excluded for the same reason from the other
+#: side: it is the inventory *of* the forbidden literals and so contains every one of them.
+CORE_FILES = (SKILL, CONTRACT_REF, COMMAND, PR_TEMPLATE, LINT, MANIFEST,
+              DRIVER_CONTRACT, OPERATIONAL_MODES, WATCH)
+
+#: Everything the port must have produced. Wider than `CORE_FILES` — membership here is "this file
+#: must exist", not "this file must be project-neutral".
+#:
+#: This set is what makes the `if not path.is_file(): continue` guards in the content checks below
+#: safe. A content check has nothing to read in a missing file, so skipping is right *there*; the
+#: defect it used to hide was that nothing asserted the set was complete, so naming a file that did
+#: not exist passed every check silently. `test_every_deliverable_exists` closes that, and it does
+#: **not** skip.
+DELIVERABLES = CORE_FILES + (ROAMEX, INVENTORY)
 
 #: Target-project values that actually passed through this port. Two projects had material in the
 #: source — Roamex, and this repository *as a target* — plus the fixture's.
@@ -120,7 +135,13 @@ def json_block(text, marker):
 
 class TestArtifacts(unittest.TestCase):
     def test_every_deliverable_exists(self):
-        for path in (SKILL, CONTRACT_REF, INVENTORY, COMMAND, PR_TEMPLATE, ROAMEX, LINT, MANIFEST):
+        """The completeness assertion the content checks rely on.
+
+        It iterates `DELIVERABLES` rather than a literal tuple of its own: a second list drifts from
+        the first, and the drift is invisible because both keep passing. Adding a name to
+        `CORE_FILES` before the file exists must fail *here*.
+        """
+        for path in DELIVERABLES:
             with self.subTest(artifact=path.name):
                 self.assertTrue(path.is_file(), f"{path.relative_to(REPO_ROOT)} is missing")
 
@@ -341,13 +362,45 @@ class TestRefusal(unittest.TestCase):
 
 class TestNoPinnedModel(unittest.TestCase):
     def test_no_artifact_names_a_model_id(self):
-        for path in CORE_FILES + (ROAMEX, INVENTORY):
+        for path in DELIVERABLES:
             if not path.is_file():
                 continue
             with self.subTest(artifact=path.name):
                 hits = [l for l in path.read_text(encoding="utf-8").splitlines()
                         if MODEL_PIN.search(l) and "never" not in l.lower()]
                 self.assertEqual(hits, [], f"P9/D6: pinned model id in {path.name}: {hits}")
+
+
+class TestWatcherIsDriven(unittest.TestCase):
+    """The third Executable-tier program, actually run.
+
+    This module's docstring has named `watch_pr.py` as "driven as subprocesses here" since the port.
+    It was not — the file did not exist, and nothing invoked it. A tier claimed and not exercised is
+    the defect vibe-127 exists to correct, so the claim is discharged here rather than reworded.
+
+    Behaviour lives in `test_issue2pr_modes.py`, which drives the poll loop in-process against an
+    injected `gh` and clock. What belongs *here* is the tier's own claim: it is a program, and it
+    answers as one.
+    """
+
+    def watch(self, *args):
+        return subprocess.run([sys.executable, str(WATCH), *args],
+                              capture_output=True, text=True, timeout=60)
+
+    def test_it_answers_help(self):
+        result = self.watch("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--merge-when-green", result.stdout)
+
+    def test_a_usage_error_exits_one_and_not_argparses_two(self):
+        """Exit 2 already means "closed without merge". A typo reporting that code would make a
+        chain mark the link `closed_unmerged` and pause."""
+        self.assertEqual(self.watch("owner/repo").returncode, 1)
+
+    def test_it_carries_no_repository_of_its_own(self):
+        """The repo is an argument. A watcher with a default target is a project literal with a
+        control flow attached."""
+        self.assertIn("repo", self.watch("--help").stdout)
 
 
 class LintCase(unittest.TestCase):

@@ -1,0 +1,11 @@
+{
+  "_invocation": "gh pr view {n} --repo {repo_id} --json state",
+  "_docs": "https://cli.github.com/manual/gh_pr_view",
+  "_observation": "the PR is open and quiet",
+  "http_status": 200,
+  "headers": {},
+  "body": {
+    "state": "OPEN"
+  },
+  "exit_code": 0
+}

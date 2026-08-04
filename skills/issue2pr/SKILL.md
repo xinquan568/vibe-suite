@@ -100,6 +100,20 @@ Two consequences specific to this pipeline:
 
 Every run owns a folder. The pipeline is resumable because the folder, not the session, is the record.
 
+The nine steps describe one run. What starts, resumes, repeats and enumerates runs is stated once, in
+its own reference, and cited here in the shape used above:
+
+| Concern | Where it is stated |
+|---|---|
+| running issues serially, advancing on merge | [`chain`](references/operational-modes.md#chain) |
+| continuing a run that stopped mid-round | [`resume`](references/operational-modes.md#resume) |
+| a fresh round in place, on the same branch and PR | [`iterate`](references/operational-modes.md#iterate) |
+| enumerating runs and their state | [`list`](references/operational-modes.md#list) |
+| what `status` may hold, and which values are terminal | [Run-status enum](references/operational-modes.md) |
+
+A mode's precondition is stated in terms of that enum, so the enum is part of the definition rather
+than a note beside it.
+
 <!-- state-schema -->
 ```json
 {
@@ -112,7 +126,7 @@ Every run owns a folder. The pipeline is resumable because the folder, not the s
   "max_review_rounds": 2,
   "current_step": 1,
   "current_round": 1,
-  "status": "running",
+  "status": "in_progress",
   "areas_confirmed": [],
   "repos_in_scope": [],
   "pr": null
@@ -329,6 +343,8 @@ Only this pipeline's own. Everything shared is the contract's, cited above and n
 
 - **No resolvable profile** → refuse, with the `profile init` pointer.
 - **A profile that fails its contract** → refuse, naming the failures. `scripts/profile_lint.py`.
-- **A run folder that already exists** → refuse unless `resume` or `iterate` was asked for.
+- **A run folder that already exists** → refuse unless `resume` or `iterate` was asked for; both are
+  defined in [operational-modes.md](references/operational-modes.md), including which run statuses
+  each one accepts.
 - **A work item that does not exist, or is not an item** → refuse before any folder is created.
 - **A blocker at any review step** → stop the round.

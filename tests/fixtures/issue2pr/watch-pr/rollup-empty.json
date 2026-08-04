@@ -1,0 +1,11 @@
+{
+  "_invocation": "gh pr view {n} --repo {repo_id} --json statusCheckRollup",
+  "_docs": "https://cli.github.com/manual/gh_pr_view",
+  "_observation": "no check has registered yet \u2014 an empty set is not a green set",
+  "http_status": 200,
+  "headers": {},
+  "body": {
+    "statusCheckRollup": []
+  },
+  "exit_code": 0
+}

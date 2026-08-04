@@ -653,3 +653,27 @@ class DirectionMatrix(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCommandScriptEdge(unittest.TestCase):
+    """plugin-discover.md edge 5: a command body's plugin-root script reference de-orphans the
+    script (orphan input only — no new dangling class)."""
+
+    def test_referenced_script_is_not_an_orphan(self):
+        import tempfile, shutil, subprocess, sys as _sys
+        root = Path(tempfile.mkdtemp(prefix="vibe-edge-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "commands").mkdir()
+        (root / "scripts").mkdir()
+        (root / "commands" / "go.md").write_text(
+            '---\ndescription: "go"\n---\n\n```bash\npython3 "${CLAUDE_PLUGIN_ROOT}/scripts/used.py"\n```\n')
+        (root / "scripts" / "used.py").write_text("# SPDX-License-Identifier: ISC\n")
+        (root / "scripts" / "orphaned.py").write_text("# SPDX-License-Identifier: ISC\n")
+        r = subprocess.run([_sys.executable, str(REPO_ROOT / "scripts" / "check_engine.py"),
+                            "--root", str(root)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        import json as _json
+        issues = _json.loads(r.stdout).get("issues", [])
+        orphans = {i["source"] for i in issues if i["class"] == "orphan"}
+        self.assertNotIn("scripts/used.py", orphans)
+        self.assertIn("scripts/orphaned.py", orphans)

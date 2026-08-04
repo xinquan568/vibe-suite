@@ -34,8 +34,16 @@ O_NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
 SENTINEL_LITERALS = ("vibe-mcp", "vibe-claude-mcp")
 SENTINEL_PREFIX = "vibe-agent:"
 
+#: Advisor ownership is structural, not nominal (E6.1 / vibe-47): an advisor registers under its
+#: bare name — the skill's `mcp__<name>__<tool_name>` callable identity requires the server key to
+#: BE the name — so the claim of ownership travels inside the entry, exactly as owned hook entries
+#: carry theirs. Only this exact marker value is a claim; anything else is a user's key.
+ADVISOR_MARKER_KEY = f"_{MARKER}_owned"
+ADVISOR_MARKER = {"kind": "advisor", "schema": SCHEMA}
+
 OWNED_BLOCKS = (("AGENTS.md", "memory", "md"), ("CLAUDE.md", "import", "md"),
                 ("GEMINI.md", "import", "md"), (".gitignore", "ignore", "text"),
+                (".gitignore", "advisor-ignore", "text"),
                 (".codex/config.toml", "server:vibe-mcp", "text"))
 
 
@@ -202,6 +210,71 @@ def unlink_at(root, rel):
         return True
     finally:
         os.close(fd)
+
+
+def remove_tree_at(root, rel):
+    """Recursively remove the directory at `root/rel` through the audited descent.
+
+    Every destructive step is descriptor-relative with `O_NOFOLLOW`: a symlink inside the tree is
+    unlinked as a link — its target is never opened, so a link pointing outward cannot export the
+    deletion. A `rel` that is itself a symlink is refused rather than followed, and a `rel` with
+    dot/dotdot components never reaches the walk. Returns False when nothing exists at `rel`.
+    """
+    import stat as _stat
+    rel = Path(rel)
+    assert_root(root)
+    assert_inside(root, Path(root) / rel)
+    if not rel.parts or any(p in ("", ".", "..") for p in rel.parts):
+        raise BridgeError(f"{rel} is not a plain workspace-relative directory path; refusing")
+    # Read-only existence probe by path: the destructive walk below is fd-relative regardless, and
+    # probing first keeps `_open_dir_chain` from creating parents for a tree that is not there.
+    if not os.path.lexists(os.path.join(str(root), str(rel))):
+        return False
+    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        info = os.lstat(rel.name, dir_fd=fd)
+        if _stat.S_ISLNK(info.st_mode):
+            raise BridgeError(f"{Path(root) / rel} is a symlink; refusing to remove a tree "
+                              "through it")
+        if not _stat.S_ISDIR(info.st_mode):
+            raise BridgeError(f"{Path(root) / rel} is not a directory; unlink_at removes files")
+        _remove_tree_fd(fd, rel.name)
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(fd)
+    return True
+
+
+def ensure_dir_at(root, rel):
+    """Create the directory chain `root/rel` through the audited `O_NOFOLLOW` descent.
+
+    `Path.mkdir(parents=True)` resolves every ancestor by path, so a symlink planted at any
+    component redirects the creation outside the workspace. The descent creates each component
+    relative to a proven directory descriptor and fails on the component that is a symlink.
+    """
+    rel = Path(rel)
+    assert_inside(root, Path(root) / rel)
+    if any(p == ".." for p in rel.parts):
+        raise BridgeError(f"{rel}: '..' in a directory-creation path; refusing")
+    fd = _open_dir_chain(root, rel.parts)
+    os.close(fd)
+
+
+def _remove_tree_fd(parent_fd, name):
+    """Depth-first removal relative to an already-proven directory descriptor."""
+    import stat as _stat
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | O_NOFOLLOW_FLAG, dir_fd=parent_fd)
+    try:
+        for entry in os.listdir(fd):
+            info = os.lstat(entry, dir_fd=fd)
+            if _stat.S_ISDIR(info.st_mode):
+                _remove_tree_fd(fd, entry)
+            else:
+                os.unlink(entry, dir_fd=fd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent_fd)
 
 
 #: Identity of each workspace root this process has opened, so a mid-run replacement is detected
@@ -610,17 +683,18 @@ def toml_server_has(existing, name):
     return bool(_block_re(f"server:{name}", "#", "").search(existing))
 
 
-def toml_owned_names(text):
-    """Concrete owned servers declared in a TOML document, including `vibe-agent:` members.
+def toml_table_names(text):
+    """Every top-level `[mcp_servers.<name>]` table name in a TOML document.
 
-    Enumeration has to span every codec: an agent registered only in `.codex/config.toml` is invisible
-    to a JSON-only sweep, and #21's teardown iterates whatever this returns.
+    One parser for every consumer — enumeration and collision detection alike — because two
+    parsers for one grammar is how `[mcp_servers.'probe']` collided invisibly: the collision
+    check recognized bare and double-quoted keys while this function's grammar also knew single
+    quotes. TOML permits whitespace around the dots and either quote kind; a subtable is not a
+    registration.
     """
-    found = set()
-    for header in re.findall(r"^\s*\[mcp_servers\.(.+?)\]\s*$", text, re.M):
+    names = []
+    for header in re.findall(r"^\s*\[\s*mcp_servers\s*\.\s*(.+?)\s*\]\s*$", text, re.M):
         rest = header.strip()
-        # Split on the first dot *outside* quotes: `"vibe-agent:auditor".env` is a subtable of
-        # `vibe-agent:auditor`, and a name may itself contain dots only when quoted.
         if rest.startswith(('"', "'")):
             quote = rest[0]
             end = rest.find(quote, 1)
@@ -632,8 +706,27 @@ def toml_owned_names(text):
             trailer = "." + trailer if trailer else ""
         if trailer.strip():
             continue          # a subtable is not a registration
+        names.append(name)
+    return names
+
+
+def toml_owned_names(text):
+    """Concrete owned servers declared in a TOML document, including `vibe-agent:` members.
+
+    Enumeration has to span every codec: an agent registered only in `.codex/config.toml` is invisible
+    to a JSON-only sweep, and #21's teardown iterates whatever this returns.
+    """
+    found = set()
+    for name in toml_table_names(text):
         if name in SENTINEL_LITERALS or name.startswith(SENTINEL_PREFIX):
             found.add(name)
+    # A bare-name advisor block is owned by its fence, not its name: the `server:<name>` markers
+    # `toml_server_upsert` writes are the TOML-side twin of the JSON entry's advisor marker.
+    for fenced in re.findall(
+            rf"^# >>> {re.escape(MARKER)}:server:(.+?) v\d+ >>>$", text, re.M):
+        if re.search(r"^\s*\[mcp_servers\.(?:%s|\"%s\")(?:\.[^]]+)?\]\s*$"
+                     % (re.escape(fenced), re.escape(fenced)), text, re.M):
+            found.add(fenced)
     return sorted(found)
 
 
@@ -673,11 +766,30 @@ def inventory_enumerate(root):
     return sorted(names)
 
 
+def advisor_owned_entry(entry):
+    """Whether a server entry carries the exact advisor ownership marker.
+
+    Exact-match on purpose — including *types*: Python's `==` treats `True`, `1` and `1.0` as
+    equal, so a plain dict comparison would claim `{"schema": true}` and make teardown delete an
+    entry the suite never wrote. A malformed or coerced marker is a user's key, not our claim.
+    """
+    if not isinstance(entry, dict):
+        return False
+    marker = entry.get(ADVISOR_MARKER_KEY)
+    if not isinstance(marker, dict) or set(marker) != set(ADVISOR_MARKER):
+        return False
+    kind, schema = marker.get("kind"), marker.get("schema")
+    return (type(kind) is str and kind == ADVISOR_MARKER["kind"]
+            and type(schema) is int and not isinstance(schema, bool)
+            and schema == ADVISOR_MARKER["schema"])
+
+
 def owned_names(doc):
-    """Every suite-owned server name in a parsed `.mcp.json`: the literals plus every concrete
-    member of the `vibe-agent:` family."""
+    """Every suite-owned server name in a parsed `.mcp.json`: the literals, every concrete member
+    of the `vibe-agent:` family, and every bare-name entry carrying the advisor marker."""
     servers = doc.get("mcpServers", {}) if isinstance(doc, dict) else {}
-    found = [n for n in servers if n in SENTINEL_LITERALS or n.startswith(SENTINEL_PREFIX)]
+    found = [n for n in servers if n in SENTINEL_LITERALS or n.startswith(SENTINEL_PREFIX)
+             or advisor_owned_entry(servers[n])]
     return sorted(found)
 
 

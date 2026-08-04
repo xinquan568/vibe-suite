@@ -388,3 +388,31 @@ class WriteAtomicRefusesSymlinks(unittest.TestCase):
         fresh = self.ws / "new.md"
         bridge.write_atomic(self.ws, fresh, "made\n")
         self.assertEqual(fresh.read_text(), "made\n")
+
+
+class TestAdvisorMirrorSkip(unittest.TestCase):
+    """E6.1 (D-b): the generic mirror never touches advisor-owned entries — single writer."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-bridge-adv-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        self.plugin = Path(tempfile.mkdtemp(prefix="vibe-plugin-adv-"))
+        self.addCleanup(shutil.rmtree, self.plugin, ignore_errors=True)
+        (self.plugin / "skills").mkdir()
+
+    def test_owned_advisor_entry_is_not_mirrored(self):
+        (self.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {
+            "my_advisor": {"command": "npx", "args": ["-y", "claude-octopus@1.0.0"],
+                           "env": {"CLAUDE_DESCRIPTION": "d"},
+                           "_vibe-suite_owned": {"kind": "advisor", "schema": 1}},
+            "foreign_env": {"command": "srv", "env": {"TOKEN": "secret-value"}},
+        }}, indent=2) + "\n", encoding="utf-8")
+        r = subprocess.run(["python3", str(CLI), "mcp", "--workspace", str(self.ws),
+                            "--plugin-root", str(self.plugin)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        toml = (self.ws / ".codex" / "config.toml").read_text(encoding="utf-8")
+        self.assertNotIn("my_advisor", toml,
+                         "the advisor path owns both stores; the mirror must skip its entries")
+        self.assertIn("foreign_env", toml, "foreign env servers still mirror names-only")
+        self.assertNotIn("secret-value", toml)

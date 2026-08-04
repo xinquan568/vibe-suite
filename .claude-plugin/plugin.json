@@ -38,6 +38,7 @@
     "./commands/security-scan.md",
     "./commands/spec-sync.md",
     "./commands/test.md",
+    "./commands/trend.md",
     "./commands/unbridge.md",
     "./commands/update.md",
     "./commands/vocab.md"

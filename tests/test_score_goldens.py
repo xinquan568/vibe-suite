@@ -11,7 +11,7 @@ Engine CLI contract pinned here:
   stdin  : records `<type-or-category>\\x1f<relative-path>\\x00` (same lossless framing as
            ls_counts); a first field of `A`-`F` is a scanner discovery category and the
            engine classifies the path itself, agreeing with commands/shared/classify.md
-  args   : --root <dir> [--config <file>] [--history <file>] [--scope <tag>]
+  args   : --root <dir> [--config <file>] [--history <file>] [--scope <tag>] [--run-id <tag>]
   stdout : JSON {"files":[{"path","tier","score","band","verdict",
            "findings":[{"rule","check","line","penalty"}],"advisories":[{"rule","note"}]}],
            "run":{"files","total_penalty","considered_rows","skipped"}}

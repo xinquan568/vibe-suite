@@ -1,0 +1,51 @@
+{
+  "files": [
+    {
+      "advisories": [],
+      "band": "green",
+      "findings": [
+        {
+          "check": "c",
+          "line": 1,
+          "penalty": -10,
+          "rule": "R1"
+        }
+      ],
+      "path": "commands/a.md",
+      "score": 90,
+      "tier": "T2",
+      "verdict": "pass"
+    },
+    {
+      "advisories": [],
+      "band": "green",
+      "findings": [
+        {
+          "check": "c",
+          "line": 2,
+          "penalty": -15,
+          "rule": "R2"
+        }
+      ],
+      "path": "commands/b.md",
+      "score": 85,
+      "tier": "T2",
+      "verdict": "pass"
+    },
+    {
+      "advisories": [],
+      "band": "green",
+      "findings": [],
+      "path": "commands/c.md",
+      "score": 100,
+      "tier": "T2",
+      "verdict": "pass"
+    }
+  ],
+  "run": {
+    "considered_rows": 3,
+    "files": 3,
+    "skipped": [],
+    "total_penalty": -25
+  }
+}

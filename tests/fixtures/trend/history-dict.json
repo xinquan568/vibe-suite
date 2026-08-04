@@ -1,0 +1,40 @@
+{
+  "snapshots": [
+    {
+      "baseline": true,
+      "threshold": 70
+    },
+    {
+      "band": "green",
+      "file": "commands/a.md",
+      "scope": "full",
+      "score": 80,
+      "total_penalty": -20
+    },
+    {
+      "band": "green",
+      "file": "commands/a.md",
+      "run": "r1",
+      "scope": "full",
+      "score": 85,
+      "total_penalty": -15
+    },
+    {
+      "band": "green",
+      "file": "commands/b.md",
+      "run": "r1",
+      "scope": "full",
+      "score": 90,
+      "total_penalty": -10
+    },
+    {
+      "band": "amber",
+      "file": "commands/other.md",
+      "run": "r1",
+      "scope": "path:skills",
+      "score": 60,
+      "total_penalty": -40
+    }
+  ],
+  "vibe_suite_owned": true
+}

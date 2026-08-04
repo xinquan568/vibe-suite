@@ -15,7 +15,7 @@ CLI contract (pinned by tests/test_score_goldens.py):
            first field is either an artifact type (`skill`, `agent`, …) or a scanner discovery
            category letter `A`–`F`; given a category, the engine classifies the path itself with
            the same first-match rules as commands/shared/classify.md.
-  args   : --root <dir> [--config <file>] [--history <file>] [--scope <tag>]
+  args   : --root <dir> [--config <file>] [--history <file>] [--scope <tag>] [--run-id <tag>]
   stdout : JSON {"files":[{"path","tier","score","band","verdict",
            "findings":[{"rule","check","line","penalty"}],"advisories":[{"rule","note"}]}],
            "run":{"files","total_penalty","considered_rows","skipped"}}
@@ -70,7 +70,8 @@ Config is read through scripts/lib/config.py — the one reader; no second parse
                                                     upper line boundary
   score_threshold                                -> the pass/fail verdict boundary
 
-History (--history H --scope S): one {"scope","score","band","total_penalty","file"} entry per
+History (--history H --scope S [--run-id R]): one {"scope","score","band","total_penalty","file"}
+(plus "run" when R is given; dedup is then per-run rather than global) entry per
 scored file; an entry identical to an existing one is not appended (same-scope dedupe — a distinct
 scope produces a distinct entry and appends). The write goes through bridge.write_atomic: a temp
 file created IN the destination directory, then an atomic rename — so a failed append leaves the
@@ -1237,8 +1238,14 @@ def score_text(text, rel, path, artifact_type, tier, overrides, pass_threshold):
     }, total
 
 
-def _append_history(history, scope, files, totals):
-    """Append per-file snapshots; identical entries dedupe; the write is atomic or nothing."""
+def _append_history(history, scope, files, totals, run_id=None):
+    """Append per-file snapshots; identical entries dedupe; the write is atomic or nothing.
+
+    Dedup scope is the whole list when no run id is given (the original flagless contract) and
+    one run when `--run-id` is set: the `run` field joins the snapshot, so dict equality drops
+    only a same-content entry of the *same* run — identical content in an earlier run still
+    appends, which is what makes run membership and trajectories reconstructable (E6.2).
+    """
     if history.exists():
         existing = json.loads(history.read_text(encoding="utf-8"))
         if not isinstance(existing, list):
@@ -1249,6 +1256,8 @@ def _append_history(history, scope, files, totals):
     for entry, total in zip(files, totals):
         snapshot = {"scope": scope, "score": entry["score"], "band": entry["band"],
                     "total_penalty": total, "file": entry["path"]}
+        if run_id is not None:
+            snapshot["run"] = run_id
         if snapshot not in existing:
             existing.append(snapshot)
             changed = True
@@ -1265,6 +1274,7 @@ def main(argv=None):
     parser.add_argument("--config")
     parser.add_argument("--history")
     parser.add_argument("--scope")
+    parser.add_argument("--run-id", dest="run_id")
     args = parser.parse_args(argv)
 
     root = Path(args.root)
@@ -1351,7 +1361,7 @@ def main(argv=None):
             print("score_engine: --history requires --scope", file=sys.stderr)
             return 2
         try:
-            _append_history(Path(args.history), args.scope, files, totals)
+            _append_history(Path(args.history), args.scope, files, totals, run_id=args.run_id)
         except (bridge.BridgeError, OSError, ValueError) as err:
             print(f"score_engine: history append failed: {err}", file=sys.stderr)
             return 1

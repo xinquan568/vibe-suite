@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>vibe-suite quality report</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 2rem auto; max-width: 72rem;
+         color: #1a1a1a; }
+  h1, h2 { border-bottom: 1px solid #ddd; padding-bottom: .3rem; }
+  table { border-collapse: collapse; margin: 1rem 0; }
+  th, td { border: 1px solid #ccc; padding: .35rem .6rem; text-align: left; }
+  .absent { color: #8a6d3b; background: #fcf8e3; padding: .5rem .8rem; border-radius: 4px; }
+  .band-green { color: #2e7d32; } .band-amber { color: #b26a00; } .band-red { color: #c62828; }
+  .g6-mount { width: 100%; height: 420px; border: 1px solid #eee; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111; color: #ddd; }
+    th, td { border-color: #444; }
+    h1, h2 { border-color: #333; }
+    .g6-mount { border-color: #333; }
+  }
+</style>
+<script>{{G6_BUNDLE}}</script>
+</head>
+<body>
+<h1>vibe-suite quality report</h1>
+
+<section id="vibe-score-view"><h2>Scores</h2>{{SCORE_SECTION}}</section>
+<section id="vibe-check-view"><h2>Consistency check</h2>{{CHECK_SECTION}}</section>
+<section id="vibe-history-view"><h2>Score history</h2>{{HISTORY_SECTION}}
+  <div id="vibe-trend-mount" class="g6-mount"></div></section>
+<section id="vibe-graph-view"><h2>Cross-component graph</h2>{{GRAPH_SECTION}}
+  <div id="vibe-graph-mount" class="g6-mount"></div></section>
+<section id="vibe-vocab-view"><h2>Vocabulary</h2>{{VOCAB_SECTION}}
+  <div id="vibe-vocab-mount" class="g6-mount"></div></section>
+<section id="vibe-drift-view"><h2>Vocabulary drift</h2>{{DRIFT_SECTION}}</section>
+
+<script id="vibe-report-data" type="application/json">{{DATA_JSON}}</script>
+<script id="vibe-vocab-graph-data" type="application/json">{{VOCAB_GRAPH_JSON}}</script>
+<script>{{RENDER_JS}}</script>
+</body>
+</html>

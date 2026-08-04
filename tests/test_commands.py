@@ -322,3 +322,35 @@ class TestScoreScopeIntegration(unittest.TestCase):
             text = (REPO_ROOT / "commands" / name).read_text(encoding="utf-8")
             self.assertIn('${CLAUDE_PLUGIN_ROOT}/scripts/lib/scope_tag.py', text, name)
             self.assertNotIn('"<scope-tag>"', text, name)
+
+
+class TestReportCommandContract(unittest.TestCase):
+    """E6.3: /vibe-suite:report — blob rules, engine invocations, renderer dispatch."""
+
+    def setUp(self):
+        self.text = (REPO_ROOT / "commands" / "report.md").read_text(encoding="utf-8")
+
+    def test_frontmatter_and_orchestration(self):
+        self.assertTrue(self.text.startswith("---\n"))
+        self.assertIn("description:", self.text)
+        self.assertIn("mktemp", self.text, "the blob location rule is the command's duty")
+        self.assertNotIn("/tmp/vibe", self.text, "never a fixed /tmp path")
+        self.assertIn('${CLAUDE_PLUGIN_ROOT}/scripts/score_engine.py', self.text)
+        self.assertIn('${CLAUDE_PLUGIN_ROOT}/scripts/check_engine.py', self.text)
+        self.assertIn("--graph", self.text)
+        self.assertIn('${CLAUDE_PLUGIN_ROOT}/scripts/vocab_extract.py', self.text)
+        self.assertIn('${CLAUDE_PLUGIN_ROOT}/bin/vibe-report', self.text)
+        self.assertIn('scripts/score_engine.py" --root "<abs-target>"`', self.text,
+                      "the score invocation ends at --root: no history flag on the command")
+        self.assertNotIn('score_engine.py" --root "<abs-target>" --history', self.text,
+                         "the report's score run must not append history")
+
+    def test_contract_rules_documented(self):
+        self.assertIn("30", self.text)          # the N=30 slicing rule
+        self.assertIn("5", self.text)           # the >=5 artifact gate
+        self.assertIn("sources", self.text)     # judgment-issue shaping
+        self.assertIn("read-only", self.text.lower())  # history semantics
+
+    def test_registered_in_manifest(self):
+        manifest = json.loads((REPO_ROOT / ".claude-plugin" / "plugin.json").read_text())
+        self.assertIn("./commands/report.md", manifest["commands"])

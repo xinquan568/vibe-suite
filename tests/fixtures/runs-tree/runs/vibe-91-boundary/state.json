@@ -1,0 +1,11 @@
+{
+  "status": "stopped_by_review",
+  "outcome": null,
+  "updated_at": "2026-07-31T18:00:00+00:00",
+  "rounds": [
+    {
+      "started_at": "2026-07-31T17:30:00+00:00",
+      "completed_at": "2026-07-31T18:00:00+00:00"
+    }
+  ]
+}

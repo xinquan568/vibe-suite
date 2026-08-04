@@ -1,0 +1,4 @@
+{"type": "thread.started", "thread_id": "fixture"}
+{"type": "item.completed", "item": {"kind": "read"}}
+{"type": "item.completed", "item": {"kind": "read"}}
+{"type": "turn.completed", "usage": {"input_tokens": 1000, "cached_input_tokens": 400, "output_tokens": 200}}

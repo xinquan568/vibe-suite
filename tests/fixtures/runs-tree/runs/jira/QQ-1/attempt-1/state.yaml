@@ -1,0 +1,6 @@
+ticket_key: QQ-1
+status: done
+transitions:
+  - at: 2026-07-29T08:00:00Z
+pr_urls:
+  - url: https://github.com/example/repo/pull/7

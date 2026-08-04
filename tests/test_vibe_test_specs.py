@@ -27,6 +27,9 @@ FOURTEEN = [
 ]
 #: The five artifacts this stage delivers (four shipped + tester from this item).
 STAGE_DELIVERED = ["scanner", "scorer", "vague-scanner", "checker", "tester"]
+#: Command specs delivered after the frozen stage — rung-5 NL-TDD REDs for later issues.
+#: AC-7's "14/14" stays exactly the agent list above; these are additional, typed inventories.
+COMMAND_SPECS = ["refresh-knowledge"]
 
 SECTIONS = ["Triggers On", "Does Not Trigger On", "Output Contains", "Frontmatter Valid"]
 
@@ -73,7 +76,27 @@ def section_items(text, heading):
 class SpecCoverage(unittest.TestCase):
     def test_fourteen_of_fourteen_no_extras(self):
         on_disk = sorted(p.name for p in SPECS.glob("*.spec.md"))
-        self.assertEqual(on_disk, sorted(f"{n}.spec.md" for n in FOURTEEN))
+        expected = [f"{n}.spec.md" for n in FOURTEEN + COMMAND_SPECS]
+        self.assertEqual(on_disk, sorted(expected))
+
+    def test_command_spec_schema_and_depth(self):
+        for name in COMMAND_SPECS:
+            with self.subTest(spec=name):
+                text = (SPECS / f"{name}.spec.md").read_text(encoding="utf-8")
+                fm = spec_frontmatter(text)
+                self.assertEqual(sorted(fm), ["artifact", "min_score", "type"])
+                self.assertEqual(fm["artifact"], f"commands/{name}.md")
+                self.assertEqual(fm["type"], "command")
+                self.assertEqual(fm["min_score"], "80")
+                for heading, minimum in (("Triggers On", 5),
+                                         ("Does Not Trigger On", 3),
+                                         ("Output Contains", 2),
+                                         ("Frontmatter Valid", 1)):
+                    items = section_items(text, heading)
+                    self.assertIsNotNone(items, f"{name}: missing section {heading}")
+                    self.assertGreaterEqual(
+                        len(items), minimum,
+                        f"{name}: {heading} needs >={minimum} items")
 
     def test_per_spec_schema_and_depth(self):
         for name in FOURTEEN:

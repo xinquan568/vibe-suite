@@ -57,5 +57,11 @@ version, smoke and model probes still run there.
 The refresh date lives **beside the skill it describes**, at
 `${CLAUDE_PLUGIN_ROOT}/skills/<skill>/refreshed.json` as `{"refreshed": "<ISO-8601 date>"}` — plugin
 level, not project level, because one shared skill cannot have two projects disagreeing about when it
-was refreshed. **E6.5 (#48) writes it.** Until then the check reports `unavailable`; an absent
-producer is not evidence of staleness.
+was refreshed. **`/vibe-suite:refresh-knowledge` (E6.5/#51) writes it.** A missing record means the
+overlay was **never refreshed** — the producer exists and simply has not been run — so the check
+reports `unavailable` with that wording. A present record surfaces its date
+(`refreshed <YYYY-MM-DD>`) and, when the overlay's canonical `**Spec freshness:**` prose line
+carries a comparable date, names whichever refresh path is staler (`/vibe-suite:spec-sync` when the
+prose is older, `/vibe-suite:refresh-knowledge` when the record is). A record whose date is not a
+real dashed `YYYY-MM-DD` is a `[LOW]` finding, not a capability — a corrupt date must not read as
+fresh.

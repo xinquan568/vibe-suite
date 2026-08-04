@@ -348,3 +348,80 @@ class TestAdvisorStateVariants(DoctorCase):
         self.assertEqual(len(rows), 1, rows)
         self.assertIn("invalid-registration", rows[0]["finding"])
         self.assertFalse(rows[0]["auto_fixable"])
+
+
+class TestKnowledgeFreshnessStates(DoctorCase):
+    """E6.5 (vibe-51): the four reconciled freshness states. A valid record surfaces its date
+    as a capability; the no-record capability says never-refreshed and cites #51; every
+    malformed shape is the LOW finding (and exit 1); the staler-recommendation compares the
+    record date against the overlay's canonical prose line."""
+
+    def plugin_root(self, refreshed_json=None, prose_date="2026-06-07"):
+        root = Path(tempfile.mkdtemp(prefix="vibe-pluginroot-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        skill = root / "skills" / "conventions-claude"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: conventions-claude\n---\n\n# Overlay\n\n"
+            f"**Spec freshness:** verified {prose_date} against code.claude.com/docs/en/\n",
+            encoding="utf-8")
+        if refreshed_json is not None:
+            (skill / "refreshed.json").write_text(refreshed_json, encoding="utf-8")
+        return root
+
+    def doctor_with_root(self, root):
+        env = dict(os.environ, CODEX_HOME=str(self.home), CLAUDE_PLUGIN_ROOT=str(root))
+        return subprocess.run(["python3", str(DOCTOR), "--workspace", str(self.ws),
+                               "--json"], capture_output=True, text=True, env=env)
+
+    def freshness_capability(self, report):
+        rows = [c for c in report["capabilities"] if c["check"] == "knowledge-freshness"]
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_no_record_capability_is_never_refreshed_and_cites_51(self):
+        self.install()
+        r = self.doctor_with_root(self.plugin_root())
+        self.assertEqual(r.returncode, 0, r.stdout)
+        cap = self.freshness_capability(json.loads(r.stdout))
+        self.assertEqual(cap["status"], "unavailable")
+        self.assertIn("never refreshed", cap["blocked_on"])
+        self.assertIn("#51", cap["blocked_on"])
+
+    def test_valid_record_surfaces_the_date_without_a_finding(self):
+        self.install()
+        root = self.plugin_root('{"refreshed": "2026-06-07"}')
+        r = self.doctor_with_root(root)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        report = json.loads(r.stdout)
+        cap = self.freshness_capability(report)
+        self.assertEqual(cap["status"], "refreshed 2026-06-07")
+        self.assertEqual(cap["blocked_on"], "—")
+        self.assertNotIn("knowledge-freshness", {f["check"] for f in report["findings"]})
+
+    def test_prose_older_recommends_spec_sync(self):
+        self.install()
+        root = self.plugin_root('{"refreshed": "2026-08-01"}', prose_date="2026-06-07")
+        cap = self.freshness_capability(json.loads(self.doctor_with_root(root).stdout))
+        self.assertIn("spec-sync", cap["blocked_on"])
+
+    def test_record_older_recommends_refresh_knowledge(self):
+        self.install()
+        root = self.plugin_root('{"refreshed": "2026-05-01"}', prose_date="2026-06-07")
+        cap = self.freshness_capability(json.loads(self.doctor_with_root(root).stdout))
+        self.assertIn("refresh-knowledge", cap["blocked_on"])
+
+    def test_every_malformed_shape_is_the_low_finding_and_exit_1(self):
+        cases = ("{nope", '{"other": true}', '{"refreshed": ""}',
+                 '{"refreshed": "yesterday"}', '{"refreshed": "2026-99-99"}',
+                 '{"refreshed": "20260607"}')
+        for raw in cases:
+            with self.subTest(raw=raw):
+                self.install()
+                r = self.doctor_with_root(self.plugin_root(raw))
+                self.assertEqual(r.returncode, 1, r.stdout)
+                report = json.loads(r.stdout)
+                lows = [f for f in report["findings"]
+                        if f["check"] == "knowledge-freshness"]
+                self.assertEqual(len(lows), 1)
+                self.assertEqual(lows[0]["severity"], "[LOW]")

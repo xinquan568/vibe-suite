@@ -132,14 +132,14 @@ def parse_definition(text, filename):
                 "cwd", "max_turns", "max_budget_usd"):
         if key in fields and kinds.get(key) != "scalar":
             raise AdvisorError(f"{filename}: {key} must be a plain scalar value")
+    if "description" in fields and kinds.get("description") != "block":
+        raise AdvisorError(f"{filename}: description must be a YAML literal block scalar (|) so "
+                           "newlines and <example> tags survive")
     name = fields.get("name", stem)
     if not NAME_RE.match(name or ""):
         raise AdvisorError(f"{filename}: advisor name {name!r} is not a valid MCP server key")
     if "description" not in fields or not (fields["description"] or "").strip():
         raise AdvisorError(f"{filename}: description is required")
-    if kinds.get("description") != "block":
-        raise AdvisorError(f"{filename}: description must be a YAML literal block scalar (|) so "
-                           "newlines and <example> tags survive")
     model = fields.get("model")
     if model is not None and model not in TIERS:
         raise AdvisorError(
@@ -396,11 +396,11 @@ def _validated_journal(txn_path):
         if not all(isinstance(v.get(k), str) for k in ("path", "mode", "sha256", "content_b64")):
             return False
         try:
-            base64.b64decode(v["content_b64"], validate=True)
+            raw = base64.b64decode(v["content_b64"], validate=True)
             int(v["mode"], 8)
         except Exception:
             return False
-        return True
+        return hashlib.sha256(raw).hexdigest() == v["sha256"]
 
     pre = txn.get("pre_images")
     if not isinstance(pre, dict) or set(pre) - {str(MCP_REL), str(TOML_REL), "definition"} \
@@ -443,10 +443,10 @@ def recover(ws):
     """
     ws = Path(ws)
     bridge.assert_root(ws)
+    bridge.pin_root(ws)
     txn_path = ws / TXN_REL
     if not txn_path.is_file():
         return None
-    bridge.pin_root(ws)
     txn = _validated_journal(txn_path)
     pre = txn.get("pre_images", {})
 
@@ -461,7 +461,10 @@ def recover(ws):
         bridge.write_atomic(ws, ws / MCP_REL, base64.b64decode(post[str(MCP_REL)]))
         bridge.write_atomic(ws, ws / TOML_REL, post[str(TOML_REL)])
         name = txn["remove_name"]
-        bridge.unlink_at(ws, AGENTS_REL / f"{name}.md")
+        if pre.get("definition") is not None:
+            # None provenance means no definition existed when the journal was written; a
+            # deletion the record cannot vouch for is refused by omission.
+            bridge.unlink_at(ws, AGENTS_REL / f"{name}.md")
         if txn["delete_timeline"]:
             bridge.remove_tree_at(ws, timeline_rel(name))
             try:

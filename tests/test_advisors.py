@@ -917,3 +917,50 @@ class TestResidueHardening(unittest.TestCase):
         link.symlink_to(real)
         with self.assertRaises(bridge.BridgeError):
             advisors.recover(link)
+
+
+class TestJournalImageIntegrity(unittest.TestCase):
+    """Iteration 3: hashes verify against content; None-definition journals cannot delete."""
+
+    def _journal(self, ws, **overrides):
+        entry = {"path": str(ws / ".mcp.json"), "kind": "file", "mode": "0o644",
+                 "sha256": __import__("hashlib").sha256(b"{}\n").hexdigest(),
+                 "content_b64": __import__("base64").b64encode(b"{}\n").decode()}
+        base = {"schema": 1, "intent": "remove", "remove_name": "probe_advisor",
+                "delete_timeline": False, "desired_sha": "ab" * 32,
+                "pre_images": {".mcp.json": entry, ".codex/config.toml": None,
+                               "definition": None},
+                "post_images": {".mcp.json": "e30=", ".codex/config.toml": ""},
+                "prior_baseline": None, "post_baseline": None}
+        base.update(overrides)
+        return base
+
+    def test_malformed_sha_refused(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        state = ws / ".vibe-suite-state"
+        state.mkdir()
+        j = self._journal(ws)
+        j["pre_images"][".mcp.json"]["sha256"] = "0" * 64
+        (state / "advisor-txn.json").write_text(json.dumps(j))
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.recover(ws)
+        j2 = self._journal(ws)
+        j2["prior_baseline"] = dict(j2["pre_images"][".mcp.json"], sha256="1" * 64)
+        (state / "advisor-txn.json").write_text(json.dumps(j2))
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.recover(ws)
+
+    def test_none_definition_journal_cannot_delete_a_real_definition(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        state = ws / ".vibe-suite-state"
+        state.mkdir()
+        (state / "advisor-txn.json").write_text(json.dumps(self._journal(ws)))
+        advisors.recover(ws)
+        self.assertTrue((ws / ".vibe-suite" / "agents" / "probe_advisor.md").is_file(),
+                        "a journal without definition provenance must not delete one")
+
+    def test_list_valued_description_rejected_cleanly(self):
+        text = "---\ndescription: [x]\nmodel: sonnet\n---\n\nbody\n"
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.parse_definition(text, "probe_advisor.md")

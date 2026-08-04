@@ -157,8 +157,9 @@ def validate(blob):
                 or any(not isinstance(x, str) for x in c["terms"]) \
                 or not isinstance(c.get("rationale"), str):
             raise BlobError(f"vocab_drift.candidates[{i}]: expected {{terms: [str], rationale}}")
-    if drift.get("prose") is not None and not isinstance(drift["prose"], str):
-        raise BlobError("vocab_drift.prose: expected str|null")
+    if "prose" not in drift or (drift["prose"] is not None
+                                 and not isinstance(drift["prose"], str)):
+        raise BlobError("vocab_drift.prose: required, str|null")
 
     vocab = blob["vocabulary"]
     registry = _req(vocab, "registry", dict, "vocabulary")
@@ -170,6 +171,8 @@ def validate(blob):
                 raise BlobError(f"vocabulary.registry.scopes[{i}].paths[{j}]: expected str")
     verbs = _req(registry, "verbs", dict, "vocabulary.registry")
     for scope, entries in verbs.items():
+        if not isinstance(scope, str) or not isinstance(entries, list):
+            raise BlobError("vocabulary.registry.verbs: expected dict[str, list]")
         for i, v in enumerate(entries):
             ctx = f"vocabulary.registry.verbs[{scope}][{i}]"
             for k, t in (("canonical", str), ("output", str), ("notes", str)):
@@ -180,6 +183,8 @@ def validate(blob):
                     raise BlobError(f"{ctx}.deprecated[{j}]: expected str")
     nouns = _req(registry, "nouns", dict, "vocabulary.registry")
     for group, entries in nouns.items():
+        if not isinstance(group, str) or not isinstance(entries, list):
+            raise BlobError("vocabulary.registry.nouns: expected dict[str, list]")
         for i, n in enumerate(entries):
             ctx = f"vocabulary.registry.nouns[{group}][{i}]"
             _req(n, "canonical", str, ctx)

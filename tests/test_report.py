@@ -371,6 +371,11 @@ class TestValidatorRefusalMatrix(unittest.TestCase):
             (lambda b: b["history"].update(status="missing"),
              "missing status with payload present"),
             (lambda b: b.update(check=[1, 2]), "container of the wrong type -> BlobError not TypeError"),
+            (lambda b: b["vocab_drift"].pop("prose"), "missing drift prose"),
+            (lambda b: b["vocabulary"]["registry"].update(verbs={"operative": 7}),
+             "non-list verb collection"),
+            (lambda b: b["vocabulary"]["registry"].update(nouns={"g": (1,)}),
+             "tuple noun collection refused as exit 2, never TypeError"),
         ]
         for mutate, why in cases:
             self._refused(mutate, why)

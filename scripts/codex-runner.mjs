@@ -38,7 +38,7 @@
 
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48,7 +48,7 @@ import {
   DEFAULT_TIMEOUT_MS, heartbeatInterval, runWithDeadline, signalGroup,
 } from "./lib/process.mjs";
 import {
-  claimWith, createRecord, finaliseRecord, hashToken, jobsDir, newClaimToken, newJobId, newRecord,
+  claimWith, createRecord, finaliseRecord, hashToken, newClaimToken, newJobId, newRecord,
   readRecord, resultLine, TERMINAL_STATUSES, updateRecord,
 } from "./lib/jobs.mjs";
 
@@ -195,7 +195,7 @@ function assertSandboxAllowed(effective, { confirmDanger }) {
 }
 
 /** Build the `codex exec` argument vector. No model flag unless one was explicitly chosen (P9). */
-function codexArgs({ sandbox, effort, model, threadId, prompt, resultPath }) {
+function codexArgs({ sandbox, effort, model, threadId, prompt }) {
   const args = ["exec"];
   if (threadId) {
     // `codex exec resume` accepts no -s/--sandbox — verified against codex-cli 0.144.6, where plain
@@ -206,10 +206,6 @@ function codexArgs({ sandbox, effort, model, threadId, prompt, resultPath }) {
     args.push("-s", sandbox);
   }
   args.push("--skip-git-repo-check", "--json");
-  // The reviewer contract's Output capture row: `-o <result>` for the text, `--json` for the event
-  // stream. The path derives from the immutable jobId so two concurrent jobs can never read or
-  // clean up each other's verdict.
-  if (resultPath) args.push("-o", resultPath);
   if (effort) args.push("-c", `reasoning.effort=${effort}`);
   if (model) args.push("-m", model);
   args.push(prompt);
@@ -248,39 +244,31 @@ function classifyError(events) {
   return QUOTA_PHRASES.some((pattern) => pattern.test(message)) ? "quota" : "failure";
 }
 
-/** Read the `-o` result file, distinguishing a run that produced none from one that produced empty.
+/** The verdict, from the event stream (vibe-137).
  *
- * `verdictText: null` alone cannot separate those two, which is the property the reviewer contract's
- * Output capture row exists to preserve — so the state is stored explicitly rather than inferred.
+ * The Output capture obligation is that the verdict is retrievable and *"a run that produced none is
+ * distinguishable from one that produced an empty one."* The stream carries both facts: no
+ * `agent_message` item is `absent`, one with no non-whitespace text is `empty`.
+ *
+ * An earlier version read this from a `-o <result>` file. The stream is **mandatory** — status,
+ * threadId, error class and token accounting all come from it — so a second channel for one field
+ * bought redundancy nobody needed and a disagreement surface nothing reconciled.
  */
-function readVerdict(resultPath) {
-  let text;
-  try {
-    text = readFileSync(resultPath, "utf8");
-  } catch {
+function verdictFrom(events) {
+  if (events.agentMessage === null || events.agentMessage === undefined) {
     return { verdictText: null, verdictState: "absent" };
   }
+  const text = String(events.agentMessage);
   return { verdictText: text, verdictState: text.trim() === "" ? "empty" : "present" };
-}
-
-/** Derived from the immutable jobId: two concurrent jobs cannot collide, and cleanup is unambiguous.
- *
- * Beside the job records, via `jobsDir` — hard-coding a path here put the result file in a directory
- * that does not exist, which made a cleanup assertion pass by looking in the wrong place.
- */
-function resultPathFor(workspace, jobId) {
-  return path.join(jobsDir(workspace), `${jobId}.result`);
 }
 
 async function execute(workspace, record, prompt) {
   const heartbeatMs = heartbeatInterval();
-  const resultPath = resultPathFor(workspace, record.jobId);
-  await mkdir(path.dirname(resultPath), { recursive: true });
   const outcome = await runWithDeadline({
     command: codexBinary(),
     args: codexArgs({
       sandbox: record.sandbox, effort: record.effort, model: record.model,
-      threadId: record.threadId, prompt, resultPath,
+      threadId: record.threadId, prompt,
     }),
     cwd: workspace,
     timeoutMs: record.timeoutMs,
@@ -294,11 +282,8 @@ async function execute(workspace, record, prompt) {
       : null,
   });
 
-  const verdict = readVerdict(resultPath);
-  // Cleanup is owned by the execution that created the file, and only after the child has closed.
-  await rm(resultPath, { force: true }).catch(() => { /* best effort; the jobId makes it unique */ });
-
   const events = readEventStream(outcome.stdout);
+  const verdict = verdictFrom(events);
   let status;
   if (outcome.timedOut) status = "timed_out";
   else if (events.terminal === "completed") status = "completed";

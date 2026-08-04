@@ -646,108 +646,45 @@ class OutputCaptureAndQuota(RunnerCase):
         return self.run_runner(*self.base_args(), fixture="verdict-writer.mjs",
                                expect_ok=not (env.get("VIBE_TEST_QUOTA") or env.get("VIBE_TEST_REJECT")))
 
-    def test_the_runner_passes_the_result_file_flag(self):
-        """Output capture: `-o <result>` for the text. Nothing passed it before this change."""
-        self.run_with()
-        argv = self.read_probe()["argv"]
-        self.assertIn("-o", argv, "the contract's Output capture row requires -o")
-        self.assertTrue(argv[argv.index("-o") + 1].endswith(".result"))
+    def test_the_runner_asks_for_no_result_file(self):
+        """vibe-137: the verdict travels in the mandatory stream, so `-o` is not passed at all.
 
-    def test_a_written_verdict_is_present(self):
+        A second channel for one field bought redundancy the stream already guards — without a
+        completed-turn event you know not to trust it — and cost two sources of truth that nothing
+        reconciled.
+        """
+        self.run_with()
+        self.assertNotIn("-o", self.read_probe()["argv"])
+
+    def test_a_verdict_in_the_stream_is_present(self):
         parsed = self.result_line(self.run_with())
         self.assertEqual(parsed["verdictState"], "present")
+        self.assertEqual(self.job_record(parsed["jobId"])["verdictText"], "verdict: approve")
 
-    def test_an_empty_result_file_is_distinguishable_from_an_absent_one(self):
-        """The row's stated property: 'a run that produced none is distinguishable from one that
-        produced an empty one.' `verdictText: null` alone cannot separate those, which is why the
-        state is stored rather than inferred."""
+    def test_an_empty_message_is_distinguishable_from_no_message(self):
+        """The obligation is unchanged by where the verdict comes from: 'a run that produced none is
+        distinguishable from one that produced an empty one.'"""
         empty = self.result_line(self.run_with(VIBE_TEST_VERDICT_FILE="empty"))
         absent = self.result_line(self.run_with(VIBE_TEST_VERDICT_FILE="absent"))
         self.assertEqual(empty["verdictState"], "empty")
         self.assertEqual(absent["verdictState"], "absent")
-        self.assertNotEqual(empty["verdictState"], absent["verdictState"])
+        self.assertIsNotNone(self.job_record(empty["jobId"])["verdictText"])
+        self.assertIsNone(self.job_record(absent["jobId"])["verdictText"])
 
     def test_the_verdict_text_is_on_the_record_not_the_result_line(self):
-        """`verdictText` stays off the line because the event stream in `rawOutput` already carries
-        the agent message — duplication, not size."""
-        completed = self.run_with()
-        parsed = self.result_line(completed)
-        self.assertNotIn("verdictText", parsed)
-        record = self.job_record(parsed["jobId"])
-        self.assertEqual(record["verdictText"], "verdict: approve\n")
-        self.assertEqual(record["verdictState"], "present")
-
-    def test_the_result_path_derives_from_the_job_id(self):
-        """Two concurrent jobs must not read or clean up each other's verdict."""
+        """`verdictText` stays off the line because `rawOutput` already carries the event it came
+        from — duplication, not size."""
         parsed = self.result_line(self.run_with())
-        argv = self.read_probe()["argv"]
-        self.assertIn(parsed["jobId"], argv[argv.index("-o") + 1],
-                      "the path must derive from the immutable jobId")
+        self.assertNotIn("verdictText", parsed)
+        self.assertIn("verdictState", parsed)
 
-    def test_the_result_file_is_cleaned_up_by_its_own_execution(self):
-        """The path comes from argv, not from a guess.
-
-        An earlier version of this test looked in a directory production never writes to, so it
-        passed whether or not cleanup ran at all.
-        """
-        self.run_with()
-        argv = self.read_probe()["argv"]
-        written = Path(argv[argv.index("-o") + 1])
-        self.assertTrue(written.parent.is_dir(), "the -o directory must be the real jobs dir")
-        self.assertFalse(written.exists(),
-                         f"{written} survived; the creating execution owns its removal")
-
-    def test_two_overlapping_jobs_get_distinct_paths_and_distinct_verdicts(self):
-        """Cross-job verdict substitution is a data-integrity failure, so overlap is *forced*.
-
-        Each fixture writes its own barrier file and spins until it sees the other's, so both children
-        are provably alive at the same moment. An earlier version only started two threads and hoped.
-        Each also writes a **distinct verdict text**, which is what makes substitution detectable at
-        all — distinct ids and paths would not show it.
-        """
-        import threading
-        seen, lock = [], threading.Lock()
-
-        def one(tag, other):
-            probe = self.ws / f"probe-{tag}.json"
-            env = dict(os.environ)
-            env.update({
-                "VIBE_SUITE_CODEX_BIN": str(FIXTURES / "verdict-writer.mjs"),
-                "VIBE_TEST_PROBE": str(probe),
-                "VIBE_TEST_VERDICT_TEXT": f"verdict-{tag}",
-                "VIBE_TEST_BARRIER": f"{self.ws / f'barrier-{tag}'}:{self.ws / f'barrier-{other}'}",
-            })
-            result = subprocess.run(["node", str(RUNNER), *self.base_args()],
-                                    cwd=self.ws, env=env, capture_output=True, text=True, timeout=40)
-            line = [l for l in result.stdout.splitlines() if l.strip()][-1]
-            with lock:
-                seen.append((tag, result.returncode, json.loads(line), json.loads(probe.read_text())))
-
-        threads = [threading.Thread(target=one, args=(a, b)) for a, b in (("a", "b"), ("b", "a"))]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(60)
-
-        self.assertEqual(len(seen), 2)
-        # The barrier exits 97 on timeout. Ignoring the return code was how a *sequential* pair could
-        # satisfy every other assertion — one run times out, the next sees its leftover barrier file.
-        for tag, code, _, _ in seen:
-            self.assertEqual(code, 0, f"job {tag} exited {code}; 97 means the barrier never met")
-
-        path_of = lambda probe: probe["argv"][probe["argv"].index("-o") + 1]
-        ids = {parsed["jobId"] for _, _, parsed, _ in seen}
-        paths = {path_of(probe) for _, _, _, probe in seen}
-        self.assertEqual(len(ids), 2, "job ids collided")
-        self.assertEqual(len(paths), 2, "two concurrent jobs shared a result path")
-
-        for tag, _, parsed, probe in seen:
-            self.assertEqual(parsed["status"], "completed", f"job {tag} did not complete")
-            self.assertIn(parsed["jobId"], path_of(probe), "each path must carry its own job id")
-            record = self.job_record(parsed["jobId"])
-            self.assertEqual(record["verdictState"], "present")
-            self.assertEqual(record["verdictText"], f"verdict: verdict-{tag}\n",
-                             "a job read another job's verdict")
+    def test_no_result_file_is_written_anywhere_under_the_workspace(self):
+        """The machinery is gone, not merely unused: no path to derive, no cleanup to own, and no two
+        jobs able to collide over one file."""
+        parsed = self.result_line(self.run_with())
+        strays = list(self.ws.rglob("*.result"))
+        self.assertEqual(strays, [], f"result files survive: {strays}")
+        self.assertEqual(parsed["verdictState"], "present")
 
     QUOTA_VARIANTS = (
         "You have exceeded your usage limit.",

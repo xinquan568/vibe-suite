@@ -382,6 +382,7 @@ class TestKnowledgeFreshnessStates(DoctorCase):
     def test_no_record_capability_is_never_refreshed_and_cites_51(self):
         self.install()
         r = self.doctor_with_root(self.plugin_root())
+        self.assertEqual(r.returncode, 0, r.stdout)
         cap = self.freshness_capability(json.loads(r.stdout))
         self.assertEqual(cap["status"], "unavailable")
         self.assertIn("never refreshed", cap["blocked_on"])
@@ -391,6 +392,7 @@ class TestKnowledgeFreshnessStates(DoctorCase):
         self.install()
         root = self.plugin_root('{"refreshed": "2026-06-07"}')
         r = self.doctor_with_root(root)
+        self.assertEqual(r.returncode, 0, r.stdout)
         report = json.loads(r.stdout)
         cap = self.freshness_capability(report)
         self.assertEqual(cap["status"], "refreshed 2026-06-07")

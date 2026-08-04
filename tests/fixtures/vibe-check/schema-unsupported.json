@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/xinquan568/vibe-suite/schemas/audit-output.schema.json",
   "title": "vibe-suite audit output",
-  "description": "The machine-readable form of the finding contract. JSON is canonical; the Markdown format agents emit is its rendering. Which variant field is mandatory depends on the emitting agent, which only the report knows \u2014 so those rules are report-level conditionals reaching into findings, not per-finding rules. Deliberately expressed with a small keyword set so the repository's fail-closed checker can enforce all of it: no $ref/$defs (the finding schema is inlined), no const (enum of one), no not (non-[GOOD] severities are enumerated).",
+  "description": "The machine-readable form of the finding contract. JSON is canonical; the Markdown format agents emit is its rendering. Which variant field is mandatory depends on the emitting agent, which only the report knows \u2014 so those rules are report-level conditionals reaching into findings, not per-finding rules. Deliberately expressed with a small keyword set so the repository's fail-closed checker can enforce all of it: no $ref/$defs (the finding schema is inlined), no const (enum of one), no not (non-[GOOD] severities are enumerated). NOTE (vibe-130): the synthetic unsupported keyword is `uniqueItems`; it was `pattern` until the checker implemented that.",
   "type": "object",
   "required": [
     "agent",
@@ -20,8 +20,7 @@
         "vibe-suite:security",
         "vibe-suite:testing"
       ],
-      "description": "The <name> from the output header '## [Agent: <name>] Findings'. Constrained to the canonical qualified names: an unqualified name such as 'security' is rejected, because the agent-specific variant rules key on this value and a bare name would bypass them.",
-      "pattern": "^vibe-suite:"
+      "description": "The <name> from the output header '## [Agent: <name>] Findings'. Constrained to the canonical qualified names: an unqualified name such as 'security' is rejected, because the agent-specific variant rules key on this value and a bare name would bypass them."
     },
     "findings": {
       "type": "array",
@@ -110,7 +109,8 @@
             "file"
           ]
         }
-      }
+      },
+      "uniqueItems": true
     }
   },
   "allOf": [

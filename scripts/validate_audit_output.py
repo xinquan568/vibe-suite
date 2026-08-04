@@ -20,7 +20,9 @@ Usage:
     python3 scripts/validate_audit_output.py <report.json> [schema.json]
 """
 
+import ipaddress
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -29,7 +31,18 @@ IMPLEMENTED_KEYWORDS = frozenset({
     "type", "required", "properties", "additionalProperties",
     "enum", "minLength", "minItems", "maxItems", "items", "contains",
     "if", "then", "allOf",
+    # Added for the manifest input contract (vibe-130). The contract needs all five, and this
+    # checker halts on any keyword it does not implement — so without them a conformant schema
+    # would be refused outright rather than under-enforced.
+    "const", "minimum", "maximum", "pattern", "format",
 })
+
+#: `format` values this checker understands. An unknown format is a hard error rather than an
+#: ignored annotation: JSON Schema permits ignoring `format`, but a checker that silently skipped
+#: it would report success on a document it never examined, which is the posture this file exists
+#: to avoid. Validation is **structural only** — resolving a URI would make the result depend on
+#: the network.
+IMPLEMENTED_FORMATS = frozenset({"uri"})
 
 #: Annotation keywords carrying no validation semantics. Accepted and ignored.
 METADATA_KEYWORDS = frozenset({"$schema", "$id", "title", "description", "$comment", "examples"})
@@ -50,6 +63,105 @@ ALL_JSON_SCHEMA_KEYWORDS = frozenset({
     "allOf", "anyOf", "oneOf", "not", "if", "then", "else",  # allOf/if/then implemented
     "unevaluatedItems", "unevaluatedProperties", "contentEncoding", "contentMediaType",
 })
+
+#: RFC 3986 Appendix A, transcribed. Each name below is the RFC's own production name, so a reader
+#: can compare this block against the specification rather than against a list of cases. Four rounds
+#: of authored rules were each correct for the cases in hand and wrong for the next set; a grammar is
+#: finite and can simply be written down.
+#:
+#: **Every match uses `fullmatch`.** `re.match(..., "$")` succeeds before a terminal newline, so
+#: `http://x/\n` validated — a defect no case list found because nobody thinks to try a newline.
+#: Anchoring at the production level closes the class rather than the instance.
+#:
+#: **Syntactic only, and offline.** Resolving a URI would make the verdict depend on the network,
+#: which is the opposite of fail-closed. IPv6 is delegated to `ipaddress`: three hand-written versions
+#: were each wrong, and the standard library already implements the grammar.
+_UNRESERVED = r"A-Za-z0-9\-._~"
+_SUB_DELIMS = r"!$&'()*+,;="
+_PCT_ENCODED = r"%[0-9A-Fa-f]{2}"
+_PCHAR = r"(?:[" + _UNRESERVED + re.escape(_SUB_DELIMS) + r":@]|" + _PCT_ENCODED + r")"
+
+_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+\-.]*")
+_USERINFO = re.compile(r"(?:[" + _UNRESERVED + re.escape(_SUB_DELIMS) + r":]|" + _PCT_ENCODED + r")*")
+_IPVFUTURE = re.compile(r"[vV][0-9A-Fa-f]+\.[" + _UNRESERVED + re.escape(_SUB_DELIMS) + r":]+")
+_REG_NAME = re.compile(r"(?:[" + _UNRESERVED + re.escape(_SUB_DELIMS) + r"]|" + _PCT_ENCODED + r")*")
+_PORT = re.compile(r"[0-9]*")                       # port = *DIGIT — empty is legal
+_PATH = re.compile(r"(?:/" + _PCHAR + r"*)*")       # path-abempty
+_PATH_ROOTLESS = re.compile(_PCHAR + r"+(?:/" + _PCHAR + r"*)*")
+_QUERY = re.compile(r"(?:" + _PCHAR + r"|[/?])*")   # query and fragment share this production
+
+
+def _is_ip_literal(text):
+    """IP-literal = "[" ( IPv6address / IPvFuture ) "]" """
+    if not (text.startswith("[") and text.endswith("]")):
+        return None
+    inner = text[1:-1]
+    if _IPVFUTURE.fullmatch(inner):
+        return True
+    # `ipaddress` accepts a *scoped* address (`fe80::1%eth0`, RFC 6874). Appendix A's IPv6address has
+    # no zone-identifier production, so delegating without this guard inherits a superset of the
+    # grammar — the risk any delegation carries, and the reason it is named rather than assumed.
+    if "%" in inner:
+        return False
+    try:
+        ipaddress.IPv6Address(inner)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_host(text):
+    """host = IP-literal / IPv4address / reg-name — IPv4address is a subset of reg-name."""
+    literal = _is_ip_literal(text)
+    if literal is not None:
+        return literal
+    return bool(_REG_NAME.fullmatch(text))
+
+
+def _is_authority(text):
+    """authority = [ userinfo "@" ] host [ ":" port ]"""
+    userinfo, at, hostport = text.rpartition("@")
+    if at and not _USERINFO.fullmatch(userinfo):
+        return False
+    if hostport.startswith("["):
+        close = hostport.find("]")
+        if close < 0:
+            return False
+        host, remainder = hostport[:close + 1], hostport[close + 1:]
+        if remainder and not (remainder.startswith(":") and _PORT.fullmatch(remainder[1:])):
+            return False
+    else:
+        host, colon, port = hostport.rpartition(":")
+        if not colon:
+            host = hostport
+        elif not _PORT.fullmatch(port):
+            return False
+    return _is_host(host)
+
+
+def _is_uri(text):
+    """URI = scheme ":" hier-part [ "?" query ] [ "#" fragment ]"""
+    if not isinstance(text, str):
+        return False
+    text, hashed, fragment = text.partition("#")
+    if hashed and not _QUERY.fullmatch(fragment):
+        return False                                  # a second '#' fails here, as the grammar says
+    text, marked, query = text.partition("?")
+    if marked and not _QUERY.fullmatch(query):
+        return False
+    scheme, colon, hier = text.partition(":")
+    if not colon or not _SCHEME.fullmatch(scheme):
+        return False
+    if hier.startswith("//"):                         # "//" authority path-abempty
+        authority, slash, tail = hier[2:].partition("/")
+        return bool(_is_authority(authority)
+                    and _PATH.fullmatch("/" + tail if slash else ""))
+    if hier.startswith("/"):                          # path-absolute
+        return bool(_PATH.fullmatch(hier))
+    if hier == "":                                    # path-empty
+        return True
+    return bool(_PATH_ROOTLESS.fullmatch(hier))       # path-rootless
+
 
 _TYPES = {
     "object": dict, "array": list, "string": str,
@@ -109,6 +221,23 @@ def _check_schema_supported(schema, path="$"):
     for key, value in schema.items():
         if key in METADATA_KEYWORDS:
             continue
+        # Malformed keyword *values* are rejected here rather than at validation time. A bad
+        # `minimum` on a string property would otherwise sit inert until some instance happened to
+        # be a number, and a `pattern` that does not compile would raise a Python error mid-run.
+        if key in ("minimum", "maximum") and (
+                not isinstance(value, (int, float)) or isinstance(value, bool)):
+            raise UnsupportedSchemaError(f"{path}: {key} must be a number, got {value!r}")
+        if key == "pattern":
+            if not isinstance(value, str):
+                raise UnsupportedSchemaError(f"{path}: pattern must be a string, got {value!r}")
+            try:
+                re.compile(value)
+            except re.error as exc:
+                raise UnsupportedSchemaError(
+                    f"{path}: pattern {value!r} does not compile: {exc}") from exc
+        if key == "format" and (
+                not isinstance(value, str) or value not in IMPLEMENTED_FORMATS):
+            raise UnsupportedSchemaError(f"{path}: unsupported format {value!r}")
         if key not in IMPLEMENTED_KEYWORDS:
             raise UnsupportedSchemaError(
                 f"{path}: keyword '{key}' is not implemented by this checker. "
@@ -163,9 +292,30 @@ def _validate(instance, schema, path):
         if not any(_json_equal(instance, option) for option in schema["enum"]):
             raise ValidationError(f"{path}: {instance!r} is not one of {schema['enum']}")
 
+    if "const" in schema:
+        if not _json_equal(instance, schema["const"]):
+            raise ValidationError(f"{path}: {instance!r} is not {schema['const']!r}")
+
     if "minLength" in schema and isinstance(instance, str):
         if len(instance) < schema["minLength"]:
             raise ValidationError(f"{path}: shorter than minLength {schema['minLength']}")
+
+    if isinstance(instance, str):
+        if "pattern" in schema and not re.search(schema["pattern"], instance):
+            raise ValidationError(f"{path}: {instance!r} does not match {schema['pattern']!r}")
+        if "format" in schema:
+            fmt = schema["format"]
+            if fmt not in IMPLEMENTED_FORMATS:
+                raise UnsupportedSchemaError(f"{path}: unsupported format {fmt!r}")
+            if fmt == "uri" and not _is_uri(instance):
+                raise ValidationError(f"{path}: {instance!r} is not a URI")
+
+    # `bool` is a subclass of `int` in Python; a boolean is not a number here.
+    if isinstance(instance, (int, float)) and not isinstance(instance, bool):
+        if "minimum" in schema and instance < schema["minimum"]:
+            raise ValidationError(f"{path}: {instance} is below minimum {schema['minimum']}")
+        if "maximum" in schema and instance > schema["maximum"]:
+            raise ValidationError(f"{path}: {instance} is above maximum {schema['maximum']}")
 
     if isinstance(instance, list):
         if "minItems" in schema and len(instance) < schema["minItems"]:

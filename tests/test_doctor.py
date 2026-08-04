@@ -304,3 +304,47 @@ class TestAdvisorState(DoctorCase):
         self.install()
         report = self.report()
         self.assertEqual([f for f in report["findings"] if f["check"] == "advisor-state"], [])
+
+
+class TestAdvisorStateVariants(DoctorCase):
+    """E6.1 round 3: stale content is fixable; an invalid registration is not."""
+
+    ENTRY = {"command": "npx", "args": ["-y", "claude-octopus@9.9.9"],
+             "env": {"CLAUDE_SERVER_NAME": "probe_advisor"},
+             "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}
+
+    def _declare(self):
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "probe_advisor.md").write_text(ADVISOR_DEFN, encoding="utf-8")
+
+    def test_stale_registered_is_fixable(self):
+        self.install()
+        self._declare()
+        mcp = self.ws / ".mcp.json"
+        doc = json.loads(mcp.read_text())
+        doc.setdefault("mcpServers", {})["probe_advisor"] = dict(self.ENTRY)
+        mcp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        toml = self.ws / ".codex" / "config.toml"
+        block = ("# >>> vibe-suite:server:probe_advisor v1 >>>\n"
+                 '[mcp_servers.probe_advisor]\ncommand = "npx"\n'
+                 'args = ["-y", "claude-octopus@9.9.9"]\n'
+                 "# <<< vibe-suite:server:probe_advisor <<<\n")
+        toml.write_text(toml.read_text() + block)
+        rows = [f for f in self.report()["findings"] if f["check"] == "advisor-state"]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn("stale-registered", rows[0]["finding"])
+        self.assertTrue(rows[0]["auto_fixable"])
+
+    def test_invalid_registration_is_not_fixable(self):
+        self.install()
+        self._declare()
+        mcp = self.ws / ".mcp.json"
+        doc = json.loads(mcp.read_text())
+        entry = dict(self.ENTRY, args=["-y", "claude-octopus@latest"])
+        doc.setdefault("mcpServers", {})["probe_advisor"] = entry
+        mcp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        rows = [f for f in self.report()["findings"] if f["check"] == "advisor-state"]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn("invalid-registration", rows[0]["finding"])
+        self.assertFalse(rows[0]["auto_fixable"])

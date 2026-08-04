@@ -133,6 +133,13 @@ def parse_definition(text, filename):
     if kinds.get("description") != "block":
         raise AdvisorError(f"{filename}: description must be a YAML literal block scalar (|) so "
                            "newlines and <example> tags survive")
+    for key in ("allowed_tools", "disallowed_tools", "additional_dirs"):
+        if key in fields and kinds.get(key) != "list":
+            raise AdvisorError(f"{filename}: {key} must be a flow list like [Read, Grep, Glob]")
+    for key in ("name", "model", "tool_name", "prompt_mode", "permission_mode", "effort",
+                "cwd", "max_turns", "max_budget_usd"):
+        if key in fields and kinds.get(key) != "scalar":
+            raise AdvisorError(f"{filename}: {key} must be a plain scalar value")
     model = fields.get("model")
     if model is not None and model not in TIERS:
         raise AdvisorError(
@@ -162,9 +169,6 @@ def parse_definition(text, filename):
         if not isinstance(budget, str) or not BUDGET_RE.match(budget) or float(budget) <= 0:
             raise AdvisorError(f"{filename}: max_budget_usd must be a positive decimal, "
                                f"got {budget!r}")
-    for key in ("allowed_tools", "disallowed_tools", "additional_dirs"):
-        if key in fields and kinds.get(key) != "list":
-            raise AdvisorError(f"{filename}: {key} must be a flow list like [Read, Grep, Glob]")
     if not body.strip():
         raise AdvisorError(f"{filename}: the body (system prompt) is empty")
     return {
@@ -188,6 +192,8 @@ def parse_definition(text, filename):
 def load_definitions(ws):
     out = {}
     agents = Path(ws) / AGENTS_REL
+    if agents.is_symlink():
+        raise AdvisorError(f"{agents} is a symlink; refusing to read definitions through it")
     if not agents.is_dir():
         return out
     for path in sorted(agents.glob("*.md")):
@@ -232,11 +238,16 @@ def _entry_target(entry):
 
 
 def _toml_block_target(toml_text, name):
+    """The block's target, `"<unparseable>"` when the block exists but its target is missing,
+    malformed, or not a claude-octopus spec — a foreign or unreadable value must surface as
+    disagreement, never pass as an agreeing registration."""
     match = bridge._block_re(f"server:{name}", "#", "").search(toml_text)
     if not match:
         return None
     m = re.search(r'args = \["-y", "([^"]+)"\]', match.group(0))
-    return m.group(1) if m else None
+    if not m or not m.group(1).startswith(mcp_pin.PACKAGE + "@"):
+        return "<unparseable>"
+    return m.group(1)
 
 
 def _registered_targets(name, servers, toml_text):
@@ -357,23 +368,62 @@ def _save_ledger(ws, ledger):
                         json.dumps(ledger, indent=2, sort_keys=True) + "\n", mode=mode)
 
 
-def recover(ws):
-    """Heal an interrupted transaction. Returns the journal's `{"intent", "remove_name"}` when
-    one was found and resolved, else None — callers can tell *what* recovery completed.
+JOURNAL_KEYS = {"schema", "intent", "remove_name", "delete_timeline", "desired_sha",
+                "pre_images", "post_images", "prior_baseline", "post_baseline"}
 
-    `apply` rolls back: both stores and the baseline entry return to their journaled pre-state.
-    `remove` rolls forward: the recorded post-images are written (idempotent), the definition and
-    — when flagged — the timeline are deleted, and a fresh `reconcile` converges the leftovers.
-    """
-    ws = Path(ws)
-    txn_path = ws / TXN_REL
-    if not txn_path.is_file():
-        return None
+
+def _validated_journal(txn_path):
+    """Fail-closed: a journal recovery cannot fully trust must never drive deletions. Every
+    field is checked for presence and type; unknown schemas and unknown keys refuse."""
     try:
         txn = json.loads(txn_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise AdvisorError(f"{txn_path} is unreadable ({exc}); refusing to guess at recovery — "
                            "inspect and remove it by hand") from exc
+    def refuse(why):
+        raise AdvisorError(f"{txn_path}: {why}; refusing recovery — inspect and remove it by hand")
+    if not isinstance(txn, dict) or set(txn) - JOURNAL_KEYS:
+        refuse("unknown journal shape")
+    if txn.get("schema") != 1:
+        refuse(f"unknown journal schema {txn.get('schema')!r}")
+    if txn.get("intent") not in ("apply", "remove"):
+        refuse(f"unknown intent {txn.get('intent')!r}")
+    pre = txn.get("pre_images")
+    if not isinstance(pre, dict) or set(pre) - {str(MCP_REL), str(TOML_REL), "definition"} \
+            or str(MCP_REL) not in pre or str(TOML_REL) not in pre \
+            or not all(v is None or isinstance(v, dict) for v in pre.values()):
+        refuse("pre_images do not cover both stores with restorable entries")
+    post = txn.get("post_images")
+    if not isinstance(post, dict) or set(post) != {str(MCP_REL), str(TOML_REL)} \
+            or not isinstance(post.get(str(MCP_REL)), str) \
+            or not isinstance(post.get(str(TOML_REL)), str):
+        refuse("post_images do not cover both stores")
+    try:
+        base64.b64decode(post[str(MCP_REL)], validate=True)
+    except Exception:
+        refuse("post_images are not decodable")
+    if txn["intent"] == "remove":
+        if not NAME_RE.match(txn.get("remove_name") or ""):
+            refuse(f"remove journal names no valid advisor ({txn.get('remove_name')!r})")
+        if not isinstance(txn.get("delete_timeline"), bool):
+            refuse("remove journal carries no boolean delete_timeline")
+    return txn
+
+
+def recover(ws):
+    """Heal an interrupted transaction. Returns the journal's `{"intent", "remove_name"}` when
+    one was found and resolved, else None — callers can tell *what* recovery completed.
+
+    `apply` rolls back: both stores and the baseline entry return to their journaled pre-state.
+    `remove` rolls forward: the recorded post-images and post-baseline are applied (idempotent)
+    and the deletions complete. The journal is deleted **last**, after every fallible step, so an
+    interrupted recovery is itself recoverable.
+    """
+    ws = Path(ws)
+    txn_path = ws / TXN_REL
+    if not txn_path.is_file():
+        return None
+    txn = _validated_journal(txn_path)
     pre = txn.get("pre_images", {})
 
     def restore(rel, entry):
@@ -383,33 +433,29 @@ def recover(ws):
             bridge.write_atomic(ws, ws / rel, base64.b64decode(entry.get("content_b64", "")))
 
     if txn.get("intent") == "remove":
-        post = txn.get("post_images", {})
-        if str(MCP_REL) in post:
-            bridge.write_atomic(ws, ws / MCP_REL,
-                                base64.b64decode(post[str(MCP_REL)]))
-        if str(TOML_REL) in post:
-            bridge.write_atomic(ws, ws / TOML_REL, post[str(TOML_REL)])
-        name = txn.get("remove_name")
-        if name and NAME_RE.match(name):
-            bridge.unlink_at(ws, AGENTS_REL / f"{name}.md")
-            if txn.get("delete_timeline"):
-                bridge.remove_tree_at(ws, timeline_rel(name))
-                try:
-                    bridge.unlink_at(ws, AGENTS_REL / name)
-                except (OSError, bridge.BridgeError):
-                    pass
+        post = txn["post_images"]
+        bridge.write_atomic(ws, ws / MCP_REL, base64.b64decode(post[str(MCP_REL)]))
+        bridge.write_atomic(ws, ws / TOML_REL, post[str(TOML_REL)])
+        name = txn["remove_name"]
+        bridge.unlink_at(ws, AGENTS_REL / f"{name}.md")
+        if txn["delete_timeline"]:
+            bridge.remove_tree_at(ws, timeline_rel(name))
+            try:
+                bridge.unlink_at(ws, AGENTS_REL / name)
+            except (OSError, bridge.BridgeError):
+                pass
         baseline = _load_json_file(ws / LEDGER_REL)
-        prior = txn.get("prior_baseline")
-        if prior is None:
+        post_base = txn.get("post_baseline")
+        if post_base is None:
             baseline.pop(str(MCP_REL), None)
         else:
-            baseline[str(MCP_REL)] = prior
+            baseline[str(MCP_REL)] = post_base
+        _save_ledger(ws, baseline)
+        _ignore_block(ws, load_definitions(ws))
         bridge.unlink_at(ws, TXN_REL)
-        _reconcile_endstate(ws, load_definitions(ws), baseline)
     else:
         for rel in (str(MCP_REL), str(TOML_REL)):
-            if rel in pre:
-                restore(rel, pre[rel])
+            restore(rel, pre.get(rel))
         baseline = _load_json_file(ws / LEDGER_REL)
         prior = txn.get("prior_baseline")
         if prior is None:
@@ -506,6 +552,7 @@ def _collision_check(defs, doc, toml_text):
 def reconcile(ws, pin=None, pin_file=None, pending_file=None):
     """Converge both stores to the definitions. Returns `{name: transition}`."""
     ws = Path(ws)
+    bridge.assert_root(ws)
     bridge.pin_root(ws)
     recover(ws)
     defs = load_definitions(ws)
@@ -596,13 +643,19 @@ def _transact(ws, doc, toml_before, toml_after, defs,
         return
 
     bridge.secure_dir(ws, STATE_REL)
-    pre_images = {}
-    if mcp_before is not None:
-        pre_images[str(MCP_REL)] = bridge.record_pre_image(mcp_path)
-    if (ws / TOML_REL).is_file():
-        pre_images[str(TOML_REL)] = bridge.record_pre_image(ws / TOML_REL)
+    pre_images = {
+        str(MCP_REL): bridge.record_pre_image(mcp_path) if mcp_before is not None else None,
+        str(TOML_REL): (bridge.record_pre_image(ws / TOML_REL)
+                        if (ws / TOML_REL).is_file() else None),
+    }
     if definition_pre is not None:
         pre_images["definition"] = definition_pre
+    post_baseline = dict(baseline)
+    if advisors_left and json_changed and str(MCP_REL) not in post_baseline \
+            and mcp_before is not None:
+        post_baseline[str(MCP_REL)] = pre_images[str(MCP_REL)]
+    if not advisors_left:
+        post_baseline.pop(str(MCP_REL), None)
     journal = {
         "schema": 1, "intent": intent, "remove_name": remove_name,
         "delete_timeline": delete_timeline,
@@ -612,6 +665,7 @@ def _transact(ws, doc, toml_before, toml_after, defs,
         "post_images": {str(MCP_REL): base64.b64encode(mcp_final).decode("ascii"),
                         str(TOML_REL): toml_after},
         "prior_baseline": prior_baseline,
+        "post_baseline": post_baseline.get(str(MCP_REL)),
     }
     mode = _record_mode(pre_images.values())
     bridge.write_atomic(ws, ws / TXN_REL, json.dumps(journal) + "\n", mode=mode)
@@ -624,16 +678,11 @@ def _transact(ws, doc, toml_before, toml_after, defs,
         if toml_changed:
             _write_toml_store(ws, toml_after)
         _fail_point("toml")
-        if advisors_left and json_changed and str(MCP_REL) not in baseline \
-                and mcp_before is not None:
-            baseline[str(MCP_REL)] = pre_images[str(MCP_REL)]
-        if not advisors_left:
-            baseline.pop(str(MCP_REL), None)
-        _save_ledger(ws, baseline)
+        _save_ledger(ws, post_baseline)
         _fail_point("baseline")
         _ignore_block(ws, defs)
     except BaseException:
-        if intent == "apply":
+        if True:  # both intents roll back in-process: the destructive tail has not run yet
             if mcp_before is not None:
                 bridge.write_atomic(ws, mcp_path, mcp_before)
             elif json_changed:
@@ -654,11 +703,6 @@ def _restore_baseline(ws, prior):
     else:
         baseline[str(MCP_REL)] = prior
     return baseline
-
-
-def _reconcile_endstate(ws, defs, baseline):
-    _save_ledger(ws, baseline)
-    _ignore_block(ws, defs)
 
 
 def _ignore_block(ws, defs):
@@ -691,6 +735,7 @@ def add(ws, name, pin=None, plugin_root=None, custom_text=None,
         pin_file=None, pending_file=None):
     """Preflight everything fallible — backend included — before creating anything."""
     ws = Path(ws)
+    bridge.assert_root(ws)
     bridge.pin_root(ws)
     recover(ws)
     if not NAME_RE.match(name or ""):
@@ -739,6 +784,7 @@ def add(ws, name, pin=None, plugin_root=None, custom_text=None,
 def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_file=None):
     """Preflight → two-store transaction → definition → timeline, journaled for roll-forward."""
     ws = Path(ws)
+    bridge.assert_root(ws)
     bridge.pin_root(ws)
     recover(ws)
     if not NAME_RE.match(name or ""):
@@ -770,7 +816,14 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
     toml_text = toml_before
     report = {}
     for other, (state, desired_entry, desired_body, _) in classified.items():
-        if state in ("consistent", "registered-undeclared"):
+        if state == "consistent":
+            continue
+        if state == "registered-undeclared":
+            if is_owned_entry(servers.get(other)):
+                del servers[other]
+            if bridge.toml_server_has(toml_text, other):
+                toml_text = bridge.toml_server_remove(toml_text, other)
+            report[other] = "registered-undeclared->removed"
             continue
         if desired_entry is None:
             target = resolve_backend(pin, pin_file=pin_file, pending_file=pending_file)
@@ -808,8 +861,12 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
     bridge.unlink_at(ws, TXN_REL)
     # A final pass through the shared engine converges the end-state artifacts the deletions
     # changed after the transaction (the ignore block once the last timeline is gone) and keeps
-    # add and remove on one lifecycle path.
-    report.update(reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file))
+    # add and remove on one lifecycle path. Best-effort: the removal itself has already
+    # succeeded, so a convergence refusal is reported, never raised over a completed removal.
+    try:
+        report.update(reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file))
+    except (AdvisorError, bridge.BridgeError) as exc:
+        report["_warning"] = f"post-removal convergence deferred: {exc}"
     report[name] = "removed"
     return report
 

@@ -84,15 +84,20 @@ def main(argv=None):
     ws = Path(args.workspace)
 
     try:
-        # Heal any interrupted transaction before every operation — including read-only `list`,
-        # so a crashed remove completes (roll-forward) rather than presenting a half-state.
-        recovered = advisors.recover(ws)
-        if recovered:
-            print("recovered an interrupted advisor transaction")
-        if recovered and args.op == "remove" and recovered.get("intent") == "remove" \
-                and recovered.get("remove_name") == args.name:
-            print(f"✓ advisor {args.name!r} removed (completed by recovery)")
-            return 0
+        # Recovery runs only from MUTATING entries — `list` stays observational: a pending
+        # transaction is reported as state, and healing it is an explicit act of add/remove/
+        # reconcile (each of which also recovers internally for library callers).
+        if args.op != "list":
+            recovered = advisors.recover(ws)
+            if recovered:
+                print("recovered an interrupted advisor transaction")
+            if recovered and args.op == "remove" and recovered.get("intent") == "remove" \
+                    and recovered.get("remove_name") == args.name:
+                print(f"✓ advisor {args.name!r} removed (completed by recovery)")
+                return 0
+        elif (ws / advisors.TXN_REL).is_file():
+            print("note: an advisor transaction is pending recovery; run "
+                  "/vibe-suite:advisor reconcile (or any add/remove) to heal it")
         if args.op == "add":
             custom_text = _compose_custom(args) if args.custom else None
             report = advisors.add(ws, args.name, pin=args.pin, plugin_root=_plugin_root(),

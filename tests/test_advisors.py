@@ -505,9 +505,17 @@ class TestTransactionJournal(unittest.TestCase):
         advisors.add(ws, "probe_advisor", pin=PIN)
         r = self._crash_cli(ws, "toml", "remove", "probe_advisor", "--delete-timeline")
         self.assertEqual(r.returncode, 9, r.stderr)
-        r2 = subprocess.run(
+        r_list = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "advisor_cli.py"),
              "--workspace", str(ws), "list"], capture_output=True, text=True)
+        self.assertEqual(r_list.returncode, 0, r_list.stderr)
+        self.assertIn("pending recovery", r_list.stdout,
+                      "list must report, never heal, a pending transaction")
+        self.assertTrue((ws / ".vibe-suite-state" / "advisor-txn.json").is_file(),
+                        "list must leave the journal untouched")
+        r2 = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "advisor_cli.py"),
+             "--workspace", str(ws), "reconcile"], capture_output=True, text=True)
         self.assertEqual(r2.returncode, 0, r2.stderr)
         self.assertFalse((ws / ".vibe-suite" / "agents" / "probe_advisor.md").exists(),
                          "roll-forward must complete the definition deletion")
@@ -700,3 +708,172 @@ class TestFieldValidation(unittest.TestCase):
             "probe_advisor.md")
         self.assertEqual(d["tool_name"], "probe_check")
         self.assertEqual(d["max_budget_usd"], "1.25")
+
+
+class TestCrashMatrix(unittest.TestCase):
+    """W2 frozen matrix — every boundary, subprocess os._exit, converging re-run."""
+
+    CLI = [sys.executable, str(REPO_ROOT / "scripts" / "advisor_cli.py")]
+
+    def ws(self):
+        ws = make_ws(mcp=NONCANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        return ws
+
+    def run_cli(self, ws, *args, fail_after=None):
+        env = dict(os.environ)
+        if fail_after:
+            env["VIBE_ADVISOR_FAIL_AFTER"] = fail_after
+        return subprocess.run([*self.CLI, "--workspace", str(ws), *args],
+                              capture_output=True, text=True, env=env)
+
+    def assert_converges(self, ws, before_mcp):
+        r = self.run_cli(ws, "reconcile", "--pin", PIN)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((ws / ".vibe-suite-state" / "advisor-txn.json").exists())
+
+    def test_add_crash_at_journal_and_toml(self):
+        for point in ("journal", "toml"):
+            ws = self.ws()
+            before = (ws / ".mcp.json").read_bytes()
+            r = self.run_cli(ws, "add", "probe_advisor", "--pin", PIN, fail_after=point)
+            self.assertEqual(r.returncode, 9, (point, r.stderr))
+            self.assert_converges(ws, before)
+            doc = json.loads((ws / ".mcp.json").read_text())
+            # journal-point rollback leaves nothing; toml-point rollback also rolls back,
+            # and the converging reconcile re-registers from the surviving definition.
+            self.assertIn("probe_advisor", doc["mcpServers"])
+
+    def test_stale_update_crash_at_json_and_toml(self):
+        for point in ("json", "toml"):
+            ws = self.ws()
+            self.run_cli(ws, "add", "probe_advisor", "--pin", PIN)
+            add_definition(ws, extra="effort: high\n")
+            r = self.run_cli(ws, "reconcile", fail_after=point)
+            self.assertEqual(r.returncode, 9, (point, r.stderr))
+            r2 = self.run_cli(ws, "reconcile")
+            self.assertEqual(r2.returncode, 0, r2.stderr)
+            doc = json.loads((ws / ".mcp.json").read_text())
+            self.assertEqual(doc["mcpServers"]["probe_advisor"]["env"].get("CLAUDE_EFFORT"),
+                             "high", point)
+
+    def test_remove_crash_at_json_definition_and_timeline(self):
+        for point in ("json", "definition", "timeline"):
+            ws = self.ws()
+            self.run_cli(ws, "add", "probe_advisor", "--pin", PIN)
+            before = (ws / ".mcp.json").read_bytes()
+            r = self.run_cli(ws, "remove", "probe_advisor", "--delete-timeline",
+                             fail_after=point)
+            self.assertEqual(r.returncode, 9, (point, r.stderr))
+            r2 = self.run_cli(ws, "reconcile")
+            self.assertEqual(r2.returncode, 0, (point, r2.stderr))
+            self.assertFalse((ws / ".vibe-suite" / "agents" / "probe_advisor").exists(), point)
+            self.assertEqual(
+                bridge.owned_names(json.loads((ws / ".mcp.json").read_text())), [], point)
+
+    def test_journal_file_mode_derives_from_source(self):
+        ws = self.ws()
+        os.chmod(ws / ".mcp.json", 0o400)
+        r = self.run_cli(ws, "add", "probe_advisor", "--pin", PIN, fail_after="json")
+        self.assertEqual(r.returncode, 9, r.stderr)
+        txn = ws / ".vibe-suite-state" / "advisor-txn.json"
+        self.assertEqual(os.stat(txn).st_mode & 0o777, 0o400)
+
+
+class TestJournalValidation(unittest.TestCase):
+    """New-finding 1: recovery is fail-closed — an unvalidatable journal drives nothing."""
+
+    def test_bad_journals_refused_without_mutation(self):
+        for bad in ({"schema": 99},
+                    {"schema": 1, "intent": "explode"},
+                    {"schema": 1, "intent": "remove", "remove_name": "x",
+                     "delete_timeline": True, "pre_images": {}, "post_images": {}},
+                    {"schema": 1, "intent": "remove", "remove_name": "../evil",
+                     "delete_timeline": True,
+                     "pre_images": {".mcp.json": None, ".codex/config.toml": None},
+                     "post_images": {".mcp.json": "e30=", ".codex/config.toml": ""}}):
+            ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+            add_definition(ws)
+            state = ws / ".vibe-suite-state"
+            state.mkdir()
+            (state / "advisor-txn.json").write_text(json.dumps(bad))
+            before = (ws / ".mcp.json").read_bytes()
+            with self.assertRaises(advisors.AdvisorError, msg=bad):
+                advisors.recover(ws)
+            self.assertEqual((ws / ".mcp.json").read_bytes(), before)
+            self.assertTrue((ws / ".vibe-suite" / "agents" / "probe_advisor.md").is_file())
+            self.assertTrue((state / "advisor-txn.json").is_file(),
+                            "a refused journal must be left for inspection")
+
+
+class TestRemoveSafety(unittest.TestCase):
+    """F5 residue: a refusal caused by another advisor leaves the target fully intact."""
+
+    def test_other_advisors_invalid_registration_preserves_target(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        add_definition(ws, name="other_advisor")
+        advisors.add(ws, "other_advisor", pin=PIN)
+        toml_path = ws / ".codex" / "config.toml"
+        block = bridge._block_re("server:other_advisor", "#", "").search(
+            toml_path.read_text()).group(0)
+        toml_path.write_text(toml_path.read_text().replace(
+            block, block.replace(f'claude-octopus@{PIN}', 'evil-package@1.2.3')))
+        with tempfile.TemporaryDirectory() as td:
+            pending = Path(td) / "p.pending"
+            pending.write_text("pending\n")
+            with self.assertRaises(advisors.AdvisorError):
+                advisors.remove(ws, "probe_advisor", delete_timeline=True,
+                                pin_file=Path(td) / "p.txt", pending_file=pending)
+        self.assertTrue((ws / ".vibe-suite" / "agents" / "probe_advisor.md").is_file())
+        self.assertTrue((ws / ".vibe-suite" / "agents" / "probe_advisor" / "timeline").is_dir())
+        self.assertIn("probe_advisor",
+                      json.loads((ws / ".mcp.json").read_text())["mcpServers"])
+
+
+class TestRootAndTargetSafety(unittest.TestCase):
+    def test_symlinked_workspace_root_refused(self):
+        real = Path(tempfile.mkdtemp(prefix="advisor-real-"))
+        link = Path(tempfile.mkdtemp(prefix="advisor-link-")) / "ws"
+        link.symlink_to(real)
+        with self.assertRaises(bridge.BridgeError):
+            advisors.reconcile(link)
+
+    def test_foreign_toml_target_is_invalid_not_half(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        advisors.add(ws, "probe_advisor", pin=PIN)
+        # Strip the JSON side so the TOML block is the only registration, then poison it.
+        doc = json.loads((ws / ".mcp.json").read_text())
+        del doc["mcpServers"]["probe_advisor"]
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        toml_path = ws / ".codex" / "config.toml"
+        toml_path.write_text(toml_path.read_text().replace(
+            f'claude-octopus@{PIN}', 'evil-package@1.2.3'))
+        with tempfile.TemporaryDirectory() as td:
+            pending = Path(td) / "p.pending"
+            pending.write_text("pending\n")
+            rows = {r["name"]: r for r in advisors.list_advisors(
+                ws, pin_file=Path(td) / "p.txt", pending_file=pending)}
+            self.assertEqual(rows["probe_advisor"]["state"], "invalid-registration")
+
+    def test_pending_declared_unregistered_is_presence_only(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        with tempfile.TemporaryDirectory() as td:
+            pending = Path(td) / "p.pending"
+            pending.write_text("pending\n")
+            rows = {r["name"]: r for r in advisors.list_advisors(
+                ws, pin_file=Path(td) / "p.txt", pending_file=pending)}
+            self.assertEqual(rows["probe_advisor"]["state"], "declared-unregistered")
+
+
+class TestScalarFieldKinds(unittest.TestCase):
+    """F11 residue: scalar-required fields reject list and block forms."""
+
+    def test_list_valued_scalars_rejected(self):
+        for extra in ("cwd: [docs]\n", "model: [sonnet]\n", "max_turns: [5]\n",
+                      "tool_name: [x]\n"):
+            with self.assertRaises(advisors.AdvisorError, msg=extra):
+                advisors.parse_definition(defn_text(extra=extra), "probe_advisor.md")

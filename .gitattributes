@@ -1,0 +1,3 @@
+# The CRLF trend fixture exists to prove byte-preserving history appends; its line endings
+# are the test subject and must survive checkout and whitespace checks untouched.
+tests/fixtures/trend/noncanonical-crlf-list.json -text -whitespace

@@ -15,7 +15,7 @@ CLI contract (pinned by tests/test_score_goldens.py):
            first field is either an artifact type (`skill`, `agent`, …) or a scanner discovery
            category letter `A`–`F`; given a category, the engine classifies the path itself with
            the same first-match rules as commands/shared/classify.md.
-  args   : --root <dir> [--config <file>] [--history <file>] [--scope <tag>]
+  args   : --root <dir> [--config <file>] [--history <file>] [--scope <tag>] [--run-id <tag>]
   stdout : JSON {"files":[{"path","tier","score","band","verdict",
            "findings":[{"rule","check","line","penalty"}],"advisories":[{"rule","note"}]}],
            "run":{"files","total_penalty","considered_rows","skipped"}}
@@ -70,7 +70,8 @@ Config is read through scripts/lib/config.py — the one reader; no second parse
                                                     upper line boundary
   score_threshold                                -> the pass/fail verdict boundary
 
-History (--history H --scope S): one {"scope","score","band","total_penalty","file"} entry per
+History (--history H --scope S [--run-id R]): one {"scope","score","band","total_penalty","file"}
+(plus "run" when R is given; dedup is then per-run rather than global) entry per
 scored file; an entry identical to an existing one is not appended (same-scope dedupe — a distinct
 scope produces a distinct entry and appends). The write goes through bridge.write_atomic: a temp
 file created IN the destination directory, then an atomic rename — so a failed append leaves the
@@ -1237,8 +1238,20 @@ def score_text(text, rel, path, artifact_type, tier, overrides, pass_threshold):
     }, total
 
 
-def _append_history(history, scope, files, totals):
-    """Append per-file snapshots; identical entries dedupe; the write is atomic or nothing."""
+def _content_key(e):
+    return (e.get("scope"), e.get("file"), e.get("score"), e.get("band"),
+            e.get("total_penalty"))
+
+
+def _append_history(history, scope, files, totals, run_id=None):
+    """Append per-file snapshots; identical entries dedupe; the write is atomic or nothing.
+
+    Dedup compares the CONTENT KEY — (scope, file, score, band, total_penalty) — never whole
+    dicts: flagless, a snapshot matching any existing entry's content key drops, whether or not
+    that entry carries a run field; with `--run-id`, a snapshot drops only when content key AND
+    run both match, so identical content in an earlier run still appends — which is what makes
+    run membership and trajectories reconstructable (E6.2).
+    """
     if history.exists():
         existing = json.loads(history.read_text(encoding="utf-8"))
         if not isinstance(existing, list):
@@ -1249,7 +1262,14 @@ def _append_history(history, scope, files, totals):
     for entry, total in zip(files, totals):
         snapshot = {"scope": scope, "score": entry["score"], "band": entry["band"],
                     "total_penalty": total, "file": entry["path"]}
-        if snapshot not in existing:
+        key = _content_key(snapshot)
+        if run_id is not None:
+            snapshot["run"] = run_id
+            dup = any(_content_key(e) == key and e.get("run") == run_id
+                      for e in existing if isinstance(e, dict))
+        else:
+            dup = any(_content_key(e) == key for e in existing if isinstance(e, dict))
+        if not dup:
             existing.append(snapshot)
             changed = True
     if changed:
@@ -1265,6 +1285,7 @@ def main(argv=None):
     parser.add_argument("--config")
     parser.add_argument("--history")
     parser.add_argument("--scope")
+    parser.add_argument("--run-id", dest="run_id")  # opaque, 1-64 chars (validated below)
     args = parser.parse_args(argv)
 
     root = Path(args.root)
@@ -1346,12 +1367,15 @@ def main(argv=None):
     json.dump(out, sys.stdout, indent=2, sort_keys=True)
     print()
 
+    if args.run_id is not None and not 1 <= len(args.run_id) <= 64:
+        print("score_engine: --run-id must be 1-64 characters", file=sys.stderr)
+        return 2
     if args.history:
         if not args.scope:
             print("score_engine: --history requires --scope", file=sys.stderr)
             return 2
         try:
-            _append_history(Path(args.history), args.scope, files, totals)
+            _append_history(Path(args.history), args.scope, files, totals, run_id=args.run_id)
         except (bridge.BridgeError, OSError, ValueError) as err:
             print(f"score_engine: history append failed: {err}", file=sys.stderr)
             return 1

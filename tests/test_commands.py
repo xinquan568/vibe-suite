@@ -15,6 +15,7 @@ command reference in any shipped runtime-reachable artifact. The scan matches re
 "implementation" is legitimate English.
 """
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -280,3 +281,44 @@ class TestAdvisorCommandContract(unittest.TestCase):
         self.assertIn("E7.1", self.text)
         self.assertIn("--delete-timeline", self.text)
         self.assertIn("--keep-timeline", self.text)
+
+
+class TestTrendCommandContract(unittest.TestCase):
+    """E6.2: /vibe-suite:trend orchestrates scope_tag -> score (no --history) -> trend_engine."""
+
+    def setUp(self):
+        self.path = REPO_ROOT / "commands" / "trend.md"
+
+    def test_frontmatter_and_orchestration(self):
+        text = self.path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\n"))
+        self.assertIn("description:", text)
+        self.assertIn('${CLAUDE_PLUGIN_ROOT}/scripts/lib/scope_tag.py', text)
+        self.assertIn('${CLAUDE_PLUGIN_ROOT}/scripts/score_engine.py', text)
+        self.assertIn('${CLAUDE_PLUGIN_ROOT}/scripts/trend_engine.py', text)
+        self.assertIn("--run-id", text)
+        score_part = text[text.index("score_engine.py"):text.index("trend_engine.py")]
+        self.assertNotIn("--history", score_part,
+                         "the score invocation must not append; trend_engine owns the append")
+        self.assertLess(text.index("scope_tag.py"), text.index("score_engine.py"))
+        self.assertLess(text.index("score_engine.py"), text.index("trend_engine.py"))
+
+    def test_documents_degenerate_paths_and_opaque_tags(self):
+        text = self.path.read_text(encoding="utf-8")
+        self.assertIn("missing", text.lower())
+        self.assertIn("malformed", text.lower())
+        self.assertIn("baseline", text.lower())
+
+    def test_registered_in_manifest(self):
+        manifest = json.loads((REPO_ROOT / ".claude-plugin" / "plugin.json").read_text())
+        self.assertIn("./commands/trend.md", manifest["commands"])
+
+
+class TestScoreScopeIntegration(unittest.TestCase):
+    """E6.2 (W2): both command docs invoke the one scope derivation verbatim."""
+
+    def test_both_docs_invoke_scope_tag(self):
+        for name in ("score.md", "trend.md"):
+            text = (REPO_ROOT / "commands" / name).read_text(encoding="utf-8")
+            self.assertIn('${CLAUDE_PLUGIN_ROOT}/scripts/lib/scope_tag.py', text, name)
+            self.assertNotIn('"<scope-tag>"', text, name)

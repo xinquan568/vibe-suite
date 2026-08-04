@@ -1,0 +1,53 @@
+{
+  "files": [
+    {
+      "current": 90,
+      "delta": 5,
+      "flag": "improved",
+      "path": "commands/a.md",
+      "previous": 85
+    },
+    {
+      "current": 85,
+      "delta": -5,
+      "flag": "degraded",
+      "path": "commands/b.md",
+      "previous": 90
+    },
+    {
+      "current": 100,
+      "delta": null,
+      "flag": "new",
+      "path": "commands/c.md",
+      "previous": null
+    },
+    {
+      "current": 95,
+      "delta": 0,
+      "flag": "unchanged",
+      "path": "commands/d.md",
+      "previous": 95
+    }
+  ],
+  "status": {
+    "history": "present",
+    "scope_matches": 4
+  },
+  "trajectory": [
+    {
+      "files": 1,
+      "mean_score": 80.0,
+      "run": "(pre-run-id)"
+    },
+    {
+      "files": 3,
+      "mean_score": 90.0,
+      "run": "r1"
+    },
+    {
+      "files": 4,
+      "mean_score": 92.5,
+      "run": "r2"
+    }
+  ]
+}

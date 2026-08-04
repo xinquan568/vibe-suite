@@ -1,0 +1,18 @@
+[
+  {
+    "band": "amber",
+    "file": "commands/x.md",
+    "run": "r2",
+    "scope": "full",
+    "score": 70,
+    "total_penalty": -30
+  },
+  {
+    "band": "amber",
+    "file": "commands/a.md",
+    "run": "r2",
+    "scope": "full",
+    "score": 70,
+    "total_penalty": -30
+  }
+]

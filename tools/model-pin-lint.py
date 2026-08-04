@@ -67,6 +67,7 @@ SCANNED = frozenset(
 EXCLUDED = frozenset(
     {
         ".github",
+        ".gitattributes",  # root git configuration, same class as .gitignore (E6.2's CRLF fixture pin)
         ".gitignore",
         "LICENSE",
         "README.md",  # root documentation; nested READMEs under a scanned directory ARE scanned

@@ -19,6 +19,7 @@ process CWD, so nothing here writes into the repository.
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -47,8 +48,101 @@ class RunnerCase(unittest.TestCase):
         self.ws = Path(self._tmp.name)
         self.probe = self.ws / "probe.json"
         self.addCleanup(self._tmp.cleanup)
+        # vibe-129: cleanups run LIFO, so registering the reaper AFTER the directory
+        # cleanup makes it run FIRST — no process that can write under this workspace
+        # survives into TemporaryDirectory teardown. Both the workspace and this
+        # setUp's fixture ledger are bound as arguments: tests that call setUp() again
+        # must pair each reaper with its own directory, not whatever self.ws holds later.
+        self._spawned_fixtures = []
+        self.addCleanup(self._reap_workspace_writers, self.ws, self._spawned_fixtures)
+
+    def _group_members(self, groups):
+        """pgid -> non-zombie member pids, via ps (portable to macOS and ubuntu CI).
+        A zombie cannot write and counts as quiescent; per-pid kill(pid, 0) would both
+        miss unrecorded descendants and wait on corpses."""
+        out = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="],
+                             capture_output=True, text=True)
+        live = {}
+        for line in out.stdout.splitlines():
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            try:
+                pid_i, pgid_i = int(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            if pgid_i in groups and not parts[2].startswith("Z"):
+                live.setdefault(pgid_i, []).append(pid_i)
+        return live
+
+    @staticmethod
+    def _signal_groups(pgids, sig):
+        for pgid in pgids:
+            try:
+                os.killpg(pgid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    def _reap_workspace_writers(self, ws, spawned_fixtures):
+        """Drain, escalate, verify — the vibe-129 teardown invariant. Only validated
+        live background handles are ever signalled: a *running* record whose
+        workerPid/pgid are ints with pgid == workerPid (the worker leads its own group),
+        pgid > 1, and not the harness's group. Terminal or historical records are never
+        touched (PGID reuse). A group observed absent is dropped permanently. A hung
+        worker whose fixture should terminate fails the test after the hygiene reap
+        rather than vanishing into cleanup."""
+        jobs_dir = ws / STATE_DIRNAME / "jobs"
+        harness_pgid = os.getpgid(0)
+        active = set()
+        for rec in (jobs_dir.glob("job_*.json") if jobs_dir.is_dir() else []):
+            try:
+                data = json.loads(rec.read_text())
+            except (ValueError, OSError):
+                continue  # never convert a test failure into the reaper's own
+            pid, pgid = data.get("workerPid"), data.get("pgid")
+            if (data.get("status") == "running" and isinstance(pid, int)
+                    and isinstance(pgid, int) and pgid == pid and pgid > 1
+                    and pgid != harness_pgid):
+                active.add(pgid)
+        if not active:
+            return
+        deadline = time.monotonic() + 15.0
+
+        def live_now():
+            members = self._group_members(active)
+            active.intersection_update(members)   # absent once -> dropped permanently
+            return members
+
+        # Phase 1 — drain: emitter workers finish on their own.
+        drain_until = min(time.monotonic() + 2.0, deadline)
+        while time.monotonic() < drain_until and live_now():
+            time.sleep(0.05)
+        survivors = live_now()
+        hung_nonsleeper = False
+        if survivors:
+            expects_persistent = "sleeper.mjs" in spawned_fixtures
+            if not expects_persistent:
+                hung_nonsleeper = True
+            # Phase 2 — escalate: TERM, brief grace, then KILL (sleeper ignores TERM;
+            # the group covers the unrecorded grandchild).
+            self._signal_groups(survivors, signal.SIGTERM)
+            grace_until = min(time.monotonic() + 1.0, deadline)
+            while time.monotonic() < grace_until and live_now():
+                time.sleep(0.05)
+            self._signal_groups(live_now(), signal.SIGKILL)
+        # Phase 3 — verify: no non-zombie member of any collected group remains.
+        while live_now():
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"workspace writers survived teardown: {sorted(live_now())}")
+            time.sleep(0.05)
+        if hung_nonsleeper:
+            raise AssertionError(
+                "a worker whose fixture should terminate was still alive after the "
+                "drain window — reaped for hygiene, failing loudly (vibe-129)")
 
     def run_runner(self, *args, fixture="emitter.mjs", timeout=30, expect_ok=True):
+        self._spawned_fixtures.append(fixture)
         env = dict(os.environ)
         env["VIBE_SUITE_CODEX_BIN"] = str(FIXTURES / fixture)
         env["VIBE_TEST_PROBE"] = str(self.probe)
@@ -502,6 +596,7 @@ class LifecycleRaces(RunnerCase):
         self.latch.mkdir()
 
     def run_latched(self, *args, fixture="emitter.mjs", timeout=60):
+        self._spawned_fixtures.append(fixture)
         env = dict(os.environ)
         env["VIBE_SUITE_CODEX_BIN"] = str(FIXTURES / fixture)
         env["VIBE_TEST_PROBE"] = str(self.probe)

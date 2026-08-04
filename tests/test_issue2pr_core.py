@@ -49,6 +49,10 @@ MANIFEST = REPO_ROOT / "scripts" / "profile_manifest.py"
 DRIVER_CONTRACT = REPO_ROOT / "skills" / "issue2pr" / "references" / "driver-contract.md"
 OPERATIONAL_MODES = REPO_ROOT / "skills" / "issue2pr" / "references" / "operational-modes.md"
 WATCH = REPO_ROOT / "scripts" / "watch_pr.py"
+MANIFEST_SCHEMA = REPO_ROOT / "schemas" / "manifest.schema.json"
+MANIFEST_ENTRY = REPO_ROOT / "scripts" / "manifest_entry.py"
+EXAMPLE_MANIFEST = REPO_ROOT / "skills" / "issue2pr" / "examples" / "manifests" / "example.json"
+EXAMPLE_BRIEF = REPO_ROOT / "skills" / "issue2pr" / "examples" / "manifests" / "brief.md"
 REVIEWER_CONTRACT = REPO_ROOT / "skills" / "vibe-core" / "references" / "reviewer-contract.md"
 
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "issue2pr"
@@ -59,7 +63,8 @@ MANIFESTS = FIXTURES / "manifests"
 #: is *required* to contain project values. `INVENTORY` is excluded for the same reason from the other
 #: side: it is the inventory *of* the forbidden literals and so contains every one of them.
 CORE_FILES = (SKILL, CONTRACT_REF, COMMAND, PR_TEMPLATE, LINT, MANIFEST,
-              DRIVER_CONTRACT, OPERATIONAL_MODES, WATCH)
+              DRIVER_CONTRACT, OPERATIONAL_MODES, WATCH,
+              MANIFEST_SCHEMA, MANIFEST_ENTRY)
 
 #: Everything the port must have produced. Wider than `CORE_FILES` — membership here is "this file
 #: must exist", not "this file must be project-neutral".
@@ -69,7 +74,10 @@ CORE_FILES = (SKILL, CONTRACT_REF, COMMAND, PR_TEMPLATE, LINT, MANIFEST,
 #: defect it used to hide was that nothing asserted the set was complete, so naming a file that did
 #: not exist passed every check silently. `test_every_deliverable_exists` closes that, and it does
 #: **not** skip.
-DELIVERABLES = CORE_FILES + (ROAMEX, INVENTORY)
+#: The examples sit here and **not** in `CORE_FILES`, which is `ROAMEX`'s position: reference material
+#: is exempt from the literal check because it may legitimately carry project values, not because it
+#: is ungoverned. A deliverable that can vanish without failing anything is not a deliverable.
+DELIVERABLES = CORE_FILES + (ROAMEX, INVENTORY, EXAMPLE_MANIFEST, EXAMPLE_BRIEF)
 
 #: Target-project values that actually passed through this port. Two projects had material in the
 #: source — Roamex, and this repository *as a target* — plus the fixture's.

@@ -298,9 +298,49 @@ class TestKeywordInvariant(unittest.TestCase):
     list here would only ever check what its author remembered.
     """
 
-    def test_schema_uses_only_implemented_keywords(self):
+    def test_every_shipped_schema_uses_only_implemented_keywords(self):
+        """Every schema under `schemas/`, not just this one.
+
+        The invariant used to load `SCHEMA_PATH` alone. That was enough while one schema shipped;
+        the moment a second arrived (vibe-130's manifest contract) the check that exists to catch
+        an unimplemented keyword would not have looked at the artifact most likely to introduce one.
+        Discovering the set from the directory means a third schema is covered without an edit here.
+        """
         v = _validator()
-        schema = _load(SCHEMA_PATH)
+        shipped = sorted((REPO_ROOT / "schemas").glob("*.json"))
+        self.assertTrue(shipped, "no shipped schema found; the invariant has no subject")
+        for path in shipped:
+            with self.subTest(schema=path.name):
+                self._assert_keywords_implemented(v, _load(path))
+
+    def test_the_unsupported_schema_fixture_stays_unsupported(self):
+        """The fail-closed seam rests on a keyword the checker does not implement.
+
+        `tests/fixtures/vibe-check/schema-unsupported.json` used `pattern` until vibe-130 implemented
+        it — which would have made the fixture *supported* and silently retired
+        `test_vibe_check.py`'s exit-class-2 assertion. It now rests on `uniqueItems`, and this pins
+        that: implementing that keyword must fail here rather than hollow the seam again.
+        """
+        v = _validator()
+        fixture = _load(REPO_ROOT / "tests" / "fixtures" / "vibe-check" / "schema-unsupported.json")
+
+        def keys_of(node):
+            found = set()
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    found.add(key)
+                    found |= keys_of(value)
+            elif isinstance(node, list):
+                for item in node:
+                    found |= keys_of(item)
+            return found
+
+        known = v.IMPLEMENTED_KEYWORDS | v.METADATA_KEYWORDS
+        markers = {k for k in keys_of(fixture) if k in v.ALL_JSON_SCHEMA_KEYWORDS} - known
+        self.assertTrue(markers,
+                        "the fixture is fully supported, so the fail-closed seam proves nothing")
+
+    def _assert_keywords_implemented(self, v, schema):
 
         def keys_of(node):
             found = set()

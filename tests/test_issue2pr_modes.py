@@ -19,8 +19,11 @@ adversarial guarantee**, and the distinction is stated here rather than implied.
 divergence in *either* artifact fails it, which is what a doc and a program agreeing actually means.
 """
 
+import ast
 import importlib.util
 import json
+import pathlib
+import shutil
 import py_compile
 import re
 import subprocess
@@ -36,10 +39,15 @@ COMMAND = REPO_ROOT / "commands" / "issue2pr.md"
 CORE_TEST = REPO_ROOT / "tests" / "test_issue2pr_core.py"
 WATCH = REPO_ROOT / "scripts" / "watch_pr.py"
 
-#: The four modes this issue owns. Manifest is #130's and is deliberately absent: the tests assert
-#: that each *named* mode carries its contract, never that exactly four exist, so the follow-up adds
-#: a fifth without touching this list's shape.
-MODES = ("chain", "resume", "iterate", "list")
+#: Every mode the core defines. This began as four with manifest deliberately absent — #130 was the
+#: follow-up, and it arrived. The tests assert that each *named* mode carries its contract, never
+#: that a particular number exists, which is why adding the fifth cost one entry here.
+MODES = ("chain", "resume", "iterate", "list", "manifest")
+
+#: Modes invoked by a flag rather than a subcommand, mapped to the flag that starts them. Manifest
+#: mode replaces a run's *inputs* rather than selecting a different lifecycle, so it is a flag — and
+#: the advertised-surface check has to know that, or it reads the flag as an undefined subcommand.
+MODE_FLAGS = {"manifest": "--from-manifest"}
 
 #: A mode is defined when it answers all eight. Round 1 proposed asserting that four names appear,
 #: which four empty headings would have satisfied.
@@ -170,6 +178,9 @@ class TestModeContracts(unittest.TestCase):
                 value = self.field(mode, "Invocation") or ""
                 self.assertIn("/vibe-suite:issue2pr", value,
                               f"`{mode}`'s invocation omits the shipped namespace")
+                if mode in MODE_FLAGS:
+                    self.assertIn(MODE_FLAGS[mode], value,
+                                  f"`{mode}` is flag-invoked; its invocation must show the flag")
                 self.assertNotRegex(value, r"(?<!vibe-suite:)(?<![\w:])/issue2pr\b",
                                     f"`{mode}` shows an unnamespaced invocation")
 
@@ -440,12 +451,29 @@ class TestNoDocumentAssertsAnUndefinedCapability(unittest.TestCase):
         for mode in MODES:
             with self.subTest(mode=mode):
                 self.assertIn(mode, hint.group(1), f"`{mode}` is missing from the argument hint")
-                self.assertIn(mode, line.group(0), f"`{mode}` is missing from the subcommand prose")
+                # A flag-invoked mode does not belong in a list of subcommands — saying so would be
+                # its own inaccuracy. It must still be stated in the prose, just not as one.
+                where = text if mode in MODE_FLAGS else line.group(0)
+                self.assertIn(mode, where, f"`{mode}` is missing from the command's prose")
 
     def test_the_command_advertises_no_subcommand_the_core_leaves_undefined(self):
-        undefined = {s for s in self.advertised() if s not in MODES and s != "profile"}
+        known = set(MODES) | {"profile"} | {f.lstrip("-") for f in MODE_FLAGS.values()}
+        undefined = {s for s in self.advertised() if s.lstrip("-") not in known}
         self.assertEqual(undefined, set(),
                          f"advertised but undefined in the core: {sorted(undefined)}")
+
+    def test_every_flag_invoked_mode_is_advertised_by_its_flag(self):
+        """A flag-invoked mode is invisible to a subcommand check, so it gets its own.
+
+        `--from-manifest` sat in `chain`'s Refuses list long before anything defined it; the point of
+        advertising it is that the refusal now refers to something real.
+        """
+        text = read(COMMAND)
+        for mode, flag in MODE_FLAGS.items():
+            with self.subTest(mode=mode):
+                self.assertIsNotNone(mode_section(read(MODES_REF), mode),
+                                     f"`{mode}` is advertised by {flag} but not defined")
+                self.assertIn(flag, text, f"{flag} starts `{mode}` and must be advertised")
 
     def test_the_driver_contract_cites_a_chain_definition_that_exists(self):
         """`driver-contract.md` assigns chain-advance decisions to the core, which defined no chain."""
@@ -832,3 +860,448 @@ class TestFixtureAdapter(WatcherCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManifestCase(unittest.TestCase):
+    """vibe-130. The input contract, and the two checks a schema structurally cannot make."""
+
+    SCHEMA_PATH = REPO_ROOT / "schemas" / "manifest.schema.json"
+    EXAMPLE = REPO_ROOT / "skills" / "issue2pr" / "examples" / "manifests" / "example.json"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.entry = cls.load("manifest_entry", REPO_ROOT / "scripts" / "manifest_entry.py")
+        cls.schema = json.loads(cls.SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def load(name, path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def valid(self, **overrides):
+        doc = json.loads(self.EXAMPLE.read_text(encoding="utf-8"))
+        doc.update(overrides)
+        return doc
+
+    def rejects(self, doc):
+        with self.assertRaises(self.entry.ManifestError) as caught:
+            self.entry.validate_document(doc)
+        self.assertEqual(caught.exception.stage, "schema")
+
+    def accepts(self, doc):
+        self.entry.validate_document(doc)
+
+
+class TestManifestSchema(ManifestCase):
+    def test_the_example_validates(self):
+        self.accepts(self.valid())
+
+    def test_the_examples_body_path_resolves_to_the_shipped_brief(self):
+        """`body_path` is required, which is why the example is a pair. A manifest pointing at a
+        file that does not exist would document the contract by violating it."""
+        body = self.valid()["subtask"]["body_path"]
+        self.assertTrue((REPO_ROOT / body).is_file(), f"{body} is missing")
+
+    def test_each_required_key_rejects_independently(self):
+        for key in self.schema["required"]:
+            with self.subTest(missing=key):
+                doc = self.valid()
+                del doc[key]
+                self.rejects(doc)
+
+    def test_each_constraint_rejects_independently(self):
+        cases = {
+            "manifest_version const": {"manifest_version": 2},
+            "unknown top-level key": {"unexpected": 1},
+            "branch pattern": {"branch": "no-ai-segment"},
+            "scope_override pattern": {"scope_override": "missing-number"},
+            "subject_prefix pattern": {"subject_prefix": "no brackets"},
+            "scenario enum": {"scenario": "refactor"},
+            "round minimum": {"round": 0},
+            "cap below minimum": {"max_review_iterations": 1},
+            "cap above maximum": {"max_review_iterations": 6},
+            "review_mode enum": {"review_mode": "partial"},
+            "backend enum": {"reviewer_backend": "copilot-cli"},
+            "empty repos": {"repos": []},
+            "run_folder minLength": {"run_folder": ""},
+        }
+        for label, override in cases.items():
+            with self.subTest(constraint=label):
+                self.rejects(self.valid(**override))
+
+    def test_every_constraint_in_the_schema_rejects_independently(self):
+        """One isolated mutation per constraint, derived from the schema rather than listed by hand.
+
+        A hand-written list only ever covers what its author remembered; walking the schema means a
+        constraint added later is covered without editing this test.
+        """
+        def mutations(node, path=()):
+            """(label, keys, value) for each constraint the walker can violate in isolation.
+
+            Every applicable constraint yields a case — an earlier version used an `elif` chain, so a
+            property with an `enum` never had its `type` mutated and a property with a `pattern` never
+            had its `minLength` mutated. A constraint that cannot lose is a constraint nobody checked.
+            """
+            out = []
+            for key, sub in (node.get("properties") or {}).items():
+                here = path + (key,)
+                label = ".".join(here)
+                kind = sub.get("type")
+                if sub.get("enum"):
+                    out.append((f"{label} enum", here, "___not_a_member___"))
+                if "const" in sub:
+                    out.append((f"{label} const", here, "___not_the_const___"))
+                if sub.get("pattern"):
+                    out.append((f"{label} pattern", here, "!!!"))
+                if sub.get("format"):
+                    out.append((f"{label} format", here, "not a uri"))
+                if sub.get("minLength"):
+                    out.append((f"{label} minLength", here, ""))
+                if "minimum" in sub:
+                    out.append((f"{label} minimum", here, sub["minimum"] - 1))
+                if "maximum" in sub:
+                    out.append((f"{label} maximum", here, sub["maximum"] + 1))
+                if kind == "string":
+                    out.append((f"{label} type", here, 42))
+                elif kind == "integer":
+                    out.append((f"{label} type", here, "not-an-int"))
+                elif kind == "array":
+                    out.append((f"{label} type", here, "not-an-array"))
+                    if "minItems" in sub:
+                        out.append((f"{label} minItems", here, []))
+                    if "maxItems" in sub:
+                        out.append((f"{label} maxItems", here,
+                                    [{}] * (sub["maxItems"] + 1)))
+                elif kind == "object":
+                    out.append((f"{label} type", here, "not-an-object"))
+                    out.append((f"{label} additionalProperties", here + ("___extra___",), 1))
+                    for required in sub.get("required", []):
+                        out.append((f"{label}.{required} required", here + (required,), None))
+                    out.extend(mutations(sub, here))
+            return out
+
+        def apply(doc, keys, value):
+            node = doc
+            for key in keys[:-1]:
+                node = node[key]
+            if value is None:
+                node.pop(keys[-1], None)
+            else:
+                node[keys[-1]] = value
+            return doc
+
+        cases = mutations(self.schema)
+        self.assertGreater(len(cases), 35, f"only {len(cases)} constraints derived; the walk is wrong")
+        # Every property that declares a type must have had that type mutated, whatever else it
+        # declares — at **every** depth. This is the assertion that would have caught the `elif`
+        # chain, and enumerating only top-level properties would have let a nested one slip.
+        def typed_properties(node, path=()):
+            found = set()
+            for key, sub in (node.get("properties") or {}).items():
+                here = path + (key,)
+                if "type" in sub:
+                    found.add(".".join(here))
+                found |= typed_properties(sub, here)
+            return found
+
+        typed = typed_properties(self.schema)
+        self.assertGreater(len(typed), 15, "the type survey is not reaching nested properties")
+        mutated_types = {label.rsplit(" ", 1)[0] for label, _, _ in cases if label.endswith(" type")}
+        self.assertEqual(typed - mutated_types, set(),
+                         "properties whose type is never independently mutated")
+
+        # Per-kind coverage, because a total-count floor does not notice a missing *kind*. Deleting
+        # every `enum` emission left 48 of 52 cases — enough to pass a floor of 35, the type
+        # invariant and the `repos minItems` check all at once. Counting each kind against what the
+        # schema actually declares is what makes the generator answerable for its description.
+        def declared(node, kind):
+            total = 0
+            for sub in (node.get("properties") or {}).values():
+                if kind in sub:
+                    total += 1
+                total += declared(sub, kind)
+                if sub.get("type") == "array" and kind in (sub.get("items") or {}):
+                    total += 1
+            return total
+
+        emitted = {}
+        for label, _, _ in cases:
+            emitted[label.rsplit(" ", 1)[-1]] = emitted.get(label.rsplit(" ", 1)[-1], 0) + 1
+        for kind in ("enum", "const", "pattern", "format", "minLength", "minimum", "maximum",
+                     "minItems", "required", "additionalProperties"):
+            want = declared(self.schema, kind) if kind not in ("required", "additionalProperties") else None
+            with self.subTest(kind=kind):
+                if want:
+                    self.assertGreaterEqual(
+                        emitted.get(kind, 0), want,
+                        f"schema declares {want} {kind} constraint(s); the walk emits "
+                        f"{emitted.get(kind, 0)}")
+                else:
+                    self.assertGreater(emitted.get(kind, 0), 0, f"no {kind} case is derived")
+        for label, keys, value in cases:
+            with self.subTest(constraint=label):
+                self.rejects(apply(self.valid(), keys, value))
+
+    def test_the_root_object_rejects_a_non_object(self):
+        for value in ("a string", 7, [], None):
+            with self.subTest(instance=value):
+                self.rejects(value)
+
+    def test_repo_item_constraints_reject_independently(self):
+        """Array items are not reached by the property walk above, so they get their own pass."""
+        item = self.schema["properties"]["repos"]["items"]
+        for field in item["properties"]:
+            with self.subTest(wrong_type=f"repos[0].{field}"):
+                doc = self.valid()
+                doc["repos"][0][field] = 99
+                self.rejects(doc)
+        for required in item["required"]:
+            with self.subTest(missing=f"repos[0].{required}"):
+                doc = self.valid()
+                del doc["repos"][0][required]
+                self.rejects(doc)
+        for label, repo in {
+            "unknown key": {"id": "a", "path": "p", "base_branch": "b", "extra": 1},
+            "id empty": {"id": "", "path": "p", "base_branch": "b"},
+            "path empty": {"id": "a", "path": "", "base_branch": "b"},
+            "base_branch empty": {"id": "a", "path": "p", "base_branch": ""},
+            "item not an object": "a string",
+        }.items():
+            with self.subTest(case=label):
+                self.rejects(self.valid(repos=[repo]))
+
+    def test_booleans_are_not_numbers_for_the_bounds(self):
+        """`bool` subclasses `int` in Python. A checker that forgot would accept `round: True`."""
+        self.rejects(self.valid(round=True))
+        self.rejects(self.valid(max_review_iterations=False))
+
+    def test_nested_objects_reject_unknown_keys_and_bad_urls(self):
+        for label, doc in {
+            "parent_source extra": self.valid(parent_source={
+                "type": "brief-file", "id": "x", "surprise": 1}),
+            "parent_source enum": self.valid(parent_source={"type": "jira", "id": "x"}),
+            "subtask missing body_path": self.valid(subtask={
+                "id": "a", "slug": "b", "title": "c"}),
+            "malformed url": self.valid(parent_source={
+                "type": "brief-file", "id": "x", "url": "not a uri"}),
+        }.items():
+            with self.subTest(case=label):
+                self.rejects(doc)
+
+    def test_correction_1_an_arbitrary_repo_id_validates(self):
+        """The source pinned `const: "vibe-suite"`. A project-neutral contract cannot."""
+        self.accepts(self.valid(repos=[{
+            "id": "anything-at-all", "path": "codes/x", "base_branch": "trunk"}]))
+
+    def test_correction_2_an_arbitrary_base_branch_validates(self):
+        self.accepts(self.valid(repos=[{
+            "id": "example-repo", "path": "codes/x", "base_branch": "release/9"}]))
+
+    def test_correction_3_a_two_element_repos_array_validates(self):
+        """`boundary-inventory.md`: the core never assumes arity, so the schema must not impose it."""
+        self.accepts(self.valid(repos=[
+            {"id": "a", "path": "codes/a", "base_branch": "main"},
+            {"id": "b", "path": "codes/b", "base_branch": "main"}]))
+
+
+class TestManifestEntryPath(ManifestCase):
+    PROFILE = {"repo_id": "example-repo", "base_branch": "trunk"}
+
+    def test_a_conformant_manifest_is_accepted(self):
+        self.assertEqual(
+            self.entry.accept(self.valid(), self.PROFILE),
+            {"max_review_rounds": 3, "review_mode": "full", "reviewer_backend": "codex"})
+
+    def test_a_mismatched_repo_id_is_refused_here_not_by_the_schema(self):
+        doc = self.valid(repos=[{"id": "other", "path": "p", "base_branch": "trunk"}])
+        self.accepts(doc)                                   # the schema is content with it
+        with self.assertRaises(self.entry.ManifestError) as caught:
+            self.entry.check_against_profile(doc, self.PROFILE)
+        self.assertEqual(caught.exception.stage, "profile")
+
+    def test_a_mismatched_base_branch_is_refused_here_not_by_the_schema(self):
+        doc = self.valid(repos=[{"id": "example-repo", "path": "p", "base_branch": "main"}])
+        self.accepts(doc)
+        with self.assertRaises(self.entry.ManifestError) as caught:
+            self.entry.check_against_profile(doc, self.PROFILE)
+        self.assertEqual(caught.exception.stage, "profile")
+
+    def test_the_cap_property_is_mapped_to_the_cores_field(self):
+        """The manifest keeps the source spelling; the core's field is what a run reads."""
+        settings = self.entry.to_run_settings(self.valid(max_review_iterations=5))
+        self.assertEqual(settings["max_review_rounds"], 5)
+        self.assertNotIn("max_review_iterations", settings)
+
+    def test_schema_failure_takes_precedence_over_a_profile_failure(self):
+        """Order is contract. A profile complaint about a document that is not a manifest is noise."""
+        doc = self.valid(round=0, repos=[{"id": "wrong", "path": "p", "base_branch": "wrong"}])
+        with self.assertRaises(self.entry.ManifestError) as caught:
+            self.entry.accept(doc, self.PROFILE)
+        self.assertEqual(caught.exception.stage, "schema")
+
+    def run_cli(self, document, profile_text):
+        import tempfile
+        directory = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        manifest = directory / "m.json"
+        manifest.write_text(json.dumps(document), encoding="utf-8")
+        profile = directory / "p.md"
+        profile.write_text(profile_text, encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "manifest_entry.py"), str(manifest),
+             "--profile", str(profile)], capture_output=True, text=True, timeout=60)
+
+    GOOD_PROFILE = "repo_id: example-repo\nbase_branch: trunk\n"
+
+    def test_the_cli_accepts_a_conformant_manifest_and_prints_run_settings(self):
+        result = self.run_cli(self.valid(), self.GOOD_PROFILE)
+        self.assertEqual(result.returncode, self.entry.EXIT_OK, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["max_review_rounds"], 3)
+
+    def test_the_cli_reports_a_schema_failure_with_its_own_code(self):
+        result = self.run_cli(self.valid(round=0), self.GOOD_PROFILE)
+        self.assertEqual(result.returncode, self.entry.EXIT_SCHEMA, result.stderr)
+        self.assertIn("schema", result.stderr)
+
+    def test_the_cli_reports_a_profile_failure_with_its_own_code(self):
+        result = self.run_cli(
+            self.valid(repos=[{"id": "other", "path": "p", "base_branch": "trunk"}]),
+            self.GOOD_PROFILE)
+        self.assertEqual(result.returncode, self.entry.EXIT_PROFILE, result.stderr)
+
+    def test_the_cli_reports_the_schema_failure_when_the_profile_is_also_unusable(self):
+        """The regression that motivates the explicit sequencing in `main`.
+
+        `accept(document, read_profile(path))` reads the profile first — Python evaluates arguments
+        before the call — so an invalid manifest paired with an unreadable profile reported the
+        *profile* failure for a document that was never a manifest.
+        """
+        result = self.run_cli(self.valid(round=0), "this profile declares nothing\n")
+        self.assertEqual(result.returncode, self.entry.EXIT_SCHEMA, result.stderr)
+        self.assertNotIn("declares no", result.stderr)
+
+
+class TestUriConformance(unittest.TestCase):
+    """`format: uri`, evidenced against a **sourced** corpus.
+
+    Four rounds fixed whichever cases a reviewer had just found, and a fifth round found more each
+    time — including one nobody had thought to try (a trailing newline, which `$` accepts). Coverage
+    drawn from "cases found so far" has no stopping condition by construction.
+
+    Every case below carries its provenance. The RFC examples make the valid set answerable to a
+    named authority rather than to this project's history; the historical cases are regression guards,
+    because a rewrite's real risk is the cases the old version got right.
+
+    **What this establishes**: conformance to the productions transcribed in
+    `scripts/validate_audit_output.py`, evidenced against this corpus. Not a proof of RFC 3986
+    conformance — a mistranscription stays latent until a reader compares the productions or a case
+    reaches it. That limit is real and stated rather than implied.
+    """
+
+    #: (uri, valid, source)
+    CORPUS = (
+        # RFC 3986 §1.1.2, verbatim — the specification's own worked examples.
+        ("ftp://ftp.is.co.za/rfc/rfc1808.txt", True, "RFC 3986 §1.1.2"),
+        ("http://www.ietf.org/rfc/rfc2396.txt", True, "RFC 3986 §1.1.2"),
+        ("ldap://[2001:db8::7]/c=GB?objectClass?one", True, "RFC 3986 §1.1.2"),
+        ("mailto:John.Doe@example.com", True, "RFC 3986 §1.1.2"),
+        ("news:comp.infosystems.www.servers.unix", True, "RFC 3986 §1.1.2"),
+        ("tel:+1-816-555-1212", True, "RFC 3986 §1.1.2"),
+        ("telnet://192.0.2.16:80/", True, "RFC 3986 §1.1.2"),
+        ("urn:oasis:names:specification:docbook:dtd:xml:4.1.2", True, "RFC 3986 §1.1.2"),
+        # Wrongly rejected before the ABNF transcription.
+        ("http://[V1.a]/", True, "round 4 — IPvFuture prefix is case-insensitive"),
+        ("http://[::1]:/", True, "round 4 — port = *DIGIT admits empty"),
+        ("http://[::1]:80/", True, "round 3 — bracketed host with port"),
+        ("http://[0:0:0:0:0:ffff:192.0.2.128]/", True, "round 3 — IPv4-mapped"),
+        ("http://example.com?x", True, "round 2 — query with no path"),
+        ("http://user:pass@example.com/", True, "round 2 — userinfo permits ':'"),
+        ("http://[v1.a]/", True, "round 1 — IPvFuture"),
+        # Wrongly accepted before it.
+        ("http://x/\n", False, "round 5 — `$` matches before a terminal newline"),
+        ("http://x/a\nb", False, "round 5 — embedded control character"),
+        ("http://[::1:2:3:4:5:6:7:8]/", False, "round 3 — nine groups"),
+        ("http://[::ffff:999.999.999.999]/", False, "round 3 — octets out of range"),
+        ("http://[1:2:3]/", False, "round 2 — three groups without '::'"),
+        ("http://[:]/", False, "round 2 — not an address"),
+        ("https://[broken", False, "round 1 — unclosed bracket"),
+        ("https://example.com/%zz", False, "round 1 — invalid percent-encoding"),
+        ("https://example.com/#one#two", False, "round 1 — two fragments"),
+        ("https://[::::]/", False, "round 1 — malformed IPv6"),
+        ("not a uri", False, "round 1 — no scheme"),
+        ("http://[fe80::1%eth0]/", False, "round 6 — RFC 3986 Appendix A has no zone-identifier"),
+        ("http://[fe80::1%25eth0]/", False, "round 6 — RFC 6874 scoped form, not Appendix A"),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "validate_audit_output", REPO_ROOT / "scripts" / "validate_audit_output.py")
+        cls.v = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.v)
+
+    def test_the_corpus_classifies_correctly(self):
+        for uri, valid, source in self.CORPUS:
+            with self.subTest(uri=uri, source=source):
+                self.assertEqual(self.v._is_uri(uri), valid, f"{uri!r} — {source}")
+
+    def test_every_rfc_example_is_present(self):
+        """The valid set answers to the specification, not to this project's findings."""
+        rfc = [c for c in self.CORPUS if c[2].startswith("RFC 3986")]
+        self.assertEqual(len(rfc), 8, "RFC 3986 §1.1.2 lists eight examples")
+        self.assertTrue(all(valid for _, valid, _ in rfc))
+
+    def test_every_case_carries_a_source(self):
+        """A case with no provenance is one nobody can check."""
+        for uri, _, source in self.CORPUS:
+            with self.subTest(uri=uri):
+                self.assertTrue(source.strip(), "every corpus entry states where it came from")
+
+    def test_no_production_is_anchored_with_a_dollar(self):
+        """The defect class, closed at its source.
+
+        `re.match(r"...$", "x\n")` succeeds, so any production anchored with `$` re-admits a trailing
+        newline. Asserting the *technique* means the class cannot return one production at a time.
+        """
+        source = (REPO_ROOT / "scripts" / "validate_audit_output.py").read_text(encoding="utf-8")
+
+        # Every compiled production, and every method it is consumed through — read from the AST,
+        # not from substrings. A previous version asserted `"fullmatch" in text` (satisfied by a
+        # comment) and the absence of two literal strings (leaving `.search(` free to pass while
+        # accepting `http://x:80evil/`).
+        tree = ast.parse(source)
+        productions = {
+            node.targets[0].id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+            and getattr(node.value.func, "attr", None) == "compile"
+        }
+        self.assertGreaterEqual(len(productions), 6, f"expected the grammar's productions, got {productions}")
+
+        used = {}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in productions):
+                used.setdefault(node.func.value.id, set()).add(node.func.attr)
+        self.assertTrue(used, "no production is called anywhere")
+        for name, methods in sorted(used.items()):
+            with self.subTest(production=name):
+                self.assertEqual(methods, {"fullmatch"},
+                                 f"{name} is consumed through {sorted(methods)}; a production must "
+                                 "consume its whole input, so only fullmatch is permitted")
+
+        # And no compiled pattern may carry a terminal anchor, which would re-admit a trailing
+        # newline even under fullmatch's sibling methods.
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id in productions):
+                literals = [n.value for n in ast.walk(node.value)
+                            if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+                for literal in literals:
+                    with self.subTest(production=node.targets[0].id, literal=literal):
+                        self.assertFalse(literal.endswith("$"),
+                                         "a production ends with a `$` anchor")

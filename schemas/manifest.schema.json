@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "manifest.schema.json",
+  "title": "issue2pr manifest-mode input",
+  "description": "The input contract for manifest mode: everything a programmatic dispatcher supplies in place of a work-item id and the prompts a normal run would ask. This is NOT the run manifest \u2014 that one is keyed `schema_version` and handled by scripts/profile_manifest.py. The two share a word and nothing else. Three constraints from the source deliberately do not appear here: `const` values pinning a repository id and a base branch, which are project values a project-neutral contract cannot carry, and a cap on `repos`, which would contradict the core's recorded property that it never assumes arity. The first two are checked at the entry path, which knows the bound profile; a schema does not. The `$id` is relative rather than an absolute URL under a repository: an absolute one would name a project, and the guard that checks this file for project values catches it \u2014 which is what putting the schema inside CORE_FILES is for.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "parent_source",
+    "subtask",
+    "repos",
+    "branch",
+    "scope_override",
+    "subject_prefix",
+    "scenario",
+    "round",
+    "run_folder"
+  ],
+  "properties": {
+    "manifest_version": {
+      "const": 1,
+      "description": "The input contract's version. Distinct from the run manifest's `schema_version`."
+    },
+    "parent_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "github-issue",
+            "brief-file"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "subtask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "slug",
+        "title",
+        "body_path"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path to the brief this subtask's body lives in. Required, which is why a shipped example is a brief and a manifest rather than a manifest alone."
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "repos": {
+      "type": "array",
+      "minItems": 1,
+      "description": "No `maxItems`. The source pinned this at 1; skills/issue2pr/references/boundary-inventory.md records one-repository-per-run as an assumption resolved by `repo_path accepts a list; core never assumes arity`. Porting the cap would ship a schema contradicting the core it serves.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "path",
+          "base_branch"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "No `const`. The source pinned a repository name, which is a project value. Whether this id matches the bound profile is checked at the entry path, which has a profile to compare against."
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "base_branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "No `const`, for the same reason as `id`, and checked in the same place."
+          }
+        }
+      }
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9-]+/ai/"
+    },
+    "scope_override": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9-]+-\\d+$"
+    },
+    "subject_prefix": {
+      "type": "string",
+      "pattern": "^\\[.+\\]$"
+    },
+    "scenario": {
+      "type": "string",
+      "enum": [
+        "new-feature",
+        "bug-fix",
+        "iterate",
+        "spike",
+        "docs",
+        "no-go"
+      ]
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "run_folder": {
+      "type": "string",
+      "minLength": 1
+    },
+    "review_mode": {
+      "type": "string",
+      "enum": [
+        "none",
+        "single",
+        "full"
+      ]
+    },
+    "max_review_iterations": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 5,
+      "description": "The source spelling, kept deliberately. The core's run state and CLI say `max_review_rounds`; translation happens at the entry path, because renaming a specified input property would be a fourth port-time correction this contract does not authorise."
+    },
+    "reviewer_model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reviewer_backend": {
+      "type": "string",
+      "enum": [
+        "codex"
+      ]
+    }
+  }
+}

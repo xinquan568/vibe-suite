@@ -169,3 +169,32 @@ the existing body.
 
 Output is a table sorted by last-touched, newest first, with a `resume` pointer printed for every
 run that is not finished.
+
+---
+
+## `manifest`
+
+Programmatic dispatch. An orchestrator supplies every input as JSON instead of a work-item id and the
+prompts a normal run would ask; direct human use is not expected. For everyday parallel batching,
+`chain` is the mode you want.
+
+- **Invocation:** `/vibe-suite:issue2pr --from-manifest <path>`. Not a subcommand — a flag, because
+  it replaces a run's *inputs* rather than selecting a different lifecycle.
+- **Reads:** the manifest at `<path>`, validated against
+  [`schemas/manifest.schema.json`](../../../schemas/manifest.schema.json); the brief named by
+  `subtask.body_path`; the bound profile, for the two checks a schema cannot make.
+- **Writes:** the run folder named by `run_folder`, then everything a normal run writes. It
+  short-circuits **input gathering only** — the nine steps, their reviews and their bounded loops all
+  run unchanged.
+- **Precondition:** the document passes the schema **first**, then the profile checks. A manifest
+  failing both reports the schema failure, because a profile mismatch on a document that is not a
+  manifest is not a useful thing to say.
+- **Refuses:** a manifest whose `repos[].id` or `repos[].base_branch` disagrees with the bound
+  profile. The schema carries no `const` for either — pinning them would put a project value in a
+  project-neutral contract — so the entry path owns both.
+- **Statuses read:** none at entry; the run it starts uses the same enum as any other.
+- **Transitions written:** the run's own, `in_progress` onward. Manifest mode starts a run; it does
+  not add a lifecycle.
+- **Round bounds:** the manifest's optional `max_review_iterations` is mapped to the core's
+  `max_review_rounds` at the entry path. The manifest keeps the source spelling because renaming a
+  specified input property is a change to the contract, not to a port.

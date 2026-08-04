@@ -1,0 +1,30 @@
+{
+  "manifest_version": 1,
+  "parent_source": {
+    "type": "brief-file",
+    "id": "brief-widget-cache",
+    "url": "file:///briefs/widget-cache.md"
+  },
+  "subtask": {
+    "id": "example-7",
+    "slug": "widget-cache-eviction",
+    "title": "Evict cached widgets on write",
+    "body_path": "skills/issue2pr/examples/manifests/brief.md"
+  },
+  "repos": [
+    {
+      "id": "example-repo",
+      "path": "codes/example-repo",
+      "base_branch": "trunk"
+    }
+  ],
+  "branch": "someone/ai/example-7-widget-cache-eviction",
+  "scope_override": "example-7",
+  "subject_prefix": "[cache]",
+  "scenario": "bug-fix",
+  "round": 1,
+  "run_folder": "runs/example-7-widget-cache-eviction",
+  "review_mode": "full",
+  "max_review_iterations": 3,
+  "reviewer_backend": "codex"
+}

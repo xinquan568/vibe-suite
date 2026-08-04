@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: ISC
+"""bin/vibe-report — render the quality-report blob into self-contained HTML (F8.2, vibe-49).
+
+Stdlib-only; no Claude Code required. Usage:
+
+    bin/vibe-report --data <blob.json> --out-dir <dir> [--template <path>]
+
+The blob's schema is the contract (`tests/test_report.py` pins it): six typed sections —
+score, check (mechanical + attempted judgment), vocab_drift, vocabulary, graph, history — each
+rendered honestly, absences included. The emitted files are SINGLE self-contained documents:
+the vendored AntV G6 bundle and the blob are inlined, so `index.html` and every archive open
+over `file://` with no network (`templates/report/vendor/VENDORED.md` records the bundle's
+provenance and digests).
+
+Concurrency discipline (the E6.3 acceptance): the caller allocates the blob via `mktemp` in its
+own scratch space (never a fixed path — the nlpm S12 defect); this renderer stages `index.html`
+through a per-process unique temp file and `os.replace`, and creates each archive
+(`report-<UTC>-<pid>-<6hex>.html`) with `O_EXCL`, retrying with a fresh suffix on collision.
+Concurrent runs therefore each land a complete archive, and `index.html` is always exactly one
+run's whole output.
+
+Exit codes: 0 rendered; 2 contract refusal (unreadable blob, schema violation — nothing written).
+"""
+
+import argparse
+import base64
+import binascii
+import datetime
+import html
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
+DEFAULT_TEMPLATE = REPO / "templates" / "report" / "single.html"
+VENDOR_BUNDLE = REPO / "templates" / "report" / "vendor" / "g6.min.js"
+
+
+class BlobError(Exception):
+    """Schema refusal. Nothing has been written."""
+
+
+# --------------------------------------------------------------------------------------------
+# Validation — fail-closed, every field typed (the vibe-49 frozen contract)
+# --------------------------------------------------------------------------------------------
+
+def _req(obj, key, types, ctx):
+    if not isinstance(obj, dict) or key not in obj:
+        raise BlobError(f"{ctx}: missing {key!r}")
+    val = obj[key]
+    if types is bool:
+        if not isinstance(val, bool):
+            raise BlobError(f"{ctx}.{key}: expected bool, got {type(val).__name__}")
+    elif types is int:
+        if not isinstance(val, int) or isinstance(val, bool):
+            raise BlobError(f"{ctx}.{key}: expected int, got {type(val).__name__}")
+    elif not isinstance(val, types):
+        raise BlobError(f"{ctx}.{key}: expected {types}, got {type(val).__name__}")
+    return val
+
+
+def _req_list(obj, key, ctx):
+    val = _req(obj, key, list, ctx)
+    return val
+
+
+def _validate_issue(issue, ctx, judgment_lane):
+    if not isinstance(issue, dict):
+        raise BlobError(f"{ctx}: issue must be an object")
+    _req(issue, "class", str, ctx)
+    _req(issue, "detail", str, ctx)
+    if "sources" in issue:
+        if not judgment_lane:
+            raise BlobError(f"{ctx}: a mechanical issue must not carry 'sources'")
+        if "source" in issue or "direction" in issue or "target" in issue:
+            raise BlobError(f"{ctx}: a judgment issue carries only class/detail/sources")
+        if not isinstance(issue["sources"], list) \
+                or any(not isinstance(s, str) for s in issue["sources"]):
+            raise BlobError(f"{ctx}: 'sources' must be a list of strings")
+    else:
+        _req(issue, "source", str, ctx)
+        for opt in ("direction", "target"):
+            if opt in issue and not isinstance(issue[opt], str):
+                raise BlobError(f"{ctx}.{opt}: expected str")
+
+
+def _validate_check_envelope(env, ctx, judgment_lane):
+    _req(env, "verdict", str, ctx)
+    for i, issue in enumerate(_req_list(env, "issues", ctx)):
+        _validate_issue(issue, f"{ctx}.issues[{i}]", judgment_lane)
+    checked = _req(env, "checked", dict, ctx)
+    for k, v in checked.items():
+        if not isinstance(k, str) or not isinstance(v, int) or isinstance(v, bool):
+            raise BlobError(f"{ctx}.checked: expected dict[str, int]")
+
+
+def validate(blob):
+    if not isinstance(blob, dict):
+        raise BlobError("blob: expected an object")
+    if blob.get("schema") != 1:
+        raise BlobError(f"blob.schema: unknown schema {blob.get('schema')!r}")
+    for key in ("score", "check", "vocab_drift", "vocabulary", "graph", "history"):
+        if key not in blob:
+            raise BlobError(f"blob: missing {key!r}")
+
+    score = blob["score"]
+    for i, f in enumerate(_req_list(score, "files", "score")):
+        ctx = f"score.files[{i}]"
+        for k, t in (("path", str), ("tier", str), ("score", int), ("band", str),
+                     ("verdict", str)):
+            _req(f, k, t, ctx)
+        for j, fi in enumerate(_req_list(f, "findings", ctx)):
+            for k, t in (("rule", str), ("check", str), ("line", int), ("penalty", int)):
+                _req(fi, k, t, f"{ctx}.findings[{j}]")
+        for j, ad in enumerate(_req_list(f, "advisories", ctx)):
+            for k in ("rule", "note"):
+                _req(ad, k, str, f"{ctx}.advisories[{j}]")
+    run = _req(score, "run", dict, "score")
+    for k in ("files", "total_penalty", "considered_rows"):
+        _req(run, k, int, "score.run")
+    _req_list(run, "skipped", "score.run")
+
+    check = blob["check"]
+    _validate_check_envelope(_req(check, "mechanical", dict, "check"), "check.mechanical",
+                             judgment_lane=False)
+    judgment = _req(check, "judgment", dict, "check")
+    _req(judgment, "available", bool, "check.judgment")
+    status = _req(judgment, "status", str, "check.judgment")
+    if status not in ("composed", "skipped", "failed"):
+        raise BlobError(f"check.judgment.status: unknown {status!r}")
+    if judgment.get("reason") is not None and not isinstance(judgment["reason"], str):
+        raise BlobError("check.judgment.reason: expected str|null")
+    if judgment.get("data") is not None:
+        _validate_check_envelope(judgment["data"], "check.judgment.data", judgment_lane=True)
+
+    drift = blob["vocab_drift"]
+    _req(drift, "available", bool, "vocab_drift")
+    if drift.get("reason") is not None and not isinstance(drift["reason"], str):
+        raise BlobError("vocab_drift.reason: expected str|null")
+    for i, c in enumerate(_req_list(drift, "candidates", "vocab_drift")):
+        if not isinstance(c.get("terms"), list) or not isinstance(c.get("rationale"), str):
+            raise BlobError(f"vocab_drift.candidates[{i}]: expected {{terms: [str], rationale}}")
+    if drift.get("prose") is not None and not isinstance(drift["prose"], str):
+        raise BlobError("vocab_drift.prose: expected str|null")
+
+    vocab = blob["vocabulary"]
+    registry = _req(vocab, "registry", dict, "vocabulary")
+    for i, s in enumerate(_req_list(registry, "scopes", "vocabulary.registry")):
+        for k in ("id", "description"):
+            _req(s, k, str, f"vocabulary.registry.scopes[{i}]")
+        _req_list(s, "paths", f"vocabulary.registry.scopes[{i}]")
+    verbs = _req(registry, "verbs", dict, "vocabulary.registry")
+    for scope, entries in verbs.items():
+        for i, v in enumerate(entries):
+            ctx = f"vocabulary.registry.verbs[{scope}][{i}]"
+            for k, t in (("canonical", str), ("output", str), ("notes", str)):
+                _req(v, k, t, ctx)
+            _req(v, "judgment", bool, ctx)
+            _req_list(v, "deprecated", ctx)
+    nouns = _req(registry, "nouns", dict, "vocabulary.registry")
+    for group, entries in nouns.items():
+        for i, n in enumerate(entries):
+            ctx = f"vocabulary.registry.nouns[{group}][{i}]"
+            _req(n, "canonical", str, ctx)
+            if group == "role_nouns":
+                _req(n, "paired_verb", str, ctx)
+            else:
+                _req(n, "definition", str, ctx)
+                _req_list(n, "deprecated", ctx)
+    extracted = _req(vocab, "extracted", dict, "vocabulary")
+    for i, tm in enumerate(_req_list(extracted, "terms", "vocabulary.extracted")):
+        _req(tm, "term", str, f"vocabulary.extracted.terms[{i}]")
+        _req(tm, "count", int, f"vocabulary.extracted.terms[{i}]")
+
+    graph = blob["graph"]
+    for i, n in enumerate(_req_list(graph, "nodes", "graph")):
+        for k in ("path", "kind"):
+            _req(n, k, str, f"graph.nodes[{i}]")
+    for i, e in enumerate(_req_list(graph, "edges", "graph")):
+        for k in ("source", "target", "kind"):
+            _req(e, k, str, f"graph.edges[{i}]")
+
+    history = blob["history"]
+    hstatus = _req(history, "status", str, "history")
+    if hstatus not in ("present", "missing", "malformed"):
+        raise BlobError(f"history.status: unknown {hstatus!r}")
+    for i, e in enumerate(_req_list(history, "entries", "history")):
+        ctx = f"history.entries[{i}]"
+        for k, t in (("scope", str), ("score", int), ("band", str), ("total_penalty", int),
+                     ("file", str)):
+            _req(e, k, t, ctx)
+        if "run" in e and not isinstance(e["run"], str):
+            raise BlobError(f"{ctx}.run: expected str when present")
+    for i, p in enumerate(_req_list(history, "trajectory", "history")):
+        ctx = f"history.trajectory[{i}]"
+        _req(p, "run", str, ctx)
+        if not isinstance(p.get("mean_score"), (int, float)) or isinstance(p.get("mean_score"), bool):
+            raise BlobError(f"{ctx}.mean_score: expected number")
+        _req(p, "files", int, ctx)
+
+
+# --------------------------------------------------------------------------------------------
+# Rendering — plain HTML tables plus G6 mounts driven by the inlined data
+# --------------------------------------------------------------------------------------------
+
+def esc(value):
+    return html.escape(str(value), quote=True)
+
+
+def _score_section(score):
+    rows = "".join(
+        f"<tr><td>{esc(f['path'])}</td><td class='band-{esc(f['band'])}'>{f['score']}</td>"
+        f"<td>{esc(f['band'])}</td><td>{esc(f['verdict'])}</td>"
+        f"<td>{len(f['findings'])}</td><td>{len(f['advisories'])}</td></tr>"
+        for f in score["files"])
+    run = score["run"]
+    return (f"<table><tr><th>File</th><th>Score</th><th>Band</th><th>Verdict</th>"
+            f"<th>Findings</th><th>Advisories</th></tr>{rows}</table>"
+            f"<p>{run['files']} file(s), total penalty {run['total_penalty']}.</p>")
+
+
+def _issues_table(env):
+    if not env["issues"]:
+        return "<p>No issues.</p>"
+    rows = "".join(
+        "<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            esc(i["class"]),
+            esc(i.get("source", ", ".join(i.get("sources", [])))),
+            esc(i["detail"]))
+        for i in env["issues"])
+    return f"<table><tr><th>Class</th><th>Source(s)</th><th>Detail</th></tr>{rows}</table>"
+
+
+def _check_section(check):
+    parts = [f"<h3>Mechanical (verdict: {esc(check['mechanical']['verdict'])})</h3>",
+             _issues_table(check["mechanical"])]
+    j = check["judgment"]
+    if j["available"] and j["data"] is not None:
+        parts += [f"<h3>Composed (verdict: {esc(j['data']['verdict'])})</h3>",
+                  _issues_table(j["data"])]
+    else:
+        parts.append(f"<p class='absent'>Judgment lane {esc(j['status'])}: "
+                     f"{esc(j.get('reason') or 'no reason recorded')}</p>")
+    return "".join(parts)
+
+
+def _drift_section(drift):
+    if not drift["available"]:
+        return f"<p class='absent'>Vocab drift unavailable: {esc(drift.get('reason') or '—')}</p>"
+    items = "".join(f"<li><strong>{esc(', '.join(c['terms']))}</strong>: {esc(c['rationale'])}</li>"
+                    for c in drift["candidates"]) or "<li>No drift candidates.</li>"
+    prose = f"<p>{esc(drift['prose'])}</p>" if drift.get("prose") else ""
+    return f"<ul>{items}</ul>{prose}"
+
+
+def _vocab_section(vocab):
+    reg = vocab["registry"]
+    verbs = sum(len(v) for v in reg["verbs"].values())
+    nouns = sum(len(n) for n in reg["nouns"].values())
+    top = "".join(f"<tr><td>{esc(t['term'])}</td><td>{t['count']}</td></tr>"
+                  for t in vocab["extracted"]["terms"][:10])
+    return (f"<p>Registry: {verbs} canonical verb(s), {nouns} noun(s) across "
+            f"{len(reg['scopes'])} scope(s).</p>"
+            f"<table><tr><th>Extracted term</th><th>Count</th></tr>{top}</table>")
+
+
+def _history_section(history):
+    if history["status"] != "present":
+        return f"<p class='absent'>History {esc(history['status'])} — baseline view.</p>"
+    rows = "".join(f"<tr><td>{esc(p['run'])}</td><td>{p['mean_score']}</td>"
+                   f"<td>{p['files']}</td></tr>" for p in history["trajectory"])
+    return f"<table><tr><th>Run</th><th>Mean score</th><th>Files</th></tr>{rows}</table>"
+
+
+def _graph_section(graph):
+    return (f"<p>{len(graph['nodes'])} node(s), {len(graph['edges'])} edge(s); orphan candidates "
+            f"are nodes with no inbound edge.</p>")
+
+
+RENDER_JS = """
+(function () {
+  var el = document.getElementById('vibe-report-data');
+  if (!el || typeof window.G6 === 'undefined') { return; }
+  var blob = JSON.parse(el.textContent);
+  function mount(id, data) {
+    var host = document.getElementById(id);
+    if (!host || !data.nodes.length) { return; }
+    try {
+      var graph = new G6.Graph({
+        container: id, autoFit: 'view',
+        data: data,
+        layout: { type: 'force', preventOverlap: true },
+        node: { style: { labelText: function (d) { return d.id; } } }
+      });
+      graph.render();
+    } catch (e) { host.textContent = 'graph rendering unavailable: ' + e.message; }
+  }
+  mount('vibe-graph-mount', {
+    nodes: blob.graph.nodes.map(function (n) { return { id: n.path, data: n }; }),
+    edges: blob.graph.edges.map(function (e) { return { source: e.source, target: e.target }; })
+  });
+  var traj = blob.history.trajectory;
+  mount('vibe-trend-mount', {
+    nodes: traj.map(function (p, i) {
+      return { id: p.run + ' (' + p.mean_score + ')', data: p,
+               style: { x: 80 + i * 120, y: 300 - p.mean_score * 2 } };
+    }),
+    edges: traj.slice(1).map(function (p, i) {
+      return { source: traj[i].run + ' (' + traj[i].mean_score + ')',
+               target: p.run + ' (' + p.mean_score + ')' };
+    })
+  });
+  var verbs = [];
+  Object.keys(blob.vocabulary.registry.verbs).forEach(function (scope) {
+    blob.vocabulary.registry.verbs[scope].forEach(function (v) {
+      verbs.push({ id: scope + ':' + v.canonical, data: v });
+    });
+  });
+  mount('vibe-vocab-mount', { nodes: verbs, edges: [] });
+})();
+"""
+
+
+def render_html(blob, template_text, bundle_text):
+    data_json = json.dumps(blob, indent=2, sort_keys=True).replace("</", "<\\/")
+    return (template_text
+            .replace("{{G6_BUNDLE}}", bundle_text.replace("</", "<\\/"))
+            .replace("{{SCORE_SECTION}}", _score_section(blob["score"]))
+            .replace("{{CHECK_SECTION}}", _check_section(blob["check"]))
+            .replace("{{HISTORY_SECTION}}", _history_section(blob["history"]))
+            .replace("{{GRAPH_SECTION}}", _graph_section(blob["graph"]))
+            .replace("{{VOCAB_SECTION}}", _vocab_section(blob["vocabulary"]))
+            .replace("{{DRIFT_SECTION}}", _drift_section(blob["vocab_drift"]))
+            .replace("{{DATA_JSON}}", data_json)
+            .replace("{{RENDER_JS}}", RENDER_JS))
+
+
+# --------------------------------------------------------------------------------------------
+# Writing — unique archives (O_EXCL + retry), atomic index via unique staging
+# --------------------------------------------------------------------------------------------
+
+def _write_archive(out_dir, content):
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    data = content.encode("utf-8")
+    for _ in range(16):
+        suffix = binascii.hexlify(os.urandom(3)).decode("ascii")
+        name = f"report-{stamp}-{os.getpid()}-{suffix}.html"
+        try:
+            fd = os.open(os.path.join(out_dir, name),
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        return name
+    raise OSError("could not create a unique archive name after 16 attempts")
+
+
+def _write_index(out_dir, content):
+    fd, staging = tempfile.mkstemp(prefix=".index-", suffix=".tmp", dir=out_dir)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(content.encode("utf-8"))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(staging, os.path.join(out_dir, "index.html"))
+    except BaseException:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+        raise
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[2])
+    parser.add_argument("--data", required=True)
+    parser.add_argument("--out-dir", dest="out_dir", required=True)
+    parser.add_argument("--template", default=str(DEFAULT_TEMPLATE))
+    args = parser.parse_args(argv)
+
+    try:
+        blob = json.loads(Path(args.data).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"vibe-report: blob unreadable: {exc}", file=sys.stderr)
+        return 2
+    try:
+        validate(blob)
+    except BlobError as exc:
+        print(f"vibe-report: {exc}", file=sys.stderr)
+        return 2
+
+    template_text = Path(args.template).read_text(encoding="utf-8")
+    bundle_text = VENDOR_BUNDLE.read_text(encoding="utf-8")
+    content = render_html(blob, template_text, bundle_text)
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    archive = _write_archive(str(out_dir), content)
+    _write_index(str(out_dir), content)
+    print(f"vibe-report: wrote {out_dir / 'index.html'} (archive {archive})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -64,6 +64,37 @@ def _last_per(entries, key):
     return out
 
 
+def trajectory_from_entries(entries, scope, limit):
+    """The STORED record's trajectory — read-only, no current-score point, no append.
+
+    The report surface (vibe-49) consumes this: reporting is observation of the record, and the
+    trend command owns the appending workflow. Group semantics match `compute` exactly — the
+    legacy bucket first regardless of physical position, keyed runs in first-appearance order,
+    last-wins per (run, scope, file) — minus the current-run merge, which only the trend flow
+    performs.
+    """
+    scoped = [e for e in entries if _is_score_entry(e) and e["scope"] == scope]
+    legacy = [e for e in scoped if not e.get("run")]
+    keyed, keyed_order = {}, []
+    for e in scoped:
+        r = e.get("run")
+        if not r:
+            continue
+        if r not in keyed:
+            keyed[r] = []
+            keyed_order.append(r)
+        keyed[r].append(e)
+    sequence = ([(LEGACY_RUN, legacy)] if legacy else []) \
+        + [(r, keyed[r]) for r in keyed_order]
+    trajectory = []
+    for run, group in sequence:
+        last = _last_per(group, lambda e: (e["scope"], e["file"]))
+        scores = [e["score"] for e in last.values()]
+        trajectory.append({"run": run, "mean_score": round(sum(scores) / len(scores), 1),
+                           "files": len(scores)})
+    return trajectory[-limit:]
+
+
 def compute(history_entries, scope, current_files, run_id, limit):
     scoped_all = [e for e in history_entries if _is_score_entry(e) and e["scope"] == scope]
     baseline_input = [e for e in scoped_all if e.get("run") != run_id]

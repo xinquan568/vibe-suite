@@ -149,9 +149,14 @@ def walk_hooks(node):
             yield from walk_hooks(item)
 
 
-def check_mechanical(root, arts, deprecated_terms):
+def check_mechanical(root, arts, deprecated_terms, graph=None):
     issues, edges = [], set()   # edges: target rels with at least one inbound reference
     seen = set()                # (direction, source, target) dedupe for reported issues
+
+    graph_edges = set()
+
+    def edge(source, target, kind):
+        graph_edges.add((source, target, kind))
 
     def dangling(direction, source, target, detail):
         if (direction, source, target) not in seen:
@@ -169,16 +174,19 @@ def check_mechanical(root, arts, deprecated_terms):
         for target in HOOK_TARGET.findall(body):
             if (root / target).is_file():
                 edges.add(target)
+                edge(rel, target, "command-script")
         for token in PARTIAL_TOKEN.findall(body):
             target = f"commands/shared/{Path(token).name}"
             if (root / target).is_file():
                 edges.add(target)
+                edge(rel, target, "command-partial")
             else:
                 dangling("command-partial", rel, target,
                          "referenced shared partial does not exist")
         for agent_rel, name in agent_names.items():
             if agent_rel in body or re.search(rf"\b{re.escape(name)}\b", body):
                 edges.add(agent_rel)
+                edge(rel, agent_rel, "command-agent")
 
     # agents: frontmatter skills: (reportable) + body skill tokens (orphan input only)
     for rel in arts["agent"]:
@@ -187,6 +195,7 @@ def check_mechanical(root, arts, deprecated_terms):
             target = f"skills/{name}/SKILL.md"
             if (root / target).is_file():
                 edges.add(target)
+                edge(rel, target, "agent-skill")
             else:
                 dangling("agent-skills", rel, target,
                          "skills: entry resolves to no SKILL.md")
@@ -194,6 +203,7 @@ def check_mechanical(root, arts, deprecated_terms):
             target = f"skills/{name}/SKILL.md"
             if (root / target).is_file():
                 edges.add(target)
+                edge(rel, target, "agent-skill")
 
     # hook commands, read out of the PARSED object (reportable)
     for rel in arts["hook-config"]:
@@ -205,6 +215,7 @@ def check_mechanical(root, arts, deprecated_terms):
             for target in HOOK_TARGET.findall(command):
                 if (root / target).is_file():
                     edges.add(target)
+                    edge(rel, target, "hook-script")
                 else:
                     dangling("hook-script", rel, target,
                              "hook command names a script that does not exist")
@@ -219,6 +230,7 @@ def check_mechanical(root, arts, deprecated_terms):
             if PATH_SHAPED.fullmatch(item):
                 if (root / item).exists():
                     edges.add(item)
+                    edge(rel, item, "claude-md-listing")
                 else:
                     dangling("claude-md-listing", rel, item,
                              "listed path does not resolve")
@@ -228,6 +240,7 @@ def check_mechanical(root, arts, deprecated_terms):
                 target = f"commands/{token.group(1)}.md"
                 if (root / target).is_file():
                     edges.add(target)
+                    edge(rel, target, "claude-md-listing")
                 else:
                     dangling("claude-md-listing", rel, item,
                              "listed plugin component token does not resolve")
@@ -256,6 +269,21 @@ def check_mechanical(root, arts, deprecated_terms):
                                    "detail": f"deprecated term '{term}' (canonical: "
                                              f"'{canonical}'), {n} occurrence"
                                              + ("s" if n > 1 else "")})
+    if graph is not None:
+        # The same inventory and edge tuples the walk above discovered, in deterministic order;
+        # the inbound-target set (`edges`) and every flagless output are untouched. Edge
+        # endpoints outside the artifact classes (a command dispatching bin/<tool>, say) gain
+        # nodes of kind "file" so the emitted graph is closed — a renderer must never meet a
+        # dangling reference.
+        inventory = {rel for kind in arts for rel in arts[kind]}
+        kinds_by_rel = {rel: kind for kind in sorted(arts) for rel in arts[kind]}
+        endpoints = {p for s, tgt, _ in graph_edges for p in (s, tgt)}
+        graph["nodes"] = ([{"path": rel, "kind": kind}
+                           for kind in sorted(arts) for rel in sorted(arts[kind])]
+                          + [{"path": rel, "kind": "file"}
+                             for rel in sorted(endpoints - inventory)])
+        graph["edges"] = [{"source": s, "target": tgt, "kind": k}
+                          for s, tgt, k in sorted(graph_edges)]
     return issues
 
 
@@ -745,6 +773,9 @@ def main(argv=None):
     parser.add_argument("--root", required=True)
     parser.add_argument("--config")
     parser.add_argument("--judgment")
+    parser.add_argument("--graph", action="store_true",
+                        help="add the nodes/edges the reference-integrity walk discovered "
+                             "(E6.3's report consumes it; flagless output is unchanged)")
     args = parser.parse_args(argv)
     root = Path(args.root)
     if not root.is_dir():
@@ -766,7 +797,8 @@ def main(argv=None):
     except RegistryError as err:
         return fail(f"registry: {err}")
 
-    issues = check_mechanical(root, arts, deprecated_terms)
+    graph = {"nodes": [], "edges": []} if args.graph else None
+    issues = check_mechanical(root, arts, deprecated_terms, graph=graph)
     issues.sort(key=sort_key)
 
     if args.judgment:
@@ -776,9 +808,11 @@ def main(argv=None):
         issues.extend(judgment)   # file order, after the mechanical block
 
     verdict = "CLEAN" if not issues else f"{len(issues)} issues"
-    json.dump({"verdict": verdict, "issues": issues,
-               "checked": {k: len(v) for k, v in sorted(arts.items())}},
-              sys.stdout, indent=2, sort_keys=False)
+    out = {"verdict": verdict, "issues": issues,
+           "checked": {k: len(v) for k, v in sorted(arts.items())}}
+    if graph is not None:
+        out["graph"] = graph
+    json.dump(out, sys.stdout, indent=2, sort_keys=False)
     print()
     return 0
 

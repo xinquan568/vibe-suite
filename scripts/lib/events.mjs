@@ -28,7 +28,7 @@ function parseLine(line) {
 /**
  * Reduce a raw `--json` stream to the facts the job engine needs.
  *
- * Returns `{ threadId, terminal, usage, errorMessage, malformedLines }` where `terminal` is
+ * Returns `{ threadId, terminal, usage, errorMessage, errorCode, malformedLines }` where `terminal` is
  * `"completed"`, `"failed"`, or `null` when no terminal event was seen at all.
  */
 export function readEventStream(raw) {
@@ -36,6 +36,7 @@ export function readEventStream(raw) {
   let terminal = null;
   let usage = null;
   let errorMessage = null;
+  let errorCode = null;
   let malformedLines = 0;
 
   for (const line of String(raw ?? "").split("\n")) {
@@ -57,11 +58,14 @@ export function readEventStream(raw) {
       usage = event.usage ?? (event.turn && event.turn.usage) ?? null;
       if (mapped === "failed") {
         errorMessage = event.error?.message ?? event.message ?? "turn.failed";
+        // Machine-set and stable, where the backend supplies it. Prose is neither, so a classifier
+        // that reads only the message is at the mercy of wording changes upstream.
+        errorCode = event.error?.code ?? event.error?.type ?? null;
       }
     }
   }
 
-  return { threadId, terminal, usage, errorMessage, malformedLines };
+  return { threadId, terminal, usage, errorMessage, errorCode, malformedLines };
 }
 
 /**

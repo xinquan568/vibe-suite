@@ -83,7 +83,7 @@ export function restorationBlock(engine, outcome, probeBinary) {
 /**
  * Any non-completion is a hand-off with disclosure.
  *
- * The four-key result line carries no `error` field, so a caller reading only that line cannot know
+ * The result line carries no `error` field, so a caller reading only that line cannot know
  * *why* a job failed — and guessing "it probably just answered badly" would suppress the disclosure a
  * failed engine deserves. Failing toward disclosure is the safe direction: the worst case is a header
  * the operator did not need.
@@ -98,7 +98,7 @@ export function isUnreachable(outcome) {
 const completed = (outcome) => outcome?.status === "completed";
 
 /**
- * Run the chain. `deps.runAgy` / `deps.runCodex` each resolve to a job outcome (the four-key shape)
+ * Run the chain. `deps.runAgy` / `deps.runCodex` each resolve to a job outcome (the five-key shape)
  * or null when the engine is not installed at all; `deps.emitHeader` receives the diagnostic.
  */
 export async function runWithFallback(deps) {

@@ -78,8 +78,8 @@ test("completion path: a live background job completes; status and result exerci
   const line = result.stdout.trim();
   assert.equal(line.split("\n").length, 1, "result is one line of JSON");
   const parsed = JSON.parse(line);
-  assert.deepEqual(Object.keys(parsed), ["jobId", "status", "threadId", "rawOutput"],
-    "exactly the four contract keys, in contract order");
+  assert.deepEqual(Object.keys(parsed), ["jobId", "status", "threadId", "rawOutput", "verdictState"],
+    "exactly the five contract keys, in contract order");
   assert.equal(parsed.jobId, jobId);
   assert.equal(parsed.status, "completed");
 

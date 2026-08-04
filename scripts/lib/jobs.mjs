@@ -42,8 +42,14 @@ import path from "node:path";
 
 export const STATE_DIRNAME = ".vibe-suite-state";
 
-/** The four keys of the one-line result contract, in contract order. */
-export const RESULT_KEYS = ["jobId", "status", "threadId", "rawOutput"];
+/** The five keys of the one-line result contract, in contract order.
+ *
+ * `verdictState` was **appended** rather than inserted (vibe-46): four assertions compare
+ * `Object.keys(...)` with `deepEqual`, so position is part of this contract, not a detail.
+ * `verdictText` is deliberately absent — the event stream in `rawOutput` already carries the agent
+ * message, and putting it here would ship the same content twice in one record.
+ */
+export const RESULT_KEYS = ["jobId", "status", "threadId", "rawOutput", "verdictState"];
 
 /** Terminal statuses. `cancelled` is reserved for #12, which signals via `pgid`. */
 export const TERMINAL_STATUSES = new Set(["completed", "failed", "timed_out", "cancelled"]);
@@ -110,6 +116,12 @@ export function newRecord({ jobId, kind, sandbox, effort, model, background, tim
     model: model ?? null,          // P9: null means the CLI's own default ran
     background: Boolean(background),
     threadId: null,
+    // vibe-46: declared at creation so a running record and an early terminal failure — a spawn
+    // fault, a worker-handshake failure — satisfy the same schema as a completed one. A field that
+    // only exists on the happy path is a schema the unhappy paths quietly violate.
+    verdictText: null,
+    verdictState: "absent",
+    errorClass: null,
     workerPid: null,
     pgid: null,                    // non-null only for background: the detached worker leads its group
     claimDigest: claimDigest ?? null,
@@ -379,7 +391,7 @@ export function isAbandoned(record, { now = Date.now(), heartbeatMs = 30_000 } =
   return true;
 }
 
-/** The result line: exactly the four contract keys, in contract order. */
+/** The result line: exactly the five contract keys, in contract order. */
 export function resultLine(record) {
   return JSON.stringify(Object.fromEntries(RESULT_KEYS.map((key) => [key, record[key] ?? null])));
 }
@@ -436,6 +448,9 @@ const RECORD_SHAPE = {
   effort: nullOr((v) => typeof v === "string"),
   model: nullOr((v) => typeof v === "string"),
   background: (v) => typeof v === "boolean",
+  verdictText: nullOr((v) => typeof v === "string"),
+  verdictState: (v) => v === "absent" || v === "empty" || v === "present",
+  errorClass: nullOr((v) => v === "quota" || v === "failure"),
   threadId: nullOr((v) => typeof v === "string"),
   workerPid: nullOr(isPid),
   pgid: nullOr(isPid),

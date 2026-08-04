@@ -34,7 +34,7 @@ set -euo pipefail
 node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --resume "$CONTINUE_JOB_ID" ${CONTINUE_CONFIRM_DANGER:+--confirm-danger} -- "$(cat "$CONTINUE_PROMPT_FILE")"
 ```
 
-Branch on the four-key result's `status`: use the output **only for `completed`**; `failed` and
+Branch on the result line's `status`: use the output **only for `completed`**; `failed` and
 `timed_out` route to §3; `cancelled` is the operator's own stop — report it and stop.
 
 ## 3. When the engine is unreachable — the honest fallback

@@ -61,13 +61,13 @@ test("pre-gate: the committed gate is shut, so nothing dispatches and no record 
   assert.equal(jobCount(dir), 0, "a refused lane must not leave a job record behind");
 });
 
-test("with the gate simulated open: a record, the four-key line, and threadId null", async () => {
+test("with the gate simulated open: a record, the five-key line, and threadId null", async () => {
   const dir = ws();
   const probe = path.join(mkdtempSync(path.join(tmpdir(), "agy-probe-")), "probe.json");
   const result = run(base(), { cwd: dir, gate: passedGateFile(), probe });
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   const line = JSON.parse(result.stdout.trim().split("\n").at(-1));
-  assert.deepEqual(Object.keys(line), ["jobId", "status", "threadId", "rawOutput"]);
+  assert.deepEqual(Object.keys(line), ["jobId", "status", "threadId", "rawOutput", "verdictState"]);
   assert.equal(line.status, "completed");
   assert.equal(line.threadId, null, "agy v1 exposes no thread id — inventing one would be a lie");
   const argv = JSON.parse(readFileSync(probe, "utf8")).argv;

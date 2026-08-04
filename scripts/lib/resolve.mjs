@@ -184,7 +184,8 @@ export async function settleAbandoned(workspace, records, { now = Date.now() } =
   for (const record of records) {
     if (!isAbandoned(record, { now })) continue;
     const done = await finaliseRecord(workspace, record.jobId, {
-      status: "failed", error: "abandoned: heartbeat stale, worker dead",
+      status: "failed", errorClass: "failure",
+      error: "abandoned: heartbeat stale, worker dead",
     });
     if (done) settled.push(done);
   }

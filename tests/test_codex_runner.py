@@ -19,6 +19,8 @@ process CWD, so nothing here writes into the repository.
 
 import json
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -57,11 +59,18 @@ class RunnerCase(unittest.TestCase):
         self.addCleanup(self._reap_workspace_writers, self.ws, self._spawned_fixtures)
 
     def _group_members(self, groups):
-        """pgid -> non-zombie member pids, via ps (portable to macOS and ubuntu CI).
-        A zombie cannot write and counts as quiescent; per-pid kill(pid, 0) would both
-        miss unrecorded descendants and wait on corpses."""
-        out = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="],
-                             capture_output=True, text=True)
+        """(ok, pgid -> non-zombie member pids), via ps (portable to macOS and ubuntu
+        CI). A zombie cannot write and counts as quiescent; per-pid kill(pid, 0) would
+        both miss unrecorded descendants and wait on corpses. A failed, timed-out, or
+        empty ps is reported as ok=False — the caller must treat that snapshot as
+        unknown, never as absence."""
+        try:
+            out = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="],
+                                 capture_output=True, text=True, timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            return False, {}
+        if out.returncode != 0 or not out.stdout.strip():
+            return False, {}
         live = {}
         for line in out.stdout.splitlines():
             parts = line.split(None, 2)
@@ -73,7 +82,7 @@ class RunnerCase(unittest.TestCase):
                 continue
             if pgid_i in groups and not parts[2].startswith("Z"):
                 live.setdefault(pgid_i, []).append(pid_i)
-        return live
+        return True, live
 
     @staticmethod
     def _signal_groups(pgids, sig):
@@ -93,12 +102,26 @@ class RunnerCase(unittest.TestCase):
         rather than vanishing into cleanup."""
         jobs_dir = ws / STATE_DIRNAME / "jobs"
         harness_pgid = os.getpgid(0)
-        active = set()
+        # Authoritative record per job: canonical <jobId>.json and CAS slots
+        # <jobId>.v<N>.json both match the glob; the highest committed version wins,
+        # so a stale running slot beneath a newer terminal record is never signalled.
+        slot_re = re.compile(r"(job_[A-Za-z0-9_-]+?)(?:\.v(\d+))?\.json")
+        by_job = {}
         for rec in (jobs_dir.glob("job_*.json") if jobs_dir.is_dir() else []):
+            m = slot_re.fullmatch(rec.name)
+            if not m:
+                continue
             try:
                 data = json.loads(rec.read_text())
             except (ValueError, OSError):
                 continue  # never convert a test failure into the reaper's own
+            if data.get("jobId") != m.group(1) or not isinstance(data.get("version"), int):
+                continue
+            best = by_job.get(m.group(1))
+            if best is None or data["version"] > best["version"]:
+                by_job[m.group(1)] = data
+        active = set()
+        for data in by_job.values():
             pid, pgid = data.get("workerPid"), data.get("pgid")
             if (data.get("status") == "running" and isinstance(pid, int)
                     and isinstance(pgid, int) and pgid == pid and pgid > 1
@@ -109,32 +132,60 @@ class RunnerCase(unittest.TestCase):
         deadline = time.monotonic() + 15.0
 
         def live_now():
-            members = self._group_members(active)
+            """A dict of live members, or None when no valid snapshot was obtained —
+            unknown never mutates `active` and is never treated as absence."""
+            ok, members = self._group_members(active)
+            if not ok:
+                return None
             active.intersection_update(members)   # absent once -> dropped permanently
             return members
 
+        def settled_snapshot():
+            """A valid snapshot, retried within the deadline; monitoring failure is loud."""
+            while True:
+                members = live_now()
+                if members is not None:
+                    return members
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        "vibe-129 reaper: ps never produced a valid snapshot within "
+                        "the teardown deadline — process liveness is unknown")
+                time.sleep(0.1)
+
         # Phase 1 — drain: emitter workers finish on their own.
         drain_until = min(time.monotonic() + 2.0, deadline)
-        while time.monotonic() < drain_until and live_now():
+        while time.monotonic() < drain_until:
+            members = live_now()
+            if members == {}:
+                break
             time.sleep(0.05)
-        survivors = live_now()
+        survivors = settled_snapshot()
         hung_nonsleeper = False
         if survivors:
-            expects_persistent = "sleeper.mjs" in spawned_fixtures
-            if not expects_persistent:
-                hung_nonsleeper = True
+            # The exemption is per-workspace-pure-sleeper, not any-sleeper-anywhere:
+            # a hung emitter beside a sleeper invocation must still be reported.
+            pure_sleeper = bool(spawned_fixtures) and set(spawned_fixtures) == {"sleeper.mjs"}
+            hung_nonsleeper = not pure_sleeper
             # Phase 2 — escalate: TERM, brief grace, then KILL (sleeper ignores TERM;
             # the group covers the unrecorded grandchild).
             self._signal_groups(survivors, signal.SIGTERM)
             grace_until = min(time.monotonic() + 1.0, deadline)
-            while time.monotonic() < grace_until and live_now():
+            while time.monotonic() < grace_until:
+                members = live_now()
+                if members == {}:
+                    break
                 time.sleep(0.05)
-            self._signal_groups(live_now(), signal.SIGKILL)
+            remaining = settled_snapshot()
+            if remaining:
+                self._signal_groups(remaining, signal.SIGKILL)
         # Phase 3 — verify: no non-zombie member of any collected group remains.
-        while live_now():
+        while True:
+            members = settled_snapshot()
+            if members == {}:
+                break
             if time.monotonic() >= deadline:
                 raise AssertionError(
-                    f"workspace writers survived teardown: {sorted(live_now())}")
+                    f"workspace writers survived teardown: {sorted(members)}")
             time.sleep(0.05)
         if hung_nonsleeper:
             raise AssertionError(
@@ -577,6 +628,64 @@ class Namespace(unittest.TestCase):
         for bare in (" :jobs", " :continue", " :bug-analyze", " :delegate"):
             self.assertNotIn(bare, source,
                              f"command names must be fully qualified (/vibe-suite{bare.strip()})")
+
+
+class ReaperContract(RunnerCase):
+    """Step-8 regressions for the vibe-129 reaper itself: authoritative-version
+    resolution, and the pure-sleeper-only masking exemption. Each test fabricates a
+    separate workspace and drives _reap_workspace_writers directly against a real
+    detached process group."""
+
+    def _spawn_group(self):
+        proc = subprocess.Popen(["sleep", "30"], preexec_fn=os.setsid,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(self._end_group, proc)
+        return proc
+
+    @staticmethod
+    def _end_group(proc):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait(timeout=10)
+
+    def _fab_ws(self, records):
+        ws = Path(tempfile.mkdtemp(prefix="reaper-fab-"))
+        self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
+        jobs = ws / STATE_DIRNAME / "jobs"
+        jobs.mkdir(parents=True)
+        for name, data in records.items():
+            (jobs / name).write_text(json.dumps(data))
+        return ws
+
+    def test_historical_running_slot_is_never_signalled(self):
+        proc = self._spawn_group()
+        base = {"jobId": "job_hist", "workerPid": proc.pid, "pgid": proc.pid}
+        ws = self._fab_ws({
+            "job_hist.v1.json": {**base, "version": 1, "status": "running"},
+            "job_hist.json": {**base, "version": 2, "status": "completed"},
+        })
+        self._reap_workspace_writers(ws, ["emitter.mjs"])
+        self.assertIsNone(proc.poll(),
+                          "a stale running slot beneath a terminal record was signalled")
+
+    def test_hung_nonsleeper_is_reported_after_reaping(self):
+        proc = self._spawn_group()
+        ws = self._fab_ws({"job_hung.json": {"jobId": "job_hung", "version": 1,
+                                             "status": "running",
+                                             "workerPid": proc.pid, "pgid": proc.pid}})
+        with self.assertRaisesRegex(AssertionError, "fixture should terminate"):
+            self._reap_workspace_writers(ws, ["emitter.mjs", "sleeper.mjs"])
+        self.assertIsNotNone(proc.poll(), "the hygiene reap must still have run")
+
+    def test_pure_sleeper_workspace_is_exempt(self):
+        proc = self._spawn_group()
+        ws = self._fab_ws({"job_slp.json": {"jobId": "job_slp", "version": 1,
+                                            "status": "running",
+                                            "workerPid": proc.pid, "pgid": proc.pid}})
+        self._reap_workspace_writers(ws, ["sleeper.mjs"])
+        self.assertIsNotNone(proc.poll(), "the sleeper group is still reaped for hygiene")
 
 
 if __name__ == "__main__":

@@ -65,7 +65,23 @@ How `profile init` produces one: [`references/profile-init.md`](references/profi
 
 ## Round bounds
 
-`max_review_rounds`, set by `--max-review-rounds`: floor **2**, ceiling **5**, default **2**.
+`max_review_rounds`, set by `--max-review-rounds`: floor **2**, ceiling **5**, default **2**. An
+out-of-range integer clamps to the nearest bound with a notice naming both values; a non-integer is an
+error rather than a clamp.
+
+**The loop is bounded by the *effective* cap, not by the run-start one**, because `iterate` may raise
+it for a new round. Resolution, stated here once:
+
+```
+effective cap = state.json:max_review_rounds_overrides[current_round]   # set only by `iterate`
+             ?? state.json:max_review_rounds                            # mirrored at run-start
+             ?? 2                                                       # a run that predates the field
+```
+
+An **absent** `max_review_rounds_overrides` is read as `{}` — runs written before the field existed
+resolve rather than raise. Values in the map are already validated and clamped at write time, so
+resolution reads them without re-checking. Everywhere this document writes `N` for the cap, it means
+the effective cap.
 
 The floor is 2 because this loop's round is *update + verify*: the worker answers a finding and the
 reviewer checks the answer. A cap of 1 would admit an update that no reviewer ever verified, which is
@@ -94,7 +110,9 @@ Two consequences specific to this pipeline:
 - **Canonical step numbering is preserved.** Under `none` the run executes steps 1, 4 and 7 and they
   keep those numbers. State, resume, and reporting stay comparable across modes; a mode that renumbered
   its steps would make two runs of the same issue incomparable.
-- `none` needs no reviewer backend, so pre-flight is skipped rather than failed.
+- `none` needs no reviewer backend, so pre-flight is skipped rather than failed. Pre-flight
+  otherwise resolves the **effective cap** for the round about to run, by the rule under
+  [Round bounds](#round-bounds).
 
 ## Durable state
 
@@ -124,6 +142,7 @@ than a note beside it.
   "scenario": "new-feature",
   "review_mode": "full",
   "max_review_rounds": 2,
+  "max_review_rounds_overrides": {},
   "current_step": 1,
   "current_round": 1,
   "status": "in_progress",
@@ -132,6 +151,11 @@ than a note beside it.
   "pr": null
 }
 ```
+
+`max_review_rounds_overrides` maps a **string-typed** round number to the cap that round runs
+under — `{"2": 4}`, not `{2: 4}`, matching what JSON round-trips give you and the
+`review_mode_overrides` mechanism it is modelled on. How a value gets there, and what it must
+satisfy, is stated once under [Round bounds](#round-bounds).
 
 `areas_confirmed` names the parts of the project a run touches. It was called `crates_confirmed` in the
 source — a fossil from a project whose parts were crates. `scripts/profile_manifest.py` reads either

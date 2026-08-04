@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: ISC
+"""bin/vibe-badge — shields.io endpoint JSON + attestation sidecar from the score history
+(F8.3 / E6.4, vibe-50).
+
+Stdlib-only; no Claude Code required. Usage:
+
+    bin/vibe-badge --history <file> [--scope <tag>] [--attestation]
+
+Badge JSON on stdout — exactly {schemaVersion, label, message, color}, nothing else;
+--attestation emits the audit sidecar payload instead. The tool writes no files: the caller
+redirects, and refresh is re-invocation (self-check wiring lands in E8.4). Output is a pure
+function of (history bytes, scope) — no wall clock anywhere.
+
+A missing history, or a scope with no score entries, is an honest "no data" badge (exit 0):
+a repo before its first scored run still deserves a rendering badge, and a CI refresh must
+not fail on it. A history that is present but unreadable or malformed refuses instead —
+exit 2, nothing on stdout — because a corrupt record must not render as healthy. And
+--attestation with nothing to attest refuses likewise.
+"""
+
+import argparse
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from trend_engine import LEGACY_RUN, entries_from_text, trajectory_from_entries  # noqa: E402,F401
+from score_engine import band  # noqa: E402
+
+COLORS = {"Excellent": "brightgreen", "Good": "green", "Adequate": "yellowgreen",
+          "Weak": "orange", "Rewrite": "red"}
+
+
+def _refuse(message):
+    print(f"vibe-badge: {message}", file=sys.stderr)
+    return 2
+
+
+def _emit(payload):
+    json.dump(payload, sys.stdout, indent=2, ensure_ascii=False, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
+
+
+def _label(scope):
+    return "vibe-suite" if scope == "full" else f"vibe-suite · {scope}"
+
+
+def _no_data(scope):
+    return {"schemaVersion": 1, "label": _label(scope),
+            "message": "no data", "color": "lightgrey"}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="vibe-badge",
+        description="Emit a shields.io endpoint badge (or its attestation sidecar) "
+                    "from the score history.")
+    parser.add_argument("--history", required=True,
+                        help="path to the score-history file")
+    parser.add_argument("--scope", default="full",
+                        help="scope tag to read (default: full)")
+    parser.add_argument("--attestation", action="store_true",
+                        help="emit the audit sidecar payload instead of the badge")
+    args = parser.parse_args(argv)
+
+    if not args.scope:
+        return _refuse("--scope must be non-empty")
+
+    history = Path(args.history)
+    if not history.exists():
+        if args.attestation:
+            return _refuse(f"nothing to attest: history {args.history} does not exist")
+        return _emit(_no_data(args.scope))
+
+    try:
+        raw_bytes = history.read_bytes()
+    except OSError as e:
+        return _refuse(f"cannot read history {args.history}: {e}")
+    try:
+        entries = entries_from_text(raw_bytes.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as e:
+        return _refuse(f"malformed history {args.history}: {e}")
+
+    latest = trajectory_from_entries(entries, args.scope, 1)
+    if not latest:
+        if args.attestation:
+            return _refuse(
+                f"nothing to attest: no {args.scope!r} entries in {args.history}")
+        return _emit(_no_data(args.scope))
+
+    point = latest[0]
+    point_band = band(point["mean_score"])
+    if args.attestation:
+        # runs_observed: every run-group the reader yields for the scope, legacy bucket
+        # included — the group count cannot exceed the entry count, so this limit never
+        # truncates.
+        runs_observed = len(trajectory_from_entries(entries, args.scope, len(entries) + 1))
+        return _emit({"kind": "vibe-badge-attestation", "schema": 1, "scope": args.scope,
+                      "run": point["run"], "mean_score": point["mean_score"],
+                      "band": point_band, "files": point["files"],
+                      "runs_observed": runs_observed,
+                      "history_sha256": hashlib.sha256(raw_bytes).hexdigest()})
+    return _emit({"schemaVersion": 1, "label": _label(args.scope),
+                  "message": f"{point['mean_score']} · {point_band}",
+                  "color": COLORS[point_band]})
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -64,6 +64,21 @@ def _last_per(entries, key):
     return out
 
 
+def entries_from_text(raw_text):
+    """A history file's entries list — the strict read-only loader (the badge consumes this).
+
+    Raises ValueError on non-JSON text or an unrecognized container. The trend flow's own
+    warn-and-replace treatment of malformed history stays untouched; a pure reporting surface
+    must refuse a corrupt record rather than recover it.
+    """
+    try:
+        raw = json.loads(raw_text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"history is not JSON: {e}") from None
+    entries, _shape = _normalize(raw)
+    return entries
+
+
 def trajectory_from_entries(entries, scope, limit):
     """The STORED record's trajectory — read-only, no current-score point, no append.
 

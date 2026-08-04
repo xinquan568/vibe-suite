@@ -354,3 +354,70 @@ class TestReportCommandContract(unittest.TestCase):
     def test_registered_in_manifest(self):
         manifest = json.loads((REPO_ROOT / ".claude-plugin" / "plugin.json").read_text())
         self.assertIn("./commands/report.md", manifest["commands"])
+
+
+class TestRefreshKnowledgeContentContract(unittest.TestCase):
+    """The refresh-knowledge content contract (E6.5 / vibe-51) — written before the artifact
+    existed (TDD RED). Pins the doc's decision surface: mode table with the --check default,
+    the absent-context7 stop with install instructions and no fall-through, the
+    conventions-claude-only boundary with spec-sync named for the rest, and the update
+    branch's two freshness surfaces ending at the doctor-read refreshed.json."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.path = REPO_ROOT / "commands" / "refresh-knowledge.md"
+        cls.text = cls.path.read_text(encoding="utf-8")
+
+    def test_frontmatter_and_surface(self):
+        self.assertRegex(self.text, r"(?m)^name: refresh-knowledge$")
+        self.assertRegex(self.text, r"(?m)^argument-hint:.*--check.*--update")
+        self.assertIn("--check", self.text)
+        self.assertIn("--update", self.text)
+
+    def test_mode_table_defaults_to_check(self):
+        self.assertRegex(self.text, r"(?im)\(empty\).*--check|empty.*defaults? to `?--check`?")
+
+    def test_absent_mcp_branch_stops_with_install_instructions(self):
+        self.assertIn("/plugin install context7@claude-plugins-official", self.text)
+        self.assertRegex(self.text, r"(?m)\*\*STOP\*\*|and STOP")
+        self.assertRegex(self.text, r"(?i)example", "tool ids must be marked as examples")
+
+    def test_target_boundary_names_spec_sync(self):
+        self.assertIn("skills/conventions-claude/", self.text)
+        self.assertIn("spec-sync", self.text)
+        for other in ("conventions-codex", "conventions-antigravity"):
+            self.assertNotRegex(self.text, rf"refresh(es|ing)? .*{other}",
+                                f"{other} is spec-sync's, never this command's target")
+
+    def test_update_branch_ends_at_the_doctor_read_record(self):
+        self.assertIn("refreshed.json", self.text)
+        self.assertIn('"refreshed"', self.text)
+        self.assertIn("**Spec freshness:**", self.text)
+        self.assertRegex(self.text, r"(?i)no .*(pre-refreshed|initial) record|ships no")
+
+    def test_no_pinned_model_ids(self):
+        self.assertNotRegex(self.text, r"(claude|gpt|gemini)-[0-9]",
+                            "no pinned model identifiers (P9)")
+
+    def test_registered_in_manifest(self):
+        manifest = json.loads((REPO_ROOT / ".claude-plugin" / "plugin.json").read_text())
+        self.assertIn("./commands/refresh-knowledge.md", manifest["commands"])
+
+
+class TestDoctorDocReconciled(unittest.TestCase):
+    """E6.5's landing makes doctor.md's old wording false: the producer exists, so a
+    no-record state is 'never refreshed', and the issue is #51 (the old text said #48)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.doc = (REPO_ROOT / "commands" / "doctor.md").read_text(encoding="utf-8")
+        cls.py = (REPO_ROOT / "scripts" / "doctor.py").read_text(encoding="utf-8")
+
+    def test_doc_cites_51_with_never_refreshed_semantics(self):
+        self.assertIn("#51", self.doc)
+        self.assertIn("never refreshed", self.doc)
+        self.assertIn("refresh-knowledge", self.doc)
+
+    def test_stale_48_citation_gone_everywhere(self):
+        self.assertNotIn("#48", self.doc)
+        self.assertNotIn("#48", self.py)

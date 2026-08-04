@@ -19,6 +19,7 @@ repair is safe when provenance cannot support it.
 """
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -289,20 +290,60 @@ def check_provenance(ws, state, out):
                            "unbridge cannot rely on it", False))
 
 
+PROSE_FRESHNESS = re.compile(r"\*\*Spec freshness:\*\*.*?(\d{4}-\d{2}-\d{2})")
+
+
+def _valid_refresh_date(value):
+    """Exactly the dashed YYYY-MM-DD calendar form. fromisoformat alone also admits
+    YYYYMMDD, so the regex pins the shape and fromisoformat rejects impossible dates."""
+    if not (isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)):
+        return False
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _staler_path(skill_md, refreshed):
+    """F8.4: recommend whichever of the two refresh paths is staler. The comparison is the
+    record date against the overlay's canonical prose line (spec-sync's pinned format);
+    an unparseable prose line degrades to no recommendation rather than a guess."""
+    try:
+        match = PROSE_FRESHNESS.search(skill_md.read_text(encoding="utf-8"))
+    except OSError:
+        match = None
+    if not match:
+        return "—"
+    prose = match.group(1)
+    if prose < refreshed:
+        return f"staler path: /vibe-suite:spec-sync (prose {prose} < record {refreshed})"
+    if refreshed < prose:
+        return (f"staler path: /vibe-suite:refresh-knowledge "
+                f"(record {refreshed} < prose {prose})")
+    return "—"
+
+
 def knowledge_capability(out):
     """F8.4's date is plugin-level, beside the skill it describes — a project-local copy would let
-    two projects disagree about one shared skill. E6.5 (#48) writes it."""
+    two projects disagree about one shared skill. /vibe-suite:refresh-knowledge (E6.5/#51)
+    writes it. Returns a capability row (has "status") for the no-record and valid states,
+    a finding for every malformed record, and diagnose routes by shape."""
     root = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", HERE.parent))
     for candidate in (root / "skills").glob("*/refreshed.json"):
         try:
             record = bridge.load_json(candidate)
         except Exception:
             record = None
-        if isinstance(record, dict) and record.get("refreshed"):
-            return None
-        return finding("[LOW]", "knowledge-freshness",
-                       f"{candidate.name} carries no readable date", False)
-    return ("knowledge-freshness", "E6.5 (#48) — no refresh date is written yet")
+        refreshed = record.get("refreshed") if isinstance(record, dict) else None
+        if not _valid_refresh_date(refreshed):
+            return finding("[LOW]", "knowledge-freshness",
+                           f"{candidate.name} carries no readable date", False)
+        return {"check": "knowledge-freshness", "status": f"refreshed {refreshed}",
+                "blocked_on": _staler_path(candidate.parent / "SKILL.md", refreshed)}
+    return {"check": "knowledge-freshness", "status": "unavailable",
+            "blocked_on": "never refreshed — /vibe-suite:refresh-knowledge (E6.5/#51) "
+                          "writes skills/<skill>/refreshed.json"}
 
 
 def diagnose(ws):
@@ -333,9 +374,8 @@ def diagnose(ws):
     for check, blocked in UNAVAILABLE:
         capabilities.append({"check": check, "status": "unavailable", "blocked_on": blocked})
     knowledge = knowledge_capability(findings)
-    if isinstance(knowledge, tuple):
-        capabilities.append({"check": knowledge[0], "status": "unavailable",
-                             "blocked_on": knowledge[1]})
+    if isinstance(knowledge, dict) and "status" in knowledge:
+        capabilities.append(knowledge)
     elif knowledge:
         findings.append(knowledge)
     capabilities.append({"check": "connectivity", "status": "see-preflight",

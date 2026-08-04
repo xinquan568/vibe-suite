@@ -32,6 +32,7 @@
     "./commands/nl-audit.md",
     "./commands/preflight.md",
     "./commands/refine-proposal.md",
+    "./commands/refresh-knowledge.md",
     "./commands/repair.md",
     "./commands/report.md",
     "./commands/roast.md",

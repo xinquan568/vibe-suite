@@ -52,6 +52,7 @@ SCANNED = frozenset(
         "auditor",  # "the deployable audit unit"
         "bin",  # "programs, not prompts — they ship with tests"
         "codex",  # generated Codex-CLI mirror of shipped artifacts
+        "codex-src",  # hand-authored Codex-side skill sources (E7.1) — consumed by the E7.2 generator
         "commands",
         "hooks",  # executed by the harness
         "schemas",

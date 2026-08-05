@@ -207,7 +207,10 @@ class TestRoundTrip(unittest.TestCase):
         doc = json.loads((ws / ".mcp.json").read_text())
         self.assertIn("probe_advisor", doc["mcpServers"])
         self.assertTrue((ws / ".vibe-suite" / "agents" / "probe_advisor" / "timeline").is_dir())
-        rows = advisors.list_advisors(ws)
+        # E7.1: the real tree now ships a default pin, so classification against the
+        # default paths would compare content to it. The round-trip contract under test is
+        # byte restoration, so the listing pins the same target the add used.
+        rows = advisors.list_advisors(ws, pin=PIN)
         self.assertEqual([r["name"] for r in rows], ["probe_advisor"])
         self.assertEqual(rows[0]["state"], "consistent")
         advisors.remove(ws, "probe_advisor", delete_timeline=True)
@@ -326,6 +329,25 @@ class TestReconcile(unittest.TestCase):
         report = advisors.reconcile(ws, pin=PIN)
         self.assertEqual(report["halfway"], "half-registered->registered")
         self.assertIn("halfway", toml_path.read_text())
+
+    def test_stale_explicit_registration_retargets_to_shipped_default(self):
+        # E7.1 (vibe-53) characterization: the pending→shipped transition's advisor consequence.
+        # An advisor registered at an older explicit pin, reconciled with no pin argument against
+        # a shipped pin file, converges both stores to the shipped default.
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws, name="veteran")
+        advisors.add(ws, "veteran", pin="1.0.0")
+        with tempfile.TemporaryDirectory() as td:
+            shipped = Path(td) / "pin.txt"
+            shipped.write_text("2.0.0\n")
+            report = advisors.reconcile(ws, pin_file=shipped,
+                                        pending_file=Path(td) / "absent.pending")
+        self.assertEqual(report["veteran"], "stale-registered->registered")
+        doc = json.loads((ws / ".mcp.json").read_text())
+        self.assertIn("claude-octopus@2.0.0", json.dumps(doc["mcpServers"]["veteran"]))
+        toml = (ws / ".codex" / "config.toml").read_text()
+        self.assertIn("claude-octopus@2.0.0", toml)
+        self.assertNotIn("claude-octopus@1.0.0", toml)
 
     def test_add_and_remove_route_through_reconcile(self):
         ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
@@ -629,22 +651,22 @@ class TestTargetAndClassification(unittest.TestCase):
         doc = json.loads((ws / ".mcp.json").read_text())
         doc["mcpServers"]["probe_advisor"]["env"]["CLAUDE_MAX_TURNS"] = "99"
         (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
-        rows = {r["name"]: r for r in advisors.list_advisors(ws)}
+        rows = {r["name"]: r for r in advisors.list_advisors(ws, pin=PIN)}
         self.assertEqual(rows["probe_advisor"]["state"], "stale-registered")
         advisors.reconcile(ws, pin=PIN)
-        rows = {r["name"]: r for r in advisors.list_advisors(ws)}
+        rows = {r["name"]: r for r in advisors.list_advisors(ws, pin=PIN)}
         self.assertEqual(rows["probe_advisor"]["state"], "consistent")
         # TOML-only staleness
         toml_path = ws / ".codex" / "config.toml"
         toml_path.write_text(toml_path.read_text().replace(
             'CLAUDE_MAX_TURNS = "4"', 'CLAUDE_MAX_TURNS = "77"'))
-        rows = {r["name"]: r for r in advisors.list_advisors(ws)}
+        rows = {r["name"]: r for r in advisors.list_advisors(ws, pin=PIN)}
         self.assertEqual(rows["probe_advisor"]["state"], "stale-registered")
 
     def test_edited_definition_flips_state(self):
         ws = self._ws()
         add_definition(ws, extra="effort: high\n")
-        rows = {r["name"]: r for r in advisors.list_advisors(ws)}
+        rows = {r["name"]: r for r in advisors.list_advisors(ws, pin=PIN)}
         self.assertEqual(rows["probe_advisor"]["state"], "stale-registered")
 
     def test_disagreeing_targets_invalid(self):

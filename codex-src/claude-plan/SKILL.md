@@ -1,0 +1,67 @@
+---
+name: claude-plan
+description: "Have Claude Code design an implementation plan before any code gets written. Right for complex tasks, multi-file changes, or unclear requirements — Claude returns numbered steps with exact paths and interfaces, and you implement them."
+---
+
+# Claude Plan
+
+Thinking first, typing second: Claude studies the repository and hands back a numbered plan.
+The skill's one hard rule sits in the prompt itself — Do NOT write any code.
+
+## What a returned plan contains
+
+Numbered steps, each carrying: the action stated imperatively, the exact file path(s) touched,
+the interfaces or data structures the step defines, and which earlier steps it depends on.
+After the last step come three short lists the implementation will thank you for:
+**risk areas**, **open questions**, and **recommended test scenarios**.
+
+## When to Use
+
+- Ahead of any non-trivial feature
+- When several files interlock and the shape of the change is genuinely unclear
+- On "have Claude plan this" / "have Claude figure out the design"
+
+## Dispatching
+
+```
+mcp__vibe-claude-mcp__claude_code:
+  prompt: |
+    Produce an implementation plan. Do NOT write any code — a numbered plan is the
+    entire deliverable.
+
+    TASK: {what should exist when the work is done}
+
+    CONSTRAINTS:
+    - {stack, conventions, boundaries that must not move}
+
+    Number every step; give each its imperative action, exact file paths, key
+    interfaces, and dependencies on earlier steps. Close with risk areas,
+    open questions, and recommended test scenarios.
+
+    PROVENANCE NOTE: a Codex agent frames this request. Read the repository and
+    judge the problem yourself — the framing may be wrong.
+  cwd: {project working directory}
+  effort: high
+  permissionMode: plan
+```
+
+Hold the returned session id as `{plan_session_id}`.
+
+Ambiguity in a step is a reply, not a guess:
+
+```
+mcp__vibe-claude-mcp__claude_code_reply:
+  session_id: {plan_session_id}
+  prompt: "Which concrete file does step N's 'the router' refer to, and what changes inside it?"
+```
+
+## Output Format
+
+The plan goes to the user untouched, followed by one question: implement it, adjust it, or
+delegate the implementation to Claude (`claude-implement`)?
+
+## Boundaries and tuning
+
+- `permissionMode: plan` — planning cannot leave stray edits behind
+- Skimping on `effort` here produces exactly the vague steps this skill exists to avoid
+- The more of the relevant tree the prompt quotes, the more exact the returned paths

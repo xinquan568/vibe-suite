@@ -32,6 +32,12 @@ STAGE_DELIVERED = ["scanner", "scorer", "vague-scanner", "checker", "tester"]
 COMMAND_SPECS = ["refresh-knowledge"]
 #: Skill specs — same rung-5 mechanism for skills/<name>/SKILL.md artifacts.
 SKILL_SPECS = ["runs-stats"]
+#: codex-src source specs (E7.1 / vibe-53) — the reverse-delegation source set, F9.6(d).
+#: Same rung-5 mechanism pointed at codex-src/<name>/SKILL.md.
+CODEX_SRC_SPECS = [
+    "claude-review", "claude-plan", "claude-implement", "claude-debug",
+    "audit", "audit-fix", "verify",
+]
 
 SECTIONS = ["Triggers On", "Does Not Trigger On", "Output Contains", "Frontmatter Valid"]
 
@@ -78,7 +84,8 @@ def section_items(text, heading):
 class SpecCoverage(unittest.TestCase):
     def test_fourteen_of_fourteen_no_extras(self):
         on_disk = sorted(p.name for p in SPECS.glob("*.spec.md"))
-        expected = [f"{n}.spec.md" for n in FOURTEEN + COMMAND_SPECS + SKILL_SPECS]
+        expected = [f"{n}.spec.md"
+                    for n in FOURTEEN + COMMAND_SPECS + SKILL_SPECS + CODEX_SRC_SPECS]
         self.assertEqual(on_disk, sorted(expected))
 
     def test_skill_spec_schema_and_depth(self):
@@ -144,6 +151,35 @@ class SpecCoverage(unittest.TestCase):
                                    if l.startswith("Source:"))
                 self.assertIn(SOURCE_TOKENS[name], source_line,
                               f"{name}: Source line lacks its frozen token")
+
+    def test_codex_src_spec_schema_and_depth(self):
+        for name in CODEX_SRC_SPECS:
+            with self.subTest(spec=name):
+                text = (SPECS / f"{name}.spec.md").read_text(encoding="utf-8")
+                fm = spec_frontmatter(text)
+                self.assertEqual(sorted(fm), ["artifact", "min_score", "type"])
+                self.assertEqual(fm["artifact"], f"codex-src/{name}/SKILL.md")
+                self.assertEqual(fm["type"], "skill")
+                self.assertEqual(fm["min_score"], "80")
+                for heading, minimum in (("Triggers On", 5),
+                                         ("Does Not Trigger On", 3),
+                                         ("Output Contains", 2),
+                                         ("Frontmatter Valid", 1)):
+                    items = section_items(text, heading)
+                    self.assertIsNotNone(items, f"{name}: missing section {heading}")
+                    self.assertGreaterEqual(
+                        len(items), minimum,
+                        f"{name}: {heading} needs >={minimum} items")
+                source_line = next(l for l in text.splitlines()
+                                   if l.startswith("Source:"))
+                self.assertIn("F9.6", source_line,
+                              f"{name}: Source line lacks its F9.6 provenance token")
+
+    def test_codex_src_spec_artifacts_resolve(self):
+        for name in CODEX_SRC_SPECS:
+            with self.subTest(spec=name):
+                self.assertTrue((REPO_ROOT / "codex-src" / name / "SKILL.md").is_file(),
+                                f"{name}: spec's artifact path does not resolve")
 
     def test_stage_delivered_artifacts_resolve(self):
         for name in STAGE_DELIVERED:

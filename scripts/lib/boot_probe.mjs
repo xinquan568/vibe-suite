@@ -96,9 +96,24 @@ child.stdout.on("data", (chunk) => {
     let msg;
     try { msg = JSON.parse(line); } catch { continue; }  // banner lines are not an error
     if (msg.jsonrpc !== "2.0" || msg.id !== 1) continue;
-    if (msg.result?.serverInfo?.name) {
+    if (msg.result?.serverInfo !== undefined) {
       const { name, version } = msg.result.serverInfo;
-      finish(0, `${target} booted; server reports ${sanitize(name)}@${sanitize(version ?? "?")}`);
+      // E7.1 (vibe-53): the acceptance's "pin mismatch fails loudly" contract. The launch target
+      // is what npx pins; the self-report is the server's own claim about what booted. A claim
+      // disagreeing with the request on name or version — or lacking a usable string for either
+      // — is a mismatch, reported with both values so the operator sees the disagreement, not a
+      // guess. Identity validation runs on ANY serverInfo, so an absent or non-string name fails
+      // here immediately instead of surfacing later as a timeout.
+      const at = target.lastIndexOf("@");
+      const reqName = target.slice(0, at), reqVersion = target.slice(at + 1);
+      if (typeof name !== "string" || name === "" || typeof version !== "string"
+          || name !== reqName || version !== reqVersion) {
+        const rName = typeof name === "string" && name !== "" ? sanitize(name) : "?";
+        const rVersion = typeof version === "string" ? sanitize(version) : "?";
+        finish(1, `pin mismatch: requested ${target}, server reports ${rName}@${rVersion}`);
+        return;
+      }
+      finish(0, `${target} booted; server reports ${sanitize(name)}@${sanitize(version)}`);
       return;
     }
     if (msg.error) {

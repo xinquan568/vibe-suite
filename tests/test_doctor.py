@@ -336,7 +336,11 @@ class TestAdvisorStateVariants(DoctorCase):
         self.assertIn("stale-registered", rows[0]["finding"])
         self.assertTrue(rows[0]["auto_fixable"])
 
-    def test_invalid_registration_is_not_fixable(self):
+    def test_floating_target_is_fixable_under_the_shipped_pin(self):
+        # Pre-E7.1 this scenario was invalid-registration (a floating target with no default pin
+        # to settle it — not auto-fixable). The shipped pin (vibe-53) settles the target, so the
+        # same seed now classifies as a repairable divergence. The unsettleable-target refusal
+        # remains covered by explicit pending-file cases in tests/test_advisors.py.
         self.install()
         self._declare()
         mcp = self.ws / ".mcp.json"
@@ -346,8 +350,8 @@ class TestAdvisorStateVariants(DoctorCase):
         mcp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
         rows = [f for f in self.report()["findings"] if f["check"] == "advisor-state"]
         self.assertEqual(len(rows), 1, rows)
-        self.assertIn("invalid-registration", rows[0]["finding"])
-        self.assertFalse(rows[0]["auto_fixable"])
+        self.assertNotIn("invalid-registration", rows[0]["finding"])
+        self.assertTrue(rows[0]["auto_fixable"])
 
 
 class TestKnowledgeFreshnessStates(DoctorCase):

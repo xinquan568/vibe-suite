@@ -280,7 +280,12 @@ class TestAdvisorReconcile(RepairCase):
         after = json.loads(mcp.read_text())
         self.assertNotIn("orphan_advisor", after.get("mcpServers", {}))
 
-    def test_a_declared_advisor_with_pending_pin_is_a_recorded_failure(self):
+    def test_a_declared_advisor_registers_at_the_shipped_default(self):
+        # Pre-E7.1 this was the recorded-failure case: a declared advisor with the pending pin
+        # refused to register and repair recorded the refusal. The shipped pin (vibe-53) is
+        # exactly the activation that turns the refusal into a zero-flag registration — the
+        # behavior commands/advisor.md promised for E7.1. The pending-refusal contract remains
+        # covered by explicit pending-file cases in tests/test_advisors.py.
         self.install()
         agents = self.ws / ".vibe-suite" / "agents"
         agents.mkdir(parents=True, exist_ok=True)
@@ -289,5 +294,8 @@ class TestAdvisorReconcile(RepairCase):
             encoding="utf-8")
         report = json.loads(self.repair().stdout)
         outcome = {s["step"]: s["outcome"] for s in report["steps"]}.get("advisors", "")
-        self.assertTrue(outcome.startswith("failed:"), outcome)
-        self.assertIn("--pin", outcome)
+        self.assertTrue(outcome.startswith("ok"), outcome)
+        self.assertIn("declared-unregistered->registered", outcome)
+        doc = json.loads((self.ws / ".mcp.json").read_text())
+        args = doc["mcpServers"]["probe_advisor"]["args"]
+        self.assertRegex(args[-1], r"^claude-octopus@\d+\.\d+\.\d+")

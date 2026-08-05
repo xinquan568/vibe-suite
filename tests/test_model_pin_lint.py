@@ -183,7 +183,9 @@ class TestScope(unittest.TestCase):
                     self.assertEqual(lint.scan(tmp, lister=_tree_lister), [])
 
     def test_scanned_directories_are_scanned(self):
-        for area in ("commands", "schemas", "templates"):
+        # codex-src (E7.1 / vibe-53): hand-authored Codex-side sources ship to another agent's
+        # runtime, so they are inside AC-9's shipped-artifact scope like the codex/ mirror.
+        for area in ("commands", "schemas", "templates", "codex-src"):
             with self.subTest(area=area):
                 with tempfile.TemporaryDirectory() as tmp:
                     _write(tmp, f"{area}/thing.md", "claude-sonnet-4-20250514\n")

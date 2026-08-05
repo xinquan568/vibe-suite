@@ -681,6 +681,79 @@ class TestConsumption(DriverCase):
                 data = json.loads(chain.read_text())
                 self.assertEqual(data["links"][0]["status"], "skipped")
 
+        with self.subTest(mutation="blanket pause status honored on a failed path"):
+            def mutate(blocks):
+                blocks["chain-operations"]["on_link_terminal_chain_status"] = "stopped"
+            ref = edit_reference(mutate)
+            chain = self.copy_fixture("chain-two-link") / "chain.json"
+            data = json.loads(chain.read_text())
+            data["links"][0]["status"] = "running"
+            chain.write_text(json.dumps(data, indent=2) + "\n")
+            r = self.drive("chain", "--chain-file", str(chain),
+                           "--event", "link-run-outcome", "--status", "failed",
+                           reference=ref)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(chain.read_text())["status"], "stopped",
+                             "the failed path takes its chain status from the "
+                             "declaration alone — no literal override survives")
+
+        with self.subTest(mutation="never_writes protection fires"):
+            def mutate(blocks):
+                blocks["iterate-operations"]["never_writes"] = ["00-meta.json",
+                                                                 "state.json"]
+            ref = edit_reference(mutate)
+            root = self.runs_root_with("terminal-run")
+            r = self.drive("iterate", "terminal-run", "--runs-root", str(root),
+                           reference=ref)
+            self.assertEqual(r.returncode, 2,
+                             "state.json declared never-written must refuse — the "
+                             "protection is behavioral, not a comment")
+            self.assertIn("state.json", r.stderr)
+
+        with self.subTest(mutation="override_key_type non-matching is a gap"):
+            def mutate(blocks):
+                blocks["iterate-operations"]["override_key_type"] = "integer round"
+            ref = edit_reference(mutate)
+            root = self.runs_root_with("terminal-run")
+            r = self.drive("iterate", "terminal-run", "--runs-root", str(root),
+                           "--max-review-rounds", "3", reference=ref)
+            self.assertEqual(r.returncode, 4)
+            self.assertIn("override_key_type", r.stderr)
+
+        for mode, run_name in (("resume", "in-progress-run-none"), ("list", None)):
+            with self.subTest(mutation=f"{mode} writes non-empty is a gap"):
+                def mutate(blocks, mode=mode):
+                    blocks[f"{mode}-operations"]["writes"] = ["surprise.txt"]
+                ref = edit_reference(mutate)
+                if mode == "resume":
+                    root = self.runs_root_with(run_name)
+                    r = self.drive("resume", run_name, "--runs-root", str(root),
+                                   reference=ref)
+                else:
+                    root = self.runs_root_with("underscore-suite") / "underscore-suite"
+                    r = self.drive("list", "--runs-root", str(root), reference=ref)
+                self.assertEqual(r.returncode, 4)
+                self.assertIn("writes", r.stderr)
+
+        with self.subTest(mutation="result_events undeclared is a gap; empty drops the line"):
+            def bad_event(blocks):
+                blocks["watcher-exit-actions"]["3"]["result_events"] = ["no-such-event"]
+            chain = self.copy_fixture("chain-two-link") / "chain.json"
+            r = self.drive("chain", "--chain-file", str(chain), "--watcher-exit", "3",
+                           "--classification", "question", "--babysit-round", "1",
+                           "--babysit-cap", "3", reference=edit_reference(bad_event))
+            self.assertEqual(r.returncode, 4)
+            self.assertIn("no-such-event", r.stderr)
+
+            def no_events(blocks):
+                blocks["watcher-exit-actions"]["3"]["result_events"] = []
+            chain = self.copy_fixture("chain-two-link") / "chain.json"
+            r = self.drive("chain", "--chain-file", str(chain), "--watcher-exit", "3",
+                           "--classification", "question", "--babysit-round", "1",
+                           "--babysit-cap", "3", reference=edit_reference(no_events))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("awaiting result events", r.stdout)
+
         with self.subTest(mutation="edge removed from the legal set"):
             def mutate(blocks):
                 blocks["chain-operations"]["link_edges"]["waiting_merge"] = ["merged"]

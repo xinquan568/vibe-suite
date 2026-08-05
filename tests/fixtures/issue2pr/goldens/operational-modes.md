@@ -122,8 +122,7 @@ the mapping, the commonest reason a round needs iterating had no status that `it
           "edge": {
             "from": "running",
             "to": "failed"
-          },
-          "chain": "paused"
+          }
         }
       }
     },
@@ -154,8 +153,7 @@ the mapping, the commonest reason a round needs iterating had no status that `it
           "edge": {
             "from": "iterating",
             "to": "failed"
-          },
-          "chain": "paused"
+          }
         }
       }
     },

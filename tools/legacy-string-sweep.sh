@@ -70,26 +70,27 @@ for area in $SWEPT; do
     exit 2
   fi
   [ -n "$files" ] || continue
-  # grep status: 0 = matches, 1 = none, >1 = read/usage error (F1: an unreadable file is a
-  # loud exit 2, never a silent clean).
-  hits=$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 grep -HInE "$PATTERNS" --)
-  rc=$?
-  if [ "$rc" -gt 1 ]; then
-    echo "legacy-string-sweep: grep failed (status $rc) scanning '$area'" >&2
-    exit 2
-  fi
-  [ "$rc" -eq 0 ] || continue
-  while IFS= read -r hit; do
-    [ -n "$hit" ] || continue
-    file=${hit%%:*}
+  # Per-FILE grep, no xargs: GNU xargs folds grep's ordinary no-match (1) into its own 123,
+  # which is indistinguishable from a real error — the exact ambiguity that failed CI while
+  # macOS passed. Per file, the status is unambiguous: 0 = matches, 1 = none, >1 = a
+  # read/usage error and a loud exit 2 (never a silent clean).
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
     skip=0
     for exc in $EXCEPTED_FILES; do
-      [ "$file" = "$exc" ] && skip=1
+      [ "$f" = "$exc" ] && skip=1
     done
     [ "$skip" -eq 1 ] && continue
-    echo "$hit"
+    hits=$(grep -HInE "$PATTERNS" -- "$f")
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+      echo "legacy-string-sweep: grep failed (status $rc) reading '$f'" >&2
+      exit 2
+    fi
+    [ "$rc" -eq 0 ] || continue
+    printf '%s\n' "$hits"
     status=1
-  done <<< "$hits"
+  done <<< "$files"
 done
 
 if [ "$status" -eq 0 ]; then

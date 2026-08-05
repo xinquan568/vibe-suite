@@ -246,13 +246,41 @@ test("secureDirAt cannot chmod outside its root", async () => {
   assert.equal(mode(path.join(outside, "victim")), 0o755, "an outside directory must be untouched");
 });
 
-test("a failed stage leaves no scratch behind", async () => {
+test("a stage that fails AFTER creating its scratch leaves nothing behind", async () => {
   const root = scratchDir();
-  // A directory at the destination makes writeAtomic refuse *after* it would have staged.
-  mkdirSync(path.join(root, "dest.json"));
-  await assert.rejects(() => writeAtomic(root, path.join(root, "dest.json"), "x"), /is a dir/);
+  // Content `writeFile` rejects, so the failure happens with the scratch already on disk — the
+  // earlier version of this cell was refused before staging and proved nothing about cleanup.
+  await assert.rejects(() => writeAtomic(root, path.join(root, "dest.json"), Symbol("nope")));
   assert.deepEqual(readdirSync(root).filter((n) => n.endsWith(".vibe-tmp")), [],
     "a scratch nobody will publish is a private file left behind");
+});
+
+test("'..' is refused on the LITERAL path, before any normalisation", async () => {
+  // The escape a review found after the first fix: `path.resolve`/`relative`/`join` all collapse
+  // `link/..` lexically, while the kernel follows the link first — so a containment check on the
+  // collapsed path and a write through the original disagree, and the write wins.
+  const root = scratchDir();
+  const outside = scratchDir();
+  mkdirSync(path.join(outside, "child"));
+  symlinkSync(path.join(outside, "child"), path.join(root, "link"));
+
+  for (const raw of [`${root}/link/../new.json`, `${root}/link/../../new.json`,
+    `${root}/../escape.json`]) {
+    await assert.rejects(() => writeAtomic(root, raw, "pwned"), /not a usable path component/);
+    await assert.rejects(() => publishNew(root, raw, "pwned"), /not a usable path component/);
+  }
+  assert.deepEqual(readdirSync(outside).filter((n) => n !== "child"), [],
+    "nothing may be written outside through a normalisation disagreement");
+});
+
+test("a symlinked root passed with a trailing separator is still refused", async () => {
+  // lstat("/path/") follows the trailing-slash symlink and reports a directory, so the root check
+  // has to normalise before it looks.
+  const real = scratchDir();
+  const linkRoot = path.join(scratchDir(), "root-link");
+  symlinkSync(real, linkRoot);
+  await assert.rejects(() => writeAtomic(`${linkRoot}/`, path.join(real, "f.json"), "x"),
+    /containment root is a symlink/);
 });
 
 test("removeOwnedTree refuses a root it does not own", async () => {
@@ -324,4 +352,77 @@ test("the reaper trusts the WORKSPACE, not the last path component", async () =>
   assert.equal(await reapOrphanTemps(ws), 0);
   assert.ok(readdirSync(path.join(outside, "jobs")).includes("job_x.tmp.1.aaa"),
     "a stamp is copyable; the containment chain is what says the directory is ours");
+});
+
+for (const umask of [0o077, 0o000]) {
+  test(`preservation is exact under umask ${umask.toString(8).padStart(3, "0")}`, async () => {
+    const previous = process.umask(umask);
+    try {
+      const root = scratchDir();
+      const dest = path.join(root, "doc.md");
+      writeFileSync(dest, "one");
+      chmodSync(dest, 0o640);
+      await writeAtomic(root, dest, "two");              // no explicit mode: preserve
+      assert.equal(mode(dest), 0o640, "preservation must survive the process umask too");
+    } finally {
+      process.umask(previous);
+    }
+  });
+}
+
+test("the latch signal is written 0600, and only inside an owned root", async () => {
+  const { spawnSync: spawn } = await import("node:child_process");
+  const owned = await makeOwnedTempDir("vibe-latch-mode");
+  const bare = mkdtempSync(path.join(tmpdir(), "vibe-latch-bare-"));
+  const runner = path.join(REPO_ROOT, "scripts", "codex-runner.mjs");
+
+  for (const [dir, shouldWrite] of [[owned, true], [bare, false]]) {
+    spawn(process.execPath, [runner, "--kind", "review", "--effort", "low", "--sandbox",
+      "read-only", "--timeout-ms", "3000", "--", "probe"], {
+      cwd: mkdtempSync(path.join(tmpdir(), "latch-ws-")),
+      env: { ...process.env, VIBE_SUITE_TEST_LATCH_DIR: dir,
+        VIBE_SUITE_CODEX_BIN: path.join(REPO_ROOT, "tests/fixtures/fake-codex/emitter.mjs") },
+      encoding: "utf8", timeout: 30_000,
+    });
+    const signals = readdirSync(dir).filter((n) => n.endsWith(".signal"));
+    if (shouldWrite) {
+      assert.ok(signals.length > 0, "an owned root must receive the latch signal");
+      assert.equal(mode(path.join(dir, signals[0])), PRIVATE_FILE_MODE);
+    } else {
+      assert.deepEqual(signals, [],
+        "an env-supplied path that is not an owned root is not a permitted destination");
+    }
+  }
+  await removeOwnedTree(owned);
+});
+
+test("the gate record refuses an out-of-root and a symlinked destination", async () => {
+  const { spawnSync: spawn } = await import("node:child_process");
+  const probe = path.join(REPO_ROOT, "scripts", "agy-contract-probe.mjs");
+  const outside = mkdtempSync(path.join(tmpdir(), "gate-out-"));
+  const target = path.join(outside, "gate-status.json");
+
+  const run = (file) => spawn(process.execPath, [probe, "--write-record"], {
+    env: { ...process.env, VIBE_SUITE_AGY_GATE_FILE: file,
+      VIBE_SUITE_AGY_BIN: path.join(REPO_ROOT, "tests/fixtures/fake-codex/emitter.mjs") },
+    encoding: "utf8", timeout: 60_000,
+  });
+
+  run(target);
+  assert.ok(!readdirSync(outside).includes("gate-status.json"),
+    "an out-of-root gate destination must be refused, not written");
+
+  const owned = await makeOwnedTempDir("gate-owned");
+  const linked = path.join(owned, "link.json");
+  symlinkSync(target, linked);
+  run(linked);
+  assert.ok(!readdirSync(outside).includes("gate-status.json"),
+    "a symlinked gate destination must not be followed");
+
+  // The positive control. Without it the two assertions above pass just as well when the probe
+  // never wrote anything at all — an absence-only test reports safety it did not establish.
+  run(path.join(owned, "gate-status.json"));
+  assert.ok(readdirSync(owned).includes("gate-status.json"),
+    "a permitted destination inside an owned root must still be written");
+  await removeOwnedTree(owned).catch(() => {});
 });

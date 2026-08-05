@@ -88,7 +88,9 @@ export async function classify(p) {
  * symlink, every "is this inside?" comparison resolves through it and passes.
  */
 export async function assertRoot(root) {
-  const kind = await classify(root);
+  // `path.resolve` first: `lstat("/var/")` follows the trailing-slash symlink and reports a
+  // directory, so a root passed with a trailing separator escaped this check entirely.
+  const kind = await classify(path.resolve(root));
   if (kind === "symlink") throw new WriteError(`${root}: containment root is a symlink`);
   if (kind !== "dir") throw new WriteError(`${root}: containment root is not a directory (${kind})`);
 }
@@ -106,6 +108,19 @@ export async function assertInside(root, target) {
   // past it to the root, so `/root/link/new.json` with `link -> /outside` resolved to `/root`,
   // answered "inside", and then published through the link into `/outside`.
   const resolvedRoot = await fs.realpath(root);
+
+  // **`..` is refused on the ORIGINAL path, before normalisation.** `path.resolve` collapses
+  // `link/../new.json` to `new.json` lexically, but the kernel resolves it by following `link`
+  // first — so a containment check on the collapsed path and a write through the original one
+  // disagree, and the write wins. Refusing the component removes the disagreement instead of
+  // trying to model it.
+  // The check reads the LITERAL string. `path.relative` and `path.join` both normalise, so running
+  // either one first re-collapses the very component being looked for — which is how the first
+  // attempt at this guard passed its own test while the escape still worked.
+  if (String(target).split(path.sep).includes("..")) {
+    throw new WriteError(`${target}: '..' is not a usable path component here`);
+  }
+
   const target_ = path.resolve(target);
   let probe = target_;
   while (true) {
@@ -159,19 +174,21 @@ export async function scratch(dir, name, mode) {
  */
 async function stage(dir, name, content, mode) {
   const { handle, path: staged } = await scratch(dir, name, mode);
-  let published = false;
   try {
-    await handle.writeFile(content, "utf8");
-    await handle.chmod(mode);
-    await handle.sync();
-    published = true;
-    return staged;
-  } finally {
-    await handle.close();
-    // A scratch nobody will publish is a private file left behind, so it is removed on the way out
-    // of every failing path rather than only the ones the caller thought to catch.
-    if (!published) await fs.unlink(staged).catch(() => {});
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.chmod(mode);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    // Every failing path, including a rejecting `close()` — which an earlier revision let through
+    // because the success flag was set before the close ran, leaving an unreachable private file.
+    await fs.unlink(staged).catch(() => {});
+    throw error;
   }
+  return staged;
 }
 
 async function syncDir(dir) {

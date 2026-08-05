@@ -123,6 +123,42 @@ AUDIT_FIX_TABLE_ROWS = [
     re.compile(r"--ask[^|\n]*\|\s*off\s*\|"),
     re.compile(r"file/dir path[^|\n]*\|\s*cwd\s*\|"),
 ]
+#: The audit skill's own depth/scope table: same discipline — defaults and effects are contract.
+AUDIT_TABLE_ROWS = [
+    re.compile(r"--mini[^|\n]*\|\s*on\s*\|[^|\n]*5"),
+    re.compile(r"--full[^|\n]*\|\s*off\s*\|[^|\n]*9"),
+    re.compile(r"file/dir path[^|\n]*\|\s*cwd\s*\|"),
+]
+#: Tokens whose contracted home is a CALL FORM, not just the document: presence anywhere is
+#: not presence where the delegated session will actually see it.
+BLOCK_TOKENS = {
+    "claude-review": ["Correctness", "Security", "Quality", "Architecture",
+                      "Critical / High / Medium / Low", "Suggested fix"],
+    "claude-plan": ["Do NOT write any code", "risk areas", "open questions",
+                    "test scenarios"],
+    "claude-implement": ["Files changed", "Test results", "deferred"],
+    "claude-debug": ["SYMPTOM", "ERROR OUTPUT", "REPRODUCTION STEPS", "WHAT I TRIED",
+                     "root cause"],
+    "audit": ["Critical / High / Medium / Low", "file:line"],
+    "audit-fix": ["file:line | severity | dimension | issue",
+                  "FIXED / NOT FIXED / PARTIAL / REGRESSED"],
+    "verify": ["FIXED", "NOT FIXED", "PARTIAL", "REGRESSED"],
+}
+#: Which session token each skill's reply forms must reuse. verify's Option A continues the
+#: AUDIT session by contract — reusing its own fresh token there would be a flow error.
+REPLY_SESSION_TOKENS = {
+    "claude-review": "{review_session_id}", "claude-plan": "{plan_session_id}",
+    "claude-implement": "{impl_session_id}", "claude-debug": "{debug_session_id}",
+    "audit": "{audit_session_id}", "audit-fix": "{cycle_session_id}",
+    "verify": "{audit_session_id}",
+}
+#: audit-fix flow sentences that carry defaults and stop rules (non-interactive stop after an
+#: incomplete first round; the hard ceiling; the three --ask doors).
+AUDIT_FIX_FLOW_TOKENS = [
+    "after round one, the loop stops",
+    "stops unconditionally",
+    "Fix all", "Critical+High only", "Stop here",
+]
 
 
 def load_schema():
@@ -235,6 +271,39 @@ class ContractTable(unittest.TestCase):
         for pattern in AUDIT_FIX_TABLE_ROWS:
             with self.subTest(pattern=pattern.pattern):
                 self.assertRegex(text, pattern)
+
+    def test_audit_argument_defaults(self):
+        text = body("audit")
+        for pattern in AUDIT_TABLE_ROWS:
+            with self.subTest(pattern=pattern.pattern):
+                self.assertRegex(text, pattern)
+
+    def test_contracted_tokens_sit_inside_call_forms(self):
+        for name, tokens in BLOCK_TOKENS.items():
+            blocks = "\n".join(b for _, _, b in call_blocks(body(name)))
+            for token in tokens:
+                with self.subTest(skill=name, token=token):
+                    self.assertIn(token, blocks,
+                                  f"{name}: {token!r} not inside any call form")
+
+    def test_reply_forms_reuse_the_contracted_session(self):
+        for name, token in REPLY_SESSION_TOKENS.items():
+            reply_blocks = [b for _, tool, b in call_blocks(body(name))
+                            if tool == "claude_code_reply"]
+            self.assertTrue(reply_blocks, f"{name}: no reply call form")
+            for b in reply_blocks:
+                with self.subTest(skill=name):
+                    m = re.search(r"^  session_id:\s*(\S+)\s*$", b, re.M)
+                    self.assertIsNotNone(m, f"{name}: reply form lacks session_id line")
+                    self.assertEqual(m.group(1), token,
+                                     f"{name}: reply reuses {m.group(1)!r}, contract says "
+                                     f"{token!r}")
+
+    def test_audit_fix_flow_rules(self):
+        text = body("audit-fix")
+        for token in AUDIT_FIX_FLOW_TOKENS:
+            with self.subTest(token=token):
+                self.assertIn(token, text)
 
     def test_audit_fix_actor_boundary(self):
         text = body("audit-fix")

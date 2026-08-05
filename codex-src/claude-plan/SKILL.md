@@ -35,8 +35,8 @@ mcp__vibe-claude-mcp__claude_code:
     - {stack, conventions, boundaries that must not move}
 
     Number every step; give each its imperative action, exact file paths, key
-    interfaces, and dependencies on earlier steps. Close with risk areas, open
-    questions, and recommended test scenarios.
+    interfaces, and dependencies on earlier steps. Close with risk areas,
+    open questions, and recommended test scenarios.
 
     PROVENANCE NOTE: a Codex agent frames this request. Read the repository and
     judge the problem yourself — the framing may be wrong.

@@ -77,8 +77,8 @@ mcp__vibe-claude-mcp__claude_code_reply:
 ```
 
 - *Decide.* Everything FIXED → the report. Open issues with rounds to spare → `--ask` offers
-  another round or stop; the silent default stops. The counter reaching `--rounds` stops
-  unconditionally.
+  another round or stop; the silent default stops. A counter that reaches `--rounds`
+  stops unconditionally.
 
 **4 — report.** Scope · depth · rounds used, then the ledger:
 

@@ -62,7 +62,7 @@ const BASE_MUTATORS = [
   "writeFile", "appendFile", "mkdir", "mkdtemp", "rename", "link", "symlink", "unlink",
   "rm", "rmdir", "chmod", "chown", "lchmod", "lchown", "copyFile", "cp", "truncate",
   "ftruncate", "utimes", "lutimes", "futimes", "write", "writev", "fchmod", "fchown",
-  "fdatasync", "fsync",
+  "fdatasync", "fsync", "mkdtempDisposable",
 ];
 export const MUTATORS = new Set([
   ...BASE_MUTATORS,
@@ -88,11 +88,17 @@ export const HANDLE_MUTATORS = new Set([
 ]);
 const HANDLE_READERS = new Set([
   "read", "readv", "readFile", "readLines", "stat", "createReadStream", "close",
+  "readableWebStream",
 ]);
 
 const FORBIDDEN_CALLEES = new Set([
   "eval", "Function", "require", "createRequire", "Worker",
 ]);
+// Modules whose exports ARE capability factories. Any local name bound from one of these —
+// under any alias, default or namespace form — is dangerous by BINDING, so
+// `import { createRequire as make } from "node:module"` cannot launder it.
+const CAPABILITY_MODULES = new Set(["node:module", "module", "node:vm", "vm",
+                                    "node:worker_threads", "worker_threads"]);
 const FORBIDDEN_OBJECTS = new Set(["process", "globalThis", "module", "Reflect", "global"]);
 const BENIGN_HOST_MEMBERS = new Set([
   "exit", "on", "once", "off", "emit", "cwd", "hrtime", "nextTick", "kill", "uptime",
@@ -131,36 +137,74 @@ function tokenize(source) {
     if (c === '"' || c === "'") {
       let j = i + 1;
       let value = "";
+      let escaped = false;
       while (j < source.length && source[j] !== c) {
-        if (source[j] === "\\") { value += source[j + 1] ?? ""; j += 2; continue; }
+        if (source[j] === "\\") { escaped = true; value += source[j + 1] ?? ""; j += 2; continue; }
         if (source[j] === "\n") throw new Refusal("unterminated string");
         value += source[j];
         j += 1;
       }
       if (j >= source.length) throw new Refusal("unterminated string");
       i = j + 1;
-      push("string", value);
+      out.push({ type: "string", value, escaped });
+      prev = { type: "string", value };
       continue;
     }
     if (c === "`") {
+      // A template's STATIC parts are inert text, but every `${ … }` substitution is ordinary
+      // code and is tokenized as such — eliding it would let `${fs.writeFileSync(p)}` pass.
       let j = i + 1;
-      let depth = 0;
+      push("template", "");
       while (j < source.length) {
         if (source[j] === "\\") { j += 2; continue; }
-        if (depth === 0 && source[j] === "`") break;
-        if (source[j] === "$" && source[j + 1] === "{") { depth += 1; j += 2; continue; }
-        if (depth > 0 && source[j] === "}") { depth -= 1; j += 1; continue; }
+        if (source[j] === "`") { j += 1; break; }
+        if (source[j] === "$" && source[j + 1] === "{") {
+          // hand the substitution back to the main loop by recursing over its source slice
+          let depth = 1;
+          let k = j + 2;
+          while (k < source.length && depth > 0) {
+            const ch = source[k];
+            if (ch === "\\") { k += 2; continue; }
+            if (ch === "`") {                       // nested template: skip to its close
+              let d2 = 0;
+              k += 1;
+              while (k < source.length) {
+                if (source[k] === "\\") { k += 2; continue; }
+                if (d2 === 0 && source[k] === "`") { k += 1; break; }
+                if (source[k] === "$" && source[k + 1] === "{") { d2 += 1; k += 2; continue; }
+                if (d2 > 0 && source[k] === "}") { d2 -= 1; }
+                k += 1;
+              }
+              continue;
+            }
+            if (ch === "{") depth += 1;
+            else if (ch === "}") depth -= 1;
+            k += 1;
+          }
+          if (depth > 0) throw new Refusal("unterminated template substitution");
+          for (const tok of tokenize(source.slice(j + 2, k - 1))) out.push(tok);
+          prev = out[out.length - 1] ?? prev;
+          j = k;
+          continue;
+        }
         j += 1;
       }
-      if (j >= source.length) throw new Refusal("unterminated template literal");
-      i = j + 1;
-      push("template", "");
+      if (j > source.length) throw new Refusal("unterminated template literal");
+      i = j;
       continue;
     }
     if (c === "/") {
-      const regexAllowed = prev === null
+      // Only positions where a VALUE may begin admit a regex. Everything else is division.
+      // `)`/`]`/`}` and an identifier/number end a value; so does a postfix `++`/`--`, which
+      // is why the last two tokens are inspected rather than only the last.
+      const prev2 = out[out.length - 2] ?? null;
+      const postfixUpdate = prev !== null && prev2 !== null
+        && prev.type === "punct" && prev2.type === "punct"
+        && ((prev.value === "+" && prev2.value === "+")
+            || (prev.value === "-" && prev2.value === "-"));
+      const regexAllowed = !postfixUpdate && (prev === null
         || (prev.type === "punct" && !")]}".includes(prev.value))
-        || (prev.type === "word" && REGEX_OK_WORDS.has(prev.value));
+        || (prev.type === "word" && REGEX_OK_WORDS.has(prev.value)));
       if (!regexAllowed) { i += 1; push("punct", "/"); continue; }
       let j = i + 1;
       let inClass = false;
@@ -192,7 +236,10 @@ function tokenize(source) {
   return out;
 }
 
-function assertProvenance(spec) {
+function assertProvenance(spec, escaped) {
+  // An escaped specifier means the checker's literal and Node's resolved value can differ
+  // (`"node:\\x66s"` resolves to node:fs). Refuse rather than compare a wrong string.
+  if (escaped) throw new Refusal("import specifier contains escapes");
   if (spec.startsWith("./") || spec.startsWith("../")) return;
   if (spec.startsWith("node:")) return;
   if (FS_SPECIFIERS.has(spec)) return;
@@ -245,7 +292,11 @@ function acceptedOpenBinding(toks, nameIndex) {
       depth -= 1;
       if (depth === 0) {
         const after = toks[j + 1];
-        if (after && after.type === "punct" && after.value === ".") return null;
+        // Any continuation of the expression — `.then`, `["then"]`, a call, a template tag —
+        // takes the handle somewhere this checker does not follow, so it refuses.
+        // A template token is how a tagged template shows up after the call.
+        if (after && (after.type === "template"
+            || (after.type === "punct" && ".[(".includes(after.value)))) return null;
         return name.value;
       }
     }
@@ -257,6 +308,8 @@ function classifyModule(source) {
   const toks = tokenize(source);
   const caps = new Map();
   const handles = new Set();
+  const dangerous = new Set();     // names bound from a capability-factory module
+  const importSpans = [];          // [start, end] token ranges of import declarations
   let sawMutator = false;
   const at = (k) => toks[k] ?? { type: "eof", value: "" };
 
@@ -280,7 +333,7 @@ function classifyModule(source) {
         const spec = at(j + 1);
         if (spec.type !== "string") throw new Refusal("export-from with a non-literal specifier");
         if (FS_SPECIFIERS.has(spec.value)) throw new Refusal("re-export of an fs module");
-        assertProvenance(spec.value);
+        assertProvenance(spec.value, spec.escaped);
       }
       continue;
     }
@@ -332,7 +385,13 @@ function classifyModule(source) {
     }
     const spec = at(j);
     if (spec.type !== "string") throw new Refusal("import with a non-literal specifier");
-    assertProvenance(spec.value);
+    assertProvenance(spec.value, spec.escaped);
+    importSpans.push([k, j]);
+    if (CAPABILITY_MODULES.has(spec.value)) {
+      if (namespaceName) dangerous.add(namespaceName);
+      if (defaultName) dangerous.add(defaultName);
+      for (const [local] of named) dangerous.add(local);
+    }
     if (!FS_SPECIFIERS.has(spec.value)) continue;
     if (namespaceName) caps.set(namespaceName, { kind: "ns" });
     if (defaultName) caps.set(defaultName, { kind: "ns" });
@@ -365,13 +424,14 @@ function classifyModule(source) {
     const prev = at(k - 1);
     const next = at(k + 1);
 
-    if (FORBIDDEN_CALLEES.has(t.value) && !caps.has(t.value)) {
+    const insideImport = importSpans.some(([a, b]) => k >= a && k <= b);
+    if (dangerous.has(t.value) && !insideImport) {
+      throw new Refusal(`capability-factory binding used: ${t.value}`);
+    }
+    if (FORBIDDEN_CALLEES.has(t.value) && !caps.has(t.value) && !insideImport) {
       const isCall = next.type === "punct" && next.value === "(";
       const isNewed = prev.type === "word" && prev.value === "new";
-      const isImportBinding = prev.type === "punct" && (prev.value === "{" || prev.value === ",");
-      if ((isCall || isNewed) && !isImportBinding) {
-        throw new Refusal(`forbidden construct: ${t.value}`);
-      }
+      if (isCall || isNewed) throw new Refusal(`forbidden construct: ${t.value}`);
       if (prev.type === "punct" && prev.value === ".") {
         throw new Refusal(`indirect ${t.value} reference`);
       }
@@ -390,21 +450,13 @@ function classifyModule(source) {
     }
 
     if (!caps.has(t.value) && !handles.has(t.value)) continue;
+    // A mention INSIDE the import declaration that bound it is a declaration, not a use —
+    // decided by exact token span, so `import { readFile as read }` binds cleanly while an
+    // object-shorthand `{ readFile }` elsewhere still refuses.
+    if (insideImport) continue;
     if (prev.type === "punct" && prev.value === ".") {
       throw new Refusal(`capability reached as a member: .${t.value}`);
     }
-    // the import declaration's own mention of the binding is not a use
-    if (prev.type === "punct" && ["{", ",", "*"].includes(prev.value)) {
-      let back = k - 1;
-      while (back >= 0 && !(at(back).type === "word"
-             && ["import", "export"].includes(at(back).value))) {
-        if (at(back).type === "punct" && at(back).value === ";") break;
-        back -= 1;
-      }
-      if (back >= 0 && at(back).type === "word" && at(back).value === "import") continue;
-    }
-    if (prev.type === "word" && prev.value === "import") continue;
-    if (next.type === "word" && next.value === "from") continue;
 
     if (next.type === "punct" && next.value === "(") {
       if (handles.has(t.value)) throw new Refusal("handle called directly");
@@ -459,16 +511,23 @@ function main(argv) {
     return 2;
   }
   let bad = 0;
+  let inspected = 0;
+  let exempt = 0;
   for (const file of files) {
     const rel = path.relative(process.cwd(), file);
-    if (rel === PRIMITIVE || KNOWN.has(rel)) continue;
+    if (rel === PRIMITIVE || KNOWN.has(rel)) { exempt += 1; continue; }
+    inspected += 1;
     const { verdict, detail } = inspect(file);
     if (verdict !== "clean") {
       process.stdout.write(`${rel}: ${verdict}${detail ? ` — ${detail}` : ""}\n`);
       bad += 1;
     }
   }
-  if (bad === 0) process.stdout.write(`no-raw-fs-writes: ${files.length} module(s) clean\n`);
+  if (bad === 0) {
+    process.stdout.write(
+      `no-raw-fs-writes: ${inspected} module(s) clean, ${exempt} exempt `
+      + `(${files.length} given)\n`);
+  }
   return bad === 0 ? 0 : 1;
 }
 

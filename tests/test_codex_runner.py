@@ -469,8 +469,11 @@ class SourceConventions(unittest.TestCase):
         result = subprocess.run(["node", str(checker), *[str(p) for p in SHIPPED_MJS]],
                                 capture_output=True, text=True, timeout=120, cwd=REPO_ROOT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(f"{len(SHIPPED_MJS)} module(s) clean", result.stdout,
-                      "the checker did not report the full corpus — anti-vacuity")
+        inspected = len([p for p in SHIPPED_MJS
+                         if p.relative_to(REPO_ROOT).as_posix() != "scripts/lib/write.mjs"])
+        self.assertIn(f"{inspected} module(s) clean", result.stdout,
+                      "the checker did not report the full inspected corpus — anti-vacuity")
+        self.assertIn(f"({len(SHIPPED_MJS)} given)", result.stdout)
 
     def test_no_raw_fs_writes_probe_suite(self):
         """The checker's own DIRTY/CLEAN probes, run in CI's test job with everything else."""

@@ -130,6 +130,61 @@ test("every unsupported construct refuses", () => {
   }
 });
 
+// --- step-8 regressions: every construct the review found reaching `clean` ----
+//
+// Each cell is a real bypass a reviewer demonstrated against the first implementation. They
+// assert the EXACT verdict, so a regression cannot hide in the refusal bucket either.
+
+const REVIEW_REGRESSIONS = {
+  // template substitutions were elided wholesale
+  templateSubstitutionWrite: [
+    'import fs from "node:fs";\nconst s = `${fs.writeFileSync("p", "x")}`;\n',
+    "raw-fs-write"],
+  templateSubstitutionRefusal: [
+    'const s = `${eval("x")}`;\n', "refused"],
+  nestedTemplateWrite: [
+    'import fs from "node:fs";\nconst s = `a${`b${fs.writeFileSync("p", "x")}`}`;\n',
+    "raw-fs-write"],
+  // postfix ++ then division was lexed as a regex, swallowing the middle
+  postfixDivisionWrite: [
+    'import fs from "node:fs";\nlet x = 1;\nconst y = x++ / fs.mkdirSync("d") / 2;\n',
+    "raw-fs-write"],
+  // an escaped specifier resolved differently in Node than in the checker
+  escapedSpecifier: [
+    'import fs from "node:\\x66s";\nfs.writeFileSync("p", "x");\n', "refused"],
+  // a capability factory aliased through an import binding
+  aliasedCreateRequire: [
+    'import { createRequire as make } from "node:module";\n'
+    + 'const r = make(import.meta.url);\n', "refused"],
+  namespacedModuleFactory: [
+    'import * as mod from "node:module";\nconst r = mod.createRequire(import.meta.url);\n',
+    "refused"],
+  aliasedWorker: [
+    'import { Worker as W } from "node:worker_threads";\nnew W(SRC, { eval: true });\n',
+    "refused"],
+  // computed continuation of an open() result
+  openComputedChain: [
+    'import { open } from "node:fs/promises";\n'
+    + 'const h = await open("p", "r")["then"]((x) => x.writeFile("owned"));\n', "refused"],
+  openTaggedTemplate: [
+    'import { open } from "node:fs/promises";\nconst h = await open("p", "r")`x`;\n',
+    "refused"],
+  // an object-shorthand mention of a capability outside its import declaration
+  objectShorthandCapability: [
+    'import { writeFile } from "node:fs/promises";\nexport const api = { writeFile };\n',
+    "refused"],
+  // a local shadowing a capability name is not silently accepted
+  shadowedLocal: [
+    'import { writeFile } from "node:fs/promises";\n'
+    + 'export function f() { const writeFile = 1; return writeFile; }\n', "refused"],
+};
+
+test("every construct the review found is now classified correctly", () => {
+  for (const [name, [src, expected]] of Object.entries(REVIEW_REGRESSIONS)) {
+    assert.equal(probe(`regress_${name}`, src), expected, name);
+  }
+});
+
 // --- the accepted dialect must admit ordinary modules ------------------------
 
 const CLEAN = {
@@ -145,6 +200,15 @@ const CLEAN = {
   relativeImport: 'import { publish } from "../lib/write.mjs";\n'
     + 'export const go = (p, d) => publish(p, d);\n',
   templatesAndRegex: 'const re = /a\\/b/g;\nexport const t = (x) => `v:${x.replace(re, "-")}`;\n',
+  // an import ALIAS is a declaration, not a use — this was a false positive
+  importAlias: 'import { readFile as read } from "node:fs/promises";\n'
+    + 'export const load = (p) => read(p, "utf8");\n',
+  defaultPlusNamed: 'import fs, { readFileSync } from "node:fs";\n'
+    + 'export const both = (p) => fs.existsSync(p) && readFileSync(p, "utf8");\n',
+  sideEffectImport: 'import "./setup.mjs";\nexport const n = 1;\n',
+  divisionAfterCall: 'export const ratio = (a) => a.length / 2;\n',
+  childProcessIsOutOfScope: 'import { spawn } from "node:child_process";\n'
+    + 'export const run = (c) => spawn(c);\n',
 };
 
 test("the accepted dialect admits ordinary modules", () => {
@@ -162,6 +226,31 @@ test("KNOWN is empty and stays empty", () => {
 
 test("the primitive is the audited write module", () => {
   assert.equal(PRIMITIVE, "scripts/lib/write.mjs");
+});
+
+// An INDEPENDENT inventory (Node's documented fs mutation surface), written from the docs
+// rather than read out of the implementation — the tables are compared to THIS, so a table
+// that loses a name fails instead of shrinking the test with itself.
+const EXPECTED_MUTATORS = [
+  "writeFile", "appendFile", "mkdir", "mkdtemp", "mkdtempDisposable", "rename", "link",
+  "symlink", "unlink", "rm", "rmdir", "chmod", "chown", "lchmod", "lchown", "copyFile",
+  "cp", "truncate", "ftruncate", "utimes", "lutimes", "futimes", "write", "writev",
+  "fchmod", "fchown", "fdatasync", "fsync", "open",
+];
+const EXPECTED_HANDLE_MUTATORS = [
+  "write", "writev", "writeFile", "appendFile", "truncate", "chmod", "chown", "utimes",
+  "createWriteStream", "sync", "datasync",
+];
+
+test("the tables match the independent Node inventory", () => {
+  for (const name of EXPECTED_MUTATORS) {
+    assert.ok(MUTATORS.has(name), `MUTATORS lacks ${name}`);
+    assert.ok(MUTATORS.has(`${name}Sync`), `MUTATORS lacks ${name}Sync`);
+  }
+  assert.ok(MUTATORS.has("createWriteStream"), "MUTATORS lacks createWriteStream");
+  for (const name of EXPECTED_HANDLE_MUTATORS) {
+    assert.ok(HANDLE_MUTATORS.has(name), `HANDLE_MUTATORS lacks ${name}`);
+  }
 });
 
 test("the mutator floor covers the issue's named set", () => {

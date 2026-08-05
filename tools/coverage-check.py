@@ -114,6 +114,27 @@ PATH_TARGET_ROWS = frozenset(("workspace:09", "workspace:10", "workspace:12"))
 #: weakening that admitting path targets introduced.
 _TARGET_PATH = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+\.[A-Za-z0-9]+$")
 
+#: vibe-128: the rows whose promised capability is scheduled rather than delivered — frozen HERE,
+#: stage and expected anchors included, for the same reason the pins are constants: two editable
+#: files agreeing proves nothing, so adding, renaming, re-staging, or re-anchoring a scheduled row
+#: must be a change to this file, not a data edit. The live `scheduled:` rows must be a SUBSET of
+#: these keys with stage and anchors matching exactly; a row graduating to `delivered:` is a
+#: data-only change. Every anchor must be ABSENT from the tree — an anchor that exists means the
+#: capability landed and the gate stays red until the row flips (self-expiry).
+#: All five are Stage-S8 (F10.x build/auditor) capabilities; anchors are the artifacts S8 delivers.
+SCHEDULED = {
+    "nlpm:12": ("S8", ("bin/vibe-build-docs",)),
+    "nlpm:13": ("S8", ("bin/vibe-build-case-studies-index", "bin/vibe-build-reference-md",
+                       "bin/vibe-build-site-report-pages", "bin/vibe-build-vocab-data")),
+    "nlpm:20": ("S8", ("auditor/SCHEMAS.md", "auditor/workflows", "auditor/prompts")),
+    "nlpm:21": ("S8", ("auditor/scripts",)),
+    "nlpm:23": ("S8", ("site",)),
+}
+
+#: The dispositions that promise a reimplementation and therefore must say where it landed.
+#: G/R/D rows promise none, so the target columns are forbidden there outright.
+PROMISING_DISPOSITIONS = frozenset(("K", "M", "K/M", "M/K"))
+
 
 class CoverageError(Exception):
     """A failure that must fail CI."""
@@ -307,8 +328,49 @@ def validate_schema(trees, mappings, function_ids):
             errors.append(f"{where}: 'corpus_roots' is empty")
         for key in mapping:
             if key not in ("row", "tree", "paths", "corpus_roots", "disposition", "target",
-                           "note", "_line"):
+                           "note", "delivered", "scheduled", "expected", "_line"):
                 errors.append(f"{where}: unknown key {key!r}")
+        # vibe-128: the promise columns. Exactly one of the two forms on every promising row,
+        # neither on G/R/D — a row that promises a capability must say where it landed or when.
+        delivered, scheduled = mapping.get("delivered"), mapping.get("scheduled")
+        expected = mapping.get("expected")
+        if disposition in PROMISING_DISPOSITIONS:
+            if (delivered is None) == (scheduled is None):
+                errors.append(f"{where}: a promising row carries exactly one of 'delivered' or "
+                              "'scheduled' — the promise either landed or has a stage")
+            if (scheduled is None) != (expected is None):
+                errors.append(f"{where}: 'scheduled' and 'expected' are required together")
+            if delivered is not None and (not isinstance(delivered, list) or not delivered):
+                errors.append(f"{where}: 'delivered' must be a non-empty list of artifact paths")
+            if scheduled is not None and not isinstance(scheduled, str):
+                errors.append(f"{where}: 'scheduled' must be a single stage id")
+            if expected is not None and (not isinstance(expected, list) or not expected):
+                errors.append(f"{where}: 'expected' must be a non-empty list of anchor paths")
+            if isinstance(delivered, list) and delivered:
+                source_paths = mapping.get("paths") if isinstance(mapping.get("paths"), list) else []
+                # Where the artifact class is mechanically derivable, assert the semantic
+                # correspondence, not bare existence: a kept command resurfaces as a command,
+                # a kept skill as a skill, and a path-target row must deliver its §6 home.
+                if disposition in ("K", "K/M") and source_paths:
+                    if (all(matches(p, "commands/**/*.md") for p in source_paths)
+                            and not any(matches(d, "commands/**/*.md") for d in delivered)):
+                        errors.append(f"{where}: every source path is a command, but nothing in "
+                                      "'delivered' is one — a kept command must resurface under "
+                                      "commands/")
+                    if (all(p.endswith("/SKILL.md") for p in source_paths)
+                            and not any(d.endswith("/SKILL.md") for d in delivered)):
+                        errors.append(f"{where}: every source path is a SKILL.md, but nothing in "
+                                      "'delivered' is one")
+                home = mapping.get("target")
+                if row in PATH_TARGET_ROWS and isinstance(home, str):
+                    if not any(d == home or d.endswith("/" + home) for d in delivered):
+                        errors.append(f"{where}: the §6 home is the path {home!r} and "
+                                      "'delivered' must include it")
+        elif disposition in DISPOSITIONS:
+            for key in ("delivered", "scheduled", "expected"):
+                if key in mapping:
+                    errors.append(f"{where}: {key!r} is forbidden on a {disposition} row — "
+                                  "G/R/D rows promise no reimplementation")
         if disposition in ("K/M", "M/K") and not mapping.get("note"):
             errors.append(f"{where}: a compound disposition must carry a note saying which is which")
         if disposition == "D" and has_paths:
@@ -336,7 +398,9 @@ def validate_schema(trees, mappings, function_ids):
                     errors.append(f"{where}: target {one!r} is neither a function ID nor a path")
         elif targets:
             errors.append(f"{where}: a D row has no target")
-        for path in mapping.get("paths", []) + mapping.get("corpus_roots", []):
+        claimed_lists = [mapping.get("paths", []), mapping.get("corpus_roots", [])]
+        claimed_lists += [value for value in (delivered, expected) if isinstance(value, list)]
+        for path in (p for one in claimed_lists for p in one):
             if path.startswith("/") or ".." in path.split("/") or path != path.strip():
                 errors.append(f"{where}: {path!r} is not a clean relative POSIX path")
 
@@ -410,6 +474,61 @@ def check_coverage(universe, mappings):
     return errors
 
 
+def check_targets(root, mappings):
+    """vibe-128's clause: a promising row's capability either landed or is scheduled.
+
+    Delivered artifacts must exist in the vibe-suite tree as regular files — a missing one fails
+    naming the row, its line, and the path, which is what makes "a row promises a capability
+    nothing delivers" a red build instead of a footnote. Scheduled rows are held to the frozen
+    SCHEDULED constant (subset semantics, exact stage and anchors) and self-expire: an anchor
+    that exists in the tree keeps the gate red until the row flips to delivered."""
+    errors = []
+    for mapping in mappings:
+        row, where = mapping.get("row"), f"docs/disposition.yaml:{mapping['_line']}"
+        delivered = mapping.get("delivered")
+        if isinstance(delivered, list):
+            for path in delivered:
+                full = root / path
+                if not full.exists():
+                    errors.append(f"{where}: {row}: delivered artifact {path!r} does not exist — "
+                                  "the row promises a capability nothing delivers")
+                elif not full.is_file():
+                    errors.append(f"{where}: {row}: delivered artifact {path!r} is a directory, "
+                                  "not a file — a promise resolves to artifacts, not areas")
+        stage = mapping.get("scheduled")
+        if stage is None:
+            continue
+        if row not in SCHEDULED:
+            errors.append(f"{where}: {row}: not in the checker's frozen scheduled set "
+                          f"({', '.join(sorted(SCHEDULED))}) — scheduling a row is a change to "
+                          f"{Path(__file__).name}, not a data edit")
+            continue
+        frozen_stage, frozen_anchors = SCHEDULED[row]
+        if stage != frozen_stage:
+            errors.append(f"{where}: {row}: scheduled stage {stage!r} is not the frozen "
+                          f"{frozen_stage!r} — re-staging is a code change, not a data edit")
+        anchors = tuple(mapping.get("expected") or ())
+        if anchors != frozen_anchors:
+            errors.append(f"{where}: {row}: expected anchors {list(anchors)} do not match the "
+                          f"frozen {list(frozen_anchors)} — re-anchoring is a code change, not a "
+                          "data edit")
+        for anchor in frozen_anchors:
+            if (root / anchor).exists():
+                errors.append(f"{where}: {row}: expected artifact {anchor!r} exists in the tree — "
+                              "the capability landed; flip the row to delivered")
+    return errors
+
+
+def report_scheduled(mappings, out=sys.stdout):
+    """Print the scheduled rows on every run with a parseable disposition, pass or fail — a
+    scheduled promise that is visible on every gate run cannot quietly become permanent."""
+    for mapping in sorted((m for m in mappings if "scheduled" in m),
+                          key=lambda m: m.get("row") or ""):
+        anchors = ", ".join(mapping.get("expected") or ())
+        out.write(f"scheduled: {mapping.get('row')} stage {mapping.get('scheduled')} "
+                  f"(awaits: {anchors})\n")
+
+
 def check_counts(universe):
     """AC-1's enumerated counts, "so a silently-empty glob fails loudly"."""
     errors = []
@@ -465,9 +584,12 @@ def build_universe(manifest_dir, root=REPO_ROOT):
 
 
 def run(disposition_path, manifest_dir, root=REPO_ROOT):
-    universe, manifest_commits = build_universe(manifest_dir, root)
+    # Parse first and report the scheduled rows immediately: the listing is a promise made for
+    # every run with a parseable disposition, including runs that go on to fail.
     text = Path(disposition_path).read_text(encoding="utf-8")
     declared, mappings = parse_disposition(text, str(disposition_path))
+    report_scheduled(mappings)
+    universe, manifest_commits = build_universe(manifest_dir, root)
 
     errors = validate_schema(declared, mappings, load_function_ids(root))
     for repo, commit in manifest_commits.items():
@@ -476,6 +598,7 @@ def run(disposition_path, manifest_dir, root=REPO_ROOT):
                           f"{commit}")
     errors += check_coverage(universe, mappings)
     errors += check_counts(universe)
+    errors += check_targets(Path(root), mappings)
     return errors, universe, mappings
 
 

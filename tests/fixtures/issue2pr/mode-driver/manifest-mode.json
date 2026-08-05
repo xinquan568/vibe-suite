@@ -1,0 +1,30 @@
+{
+  "manifest_version": 1,
+  "parent_source": {
+    "type": "brief-file",
+    "id": "brief-fx",
+    "url": "file:///briefs/fx.md"
+  },
+  "subtask": {
+    "id": "fx-9",
+    "slug": "manifest-mode-case",
+    "title": "Manifest-mode fixture case",
+    "body_path": "tests/fixtures/issue2pr/mode-driver/manifest-brief.md"
+  },
+  "repos": [
+    {
+      "id": "fixture-repo",
+      "path": "./tests/fixtures/issue2pr/fixture-repo",
+      "base_branch": "trunk"
+    }
+  ],
+  "branch": "someone/ai/fx-9-manifest-mode-case",
+  "scenario": "new-feature",
+  "round": 1,
+  "run_folder": "runs/fx-9-manifest-mode-case",
+  "review_mode": "full",
+  "max_review_iterations": 2,
+  "reviewer_backend": "codex",
+  "scope_override": "fx-9",
+  "subject_prefix": "[fx]"
+}

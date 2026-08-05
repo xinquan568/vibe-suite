@@ -47,6 +47,131 @@ the mapping, the commonest reason a round needs iterating had no status that `it
 
 ## `chain`
 
+<!-- chain-operations -->
+```json
+{
+  "link_statuses": [
+    "pending",
+    "running",
+    "waiting_merge",
+    "iterating",
+    "merged",
+    "closed_unmerged",
+    "failed",
+    "skipped"
+  ],
+  "chain_statuses": {
+    "non_terminal": [
+      "running",
+      "waiting_merge",
+      "iterating",
+      "paused"
+    ],
+    "terminal": [
+      "complete",
+      "stopped"
+    ]
+  },
+  "link_edges": {
+    "pending": [
+      "running"
+    ],
+    "running": [
+      "waiting_merge",
+      "failed",
+      "skipped"
+    ],
+    "waiting_merge": [
+      "merged",
+      "iterating",
+      "closed_unmerged",
+      "skipped"
+    ],
+    "iterating": [
+      "waiting_merge",
+      "failed"
+    ]
+  },
+  "pause_on_link_terminal_not": "merged",
+  "persist_after_every_transition": [
+    "chain.json",
+    "timeline.md"
+  ],
+  "events": {
+    "link-start": {
+      "edge": {
+        "from": "pending",
+        "to": "running"
+      }
+    },
+    "link-run-outcome": {
+      "inputs": {
+        "status": [
+          "pr_opened",
+          "failed"
+        ]
+      },
+      "effects": {
+        "pr_opened": {
+          "edge": {
+            "from": "running",
+            "to": "waiting_merge"
+          }
+        },
+        "failed": {
+          "edge": {
+            "from": "running",
+            "to": "failed"
+          }
+        }
+      }
+    },
+    "skip": {
+      "from_any_of": [
+        "running",
+        "waiting_merge"
+      ],
+      "to": "skipped",
+      "then": "advance",
+      "pause_exempt": true
+    },
+    "babysit-finish": {
+      "inputs": {
+        "outcome": [
+          "pushed",
+          "failed"
+        ]
+      },
+      "effects": {
+        "pushed": {
+          "edge": {
+            "from": "iterating",
+            "to": "waiting_merge"
+          }
+        },
+        "failed": {
+          "edge": {
+            "from": "iterating",
+            "to": "failed"
+          }
+        }
+      }
+    },
+    "advance": {
+      "next_link": {
+        "from": "pending",
+        "to": "running"
+      },
+      "on_last_link": {
+        "chain": "complete"
+      }
+    }
+  },
+  "babysit_round_semantics": "the 1-based ordinal of the babysit round about to run; it runs while round <= cap",
+  "on_link_terminal_chain_status": "paused"
+}
+```
+
 - **Invocation:** `/vibe-suite:issue2pr chain <issue> <issue> …` (2–10, executed in the given order), or
   `chain --milestone <title>`, or `chain --label <label>`; plus `[--auto-merge] [--stall-hours H]
   [--max-babysit-rounds N]` and the run flags. Management: `chain resume|status|stop|skip`.
@@ -76,14 +201,105 @@ map is what turns each into an action.
 <!-- watcher-exit-actions -->
 ```json
 {
-  "0": "fetch the base branch, verify the merge commit is an ancestor of it, surface any post-cursor activity without acting on it, mark the link merged, then start the next link or complete the chain",
-  "1": "this code and any unmapped exit: re-check PR state by hand; if nothing explains it, pause and notify",
-  "2": "mark the link closed_unmerged, then pause and notify",
-  "3": "classify the activity; actionable under cap disarms auto-merge and runs a babysit round before re-arming and advancing the cursor; a question notifies only; status-noise advances the cursor; at the cap, pause",
-  "4": "run a babysit round whose feedback is the failing check log, with the same disarm, re-arm, cap and cursor handling as exit 3",
-  "5": "notify the heartbeat and re-arm the watcher unchanged \u2014 a timeout is not a pause",
-  "6": "pause and notify; ten consecutive state probes failed, so credentials or the network are the likely cause",
-  "7": "squash-merge the PR directly, then handle it as exit 0"
+  "0": {
+    "guidance": "fetch the base branch, verify the merge commit is an ancestor of it, surface any post-cursor activity without acting on it, mark the link merged, then start the next link or complete the chain",
+    "effect": {
+      "requires": [
+        "merge_commit",
+        "ancestor_verified"
+      ],
+      "edge": {
+        "from": "waiting_merge",
+        "to": "merged"
+      },
+      "then": "advance"
+    },
+    "result_events": []
+  },
+  "1": {
+    "guidance": "this code and any unmapped exit: re-check PR state by hand; if nothing explains it, pause and notify",
+    "effect": {
+      "chain": "paused",
+      "report": "manual-recheck",
+      "catch_all_for_unmapped": true
+    },
+    "result_events": []
+  },
+  "2": {
+    "guidance": "mark the link closed_unmerged, then pause and notify",
+    "effect": {
+      "edge": {
+        "from": "waiting_merge",
+        "to": "closed_unmerged"
+      }
+    },
+    "result_events": []
+  },
+  "3": {
+    "guidance": "classify the activity; actionable under cap disarms auto-merge and runs a babysit round before re-arming and advancing the cursor; a question notifies only; status-noise advances the cursor; beyond the cap's rounds, pause",
+    "effect": {
+      "requires": [
+        "classification",
+        "babysit_round",
+        "babysit_cap"
+      ],
+      "by_classification": {
+        "question": {
+          "report": "notify",
+          "writes": []
+        },
+        "status-noise": {
+          "cursor": "advance"
+        },
+        "actionable_within_cap": {
+          "edge": {
+            "from": "waiting_merge",
+            "to": "iterating"
+          },
+          "report": "babysit-start"
+        },
+        "actionable_beyond_cap": {
+          "chain": "paused"
+        }
+      }
+    },
+    "result_events": [
+      "babysit-finish"
+    ]
+  },
+  "4": {
+    "guidance": "run a babysit round whose feedback is the failing check log, with the same disarm, re-arm, cap and cursor handling as exit 3",
+    "effect": {
+      "as": "3",
+      "timeline_note": "failing-check feedback"
+    },
+    "result_events": [
+      "babysit-finish"
+    ]
+  },
+  "5": {
+    "guidance": "notify the heartbeat and re-arm the watcher unchanged — a timeout is not a pause",
+    "effect": {
+      "report": "re-arm",
+      "writes": []
+    },
+    "result_events": []
+  },
+  "6": {
+    "guidance": "pause and notify; ten consecutive state probes failed, so credentials or the network are the likely cause",
+    "effect": {
+      "chain": "paused"
+    },
+    "result_events": []
+  },
+  "7": {
+    "guidance": "squash-merge the PR directly, then handle it as exit 0",
+    "effect": {
+      "pre_report": "squash-merge",
+      "as": "0"
+    },
+    "result_events": []
+  }
 }
 ```
 
@@ -93,6 +309,44 @@ that moment is unobserved. Do not read it as "the PR is still open" — nothing 
 ---
 
 ## `resume`
+
+<!-- resume-operations -->
+```json
+{
+  "precondition_partition": "non_terminal",
+  "redirect_nonmatching_to": "iterate",
+  "writes": [],
+  "sequences": {
+    "none": [
+      1,
+      4,
+      7
+    ],
+    "single": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "full": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ]
+  }
+}
+```
 
 - **Invocation:** `/vibe-suite:issue2pr resume <run-id>`.
 - **Reads:** `runs/<run-id>/state.json` (an absent file is an error, not an empty run); the effective
@@ -117,6 +371,36 @@ artifact is not a checkpoint.
 ---
 
 ## `iterate`
+
+<!-- iterate-operations -->
+```json
+{
+  "precondition_partition": "terminal",
+  "redirect_nonmatching_to": "resume",
+  "creates": "round-<N+1>/",
+  "override_records": {
+    "review_mode": "review_mode_overrides",
+    "reviewer_backend": "reviewer_backend_overrides",
+    "max_review_rounds": "max_review_rounds_overrides"
+  },
+  "override_key_type": "string round number",
+  "never_writes": [
+    "00-meta.json"
+  ],
+  "transition": {
+    "to": "in_progress",
+    "scope": "new-round"
+  },
+  "flag_rules": {
+    "max_review_rounds": {
+      "ignored_with_notice_under_modes": [
+        "none",
+        "single"
+      ]
+    }
+  }
+}
+```
 
 - **Invocation:** `/vibe-suite:issue2pr iterate <run-id>`, accepting a full run-id or a bare source-id, which
   resolves to the most recent run for that source. Takes `[--review-mode] [--reviewer-backend]
@@ -155,6 +439,36 @@ the existing body.
 
 ## `list`
 
+<!-- list-operations -->
+```json
+{
+  "exclude_prefix": "_",
+  "writes": [],
+  "order": "last-touched, newest first",
+  "columns": [
+    "run-id",
+    "status",
+    "source",
+    "current step",
+    "effective review mode",
+    "round",
+    "resume pointer"
+  ],
+  "column_fields": {
+    "run-id": "$dir",
+    "status": "status",
+    "source": "source_id",
+    "current step": "current_step",
+    "effective review mode": "$effective_mode",
+    "round": "current_round",
+    "resume pointer": "$resume_pointer"
+  },
+  "resume_pointer_unless_status": [
+    "completed"
+  ]
+}
+```
+
 - **Invocation:** `/vibe-suite:issue2pr list`.
 - **Reads:** every subdirectory of `runs/` **except those whose name begins with an underscore** —
   `_chains`, `_reports`, `_archive` hold chain state, reports and retired runs, not runs. For each,
@@ -173,6 +487,20 @@ run that is not finished.
 ---
 
 ## `manifest`
+
+<!-- manifest-operations -->
+```json
+{
+  "validate_via": "scripts/manifest_entry.py",
+  "creates": [
+    "run_folder",
+    "00-meta.json",
+    "state.json"
+  ],
+  "containment": "run_folder resolves beneath --runs-root",
+  "initial_status": "in_progress"
+}
+```
 
 Programmatic dispatch. An orchestrator supplies every input as JSON instead of a work-item id and the
 prompts a normal run would ask; direct human use is not expected. For everyday parallel batching,

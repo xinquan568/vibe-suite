@@ -48,6 +48,21 @@ def git_files(tree):
                   for part in raw.split(b"\0") if part)
 
 
+def git_files_at(tree, ref):
+    """Every path AT A COMMIT, read from the object database only (vibe-132): no
+    checkout, no index, nothing written — the same decode/sort as git_files, so the
+    rendered bytes are identical for identical trees."""
+    raw = subprocess.run(["git", "-C", str(tree), "ls-tree", "-r", "--name-only", "-z", ref],
+                         capture_output=True, check=True).stdout
+    return sorted(part.decode("utf-8", "surrogateescape")
+                  for part in raw.split(b"\0") if part)
+
+
+def commit_at(tree, ref):
+    return subprocess.run(["git", "-C", str(tree), "rev-parse", f"{ref}^{{commit}}"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
 def workspace_files(root):
     """Every file beneath the three skill roots, relative to `root`.
 
@@ -83,15 +98,24 @@ def main(argv=None):
     parser.add_argument("tree", type=Path)
     parser.add_argument("--repo", required=True, choices=REPOS + (WORKSPACE,))
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--ref", help="regenerate from this commit's tree instead of the "
+                                      "index/HEAD (vibe-132: a checkout's position stops "
+                                      "mattering; the pin is what is snapshotted)")
     args = parser.parse_args(argv)
 
     if args.repo == WORKSPACE:
+        if args.ref:
+            sys.stderr.write("error: --ref applies to pinned repos; the workspace is unpinned\n")
+            return 1
         commit, files = None, workspace_files(args.tree)
     else:
         if not (args.tree / ".git").exists():
             sys.stderr.write(f"error: {args.tree} is not a git checkout\n")
             return 1
-        commit, files = head_commit(args.tree), git_files(args.tree)
+        if args.ref:
+            commit, files = commit_at(args.tree, args.ref), git_files_at(args.tree, args.ref)
+        else:
+            commit, files = head_commit(args.tree), git_files(args.tree)
     args.out.write_text(render(args.repo, commit, files), encoding="utf-8")
     sys.stderr.write(f"{args.repo}: {len(files)} files at "
                      f"{commit[:7] if commit else 'unpinned'} -> {args.out}\n")

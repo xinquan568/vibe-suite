@@ -17,6 +17,7 @@ coverage cannot notice it going missing. AC-1 calls this out — "disk-driven, n
 
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -30,7 +31,56 @@ CHECK = REPO_ROOT / "tools" / "coverage-check.py"
 GEN = REPO_ROOT / "tools" / "gen-source-manifest.py"
 DISPOSITION = REPO_ROOT / "docs" / "disposition.yaml"
 MANIFESTS = REPO_ROOT / "tests" / "source-manifests"
-PINNED_TREES = REPO_ROOT.parent.parent.parent.parent / "codes"
+
+#: vibe-132: the pinned trees' location is explicit-first. The old four-parent constant
+#: resolved only from run worktrees — in CI it pointed above the runner workspace and from
+#: the main checkout at a directory that does not exist, so the reproducibility check
+#: green-skipped everywhere it mattered.
+PINNED_TREES_ENV = "VIBE_SUITE_PINNED_TREES"
+_CLONE_NAMES = ("cc-suite", "grill-for-claude", "nlpm")
+
+
+def resolve_pinned_trees(env=None, repo_root=REPO_ROOT):
+    """The pinned-tree root. An explicit VIBE_SUITE_PINNED_TREES always wins and is
+    returned unchecked — with the variable set, absence is the caller's *failure*, never
+    a skip (CI sets it, so CI can never green-skip). Unset, the documented layout
+    defaults apply in order: the main checkout's sibling codes/ (repo_root.parent), then
+    the run-worktree four-parent path; the first existing directory containing at least
+    one known clone wins. None means no candidate resolved — the local-skip case."""
+    env = os.environ if env is None else env
+    explicit = env.get(PINNED_TREES_ENV)
+    if explicit:
+        return Path(explicit)
+    for cand in (repo_root.parent,
+                 repo_root.parent.parent.parent.parent / "codes"):
+        if cand.is_dir() and any((cand / name).is_dir() for name in _CLONE_NAMES):
+            return cand
+    return None
+
+
+def verify_manifest(tree, repo, pin, manifest_path):
+    """(verdict, message) — vibe-132's blame split. 'checkout' when the clone cannot
+    serve the pinned commit (the object is what regeneration needs; HEAD position is
+    irrelevant), 'manifest' when read-only regeneration at the pin differs from the
+    shipped bytes, 'ok' otherwise."""
+    probe = subprocess.run(["git", "-C", str(tree), "cat-file", "-e", f"{pin}^{{commit}}"],
+                           capture_output=True)
+    if probe.returncode != 0:
+        return ("checkout",
+                f"checkout at {tree} cannot serve pinned commit {pin}; "
+                f"run: git -C {tree} fetch origin {pin}")
+    out = Path(tempfile.mkdtemp()) / f"{repo}.json"
+    try:
+        subprocess.run([sys.executable, str(GEN), str(tree), "--repo", repo,
+                        "--ref", pin, "--out", str(out)], capture_output=True, check=True)
+        regenerated = out.read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(out.parent, ignore_errors=True)
+    if regenerated != manifest_path.read_text(encoding="utf-8"):
+        return ("manifest",
+                f"{repo}.json is stale against pinned {pin}; regenerate with "
+                f"gen-source-manifest.py --ref {pin}")
+    return ("ok", "")
 
 
 def _load():
@@ -536,23 +586,128 @@ class TestCounts(CLICase):
 
 
 class TestManifestsAreReproducible(unittest.TestCase):
-    """The manifests are the only record CI has of the trees, so drift must be a reviewable diff."""
+    """The manifests are the only record CI has of the trees, so drift must be a reviewable diff.
+
+    vibe-132: the check executes wherever it can gate. Trees resolve per
+    `resolve_pinned_trees` (env var strict, layout defaults lenient); regeneration reads
+    the *pinned commit* read-only, so a checkout's HEAD position is irrelevant; and the
+    two failure modes blame the artifact that actually diverged — an unservable pin names
+    the checkout, a byte mismatch at the pin names the manifest.
+    """
 
     def test_regenerating_a_pinned_manifest_reproduces_it(self):
-        if not PINNED_TREES.is_dir():
-            self.skipTest(f"pinned source trees not present at {PINNED_TREES}")
-        for repo in cc.PINS:
-            tree = PINNED_TREES / repo
-            if not (tree / ".git").exists():
-                self.skipTest(f"{tree} is not a checkout")
+        root = resolve_pinned_trees()
+        strict = bool(os.environ.get(PINNED_TREES_ENV))
+        if root is None:
+            self.skipTest("no pinned-tree layout resolves and "
+                          f"{PINNED_TREES_ENV} is unset (local machines only)")
+        for repo, pin in cc.PINS.items():
             with self.subTest(repo=repo):
-                out = Path(tempfile.mkdtemp()) / f"{repo}.json"
-                self.addCleanup(shutil.rmtree, out.parent, ignore_errors=True)
-                subprocess.run([sys.executable, str(GEN), str(tree), "--repo", repo,
-                                "--out", str(out)], capture_output=True, check=True)
-                self.assertEqual(out.read_text(encoding="utf-8"),
-                                 (MANIFESTS / f"{repo}.json").read_text(encoding="utf-8"),
-                                 f"{repo}.json is stale against its pinned commit")
+                tree = root / repo
+                if not (tree / ".git").exists():
+                    if strict:
+                        self.fail(f"{PINNED_TREES_ENV} is set but {tree} is not a "
+                                  "checkout — in CI this means the fetch step did not run")
+                    self.skipTest(f"{tree} is not a checkout")
+                verdict, message = verify_manifest(tree, repo, pin,
+                                                   MANIFESTS / f"{repo}.json")
+                self.assertEqual(verdict, "ok", message)
+
+
+class TestReproducibilityMachinery(unittest.TestCase):
+    """vibe-132's helpers, hermetically: layout resolution and the blame split.
+
+    The mini-repos carry two commits with command-local identity; the expected manifest is
+    generated from the FIRST commit while HEAD stays on the SECOND, so the central
+    off-pin-HEAD behavior — position irrelevant once regeneration reads the pin — is the
+    case actually proven.
+    """
+
+    def _root(self):
+        root = Path(tempfile.mkdtemp(prefix="repro-132-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
+    def _git(self, tree, *args):
+        return subprocess.run(
+            ["git", "-C", str(tree), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+             *args], capture_output=True, text=True, check=True).stdout.strip()
+
+    def _mini_repo(self, root):
+        """(tree, first_commit) — two commits, HEAD left on the second."""
+        tree = root / "cc-suite"
+        tree.mkdir(parents=True)
+        (tree / "one.md").write_text("one\n")
+        self._git(tree, "init", "-q")
+        self._git(tree, "add", "-A")
+        self._git(tree, "commit", "-q", "-m", "first")
+        first = self._git(tree, "rev-parse", "HEAD")
+        (tree / "two.md").write_text("two\n")
+        self._git(tree, "add", "-A")
+        self._git(tree, "commit", "-q", "-m", "second")
+        return tree, first
+
+    def _gen(self, tree, pin, out):
+        subprocess.run([sys.executable, str(GEN), str(tree), "--repo", "cc-suite",
+                        "--ref", pin, "--out", str(out)], capture_output=True, check=True)
+
+    def test_resolver_env_wins(self):
+        target = self._root()
+        got = resolve_pinned_trees(env={PINNED_TREES_ENV: str(target)},
+                                   repo_root=Path("/nonexistent"))
+        self.assertEqual(got, target)
+
+    def test_resolver_prefers_main_checkout_layout(self):
+        root = self._root()
+        (root / "codes" / "vibe-suite").mkdir(parents=True)
+        (root / "codes" / "nlpm").mkdir()
+        got = resolve_pinned_trees(env={}, repo_root=root / "codes" / "vibe-suite")
+        self.assertEqual(got, root / "codes")
+
+    def test_resolver_falls_back_to_four_parent_layout(self):
+        root = self._root()
+        (root / "codes" / "cc-suite").mkdir(parents=True)
+        repo_root = root / "runs" / "r1" / "worktrees" / "vibe-suite"
+        repo_root.mkdir(parents=True)
+        got = resolve_pinned_trees(env={}, repo_root=repo_root)
+        self.assertEqual(got, root / "codes")
+
+    def test_resolver_none_when_no_candidate(self):
+        root = self._root()
+        repo_root = root / "alone" / "vibe-suite"
+        repo_root.mkdir(parents=True)
+        self.assertIsNone(resolve_pinned_trees(env={}, repo_root=repo_root))
+
+    def test_off_pin_head_is_ok(self):
+        root = self._root()
+        tree, first = self._mini_repo(root)
+        manifest = root / "cc-suite.json"
+        self._gen(tree, first, manifest)
+        verdict, message = verify_manifest(tree, "cc-suite", first, manifest)
+        self.assertEqual(verdict, "ok", message)
+
+    def test_unservable_pin_blames_checkout(self):
+        root = self._root()
+        tree, first = self._mini_repo(root)
+        ghost = "deadbeef" * 5
+        verdict, message = verify_manifest(tree, "cc-suite", ghost, root / "cc-suite.json")
+        self.assertEqual(verdict, "checkout")
+        self.assertIn(str(tree), message)
+        self.assertIn(ghost, message)
+        self.assertIn("fetch", message)
+
+    def test_tampered_manifest_blames_manifest(self):
+        root = self._root()
+        tree, first = self._mini_repo(root)
+        manifest = root / "cc-suite.json"
+        self._gen(tree, first, manifest)
+        data = json.loads(manifest.read_text())
+        data["files"].append("phantom.md")
+        manifest.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        verdict, message = verify_manifest(tree, "cc-suite", first, manifest)
+        self.assertEqual(verdict, "manifest")
+        self.assertIn("cc-suite.json", message)
+        self.assertIn(first, message)
 
 
 class TestChecksAreWiredIntoTheCLI(CLICase):

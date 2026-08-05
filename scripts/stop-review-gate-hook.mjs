@@ -34,7 +34,9 @@
 // **Node floor: 18.** No top-level await.
 
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+
+import { makeOwnedTempDir, removeOwnedTree, writeAtomic, PRIVATE_FILE_MODE } from "./lib/write.mjs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -235,7 +237,10 @@ function applyFailPolicy(gate, why) {
   return allow();
 }
 
-function main() {
+// vibe-103: async because the prompt file now goes through the audited write primitive, whose API
+// is promise-based. The invocation below is a promise chain rather than top-level await, which this
+// repo's shipped modules do not use (tests/node/no-top-level-await.mjs enforces it).
+async function main() {
   const input = readStdin();
   // A gate that blocks its own continuation stops the session forever.
   if (input.stop_hook_active === true) return allow();
@@ -271,9 +276,11 @@ function main() {
 
   // The prompt goes in a FILE. As argv it is one ~400 KB argument, which exceeds the OS limit on
   // Linux (spawnSync E2BIG) while passing on macOS — a platform-dependent gate failure.
-  const scratch = mkdtempSync(path.join(tmpdir(), "vibe-stop-gate-"));
+  // vibe-103: the prompt carries the session diff AND the bodies of untracked files, so it is
+  // private content in a world-readable default. It goes into an owned 0700 temp root at 0600.
+  const scratch = await makeOwnedTempDir("vibe-stop-gate");
   const promptFile = path.join(scratch, "prompt.md");
-  writeFileSync(promptFile, prompt, "utf8");
+  await writeAtomic(scratch, promptFile, prompt, { mode: PRIVATE_FILE_MODE });
 
   const args = [RUNNER, "--kind", "stop-gate", "--sandbox", "read-only",
     "--timeout-ms", String(Math.max(5_000, left - 10_000)), "--prompt-file", promptFile];
@@ -286,7 +293,7 @@ function main() {
       cwd, encoding: "utf8", timeout: Math.max(5_000, remainingMs()), maxBuffer: OUTPUT_MAX_BUFFER,
     });
   } finally {
-    rmSync(scratch, { recursive: true, force: true });
+    await removeOwnedTree(scratch).catch(() => {});
   }
   if (dispatched.error) {
     return applyFailPolicy(gate, `the review job could not run (${dispatched.error.message})`);
@@ -308,12 +315,10 @@ function main() {
   return allow();
 }
 
-let code = 0;
-try {
-  code = main();
-} catch (error) {
+main().then((code) => {
+  process.exitCode = code;
+}).catch((error) => {
   // A crashed gate is an infra failure, not a verdict — and never a non-zero hook exit.
   process.stderr.write(`stop-review gate: ${error?.stack ?? error} — failing open\n`);
-  code = 0;
-}
-process.exitCode = code;
+  process.exitCode = 0;
+});

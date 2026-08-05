@@ -702,7 +702,18 @@ class LifecycleRaces(RunnerCase):
     def setUp(self):
         super().setUp()
         self.latch = self.ws / "latches"
-        self.latch.mkdir()
+        # vibe-103: the runner writes a latch signal only into an *owned* temp root — an env-supplied
+        # path is an operator input, not a licence to write anywhere. The marker below is what
+        # `isOwnedTempRoot` in scripts/lib/write.mjs checks (real 0700 directory, our uid, a stamp
+        # that parses); that module is the authority for the format, and this fixture mirrors it so
+        # the Python harness can hand a child a root it will accept.
+        self.latch.mkdir(mode=0o700)
+        self.latch.chmod(0o700)
+        marker = self.latch / ".vibe-suite-owned.json"
+        marker.write_text(
+            json.dumps({"_vibe-suite_owned": {"kind": "temp-root", "schema": 1}}) + "\n",
+            encoding="utf-8")
+        marker.chmod(0o600)
 
     def run_latched(self, *args, fixture="emitter.mjs", timeout=60):
         self._spawned_fixtures.append(fixture)

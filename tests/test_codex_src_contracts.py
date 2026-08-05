@@ -129,20 +129,23 @@ AUDIT_TABLE_ROWS = [
     re.compile(r"--full[^|\n]*\|\s*off\s*\|[^|\n]*9"),
     re.compile(r"file/dir path[^|\n]*\|\s*cwd\s*\|"),
 ]
-#: Tokens whose contracted home is a CALL FORM, not just the document: presence anywhere is
-#: not presence where the delegated session will actually see it.
+#: Tokens whose contracted home is a SPECIFIC call form: presence anywhere is not presence
+#: where the delegated session will actually see it, and the dispatch/reply split matters —
+#: audit-fix's verdict vocabulary belongs to the verify REPLY, its finding-line format to the
+#: audit DISPATCH; verify owes the vocabulary to BOTH of its options.
 BLOCK_TOKENS = {
-    "claude-review": ["Correctness", "Security", "Quality", "Architecture",
-                      "Critical / High / Medium / Low", "Suggested fix"],
-    "claude-plan": ["Do NOT write any code", "risk areas", "open questions",
-                    "test scenarios"],
-    "claude-implement": ["Files changed", "Test results", "deferred"],
-    "claude-debug": ["SYMPTOM", "ERROR OUTPUT", "REPRODUCTION STEPS", "WHAT I TRIED",
-                     "root cause"],
-    "audit": ["Critical / High / Medium / Low", "file:line"],
-    "audit-fix": ["file:line | severity | dimension | issue",
-                  "FIXED / NOT FIXED / PARTIAL / REGRESSED"],
-    "verify": ["FIXED", "NOT FIXED", "PARTIAL", "REGRESSED"],
+    "claude-review": {"claude_code": ["Correctness", "Security", "Quality", "Architecture",
+                                      "Critical / High / Medium / Low", "Suggested fix"]},
+    "claude-plan": {"claude_code": ["Do NOT write any code", "risk areas", "open questions",
+                                    "test scenarios"]},
+    "claude-implement": {"claude_code": ["Files changed", "Test results", "deferred"]},
+    "claude-debug": {"claude_code": ["SYMPTOM", "ERROR OUTPUT", "REPRODUCTION STEPS",
+                                     "WHAT I TRIED", "root cause"]},
+    "audit": {"claude_code": ["Critical / High / Medium / Low", "file:line"]},
+    "audit-fix": {"claude_code": ["file:line | severity | dimension | issue"],
+                  "claude_code_reply": ["FIXED / NOT FIXED / PARTIAL / REGRESSED"]},
+    "verify": {"claude_code": ["FIXED", "NOT FIXED", "PARTIAL", "REGRESSED"],
+               "claude_code_reply": ["FIXED", "NOT FIXED", "PARTIAL", "REGRESSED"]},
 }
 #: Which session token each skill's reply forms must reuse. verify's Option A continues the
 #: AUDIT session by contract — reusing its own fresh token there would be a flow error.
@@ -278,13 +281,47 @@ class ContractTable(unittest.TestCase):
             with self.subTest(pattern=pattern.pattern):
                 self.assertRegex(text, pattern)
 
-    def test_contracted_tokens_sit_inside_call_forms(self):
-        for name, tokens in BLOCK_TOKENS.items():
-            blocks = "\n".join(b for _, _, b in call_blocks(body(name)))
-            for token in tokens:
-                with self.subTest(skill=name, token=token):
-                    self.assertIn(token, blocks,
-                                  f"{name}: {token!r} not inside any call form")
+    def test_contracted_tokens_sit_inside_their_call_form(self):
+        for name, per_tool in BLOCK_TOKENS.items():
+            all_blocks = call_blocks(body(name))
+            for tool, tokens in per_tool.items():
+                tool_blocks = "\n".join(b for _, t, b in all_blocks if t == tool)
+                for token in tokens:
+                    with self.subTest(skill=name, tool=tool, token=token):
+                        self.assertIn(token, tool_blocks,
+                                      f"{name}: {token!r} not inside a {tool} call form")
+
+    def test_call_sequence_matches_each_contract(self):
+        # Call sequence is contract. Six skills open a session and then continue it, so their
+        # dispatch precedes their reply form. verify is the deliberate inversion: Option A
+        # (continue the AUDIT session — a reply) is preferred and therefore documented FIRST,
+        # with the fresh Option B dispatch as fallback.
+        for name in CONTRACTS:
+            text = body(name)
+            cc = text.find(f"mcp__{SERVER}__claude_code:")
+            cr = text.find(f"mcp__{SERVER}__claude_code_reply:")
+            with self.subTest(skill=name):
+                self.assertGreaterEqual(cc, 0)
+                self.assertGreaterEqual(cr, 0)
+                if name == "verify":
+                    self.assertLess(cr, cc, "verify: Option A (reply) must come first")
+                else:
+                    self.assertLess(cc, cr, f"{name}: reply form precedes the dispatch")
+
+    def test_audit_fix_flow_ordering(self):
+        # The doors open between the audit dispatch and the verify reply; the hard ceiling is
+        # stated with the round decision, after the reply. Free-floating substrings elsewhere
+        # cannot satisfy this ordering chain.
+        text = body("audit-fix")
+        dispatch = text.index(f"mcp__{SERVER}__claude_code:")
+        reply = text.index(f"mcp__{SERVER}__claude_code_reply:")
+        for door in ("Fix all", "Critical+High only", "Stop here"):
+            with self.subTest(door=door):
+                pos = text.index(door)
+                self.assertGreater(pos, dispatch, f"{door!r} precedes the audit dispatch")
+                self.assertLess(pos, reply, f"{door!r} follows the verify reply")
+        self.assertGreater(text.index("stops unconditionally"), reply,
+                           "the hard-ceiling rule is not stated with the round decision")
 
     def test_reply_forms_reuse_the_contracted_session(self):
         for name, token in REPLY_SESSION_TOKENS.items():

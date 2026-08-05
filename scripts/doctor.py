@@ -401,7 +401,9 @@ def diagnose(ws):
                                            "recorded a plugin version"})
     for check, blocked in UNAVAILABLE:
         capabilities.append({"check": check, "status": "unavailable", "blocked_on": blocked})
-    check_mirror_staleness(HERE.parent, findings, capabilities)
+    check_mirror_staleness(
+        Path(os.environ.get("CLAUDE_PLUGIN_ROOT") or HERE.parent),
+        findings, capabilities)
     knowledge = knowledge_capability(findings)
     if isinstance(knowledge, dict) and "status" in knowledge:
         capabilities.append(knowledge)

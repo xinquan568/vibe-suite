@@ -495,8 +495,19 @@ class TestMirrorWiring(BridgeCase):
         first = self.run_bridge("mirrors")
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertTrue((self.plugin / "codex" / "MIRROR-MANIFEST.json").is_file())
+        import hashlib
+        def tree_hash():
+            h = hashlib.sha256()
+            for f in sorted(self.plugin.rglob("*")):
+                if f.is_file():
+                    h.update(f.relative_to(self.plugin).as_posix().encode())
+                    h.update(f.read_bytes())
+            return h.hexdigest()
+        before = tree_hash()
         second = self.run_bridge("mirrors")
         self.assertEqual(second.returncode, 0)
+        self.assertEqual(tree_hash(), before,
+                         "a second mirrors run changed the plugin tree")
 
     def test_missing_generator_fails_loudly(self):
         result = self.run_bridge("mirrors")

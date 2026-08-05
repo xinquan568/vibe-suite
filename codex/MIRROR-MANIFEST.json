@@ -39,7 +39,7 @@
     {
       "dropped_keys": [],
       "mirror": "codex/README.md",
-      "mirror_sha256": "e688794277e884fb70b7d25176fb1ef97c53af86526ba65141135dc7fbf621a9",
+      "mirror_sha256": "5a5fd70b7a718db321bfbf4a10e2b5e77e26b1966b9361e00c79d95b6b73abb6",
       "source": ".claude-plugin/plugin.json",
       "source_sha256": "acf6cd5b1dc70c22064a8030d60455daeb448def261144a5461e6c15cf4dfe54",
       "transform": "generated"
@@ -265,7 +265,7 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-roast/SKILL.md",
-      "mirror_sha256": "be3e049e59c75daf29781113319814f766dca29f16fc795abb0564f400d0933f",
+      "mirror_sha256": "e6904d3e9ab3c9d06c7f6763bad0c81d19d4a261dc963b151e968aa344bcab80",
       "source": "commands/roast.md",
       "source_sha256": "230bcd93b8dcd853da76e9257f848fba50bd833cd4270d79246dc12eeb8e848e",
       "transform": "variant"
@@ -273,7 +273,7 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-roasting/SKILL.md",
-      "mirror_sha256": "3d76379785649913931e9e019585421b804aef229fc5a07ade6bbbd0d00c8c76",
+      "mirror_sha256": "65300f0643c5baef2773269396b73443649129e74c71aad523f5321f4a676f1d",
       "source": "skills/roasting/SKILL.md",
       "source_sha256": "7479df1cb1844f96c195fad32e87fbb1c3b36623b7a3946df8d2844881aba9ac",
       "transform": "markdown"
@@ -468,6 +468,59 @@
       "test",
       "update"
     ],
+    "slash_occurrences": {
+      "skills/agent-design/SKILL.md": {
+        "advisor": 3,
+        "repair": 1,
+        "update": 1
+      },
+      "skills/auditing/SKILL.md": {
+        "nl-audit": 1,
+        "security-scan": 1
+      },
+      "skills/conventions-codex/SKILL.md": {
+        "bridge": 1
+      },
+      "skills/orchestration/SKILL.md": {
+        "init": 1
+      },
+      "skills/roasting/SKILL.md": {
+        "roast": 1
+      },
+      "skills/rules/SKILL.md": {
+        "fix": 2,
+        "score": 2
+      },
+      "skills/scoring/SKILL.md": {
+        "score": 2
+      },
+      "skills/security/SKILL.md": {
+        "security-scan": 2
+      },
+      "skills/testing/SKILL.md": {
+        "score": 2,
+        "test": 4
+      },
+      "skills/vibe-core/SKILL.md": {
+        "fix": 1,
+        "issue2pr": 1,
+        "jobs": 1,
+        "refine-proposal": 1
+      },
+      "skills/vibe-core/references/reviewer-contract.md": {
+        "fix": 2,
+        "issue2pr": 1,
+        "refine-proposal": 1
+      },
+      "skills/vocabulary/SKILL.md": {
+        "check": 1,
+        "score": 1
+      },
+      "skills/writing-plugins/SKILL.md": {
+        "scan": 1,
+        "score": 1
+      }
+    },
     "slash_rewritten": [
       "roast"
     ]

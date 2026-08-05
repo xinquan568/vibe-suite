@@ -13,33 +13,51 @@ The Codex-native rendering of the roast flow: one lane, sequential skill passes,
 report contract. The source command's multi-lane machinery does not exist here — this
 runtime IS the single engine, so nothing needs selecting or cross-checking between lanes.
 
+**Load the criteria first.** The dimensions (nine full, five mini), the six styles and the
+eight add-ons are DEFINED by [$vibe-roasting](../vibe-roasting/SKILL.md) — read it before any
+pass; this skill owns arguments, sequencing and the report only.
+
 ## Scope
 
-Resolve the target with the scope grammar: empty scope means uncommitted changes
-(`git diff HEAD --name-only`); `staged` means staged changes; `commit -N` means the last N
-commits; an explicit path is read from the filesystem without git. Enforce configured skip
-patterns. An empty resolved list stops with "No changes detected in scope." A trivial change
-(formatting-only, comment-only) asks before proceeding.
+Resolve the target with the scope grammar: an empty scope means uncommitted changes
+(`git diff HEAD --name-only`); `staged` means staged changes (`git diff --cached
+--name-only`); `commit -N` means the last N commits (`git diff HEAD~N --name-only`); an
+explicit path is read from the filesystem without git. Enforce configured skip patterns from
+the project's `.vibe-suite.md`. An empty resolved list stops with "No changes detected in
+scope. Nothing to review." A trivial resolved set — formatting-only or comment-only changes —
+asks for confirmation before a full interrogation is spent on it.
 
 ## Styles and depth
 
-Six styles: styles 1–4 run recon plus four specialists ($vibe-roast-architecture,
-$vibe-roast-error-handling, $vibe-roast-security, $vibe-roast-testing); styles 5–6
-add $vibe-roast-edge-cases.
-Style 6 on more than 500 files stops and asks before any pass, stating the file count.
-Depth: mini (five dimensions) or full — as the roasting skill defines them.
+`--style 1-6` (default 2), meanings per the roasting criteria:
+
+1. Architecture Review + Rewrite Plan — structure first; the plan proposes a target shape.
+2. Hard-Nosed Critique + Roadmap — severity-ordered, blunt, with a sequenced roadmap.
+3. Multi-Perspective Panel — the same findings argued from several stances, disagreements kept.
+4. ADR Style — findings recast as decisions with context, options and consequences.
+5. Paranoid Mode — adds the edge-cases pass; assumes hostile input and unlucky timing.
+6. Select All — every style's closing sections in one report.
+
+Styles 1–4 run the specialist roster ($vibe-roast-architecture, $vibe-roast-error-handling, $vibe-roast-security, $vibe-roast-testing); styles 5–6 add
+$vibe-roast-edge-cases.
+Style 6 on more than 500 files stops and asks before any pass,
+stating the file count and what Select All costs. Depth: `--mini` (five dimensions) or
+`--full` (nine, test files included) — per the roasting criteria.
 
 ## Sequential passes
 
-1. Always run the $vibe-roast-recon survey first; every later pass builds on it and re-surveys
-   nothing. Prior `vibe-report-*.md` files are excluded from every pass.
+1. Always run the $vibe-roast-recon survey first; its survey is injected into every later
+   pass under a context heading with "do not re-discover: this survey is the repository's
+   shape". Prior `vibe-report-*.md` files are excluded from every pass.
 2. Run each style-selected specialist skill in order, one at a time, feeding it the recon
    survey. More than 20 files: batch in groups of 10, one sequential pass per group,
    findings merged.
-3. A specialist pass that fails records the gap in the report's coverage section and the
-   run continues — a partial interrogation that says so beats a silent one.
-4. Add-ons (the eight from the source command) run after the specialists, sequentially,
-   each noted in the report.
+3. A specialist pass that fails records the gap in the report's coverage section and the run
+   continues — a partial interrogation that says so beats a silent one.
+4. Add-ons run after the specialists, sequentially, any subset of the eight from the
+   roasting criteria — Scale stress, Hidden costs, Principle violations, Strangler fig,
+   Success metrics, Before/after diagram, Assumptions audit, Compact & optimize — each
+   appending one section, none replacing a dimension.
 
 ## Synthesis and report
 

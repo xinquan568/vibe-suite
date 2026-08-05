@@ -1,6 +1,6 @@
 ---
 name: vibe-roasting
-description: "The criteria /vibe-suite:roast reviews code by — the nine cc-suite audit dimensions for the cross-model lanes, the separate five-dimension mini set, the six report styles and eight add-ons, and the reconciliation labels for --engine both. Load when running a roast, when deciding which dimension a code defect belongs to, or when a mini pass must be distinguished from a full one. Code review, not NL-artifact review: that is the auditing skill's."
+description: "The criteria $vibe-roast reviews code by — the nine cc-suite audit dimensions for the cross-model lanes, the separate five-dimension mini set, the six report styles and eight add-ons, and the reconciliation labels for --engine both. Load when running a roast, when deciding which dimension a code defect belongs to, or when a mini pass must be distinguished from a full one. Code review, not NL-artifact review: that is the auditing skill's."
 metadata:
   version: 0.0.1
 ---

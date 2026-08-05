@@ -9,6 +9,8 @@ missing mirror; version drift; malformed manifest; duplicate record; bad generat
 frontmatter; omitted sidecar (record+mirror both deleted); omitted copied dependency.
 """
 
+import importlib.machinery
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -23,10 +25,35 @@ sys.path.insert(0, str(REPO_ROOT / "tests"))
 from test_mirror_sync import FIXTURE_SETS, make_source_tree, mirror_sync  # noqa: E402
 
 
+def _load_vibe_check():
+    loader = importlib.machinery.SourceFileLoader(
+        "vibe_check_mod", str(REPO_ROOT / "bin" / "vibe-check"))
+    spec = importlib.util.spec_from_loader("vibe_check_mod", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+vibe_check = _load_vibe_check()
+
+#: The fixture-world inventory for the API-only seam — the CLI stays production-bound; these
+#: tests exercise the CHECK LOGIC against trees the fixture generator really produces.
+FIXTURE_EXPECTED = {
+    "knowledge": FIXTURE_SETS["knowledge"],
+    "workflow": FIXTURE_SETS["workflow"],
+    "roast_agents": FIXTURE_SETS["roast_agents"],
+    "copied_deps": FIXTURE_SETS["copied_deps"],
+}
+
+
 def run_check(root):
-    return subprocess.run(
-        [sys.executable, str(REPO_ROOT / "bin" / "vibe-check"), str(root), "--mirrors"],
-        capture_output=True, text=True)
+    """Findings from the mirrors class via the API seam, shaped like CLI output."""
+    findings = vibe_check.check_mirrors(root, expected=FIXTURE_EXPECTED)
+    class R:  # noqa: N801 — a tiny result shim keeping the assertion style uniform
+        returncode = 1 if findings else 0
+        stdout = "\n".join(f"mirrors: {f['path']}: {f['detail']}" for f in findings)
+        stderr = ""
+    return R
 
 
 class MirrorsClass(unittest.TestCase):
@@ -115,9 +142,23 @@ class MirrorsClass(unittest.TestCase):
         self.assert_fail("audit-output.schema.json")
 
     def test_absent_manifest_keeps_refusal(self):
+        # The refusal precedes inventory logic, so the CLI path is exercised directly here.
         self.manifest_path.unlink()
-        proc = run_check(self.root)
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "bin" / "vibe-check"), str(self.root),
+             "--mirrors"], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+
+    def test_shrunken_declaration_is_itself_a_finding(self):
+        # B1: a manifest that reclassifies or shrinks a set cannot pass — the declarations
+        # are COMPARED to the expected inventory, never trusted.
+        doc = self.manifest()
+        doc["sets"]["knowledge"] = [k for k in doc["sets"]["knowledge"] if k != "alpha"]
+        doc["sets"]["workflow"] = list(doc["sets"]["workflow"]) + ["alpha"]
+        self.write_manifest(doc)
+        proc = run_check(self.root)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("differs from the production inventory", proc.stdout)
 
 
 if __name__ == "__main__":

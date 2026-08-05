@@ -90,6 +90,58 @@ class TestCleanProject(DoctorCase):
         self.assertNotIn("mirror-staleness", statuses)
         self.assertEqual(self.severities(report), ["[GOOD]"])
 
+    def test_mirror_staleness_states(self):
+        """E7.2 (round-4): absent manifest → capability row; stale mirror → HIGH with the
+        plugin-root remediation; the check is read-only and runs from a workspace OUTSIDE
+        the plugin root (CLAUDE_PLUGIN_ROOT resolution)."""
+        import hashlib
+        import shutil as _sh
+        import sys
+        import tempfile as _tf
+        self.install()
+        with _tf.TemporaryDirectory(prefix="doctor-plugin-") as tmp:
+            plugin = Path(tmp) / "plugin"
+            _sh.copytree(REPO_ROOT, plugin, symlinks=True,
+                         ignore=_sh.ignore_patterns(".git", "node_modules", "__pycache__"))
+            def tree_hash():
+                h = hashlib.sha256()
+                for f in sorted(plugin.rglob("*")):
+                    if f.is_file():
+                        h.update(f.relative_to(plugin).as_posix().encode())
+                        h.update(f.read_bytes())
+                return h.hexdigest()
+            env_root = str(plugin)
+            # absent
+            _sh.rmtree(plugin / "codex")
+            findings, capabilities = [], []
+            import importlib.util as _ilu
+            spec = _ilu.spec_from_file_location("doctor_mod",
+                                                REPO_ROOT / "scripts" / "doctor.py")
+            doctor_mod = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(doctor_mod)
+            doctor_mod.check_mirror_staleness(Path(env_root), findings, capabilities)
+            self.assertEqual(findings, [])
+            self.assertEqual(capabilities[0]["check"], "mirror-staleness")
+            self.assertEqual(capabilities[0]["status"], "unavailable")
+            # regenerate, then go stale
+            import subprocess as _sp
+            _sp.run([sys.executable, str(plugin / "scripts" / "mirror-sync.py"),
+                     "generate", "--root", str(plugin)], check=True, capture_output=True)
+            findings, capabilities = [], []
+            doctor_mod.check_mirror_staleness(Path(env_root), findings, capabilities)
+            self.assertEqual(findings, [], "a fresh mirror reported stale")
+            victim = plugin / "codex" / "README.md"
+            victim.write_text(victim.read_text() + "tamper\n")
+            before = tree_hash()
+            findings, capabilities = [], []
+            doctor_mod.check_mirror_staleness(Path(env_root), findings, capabilities)
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0]["severity"], "[HIGH]")
+            self.assertIn("bridge mirrors", findings[0]["finding"])
+            self.assertIn("CLAUDE_PLUGIN_ROOT", findings[0]["finding"])
+            self.assertFalse(findings[0]["auto_fixable"])
+            self.assertEqual(tree_hash(), before, "the doctor check wrote to the plugin")
+
     def test_every_capability_names_what_blocks_it(self):
         self.install()
         for capability in self.report()["capabilities"]:

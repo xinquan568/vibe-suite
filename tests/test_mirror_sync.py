@@ -205,11 +205,69 @@ class GeneratorFixture(unittest.TestCase):
 
     def test_roast_variant_contract(self):
         text = self.read("codex/skills/vibe-roast/SKILL.md")
-        for token in ("recon", "edge-cases", "styles", "sequential",
-                      "scope", "trivial", "add-ons"):
+        for token in ("styles", "sequential", "scope", "trivial", "add-ons"):
             self.assertIn(token, text.lower())
         for gone in ("--engine", "reconciliation", "agy"):
             self.assertNotIn(gone, text.lower())
+        # the fixture roster renders its own specialists line
+        self.assertIn("$vibe-roast-gamma", text)
+
+    def test_roast_variant_production_rendering(self):
+        # The production variant (A-3's frozen behavior table): six style meanings, the
+        # eight add-on names, the criteria load, the full roster, the flow gates.
+        import re as _re
+        text = _re.sub(r"\s+", " ", mirror_sync._roast_variant("0.0.0-test"))
+        for token in ("Architecture Review + Rewrite Plan", "Hard-Nosed Critique",
+                      "Multi-Perspective Panel", "ADR Style", "Paranoid Mode", "Select All",
+                      "Scale stress", "Hidden costs", "Principle violations", "Strangler fig",
+                      "Success metrics", "Before/after diagram", "Assumptions audit",
+                      "Compact & optimize",
+                      "$vibe-roasting", "$vibe-roast-recon", "$vibe-roast-architecture",
+                      "$vibe-roast-error-handling", "$vibe-roast-security",
+                      "$vibe-roast-testing", "$vibe-roast-edge-cases",
+                      "500 files", "groups of 10", "coverage section",
+                      "No changes detected in scope", "trivial"):
+            self.assertIn(token, text)
+        for gone in ("--engine", "reconciliation", "agy"):
+            self.assertNotIn(gone, text.lower())
+
+
+class FailureAtomicity(unittest.TestCase):
+    def test_write_failure_restores_the_previous_tree(self):
+        # M3 (step-8): a failure mid-swap must leave the previous committed tree intact.
+        tmp = tempfile.mkdtemp(prefix="mirror-rollback-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = make_source_tree(tmp)
+        mirror_sync.generate(root, sets=FIXTURE_SETS)
+        before = tree_digest(root / "codex")
+        real_publish = mirror_sync.bridge.publish_new
+        calls = {"n": 0}
+        def failing(rootp, dest, content, mode=0o644):
+            calls["n"] += 1
+            if calls["n"] == 5:
+                raise OSError("injected write failure")
+            return real_publish(rootp, dest, content, mode)
+        mirror_sync.bridge.publish_new = failing
+        try:
+            with self.assertRaises(OSError):
+                mirror_sync.generate(root, sets=FIXTURE_SETS)
+        finally:
+            mirror_sync.bridge.publish_new = real_publish
+        self.assertEqual(tree_digest(root / "codex"), before,
+                         "the previous tree was not restored after a write failure")
+
+    def test_render_failure_leaves_the_tree_untouched(self):
+        tmp = tempfile.mkdtemp(prefix="mirror-prefail-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = make_source_tree(tmp)
+        mirror_sync.generate(root, sets=FIXTURE_SETS)
+        before = tree_digest(root / "codex")
+        skill = root / "skills" / "alpha" / "SKILL.md"
+        skill.write_text(skill.read_text() + "\nUse /vibe-suite:launch-missiles now.\n")
+        with self.assertRaises(mirror_sync.MirrorError):
+            mirror_sync.generate(root, sets=FIXTURE_SETS)
+        self.assertEqual(tree_digest(root / "codex"), before,
+                         "a render-phase failure disturbed the committed tree")
 
 
 class ProductionBinding(unittest.TestCase):
@@ -217,6 +275,25 @@ class ProductionBinding(unittest.TestCase):
         source = GEN_PATH.read_text()
         self.assertNotIn("VIBE_SUITE_MIRROR_SETS", source)
         self.assertNotIn("--sets", source)
+
+    def test_checker_inventories_match_the_generator(self):
+        # B1: the checker's deliberately duplicated MIRROR_EXPECTED must never drift from
+        # the generator's production tables.
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader(
+            "vibe_check_mod2", str(REPO_ROOT / "bin" / "vibe-check"))
+        spec = importlib.util.spec_from_loader("vibe_check_mod2", loader)
+        vc = importlib.util.module_from_spec(spec)
+        loader.exec_module(vc)
+        self.assertEqual(tuple(sorted(vc.MIRROR_EXPECTED["knowledge"])),
+                         tuple(sorted(mirror_sync.KNOWLEDGE)))
+        self.assertEqual(tuple(sorted(vc.MIRROR_EXPECTED["workflow"])),
+                         tuple(sorted(mirror_sync.WORKFLOW)))
+        self.assertEqual(tuple(sorted(vc.MIRROR_EXPECTED["roast_agents"])),
+                         tuple(sorted(mirror_sync.ROAST_AGENTS)))
+        self.assertEqual(dict(vc.MIRROR_EXPECTED["copied_deps"]),
+                         dict(mirror_sync.COPIED_DEPS))
 
     def test_production_tables_cover_the_roster(self):
         sys.path.insert(0, str(REPO_ROOT / "tests"))

@@ -242,7 +242,8 @@ def _link_mirror_skills(ws, report, plugin_root):
             report.append(f"skills: .agents/skills points at {os.readlink(skills_dir)} — "
                           "refused, not replaced")
             return
-    skills_dir.mkdir(parents=True, exist_ok=True)
+    bridge.ensure_dir_at(ws, ".agents")
+    bridge.ensure_dir_at(ws, ".agents/skills")
     for d in sorted(p for p in mirror.iterdir() if p.is_dir()):
         entry = skills_dir / d.name
         target = d

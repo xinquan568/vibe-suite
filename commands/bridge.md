@@ -46,7 +46,17 @@ Only the five events both tools share cross: `SessionStart`, `UserPromptSubmit`,
 goes to `.codex/hooks.vibe-suite.json` instead, and says so. Where it holds only our owned entry,
 that entry is preserved through the mirror.
 
-## `skills` — two links
+## `skills`
+
+**Mirror topology (E7.2).** When the plugin ships a generated `codex/skills` tree,
+`.agents/skills` is a REAL directory of per-skill symlinks — one entry per mirrored skill
+pointing into the plugin's `codex/skills/<name>` — so Codex discovers every skill at the
+documented one-level depth, and the user's own entries live safely beside ours. The exact
+legacy owned symlink (`.agents/skills → ../.claude/skills`) is migrated to the directory form
+with per-skill links preserving everything it previously exposed; any OTHER `.agents/skills`
+shape (a user-owned symlink elsewhere, a colliding user entry) is refused per entry, touching
+nothing. Without a generated mirror the legacy whole-tree link stands.
+ — two links
 
 `.claude/skills/vibe-suite` → the installed plugin's skills, and `.agents/skills` →
 `../.claude/skills`. The first **leaves your project by design** — it points at the plugin. A real

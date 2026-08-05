@@ -383,10 +383,16 @@ class TestWatcherExitActionMap(unittest.TestCase):
                          "the documented exit set and the program's exit set must be equal")
 
     def test_every_row_names_a_chain_effect(self):
-        for code, action in sorted(self.mapping().items()):
+        # vibe-135: each row is now a record — operator guidance plus a machine `effect`
+        # the mode driver executes. The word checks bind the guidance; the driver's own
+        # suite binds the effects.
+        for code, record in sorted(self.mapping().items()):
             with self.subTest(exit=code):
+                action = record["guidance"]
                 self.assertTrue(any(w in action.lower() for w in CHAIN_EFFECTS),
                                 f"exit {code} maps to {action!r}, which names no chain effect")
+                self.assertIn("effect", record,
+                              f"exit {code} declares no machine effect for the mode driver")
 
     def test_each_row_is_specific_to_its_own_code(self):
         """A generic-effect check is satisfied by replacing all eight rows with `notify`.
@@ -407,11 +413,12 @@ class TestWatcherExitActionMap(unittest.TestCase):
         mapping = self.mapping()
         for code, needle in required.items():
             with self.subTest(exit=code):
-                self.assertIn(needle, mapping.get(code, "").lower(),
-                              f"exit {code}'s action does not state {needle!r}")
+                guidance = mapping.get(code, {}).get("guidance", "")
+                self.assertIn(needle, guidance.lower(),
+                              f"exit {code}'s guidance does not state {needle!r}")
 
     def test_no_two_codes_share_an_action(self):
-        actions = list(self.mapping().values())
+        actions = [record["guidance"] for record in self.mapping().values()]
         self.assertEqual(len(set(actions)), len(actions), "two exits map to the same action text")
 
 

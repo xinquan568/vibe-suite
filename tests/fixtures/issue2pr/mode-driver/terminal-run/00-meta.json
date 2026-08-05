@@ -1,0 +1,11 @@
+{
+  "schema_version": 2,
+  "run_id": "terminal-run",
+  "source_id": "terminal",
+  "profile": "fixture",
+  "scenario": "new-feature",
+  "review_mode": "full",
+  "max_review_rounds": 2,
+  "reviewer_backend": "codex",
+  "created_at": "2026-08-01T00:00:00Z"
+}

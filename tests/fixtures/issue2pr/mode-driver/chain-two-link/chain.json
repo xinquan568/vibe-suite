@@ -1,0 +1,19 @@
+{
+  "chain_id": "chain-fx",
+  "status": "waiting_merge",
+  "current_index": 0,
+  "auto_merge": true,
+  "babysit_cap": 3,
+  "links": [
+    {
+      "issue": "fx-1",
+      "status": "waiting_merge",
+      "pr": 11,
+      "cursor": "2026-08-01T00:00:00Z"
+    },
+    {
+      "issue": "fx-2",
+      "status": "pending"
+    }
+  ]
+}

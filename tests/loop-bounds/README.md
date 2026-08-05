@@ -32,7 +32,7 @@ made twice before; this file exists partly so the third time is harder.
 |---|---|---|---|
 | `refine-proposal` | `max_review_rounds` | a `## Round bounds` block | none named |
 | `issue2pr` | `max_review_rounds` | a `## Round bounds` block | `EXIT_MAX_ROUNDS` |
-| `fix` | `--max-rounds` | step 5's prose | none named |
+| `fix` | `--max-rounds` | a `## Round bounds` block | none named |
 
 `fix`'s `FIXED` / `NOT FIXED` / `PARTIAL` / `REGRESSED` are **per-issue verdicts**, and `NOT FIXED` and
 `PARTIAL` normally *continue* the loop. Reading them as terminal statuses would invert their meaning.
@@ -48,8 +48,11 @@ That is a gap in the artifact, not in this harness. **Issue #123** is filed to c
 
 ## `loops.json` holds nothing a document could disagree with
 
-Only where each document is, and which extractor reads its declaration — the two shapes differ, and one
-parser would have to guess. Caps, contract citations and terminal statuses are read from the documents.
+Only where each document is, and which declaration shape reads it — one shape today, since #125
+brought `fix`'s declaration into the same `## Round bounds` form the other two use. The selector
+stays so a second shape would have to declare itself there, and bring its own parser, rather than
+be guessed from the text. Caps, contract citations and terminal statuses are read from the
+documents.
 
 ## Stimuli
 
@@ -64,14 +67,17 @@ An unknown mode makes the stub return a **clean** verdict, which is exactly what
 mode look like a passing one. That is why the assertions are "this mode never returns clean" rather
 than "this mode exists".
 
-## The round-loop declaration is frozen, and that is all it is
+## The round-loop declaration is parsed as data, and how it got there
 
-`commands/fix.md`'s `## Step 5 — the round loop` section is compared byte-for-byte against
-`tests/fixtures/loop-bounds/fix-step5-section.md`. Editing the section fails the suite until the golden
-is updated in the same commit.
+`commands/fix.md` now carries a `## Round bounds` block that `parse_round_bounds` reads under a
+strict grammar: a closed field vocabulary, one field per bullet, duplicates and omissions rejected,
+verdict sets as exact backticked literals with no trailing prose, fence-aware and
+uniqueness-asserting section extraction. The tests read values, not sentences.
 
-**It is drift detection, not an adversarial guarantee.** That sentence is the deliverable of a long
-detour and is worth more than the check itself.
+Before #125 landed that block, the section was **frozen byte-for-byte** against a golden fixture —
+drift detection, not an adversarial guarantee. The golden was deleted when the block arrived rather
+than kept alongside: two mechanisms for one property is how the weaker one gets read as the
+stronger. The detour that produced the golden, and then the block, is worth keeping:
 
 ### Eight attempts to verify what the document *means*
 
@@ -107,29 +113,30 @@ tier never promised more than "the specification says so". Eight rounds were spe
 Contract-tier check adversarially airtight, which is a different and much harder goal — and noticing
 that is the same discipline as the Executable/Contract/Operator split at the top of this file.
 
-So the check asserts what a golden fixture asserts anywhere in this repository: **the text has not
-changed.** It catches loop semantics altered as a side effect of an edit, which is the realistic
-failure. It does not catch a document built to defeat it.
+So the golden asserted what a golden fixture asserts anywhere in this repository: **the text has
+not changed** — catching loop semantics altered as a side effect of an edit, never a document built
+to defeat it. The structured declaration ended that arms race by removing its subject: a parsed
+field has no neighbouring prose to contradict it, so there is nothing left to extract or compare
+adversarially. That is what attempt 9 would have needed to be, and it required changing the shipped
+document, which is why it was #125's to do and not this harness's.
 
 ### What is genuinely closed, and what is not
 
 | Claim | Status |
 |---|---|
-| the `## Step 5` section cannot change without failing | **holds** — byte equality with no `strip()`, fence-aware extraction, heading uniqueness asserted |
+| the `## Round bounds` declaration cannot drift without failing | **holds** — a strict-grammar parse (closed field set, exact verdict sets, fence-aware unique extraction); a changed value fails the reading tests, a changed shape fails the parse |
 | each verdict appears at least once as an uppercase code literal | **holds**, and that is the entire claim — it catches the vocabulary being renamed *wholesale* |
-| a verdict renamed **outside** the frozen section is caught | **not claimed.** Each verdict occurs several times, so lowercasing one occurrence elsewhere satisfies the check. |
-| the document as a whole is free of contradictions | **not claimed.** Content outside the section is not read. |
-| the document cannot be constructed to defeat the check | **not claimed**, and the eight attempts above are why |
+| a verdict renamed **outside** the structured block is caught | **not claimed.** Each verdict occurs several times, so lowercasing one occurrence elsewhere satisfies the check. |
+| the document as a whole is free of contradictions | **not claimed.** Prose outside the block is not read — the declared values echo in exactly one prose surface, the CLI argument-hint, and a test asserts that echo agrees with the block. |
+| the document cannot be constructed to defeat the check | **holds — for the declaration.** The harness reads values, not sentences: the grammar rejects decoy headings, duplicates, unknown or compounded fields, and prose riding on verdict lines. No claim is made about prose elsewhere in the document. |
 
 The third row previously read as **holds**. It was wrong, and a reviewer found it by lowercasing an
-occurrence outside the section. That is the **third** time this link overstated an assertion, always in
-the same direction — which is why the table now lists what is *not* claimed at greater length than what
-is.
+occurrence outside the section. That is the **third** time this link overstated an assertion, always
+in the same direction — which is why the table still lists what is *not* claimed, and why the last
+row's **holds** is scoped to the declaration and nothing wider.
 
-Closing the last row needs a **structured declaration** `fix.md` does not have — a parsed field has no
-neighbouring prose to contradict it, so the arms race ends: the test reads values, not sentences.
-
-**Issue #125 is filed** for it, and it says the golden fixture is *deleted* when that lands rather than
-kept alongside — two mechanisms for one property is how the weaker one gets read as the stronger. It
-changes a shipped command's document, which is why it is not done inside a test-harness issue; #123 is
-the adjacent change bringing `fix` under the reviewer contract, and the two touch the same file.
+**Issue #125 landed** that structured declaration, and the golden fixture was deleted with it rather
+than kept alongside — two mechanisms for one property is how the weaker one gets read as the
+stronger. **#123** remains open: it brings `fix` under the reviewer contract (the re-ask clause and
+registry membership above), touches the same file, and inverts this harness's characterisation test
+when it lands.

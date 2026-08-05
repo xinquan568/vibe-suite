@@ -71,7 +71,9 @@ class TestArgumentSurface(FixTestCase):
         self.assertRegex(self.norm, r"severity all[^.]*default|default[^.]*severity all|"
                                     r"--severity all \(the default\)")
         self.assertRegex(self.norm, r"claude \(default\)|default[^.]*claude")
-        self.assertRegex(self.norm, r"default 3|default of 3")
+        # vibe-125: the max-rounds default moved from prose ("default 3") into the structured
+        # `## Round bounds` block ("- default: 3"); both forms declare it.
+        self.assertRegex(self.norm, r"default:? 3|default of 3")
 
     def test_max_rounds_range(self):
         self.assertRegex(self.norm, r"1[-–]5")

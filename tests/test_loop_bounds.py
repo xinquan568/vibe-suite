@@ -59,33 +59,125 @@ def document(name):
     return (REPO_ROOT / LOOPS[name]["document"]).read_text(encoding="utf-8")
 
 
-def extract_domain(name):
-    """Read a loop's cap domain from its own document, by the shape `loops.json` says it uses.
+def extract_section(text, heading):
+    """A section's body, **fence-aware and uniqueness-asserting** (vibe-125).
 
-    Two shapes, because the loops declare differently and a single parser would have to guess which it
-    was reading — which is the only thing `loops.json` exists to record.
+    Generalised from the golden's extractor rather than deleted with it: the fence and uniqueness
+    lessons (a fenced decoy heading beats a first-match extractor; two real headings make the
+    subject ambiguous) apply to any section a test reads, so the discipline moved up a level when
+    the golden died. Takes text, not a loop name, so grammar tests can feed constructed documents.
+
+    No `.strip()` on the body — outer whitespace is part of the text (the ninth refutation: four
+    spaces before the first line render it as a code block while a stripped comparison still
+    matches).
+    """
+    def fence_scan(lines):
+        """Yield (line, fenced) with real CommonMark-shaped fence tracking: a fence opens with
+        three or more backticks OR tildes, and closes only on the same character at at least the
+        opening length — so a ``` inside a ```` block is content, and ~~~ fences fence at all
+        (the naive startswith("```") toggle missed both, and each miss admitted a decoy)."""
+        open_fence = None
+        for line in lines:
+            match = re.match(r"(`{3,}|~{3,})", line.lstrip())
+            if match:
+                token = match.group(1)
+                if open_fence is None:
+                    open_fence = (token[0], len(token))
+                    yield line, True
+                    continue
+                if token[0] == open_fence[0] and len(token) >= open_fence[1]:
+                    open_fence = None
+                    yield line, True
+                    continue
+                yield line, True
+                continue
+            yield line, open_fence is not None
+
+    lines = text.splitlines()
+    starts = [i for i, (line, fenced) in enumerate(fence_scan(lines))
+              if not fenced and line.rstrip() == heading]
+    if len(starts) != 1:
+        raise AssertionError(
+            "expected exactly one %r heading outside a code fence, found %d" % (heading, len(starts)))
+    body = []
+    for line, fenced in fence_scan(lines[starts[0] + 1:]):
+        if not fenced and line.startswith("## "):
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
+#: The complete field set of a `## Round bounds` declaration, and the grammar's whole vocabulary.
+ROUND_BOUNDS_FIELDS = ("flag", "floor", "ceiling", "default",
+                       "continue-verdicts", "stop-verdicts", "at-cap")
+
+
+def parse_round_bounds(text):
+    """The `## Round bounds` block as **data under a strict grammar** (vibe-125, issue #125).
+
+    A parsed field has no neighbouring prose to contradict it, so the eight-attempt arms race over
+    extraction and comparison ends here — provided the parser is strict. Every body line is a
+    `- field: value` bullet; the field vocabulary is closed; duplicates and omissions are errors;
+    verdict fields are exact sets of backticked literals with no trailing prose; the flag is exactly
+    one backticked literal; the numeric fields are bare integers. A permissive reading anywhere on
+    this list is a place prose could creep back in.
+    """
+    body = extract_section(text, "## Round bounds")
+    fields = {}
+    for raw in body.splitlines():
+        if not raw.strip():
+            continue
+        match = re.fullmatch(r"- ([a-z-]+): (.+)", raw.rstrip())
+        if not match:
+            raise AssertionError(
+                "not a top-level '- field: value' bullet (indentation included): %r" % raw)
+        key, value = match.group(1), match.group(2).strip()
+        if key not in ROUND_BOUNDS_FIELDS:
+            raise AssertionError("unknown field %r" % key)
+        if key in fields:
+            raise AssertionError("duplicate field %r" % key)
+        fields[key] = value
+    missing = [f for f in ROUND_BOUNDS_FIELDS if f not in fields]
+    if missing:
+        raise AssertionError("missing field(s): %s" % ", ".join(missing))
+    for key in ("floor", "ceiling", "default"):
+        if not re.fullmatch(r"[0-9]+", fields[key]):
+            raise AssertionError("%s must be a bare integer, got %r" % (key, fields[key]))
+        fields[key] = int(fields[key])
+    for key in ("flag", "continue-verdicts", "stop-verdicts"):
+        literals = re.findall(r"`([^`]+)`", fields[key])
+        residue = re.sub(r"`[^`]+`", "", fields[key]).replace(",", "").strip()
+        if residue:
+            raise AssertionError("%s carries prose outside backticked literals: %r" % (key, residue))
+        if key == "flag":
+            if len(literals) != 1:
+                raise AssertionError("flag must be exactly one backticked literal, got %r" % literals)
+            fields[key] = literals[0]
+        else:
+            if not literals:
+                raise AssertionError("%s names no backticked literals" % key)
+            fields[key] = frozenset(literals)
+    return fields
+
+
+def extract_domain(name):
+    """Read a loop's cap domain from its own document, by the shape `loops.json` records.
+
+    One shape today — vibe-125 retired `prose-flag` when `fix` gained its block. The selector
+    stays so a second shape must declare itself in `loops.json`, and add its own parser here,
+    rather than be guessed from the text.
     """
     text = document(name)
     shape = LOOPS[name]["cap_declaration"]
 
     if shape == "round-bounds-block":
-        block = re.search(r"(?ms)^##[ ]Round bounds[ ]*$(.*?)(?=^#{1,2}[ ]|\Z)", text)
-        if not block:
-            return None
-        body = block.group(1)
+        body = extract_section(text, "## Round bounds")
         found = {}
         for label in ("floor", "ceiling", "default"):
             match = re.search(r"\b%s\b\W{0,20}?(\d+)" % label, body, re.I)
             if match:
                 found[label] = int(match.group(1))
         return found or None
-
-    if shape == "prose-flag":
-        match = re.search(r"--max-rounds\D{0,20}(\d+)\s*[-–]\s*(\d+)\D{0,30}default\s*(\d+)", text, re.I)
-        if not match:
-            return None
-        return {"floor": int(match.group(1)), "ceiling": int(match.group(2)),
-                "default": int(match.group(3))}
 
     raise AssertionError("unknown cap_declaration shape %r" % shape)
 
@@ -238,9 +330,90 @@ class TestExtraction(unittest.TestCase):
             with self.subTest(loop=name):
                 self.assertEqual(LOOPS[name]["cap_declaration"], "round-bounds-block")
 
-    def test_fix_declares_its_cap_in_prose(self):
-        """A different shape, which is the only reason an extractor selector exists."""
-        self.assertEqual(LOOPS["fix"]["cap_declaration"], "prose-flag")
+    def test_fix_declares_a_round_bounds_block(self):
+        """Inverted by vibe-125: the third loop now declares structurally too."""
+        self.assertEqual(LOOPS["fix"]["cap_declaration"], "round-bounds-block")
+        parse_round_bounds(document("fix"))
+
+
+class TestRoundBoundsAsData(unittest.TestCase):
+    """vibe-125: `fix`'s declaration is read as values, not sentences."""
+
+    def test_fix_verdict_routing_is_read_as_data(self):
+        fields = parse_round_bounds(document("fix"))
+        self.assertEqual(fields["continue-verdicts"], frozenset({"NOT FIXED", "PARTIAL"}))
+        self.assertEqual(fields["stop-verdicts"], frozenset({"REGRESSED"}))
+        self.assertEqual(fields["flag"], "--max-rounds")
+        self.assertEqual(fields["at-cap"], "stop and report")
+        self.assertEqual({"floor": fields["floor"], "ceiling": fields["ceiling"],
+                          "default": fields["default"]}, EXPECTED_DOMAIN["fix"])
+
+    def test_the_cli_hint_agrees_with_the_block(self):
+        """The argument-hint is the one place a number may echo the block — machine-checked.
+
+        The match is scoped to the frontmatter `argument-hint:` value: a document-wide search
+        would let stray prose satisfy the assertion after the hint itself lost its range.
+        """
+        fields = parse_round_bounds(document("fix"))
+        front = document("fix").split("---\n", 2)[1]
+        hint_line = re.search(r"(?m)^argument-hint:\s*(.+)$", front)
+        self.assertIsNotNone(hint_line, "fix.md declares no argument-hint")
+        rng = re.search(r"--max-rounds (\d+)-(\d+)", hint_line.group(1))
+        self.assertIsNotNone(rng, "the argument-hint no longer names the flag's range")
+        self.assertEqual((int(rng.group(1)), int(rng.group(2))),
+                         (fields["floor"], fields["ceiling"]),
+                         "the CLI hint may echo the block, and must agree with it")
+
+    #: A minimal well-formed document; every grammar cell below is one mutation of it.
+    GOOD = "\n".join([
+        "# doc", "",
+        "## Round bounds", "",
+        "- flag: `--max-rounds`",
+        "- floor: 1",
+        "- ceiling: 5",
+        "- default: 3",
+        "- continue-verdicts: `NOT FIXED`, `PARTIAL`",
+        "- stop-verdicts: `REGRESSED`",
+        "- at-cap: stop and report",
+        "", "## Next", "", "prose"])
+
+    def test_the_reference_document_parses(self):
+        fields = parse_round_bounds(self.GOOD)
+        self.assertEqual(fields["floor"], 1)
+
+    def test_round_bounds_grammar_is_strict(self):
+        """Table-driven adversarial cells: each is a document a permissive parser would accept."""
+        good = self.GOOD
+        cells = {
+            "heading only inside a fence":
+                "# doc\n\n```\n## Round bounds\n```\n\n## Next\n",
+            "duplicate real heading":
+                good + "\n\n## Round bounds\n\n- flag: `--max-rounds`\n",
+            "duplicate field": good.replace("- floor: 1", "- floor: 1\n- floor: 1"),
+            "unknown field": good.replace("- at-cap: stop and report",
+                                          "- at-cap: stop and report\n- extra: `x`"),
+            "missing field": good.replace("- default: 3\n", ""),
+            "unbackticked verdict": good.replace("`REGRESSED`", "REGRESSED"),
+            "non-bullet body line": good.replace("- floor: 1", "floor is one"),
+            "two fields compounded on one bullet":
+                good.replace("- floor: 1\n- ceiling: 5", "- floor: 1, ceiling: 5"),
+            "flag not exactly one literal":
+                good.replace("- flag: `--max-rounds`", "- flag: `--max-rounds` `-r`"),
+            "non-integer numeric": good.replace("- default: 3", "- default: three"),
+            "trailing prose after verdicts": good.replace("`PARTIAL`", "`PARTIAL` while open"),
+            "declaration indented as a code block":
+                good.replace("\n- ", "\n    - "),
+            "declaration wholly inside a tilde fence":
+                "# doc\n\n~~~\n" + good[good.index("## Round bounds"):]
+                + "\n~~~\n",
+            "long fence not closed by a shorter one":
+                "# doc\n\n````\n```\n" + good[good.index("## Round bounds"):]
+                + "\n````\n",
+        }
+        for name, text in cells.items():
+            with self.subTest(cell=name):
+                with self.assertRaises(AssertionError):
+                    parse_round_bounds(text)
 
 
 class TestContractDelegation(unittest.TestCase):
@@ -339,44 +512,6 @@ class TestTerminalVocabulary(unittest.TestCase):
                                  "a run-level terminal status here would mean the three loops now "
                                  "share a vocabulary — which is a change, not a detail")
 
-    def test_fix_round_loop_declaration_is_frozen(self):
-        """The `## Step 5` section of `commands/fix.md` must equal its golden, byte for byte.
-
-        **This is drift detection, not an adversarial guarantee**, and the distinction is the whole
-        point of the exercise that produced it. Eight successive checks tried to establish that the
-        document *means* the right thing, and a reviewer refuted every one:
-
-        | # | Check | Refuted by |
-        |---|---|---|
-        | 1 | no stopping phrase after the verdict | putting the phrase in front |
-        | 2 | no stopping verb stem in the sentence | "causes the loop to exit" |
-        | 3 | a continuing word near the verdict | "prevents another round" |
-        | 4 | exact clause present (substring) | prefixing "It is false that" |
-        | 5 | whole-sentence equality | "viz." splits the sentence |
-        | 6 | section golden via `norm()` | lowercasing hides `NOT FIXED` -> `not fixed` |
-        | 7 | whitespace-collapsed golden | a 4-space indent makes it a code block |
-        | 8 | exact golden, naive extraction | a fenced-code decoy heading |
-
-        Attempts 1-5 were bad checks. 6 and 7 were a sound check whose "only allowance" re-admitted the
-        class it was meant to close. 8 moved the surface from comparison to extraction.
-
-        The lesson is not that a ninth check would have worked. Establishing what a prose document
-        *means*, against a reader actively looking for a way through, is an arms race over extraction
-        and comparison surfaces with no natural end — and AC-4's terminal-status clause for `fix` is
-        **Contract**-tier by this directory's own table, which never promised more than "the
-        specification says so".
-
-        So this asserts exactly what a golden fixture asserts anywhere in this repository: **the text
-        has not changed**. It catches an edit that alters the loop's declared semantics as a side
-        effect of touching something nearby, which is the realistic failure. It does not catch someone
-        deliberately constructing a document to defeat it, and nothing here claims it does — closing
-        that needs a structured declaration `fix.md` does not have, which is filed separately.
-        """
-        self.assertEqual(fix_step5_section(), GOLDEN.read_text(),
-                         "commands/fix.md's round-loop section changed. If that was deliberate, "
-                         "update tests/fixtures/loop-bounds/fix-step5-section.md in the same commit "
-                         "-- the point is that loop semantics cannot move without a reviewer seeing it")
-
     def test_the_verdict_literals_exist_as_uppercase_code_literals(self):
         """Each verdict appears **at least once** as an uppercase code literal. That is the whole claim.
 
@@ -387,7 +522,8 @@ class TestTerminalVocabulary(unittest.TestCase):
 
         Overstating an assertion is the specific mistake this link has now made three times, always in
         the same direction. What this catches is a verdict vocabulary removed or renamed **wholesale**.
-        Anything narrower is the golden's job, and the golden reads one section.
+        Narrower renames inside the declaration fail `parse_round_bounds`'s exact-set assertion;
+        the document's remaining prose is not graded, and nothing here claims it is.
         """
         text = document("fix")
         for verdict in ("FIXED", "NOT FIXED", "PARTIAL", "REGRESSED"):
@@ -395,68 +531,6 @@ class TestTerminalVocabulary(unittest.TestCase):
                 self.assertIn("`%s`" % verdict, text,
                               "the verdicts are code literals; a document that names none of them "
                               "in backticks has renamed the vocabulary")
-
-
-def norm(text):
-    return re.sub(r"\s+", " ", text.replace("**", "").replace("`", "")).lower()
-
-
-#: The section whose text is frozen, and the file holding its golden copy.
-SECTION_HEADING = "## Step 5 — the round loop"
-GOLDEN = Path(__file__).parent / "fixtures" / "loop-bounds" / "fix-step5-section.md"
-
-
-def fix_step5_section():
-    """`commands/fix.md`'s round-loop section, extracted **fence-aware** and required to be unique.
-
-    A naive `split(HEADING)[1].split("\\n## ")[0]` is the eighth thing a reviewer broke on this
-    assertion: a fenced code block containing a decoy copy of the heading satisfies a first-match
-    extractor while the operative section is free to change. Markdown headings do not exist inside a
-    fence, so the fence state has to be tracked rather than assumed away.
-
-    Uniqueness is asserted, not resolved by taking the first match — two real headings of the same name
-    is a document problem, and picking one silently is how the decoy worked.
-    """
-    lines = document("fix").splitlines()
-    fenced, starts = False, []
-    for i, line in enumerate(lines):
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-            continue
-        if not fenced and line.rstrip() == SECTION_HEADING:
-            starts.append(i)
-
-    if len(starts) != 1:
-        raise AssertionError(
-            "expected exactly one %r heading outside a code fence, found %d — a second one means the "
-            "section this test freezes is ambiguous" % (SECTION_HEADING, len(starts)))
-
-    fenced, body = False, []
-    for line in lines[starts[0] + 1:]:
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-        elif not fenced and line.startswith("## "):
-            break
-        body.append(line)
-
-    # **No `.strip()`.** Stripping the section's outer whitespace was the ninth refutation: four spaces
-    # before the first line are discarded, so the golden still matches while markdown renders the line
-    # as an indented code block — the same failure as attempt 7, moved to the section boundary.
-    # Leading and trailing whitespace is part of the frozen text like everything else.
-    return "\n".join(body)
-
-
-#: The round-loop declaration in `commands/fix.md`, verbatim after `norm()`. Held as a constant so the
-#: assertion is a string equality rather than a judgement about English — see the three failed
-#: judgement-based attempts recorded at the call site.
-#:
-#: Normalisation is deliberately minimal: it collapses whitespace so the clause can wrap across lines,
-#: strips `**`/backticks so emphasis can move, and lowercases. It does **not** touch word order,
-#: punctuation, or vocabulary, which is where an inversion has to live.
-REQUIRED_CONTINUE_DECLARATION = (
-    "a round is: fix the issues still open → verify → keep going while "
-    "any remain not fixed or partial."
-)
 
 
 class TestReadmeStatesTheLimit(unittest.TestCase):

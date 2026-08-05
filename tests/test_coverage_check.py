@@ -839,5 +839,227 @@ class TestWorkspaceManifestIsReproducible(unittest.TestCase):
                          "workspace.json is stale against the live workspace skills")
 
 
+class TargetCase(CLICase):
+    """vibe-128: a K/M row's promise either landed (`delivered:`) or is scheduled under the
+    checker's frozen constant. Schema cells mutate a disposition copy against the real tree;
+    enforcement cells mutate a full tree copy, because the acceptance clause is about artifacts
+    disappearing from the tree, not rows disappearing from the map."""
+
+    def mutated(self, row, transform, root=None):
+        """Run the CLI with one row's block rewritten by `transform` in a sandbox copy."""
+        tmp = self.sandbox()
+        disposition = tmp / "disposition.yaml"
+        text = disposition.read_text(encoding="utf-8")
+        match = re.search(rf"(  - row: {re.escape(row)}\n(?:    .+\n)+)", text)
+        self.assertIsNotNone(match, f"row {row} not found in disposition.yaml")
+        disposition.write_text(text.replace(match.group(1), transform(match.group(1)), 1),
+                               encoding="utf-8")
+        return self.run_check(root=root, disposition=disposition, manifests=tmp / "manifests")
+
+    @staticmethod
+    def drop_field(block, key):
+        out, dropped = [], False
+        for line in block.splitlines(keepends=True):
+            if line.startswith(f"    {key}:"):
+                dropped = True
+                continue
+            out.append(line)
+        assert dropped, f"field {key!r} not present to drop"
+        return "".join(out)
+
+    @staticmethod
+    def set_field(block, key, value):
+        """Replace or append `    key: value`."""
+        block = TargetCase.drop_field(block, key) if f"\n    {key}:" in "\n" + block else block
+        return block + f"    {key}: {value}\n"
+
+    def tree_sandbox(self):
+        """A throwaway copy of the whole repository, so removing an artifact is isolated."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = tmp / "tree"
+        shutil.copytree(REPO_ROOT, root,
+                        ignore=shutil.ignore_patterns(".git", "__pycache__", "node_modules"))
+        return root
+
+    def run_on_tree(self, root):
+        return self.run_check(root=root, disposition=root / "docs" / "disposition.yaml",
+                              manifests=root / "tests" / "source-manifests")
+
+
+class TestTargetSchema(TargetCase):
+    """D1's truth table: exactly one of the two forms on every K/M row, neither on G/R/D."""
+
+    def test_baseline_passes(self):
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_k_row_with_delivered_removed_fails(self):
+        result = self.mutated("cc-suite:02", lambda b: self.drop_field(b, "delivered"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exactly one of 'delivered' or 'scheduled'", result.stderr)
+
+    def test_k_row_with_both_forms_fails(self):
+        def both(block):
+            return block + "    scheduled: S8\n    expected: [never/lands.md]\n"
+        result = self.mutated("cc-suite:02", both)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exactly one of 'delivered' or 'scheduled'", result.stderr)
+
+    def test_scheduled_without_expected_fails(self):
+        result = self.mutated("nlpm:20", lambda b: self.drop_field(b, "expected"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("required together", result.stderr)
+
+    def test_expected_without_scheduled_fails(self):
+        result = self.mutated("nlpm:20", lambda b: self.drop_field(b, "scheduled"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("required together", result.stderr)
+
+    def test_empty_delivered_list_fails(self):
+        result = self.mutated("cc-suite:02", lambda b: self.set_field(b, "delivered", "[]"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("non-empty", result.stderr)
+
+    def test_scalar_delivered_fails(self):
+        result = self.mutated(
+            "cc-suite:02", lambda b: self.set_field(b, "delivered", "commands/update.md"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("non-empty list", result.stderr)
+
+    def test_empty_expected_list_fails(self):
+        result = self.mutated("nlpm:20", lambda b: self.set_field(b, "expected", "[]"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("non-empty", result.stderr)
+
+    def test_parent_escape_in_delivered_fails(self):
+        result = self.mutated(
+            "cc-suite:02", lambda b: self.set_field(b, "delivered", "[../escape.md]"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("clean relative POSIX path", result.stderr)
+
+    def test_absolute_delivered_path_fails(self):
+        result = self.mutated(
+            "cc-suite:02", lambda b: self.set_field(b, "delivered", "[/etc/passwd]"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("clean relative POSIX path", result.stderr)
+
+    def test_delivered_on_a_g_row_fails(self):
+        result = self.mutated("nlpm:19", lambda b: b + "    delivered: [README.md]\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden on a G row", result.stderr)
+
+    def test_scheduled_on_an_r_row_fails(self):
+        def schedule(block):
+            return block + "    scheduled: S8\n    expected: [never/lands.md]\n"
+        result = self.mutated("cc-suite:10", schedule)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden on a R row", result.stderr)
+
+    def test_delivered_on_a_d_row_fails(self):
+        result = self.mutated("nlpm:24", lambda b: b + "    delivered: [README.md]\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden on a D row", result.stderr)
+
+    def test_command_row_must_deliver_a_command(self):
+        result = self.mutated(
+            "cc-suite:02", lambda b: self.set_field(b, "delivered", "[scripts/update.py]"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("command", result.stderr)
+
+    def test_path_target_row_must_deliver_its_home(self):
+        result = self.mutated(
+            "workspace:10", lambda b: self.set_field(b, "delivered", "[README.md]"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("templates/pr-body.md", result.stderr)
+
+
+class TestTargetEnforcement(TargetCase):
+    """D2: delivered artifacts must exist; the scheduled set is frozen in code and self-expiring."""
+
+    def test_removing_a_delivered_artifact_fails_naming_the_row(self):
+        # The acceptance clause end-to-end: workspace:06's delivered artifact vanishes from a
+        # throwaway tree copy and the gate goes red naming the row.
+        root = self.tree_sandbox()
+        (root / "schemas" / "manifest.schema.json").unlink()
+        result = self.run_on_tree(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("workspace:06", result.stderr)
+        self.assertIn("schemas/manifest.schema.json", result.stderr)
+
+    def test_never_existing_delivered_path_names_row_line_and_path(self):
+        result = self.mutated(
+            "cc-suite:02",
+            lambda b: self.set_field(b, "delivered", "[commands/update.md, commands/never-existed.md]"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cc-suite:02", result.stderr)
+        self.assertIn("commands/never-existed.md", result.stderr)
+        self.assertRegex(result.stderr, r"disposition\.yaml:\d+")
+
+    def test_directory_as_delivered_artifact_fails(self):
+        result = self.mutated(
+            "cc-suite:02", lambda b: self.set_field(b, "delivered", "[commands/update.md, commands]"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("directory", result.stderr)
+
+    def test_scheduled_stage_mutation_fails(self):
+        result = self.mutated(
+            "nlpm:20", lambda b: self.set_field(b, "scheduled", "S9"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("code change", result.stderr)
+
+    def test_scheduled_anchor_decoy_fails(self):
+        result = self.mutated(
+            "nlpm:20", lambda b: self.set_field(b, "expected", "[never/lands.md]"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("frozen", result.stderr)
+
+    def test_extra_scheduled_row_fails(self):
+        def schedule(block):
+            block = self.drop_field(block, "delivered")
+            return block + "    scheduled: S8\n    expected: [never/lands.md]\n"
+        result = self.mutated("nlpm:11", schedule)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("frozen scheduled set", result.stderr)
+
+    def test_graduation_is_a_data_only_change(self):
+        # A scheduled row flips to delivered with no checker edit: subset semantics.
+        def graduate(block):
+            block = self.drop_field(block, "scheduled")
+            block = self.drop_field(block, "expected")
+            return block + "    delivered: [README.md]\n"
+        result = self.mutated("nlpm:23", graduate)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_landed_anchor_demands_the_flip(self):
+        root = self.tree_sandbox()
+        (root / "site").mkdir()
+        (root / "site" / "index.md").write_text("landed\n", encoding="utf-8")
+        result = self.run_on_tree(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("nlpm:23", result.stderr)
+        self.assertIn("flip the row to delivered", result.stderr)
+
+
+class TestScheduledListing(TargetCase):
+    """D2's visibility promise: every run with a parseable disposition prints the scheduled rows."""
+
+    ROWS = ("nlpm:12", "nlpm:13", "nlpm:20", "nlpm:21", "nlpm:23")
+
+    def test_listing_appears_on_a_passing_run(self):
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for row in self.ROWS:
+            self.assertIn(f"scheduled: {row}", result.stdout)
+
+    def test_listing_appears_on_a_failing_run(self):
+        root = self.tree_sandbox()
+        (root / "schemas" / "manifest.schema.json").unlink()
+        result = self.run_on_tree(root)
+        self.assertNotEqual(result.returncode, 0)
+        for row in self.ROWS:
+            self.assertIn(f"scheduled: {row}", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

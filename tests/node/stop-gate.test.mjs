@@ -116,6 +116,10 @@ test("the PUBLISHED prompt file is 0600 inside a 0700 scratch root", () => {
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.ok(existsSync(probe), `the fixture never ran: ${result.stdout}\n${result.stderr}`);
   const seen = JSON.parse(readFileSync(probe, "utf8"));
+  // The fixture identifies the file by content, so these bits belong to THIS invocation's prompt —
+  // matching the first `vibe-stop-gate-*` root it could read would let a stale or concurrent root
+  // answer for a prompt that was absent or wrong.
+  assert.equal(seen.promptMatched, true, "the observed file must be this invocation's prompt");
   assert.equal(seen.promptMode, "600",
     "a world-readable prompt would publish the session diff to every local account");
   assert.equal(seen.scratchMode, "700");

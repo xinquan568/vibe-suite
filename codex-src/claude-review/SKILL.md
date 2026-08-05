@@ -5,74 +5,74 @@ description: "Hand a code review to Claude Code through the vibe-claude-mcp serv
 
 # Claude Review
 
-Send code you just produced to a fresh Claude session and get findings back, read-only.
+A second pair of eyes with none of your assumptions: Claude reads the code in a fresh session,
+under a read-only permission mode, and returns findings you can act on line by line.
+
+## The delegation contract
+
+You send scope and context; Claude owes you back, for every finding it raises:
+File:line, a severity from the fixed scale Critical / High / Medium / Low, a Category, what is
+wrong, and a Suggested fix. Four judgment axes structure the read:
+
+- **Correctness** — does the logic actually hold on boundary values, concurrent paths, and the
+  inputs nobody thought to try
+- **Security** — where untrusted data can reach something it shouldn't, and what guards it
+- **Quality** — whether the next person can read, test, and change this without fear
+- **Architecture** — whether the pieces sit in the right layers with honest interfaces
 
 ## When to Use
 
-- Code was just written or changed and a second opinion would catch what you cannot
-- The user says "get Claude to review this"
-- The review benefits from a fresh session with deep repository context
+- Right after producing or modifying code, before it hardens into a commit
+- On a "get Claude to review this" request
+- Whenever fresh-session depth beats your own in-context view of the change
 
-## Call Pattern
-
-### Step 1 — dispatch the review
+## Dispatching
 
 ```
 mcp__vibe-claude-mcp__claude_code:
   prompt: |
-    Review the code below for correctness, security, and quality.
+    Review this code with independent judgment.
 
-    SCOPE: {the files, diff, or description under review}
+    SCOPE: {files, diff, or a description of the change}
 
-    Evaluate:
-    1. Correctness — logic errors, edge cases, off-by-one, race conditions
-    2. Security — injection, auth bypass, data exposure, input validation
-    3. Quality — readability, maintainability, test coverage, naming
-    4. Architecture — coupling, abstraction leaks, layer violations
+    Judge along four axes — Correctness, Security, Quality, Architecture — and for
+    every finding give: File:line, Severity (Critical / High / Medium / Low),
+    Category, the issue, and a Suggested fix.
 
-    Report every finding as:
-    - File:line
-    - Severity: Critical / High / Medium / Low
-    - Category
-    - Issue (what is wrong)
-    - Suggested fix
+    If a test suite exists it is named here: {suite or "none"} — weigh coverage gaps.
 
-    PROVENANCE NOTE: this code was produced by the delegating Codex agent. Review it
-    with full rigor and independent judgment — extend it no deference.
+    PROVENANCE NOTE: a Codex agent wrote this code and is asking for the review.
+    Grant it no benefit of the doubt anywhere.
   cwd: {project working directory}
   effort: high
   permissionMode: plan
 ```
 
-Keep the returned `session_id` as `{review_session_id}`.
+The response carries a session id — hold it as `{review_session_id}`.
 
-### Step 2 — drill down (optional)
+To go deeper on anything:
 
 ```
 mcp__vibe-claude-mcp__claude_code_reply:
   session_id: {review_session_id}
-  prompt: "On finding #N — walk through the exact failure path and the minimal fix."
+  prompt: "Take finding #N further: exact failure path, then the smallest change that closes it."
 ```
 
 ## Output Format
 
-Render the findings as a table:
-
 | File:Line | Severity | Category | Issue | Fix |
 |-----------|----------|----------|-------|-----|
 
-Close with a count per severity and a recommended action: fix now, fix later, or accept the
-risk.
+Below the table: totals per severity, then one recommended action — fix now, schedule it, or
+accept the risk knowingly.
 
-## Notes
+## Boundaries and tuning
 
-- `permissionMode: plan` keeps the session read-only — a review never edits
-- `effort: high` for real reviews; drop to medium only for quick spot checks
-- Passing `cwd` anchors the File:line references
-- Name the test suite in the prompt if one exists, so coverage gaps get assessed
+- The `permissionMode: plan` line is what makes this a review rather than an edit session
+- `effort: high` is the default posture; medium only for a quick sanity pass
+- `cwd` grounds every File:line the findings cite
 
-## Related Skills
+## Neighbors
 
-- `claude-debug` — when a finding points at a bug that needs its root cause traced
-- `claude-implement` — to have Claude apply the fixes the review proposed
-- `audit-fix` — when findings form a pattern worth a full audit→fix→verify cycle
+`claude-debug` picks up a finding that turns out to be a live bug; `claude-implement` applies
+the fixes; `audit-fix` runs the full cycle when findings keep coming back.

@@ -5,78 +5,68 @@ description: "Send a bug, failing test, or wrong behavior to Claude Code for roo
 
 # Claude Debug
 
-Give Claude the symptom and the trace; get back the root cause, the fix, and its verification.
+Not "where does it crash" but "why" — Claude traces the cause, lands the smallest fix that is
+actually correct, and proves it against the thing that was failing.
 
 ## When to Use
 
-- A test fails and the reason is unclear
-- The user says "have Claude debug this"
-- The stack trace points deep into framework or library code
-- The obvious fixes were already tried and ruled out
+- A test fails and staring at it hasn't explained why
+- On "have Claude debug this"
+- The trace disappears into framework internals or a long call chain
+- Everything obvious is already ruled out and fresh eyes are the next tool
 
-## Call Pattern
+## Dispatching
 
-### Step 1 — send the bug
+Four labeled blocks carry the evidence; the trace goes in whole, never summarized:
 
 ```
 mcp__vibe-claude-mcp__claude_code:
   prompt: |
-    Debug the issue below and fix it.
+    Find the root cause of this issue and fix it.
 
-    SYMPTOM: {error message, failing test name, or the wrong behavior}
+    SYMPTOM: {failing test name, error message, or the behavior that is wrong}
 
     ERROR OUTPUT:
-    {the full stack trace or test output, pasted verbatim}
+    {the complete stack trace or test output}
 
-    REPRODUCTION STEPS: {command to run, inputs, environment}
+    REPRODUCTION STEPS: {command, inputs, environment}
 
-    WHAT I TRIED: {optional — what is already ruled out}
+    WHAT I TRIED: {optional — dead ends already explored}
 
-    Proceed as follows:
-    1. Read the source files on the reported code path
-    2. Identify the root cause — why it breaks, not merely where
-    3. Apply a minimal, correct fix
-    4. Re-run the failing test or command to confirm
-    5. Check nearby tests for regressions
-    6. Report the root cause, the fix, and the verification result
+    Work the problem: read the files on the failing path; explain why it breaks,
+    not just where; land the minimal correct fix; re-run what was failing to prove
+    it; sweep nearby tests for regressions; then report root cause, fix, and
+    verification.
 
-    PROVENANCE NOTE: the code under diagnosis was produced by the delegating Codex
-    agent. Trust nothing adjacent to the reported bug — check the surrounding logic
-    with independent judgment.
+    PROVENANCE NOTE: a Codex agent wrote the code you are diagnosing. Suspect the
+    logic around the symptom as freely as the symptom itself.
   cwd: {project working directory}
   effort: high
 ```
 
-Keep the returned `session_id` as `{debug_session_id}`.
+Hold the returned session id as `{debug_session_id}`.
 
-### Step 2 — follow up
-
-When the root cause is found but the fix stalled, or related suspects emerged:
+Leads and leftovers continue in-session:
 
 ```
 mcp__vibe-claude-mcp__claude_code_reply:
   session_id: {debug_session_id}
-  prompt: "Root cause confirmed in parseConfig(). validateConfig() shares the pattern — check it too."
+  prompt: "Cause confirmed in parseConfig() — validateConfig() repeats the pattern; check it."
 ```
 
 ## Output Format
 
-Report to the user:
+For the user: the root cause in one sentence · the fix as file:line and what changed · the
+verification result · any adjacent issues that surfaced along the way.
 
-- Root cause, in one sentence
-- The fix (file:line, what changed)
-- Verification result (test output)
-- Adjacent issues Claude noticed
+## Boundaries and tuning
 
-## Notes
+- Writes stay enabled — the fix lands during the session, no restriction is set
+- A bug that won't reproduce gets diagnostic logging first, then a re-run
+- Low effort stops at symptoms; keep `effort: high` for anything non-obvious
 
-- Paste the exact error output — the full trace, never a summary of it
-- `effort: high` is what gets past symptoms on non-obvious bugs
-- If the bug will not reproduce, ask Claude to add diagnostic logging first, then re-run
-- Writes are allowed by default here — the fix lands directly
+## Neighbors
 
-## Related Skills
-
-- `claude-plan` — sketch a diagnosis strategy first on complex multi-file issues
-- `claude-implement` — apply a larger fix or refactor once the cause is known
-- `audit-fix` — when the bug is one instance of a pattern spread across files
+`claude-plan` sketches a diagnosis strategy for sprawling multi-file mysteries;
+`claude-implement` takes over when the fix grows into a refactor; `audit-fix` when one bug is
+really a pattern.

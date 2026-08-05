@@ -113,10 +113,14 @@ CONTRACTS = {
         ]),
 }
 
-#: Cells of the audit-fix argument table that must survive verbatim (defaults are contract).
+#: Cells of the audit-fix argument table that must survive verbatim (defaults are contract):
+#: every argument row with its default, not a sample of them.
 AUDIT_FIX_TABLE_ROWS = [
+    re.compile(r"--full[^|\n]*\|\s*off\s*\|[^|\n]*9"),
+    re.compile(r"--mini[^|\n]*\|\s*on\s*\|[^|\n]*5"),
     re.compile(r"--rounds[^|\n]*\|\s*3\s*\|"),
     re.compile(r"--severity=all\\?\|high[^|\n]*\|\s*`?all`?\s*\|"),
+    re.compile(r"--ask[^|\n]*\|\s*off\s*\|"),
     re.compile(r"file/dir path[^|\n]*\|\s*cwd\s*\|"),
 ]
 
@@ -158,13 +162,29 @@ class ContractTable(unittest.TestCase):
                     self.assertIn(token, text)
 
     def test_permission_mode_per_row(self):
+        # Placement and value, not mere presence: the restriction only binds when it sits inside
+        # a claude_code call form, and its value must be exactly "plan". Prose mentioning the
+        # argument satisfies nothing.
         for name, contract in CONTRACTS.items():
             text = body(name)
+            cc_blocks = [b for _, tool, b in call_blocks(text) if tool == "claude_code"]
             with self.subTest(skill=name):
                 if contract["plan_required"]:
-                    self.assertIn("permissionMode: plan", text)
+                    self.assertTrue(
+                        any(re.search(r"^  permissionMode: plan\s*$", b, re.M)
+                            for b in cc_blocks),
+                        f"{name}: no claude_code call form carries permissionMode: plan")
                 if contract["plan_forbidden"]:
-                    self.assertNotIn("permissionMode: plan", text)
+                    for b in cc_blocks:
+                        self.assertNotIn("permissionMode", b,
+                                         f"{name}: a call form carries a permission restriction "
+                                         "the contract forbids")
+                # Whenever the argument appears in any call form, its value is exactly "plan" —
+                # a permissionMode set to anything else is outside every row's contract.
+                for b in cc_blocks:
+                    for m in re.finditer(r"^  permissionMode:\s*(.+)$", b, re.M):
+                        self.assertEqual(m.group(1).strip(), "plan",
+                                         f"{name}: permissionMode value {m.group(1)!r}")
 
     def test_reply_blocks_carry_no_permission_mode(self):
         for name in CONTRACTS:
@@ -228,6 +248,22 @@ class ContractTable(unittest.TestCase):
         text = body("verify")
         b_idx = text.index("Option B")
         self.assertIn("{verify_session_id}", text[b_idx:])
+
+    def test_session_save_follows_the_first_dispatch(self):
+        # Session flow is ordered: the save instruction must come after the claude_code call
+        # form it saves from, so a source cannot satisfy the token check with a stray mention
+        # before any dispatch exists.
+        saves = {
+            "claude-review": "{review_session_id}", "claude-plan": "{plan_session_id}",
+            "claude-implement": "{impl_session_id}", "claude-debug": "{debug_session_id}",
+            "audit": "{audit_session_id}", "audit-fix": "{cycle_session_id}",
+        }
+        for name, token in saves.items():
+            with self.subTest(skill=name):
+                text = body(name)
+                first_call = text.index(f"mcp__{SERVER}__claude_code:")
+                self.assertGreater(text.index(token), first_call,
+                                   f"{name}: session save precedes the dispatch it saves from")
 
 
 if __name__ == "__main__":

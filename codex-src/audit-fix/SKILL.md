@@ -5,97 +5,82 @@ description: "The bounded quality loop: Claude audits, Codex fixes, Claude verif
 
 # Audit-Fix
 
-Claude audits. Codex fixes. Claude verifies. Repeat until clean or the bound is reached.
-
-The division of labor is the point: Claude supplies independent analysis and verification;
-Codex applies targeted fixes without relitigating the findings.
-
-## When to Use
-
-- The user says "audit and fix this" — findings resolved, not just listed
-- Automated quality enforcement after a feature lands
-- Before a commit, when open findings should not survive
+One loop, two actors, strict roles: **Claude audits** the scope read-only, **Codex applies**
+every fix with its own hands, **Claude verifies** the results in the same session. The split is
+load-bearing — the judge never edits, the editor never overrules the judge.
 
 ## Arguments
 
 | Argument | Default | Effect |
 |----------|---------|--------|
+| `--mini` | on | 5-dimension audit — faster |
 | `--full` | off | 9-dimension audit |
-| `--mini` | on | 5-dimension audit (faster) |
-| `--rounds N` | 3 | Maximum fix→verify iterations |
-| `--severity=all\|high` | `all` | Which findings to fix: Critical+High (full) or High-only (mini) under `high` |
-| `--ask` | off | Restore the interactive severity filter and continue/stop prompts |
-| file/dir path | cwd | Scope |
+| `--rounds N` | 3 | ceiling on fix→verify iterations |
+| `--severity=all\|high` | `all` | scope of fixing: `high` means Critical+High (full) or High-only (mini) |
+| `--ask` | off | brings back the interactive filter and continue/stop prompts |
+| file/dir path | cwd | scope |
 
-Without `--ask` the loop runs non-interactively: every finding gets fixed, and the loop stops
-after the first round if issues remain open.
+Default posture is non-interactive: every finding gets fixed, and if anything remains open
+after round one, the loop stops there and reports.
 
-## Workflow
+## When to Use
 
-### Step 1 — Claude audits
+- On "audit and fix this" — the ask is closure, not a list
+- Enforcing quality after a feature without babysitting each finding
+- Pre-commit, when open findings should not survive into the history
 
-Dispatch the audit exactly as the `audit` skill does (5 or 9 dimensions by the flags):
+## The loop
+
+**1 — Claude audits (read-only).** Dispatch per the `audit` skill's pattern, `--mini` or
+`--full` deciding the dimension list:
 
 ```
 mcp__vibe-claude-mcp__claude_code:
   prompt: |
-    Audit the code below and report every issue with its exact file:line.
-
+    Audit this scope and report every issue at its exact file:line.
     SCOPE: {files or directory}
+    Dimensions: {5 or 9, by the flags — named as in the audit skill}
+    Per finding: file:line | severity | dimension | issue | suggested fix
 
-    {the 5- or 9-dimension list, exactly as in the audit skill}
-
-    Each finding: file:line | severity | dimension | issue | suggested fix
-
-    PROVENANCE NOTE: code produced by the delegating Codex agent — audit with full
-    rigor and independent judgment.
+    PROVENANCE NOTE: a Codex agent produced this code — judge it independently
+    and with full rigor.
   cwd: {project working directory}
   effort: high
   permissionMode: plan
 ```
 
-Keep `session_id` as `{cycle_session_id}`.
+Hold the session id as `{cycle_session_id}`. Zero findings ends everything right here: report
+CLEAN and stop. Otherwise the findings table goes to the user.
 
-No findings → report CLEAN and stop. Otherwise show the findings table.
-
-### Step 2 — severity filter
-
-With `--ask`: offer **Fix all** / Fix Critical+High only / **Stop here** (keep the audit, fix
-manually — stops with the final report). Without it, apply the flag silently:
-`--severity=all` fixes everything; `--severity=high` filters to Critical+High (full) or
+**2 — filter.** Under `--ask`, offer three doors: **Fix all** · fix Critical+High only ·
+**Stop here** (keep the audit, fix by hand — the run ends with the report). Without `--ask`
+the flag decides silently: `all` fixes everything, `high` narrows to Critical+High (full) or
 High-only (mini).
 
-### Step 3 — the loop (at most `--rounds` iterations)
+**3 — rounds** (at most `--rounds`):
 
-**3a — Codex fixes.** For each remaining issue: read the file at the reported location and
-apply the minimal correct fix — nothing beyond the reported location and its directly related
-code, no opportunistic refactoring, no deletions the issue does not call for. Then detect and
-run the project's test suite (`package.json` test script → `npm test` · `pytest.ini`/
-`conftest.py` → `pytest` · `go.mod` → `go test ./...` · `Cargo.toml` → `cargo test`) and show
-`git diff --stat` plus the test results.
-
-**3b — Claude verifies, same session.**
+- *Codex fixes.* Per issue: open the file at the cited location, change the least that makes
+  it correct — no drive-by refactoring, no deletions the finding didn't ask for. Then find and
+  run the suite (`npm test` / `pytest` / `go test ./...` / `cargo test`, by project markers)
+  and show `git diff --stat` with the results.
+- *Claude verifies, same session.*
 
 ```
 mcp__vibe-claude-mcp__claude_code_reply:
   session_id: {cycle_session_id}
   prompt: |
-    These issues from your audit have been addressed. Verify each one.
-
+    These audit findings have been addressed — verify each.
     ISSUES:
-    {file:line | severity | description, one per line}
-
-    For each, answer exactly one of: FIXED / NOT FIXED / PARTIAL / REGRESSED.
-    Read the files at the reported locations first — never assume a fix from its diff.
+    {file:line | severity | description}
+    Verdict per issue, exactly one of FIXED / NOT FIXED / PARTIAL / REGRESSED —
+    after reading the file at each location, never from the diff alone.
 ```
 
-**3c — evaluate.** All FIXED → final report. Issues remain and rounds are left: with `--ask`,
-show them and ask fix-again-or-stop; without it, stop with the partial state. The round
-counter hitting `--rounds` always ends the loop.
+- *Decide.* Everything FIXED → the report. Open issues with rounds to spare → `--ask` offers
+  another round or stop; the silent default stops. The counter reaching `--rounds` stops
+  unconditionally.
 
-### Step 4 — final report
-
-Scope, depth (mini/full), round count, then:
+**4 — report.** Scope · depth · rounds used, then the ledger:
 
 | Status | Count |
 |--------|-------|
@@ -104,13 +89,14 @@ Scope, depth (mini/full), round count, then:
 | Partial | N |
 | Regressed | N |
 
-A **Fixed** table (file:line, severity, issue), a **Remaining** table (adding verdict + notes),
-the `git diff --stat`, and next steps: review the diff, run the tests, commit if satisfied,
-re-run `audit-fix` on remaining files otherwise.
+Fixed table (file:line, severity, issue) · Remaining table (+ verdict, notes) ·
+`git diff --stat` · next steps: read the diff, run the suite, commit when satisfied, loop the
+leftovers through `audit-fix` again.
 
-## Notes
+## Rules the loop keeps
 
-- Claude's audit runs under `permissionMode: plan`; only Codex ever writes files
-- Reusing `{cycle_session_id}` for verification keeps Claude's full audit context — verdicts
-  come back sharper than from a fresh session
-- A fix that breaks tests gets reverted and reported NOT FIXED, never left in
+- Claude's audit leg carries `permissionMode: plan`; the verify leg is a reply in the same
+  session (the reply tool has no permission argument — its read-only character is instructed)
+- Only Codex touches files, ever
+- A fix that breaks tests is reverted and reported NOT FIXED — never left in as collateral
+- Same-session verification is why verdicts stay sharp: Claude remembers what it flagged

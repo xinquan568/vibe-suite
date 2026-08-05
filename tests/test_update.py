@@ -79,6 +79,10 @@ def write_fake_server(path, behaviour="respond"):
             del info["version"]
         if behaviour == "bad-version":
             info["version"] = {{"major": 9}}
+        if behaviour == "no-name":
+            del info["name"]
+        if behaviour == "bad-name":
+            info["name"] = 7
         if behaviour == "error":
             out = {{"jsonrpc": "2.0", "id": req["id"], "error": {{"code": -1, "message": "nope"}}}}
         else:
@@ -220,6 +224,17 @@ class Probe(unittest.TestCase):
 
     def test_malformed_reported_version_fails(self):
         proc = self.run_probe("bad-version")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("mismatch", proc.stderr)
+
+    def test_missing_reported_name_fails_immediately(self):
+        # An identity claim with no name must fail as a mismatch, not linger to the timeout.
+        proc = self.run_probe("no-name")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("mismatch", proc.stderr)
+
+    def test_malformed_reported_name_fails(self):
+        proc = self.run_probe("bad-name")
         self.assertEqual(proc.returncode, 1)
         self.assertIn("mismatch", proc.stderr)
 

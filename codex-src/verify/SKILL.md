@@ -5,73 +5,67 @@ description: "Ask Claude Code whether previously reported findings are actually 
 
 # Verify
 
-Codex supplies the issue list; Claude re-reads the code and renders a verdict per issue.
+Claims meet code: for every finding on the list, Claude re-reads the cited location and rules
+one of four ways — FIXED, NOT FIXED, PARTIAL, or REGRESSED — with reasons wherever the ruling
+isn't clean.
 
-## When to Use
-
-- Fixes from an `audit` run were just applied
-- A manual fix needs confirmation it landed at the right place
-- As the closing step of an `audit-fix` cycle
-
-## Arguments
+## Inputs
 
 | Argument | Effect |
 |----------|--------|
-| `session_id` | The Claude session from the prior `audit` — reuses its full context |
-| issue list | The findings to verify, as file:line + description |
+| `session_id` | prior `audit` session — brings the full audit memory along |
+| issue list | the findings under verification, as file:line + description |
 
-## Call Pattern
+## When to Use
 
-### Option A — continue the audit session (preferred)
+- Fixes from an `audit` just landed and need adjudication
+- A hand-made fix should be confirmed at its exact location
+- Closing out an `audit-fix` cycle
 
-With `{audit_session_id}` available from a prior `audit` or `audit-fix` run:
+## Option A — continue the audit session (the strong path)
+
+When `{audit_session_id}` survives from the audit or cycle:
 
 ```
 mcp__vibe-claude-mcp__claude_code_reply:
   session_id: {audit_session_id}
   prompt: |
-    These issues from your audit have been addressed. Verify each one.
+    The findings below have been addressed — rule on each.
 
     ISSUES TO VERIFY:
-    {findings as "file:line | severity | issue description"}
+    {"file:line | severity | issue description" per line}
 
-    Answer exactly one per issue:
-    - FIXED — fully resolved, nothing new introduced
-    - NOT FIXED — still present at the location (say why)
-    - PARTIAL — partly addressed (say what remains)
-    - REGRESSED — the fix created a new problem (describe it)
+    One ruling each: FIXED (fully resolved, nothing new broken) · NOT FIXED (still
+    there — say why) · PARTIAL (some of it remains — say what) · REGRESSED (the fix
+    broke something else — describe it).
 
-    Read the files at the reported locations before any verdict — never infer a fix
-    from its description.
+    Rule only after re-reading the file at each cited location.
 ```
 
-### Option B — fresh verification session
+## Option B — fresh session
 
-With no prior session available:
+No surviving session? Start clean, read-only:
 
 ```
 mcp__vibe-claude-mcp__claude_code:
   prompt: |
-    Verify whether the issues below have been fixed.
+    Rule on whether these issues are fixed.
 
     ISSUES TO VERIFY:
-    {findings as "file:line | severity | issue description"}
+    {"file:line | severity | issue description" per line}
 
-    For each: read the file at the location, check the resolution, and answer
-    FIXED / NOT FIXED / PARTIAL / REGRESSED — with an explanation for every
-    NOT FIXED, PARTIAL, and REGRESSED.
+    Per issue: read the cited file, then rule FIXED / NOT FIXED / PARTIAL /
+    REGRESSED, explaining every ruling that isn't FIXED. Cosmetic edits that bury
+    the underlying problem do not count as fixes.
 
-    Apply independent judgment: surface-level edits that mask the underlying issue
-    do not count as fixed.
-
-    PROVENANCE NOTE: both the code and its fixes come from the delegating Codex
-    agent — verify with fresh eyes, deferring to neither.
+    PROVENANCE NOTE: code and fixes both come from a Codex agent — adjudicate with
+    fresh eyes, deferring to neither.
   cwd: {project working directory}
   effort: high
   permissionMode: plan
 ```
 
-Keep the returned `session_id` as `{verify_session_id}`.
+Hold the returned session id as `{verify_session_id}`.
 
 ## Output Format
 
@@ -80,8 +74,8 @@ Keep the returned `session_id` as `{verify_session_id}`.
 
 **Result**: N fixed, N not fixed, N partial, N regressed
 
-## Notes
+## Afterwards
 
-- Prefer Option A whenever a session exists — retained audit context sharpens verdicts
-- Everything FIXED → report success and suggest committing
-- Anything NOT FIXED or REGRESSED → feed it into `audit-fix` or fix manually
+All FIXED clears the way to commit. Anything NOT FIXED or REGRESSED routes back into
+`audit-fix` or a manual pass — with Option A preferred next time too, because retained audit
+context is what makes the rulings precise.

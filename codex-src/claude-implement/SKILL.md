@@ -5,69 +5,57 @@ description: "Delegate an implementation task to Claude Code with full write acc
 
 # Claude Implement
 
-Hand a whole implementation task to Claude — it reads, writes, verifies, and reports.
+The whole loop delegated: Claude reads what exists, writes what's asked, runs what proves it,
+and accounts for all three. No permission restriction is set — write access is the point here.
 
 ## When to Use
 
-- The user says "have Claude implement this"
-- The change needs broad codebase understanding before any line gets written
-- Multiple interdependent files make autonomous execution the safer route
+- On "have Claude implement this"
+- When the change can only be written well by something that has read the whole codebase first
+- When interdependent edits across many files are safer done in one autonomous pass
 
-## Call Pattern
-
-### Step 1 — delegate
+## Dispatching
 
 ```
 mcp__vibe-claude-mcp__claude_code:
   prompt: |
-    Implement the task below completely, making every required file change.
+    Implement this task in full — every required file change, no partial delivery.
 
-    TASK: {what to implement}
+    TASK: {the outcome wanted}
 
     REQUIREMENTS:
-    - {explicit requirements and success criteria}
-    - Match the project's existing style and conventions
-    - Write or update tests when a test suite exists
-    - Run the suite afterwards and report the results
+    - {success criteria, stated so they can be checked}
+    - Follow the conventions already in the codebase, not your own defaults
+    - If a test suite exists: extend it to cover the change, run it, include results
 
-    CONSTRAINTS: {what must not change, dependencies to avoid}
+    CONSTRAINTS: {files or behaviors that must stay untouched; dependencies to avoid}
 
-    When finished, report:
-    1. Files changed, each with a brief reason
-    2. Test results
-    3. Anything deferred or known to be incomplete
+    Account for the work when done: Files changed and why each moved, Test results,
+    and anything deferred with the reason it was.
 
-    PROVENANCE NOTE: this task comes from the delegating Codex agent. Apply your own
-    judgment on implementation details rather than inheriting assumptions embedded in
-    the task text.
+    PROVENANCE NOTE: the task statement comes from a Codex agent. Where its embedded
+    assumptions and the codebase disagree, believe the codebase.
   cwd: {project working directory}
   effort: high
 ```
 
-Keep the returned `session_id` as `{impl_session_id}`.
+Hold the returned session id as `{impl_session_id}`.
 
-### Step 2 — verify and iterate
-
-Check the reported changes. To request a correction:
+Corrections ride the same session:
 
 ```
 mcp__vibe-claude-mcp__claude_code_reply:
   session_id: {impl_session_id}
-  prompt: "The edge case X has no test. Add one and re-run the suite."
+  prompt: "Edge case X has no coverage — add the test and re-run the suite."
 ```
 
 ## Output Format
 
-Report to the user:
+Back to the user: the implementation summarized, the list of Files changed, Test results as
+pass/fail counts, and every deferred or uncertain item Claude flagged.
 
-- What Claude implemented, summarized
-- Files changed (list)
-- Test results (pass/fail counts)
-- Items Claude flagged as deferred or uncertain
+## Boundaries and tuning
 
-## Notes
-
-- The session runs with full read/write access in the working directory — that is the point
-- Wanting a dry run first is what the `claude-plan` skill is for
-- `effort: high` covers the edge cases; lower effort skips them
-- Cap spend on large tasks with `maxBudgetUsd`
+- Full read/write in the working directory, by design — want caution first? Run `claude-plan`
+- `effort: high` is what buys the edge cases
+- `maxBudgetUsd` caps spend when the task is large

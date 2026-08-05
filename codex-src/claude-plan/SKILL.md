@@ -5,66 +5,63 @@ description: "Have Claude Code design an implementation plan before any code get
 
 # Claude Plan
 
-Ask Claude to think a task through and hand back a concrete, numbered plan — nothing else.
+Thinking first, typing second: Claude studies the repository and hands back a numbered plan.
+The skill's one hard rule sits in the prompt itself — Do NOT write any code.
+
+## What a returned plan contains
+
+Numbered steps, each carrying: the action stated imperatively, the exact file path(s) touched,
+the interfaces or data structures the step defines, and which earlier steps it depends on.
+After the last step come three short lists the implementation will thank you for:
+**risk areas**, **open questions**, and **recommended test scenarios**.
 
 ## When to Use
 
-- A non-trivial feature is about to be implemented
-- The change spans interconnected files and the right approach is not obvious
-- The user says "have Claude plan this" or "have Claude figure out the design"
+- Ahead of any non-trivial feature
+- When several files interlock and the shape of the change is genuinely unclear
+- On "have Claude plan this" / "have Claude figure out the design"
 
-## Call Pattern
-
-### Step 1 — request the plan
+## Dispatching
 
 ```
 mcp__vibe-claude-mcp__claude_code:
   prompt: |
-    Produce an implementation plan for the task below. Do NOT write any code.
-    Return a numbered plan only.
+    Produce an implementation plan. Do NOT write any code — a numbered plan is the
+    entire deliverable.
 
-    TASK: {what needs to be built or changed}
+    TASK: {what should exist when the work is done}
 
     CONSTRAINTS:
-    - {language, framework, patterns to follow, things not to touch}
+    - {stack, conventions, boundaries that must not move}
 
-    Every step must state:
-    - The action, imperatively
-    - The exact file path(s) it creates or modifies
-    - Key interfaces or data structures it defines
-    - Which prior steps it depends on
+    Number every step; give each its imperative action, exact file paths, key
+    interfaces, and dependencies on earlier steps. Close with risk areas, open
+    questions, and recommended test scenarios.
 
-    Finish with three lists: risk areas, open questions, recommended test scenarios.
-
-    PROVENANCE NOTE: this planning request comes from the delegating Codex agent. Plan
-    from your own reading of the repository — do not assume the request's framing is right.
+    PROVENANCE NOTE: a Codex agent frames this request. Read the repository and
+    judge the problem yourself — the framing may be wrong.
   cwd: {project working directory}
   effort: high
   permissionMode: plan
 ```
 
-Keep the returned `session_id` as `{plan_session_id}`.
+Hold the returned session id as `{plan_session_id}`.
 
-### Step 2 — clarify (optional)
+Ambiguity in a step is a reply, not a guess:
 
 ```
 mcp__vibe-claude-mcp__claude_code_reply:
   session_id: {plan_session_id}
-  prompt: "Step N says 'update the router' — which file exactly, and what changes in it?"
+  prompt: "Which concrete file does step N's 'the router' refer to, and what changes inside it?"
 ```
-
-### Step 3 — implement
-
-Execute the plan yourself, step by step. To delegate a step back to Claude, use the
-`claude-implement` skill.
 
 ## Output Format
 
-Show Claude's plan verbatim, then ask the user: proceed, adjust the plan, or delegate the
-implementation to Claude.
+The plan goes to the user untouched, followed by one question: implement it, adjust it, or
+delegate the implementation to Claude (`claude-implement`)?
 
-## Notes
+## Boundaries and tuning
 
-- `permissionMode: plan` guarantees planning writes nothing
-- `effort: high` matters here — shallow effort produces vague steps
-- Quoting the most relevant files and directory listings in the prompt sharpens the paths
+- `permissionMode: plan` — planning cannot leave stray edits behind
+- Skimping on `effort` here produces exactly the vague steps this skill exists to avoid
+- The more of the relevant tree the prompt quotes, the more exact the returned paths

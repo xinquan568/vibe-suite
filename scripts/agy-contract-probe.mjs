@@ -114,12 +114,16 @@ export async function probeContract(deps) {
   // so it is neither marked nor removed below.
   const ownWorkspace = deps.workspace ? null : await makeOwnedTempDir("agy-contract");
   const workspace = deps.workspace ?? ownWorkspace;
-  const write = await run(
-    ["--sandbox", "--print", `Create a file named ${SENTINEL} in the current directory.`],
-    { cwd: workspace });
-  checks.read_only_write_denied = classifyWriteProbe(write, sentinelExists(workspace));
-
-  if (ownWorkspace) await removeOwnedTree(ownWorkspace).catch(() => {});
+  try {
+    const write = await run(
+      ["--sandbox", "--print", `Create a file named ${SENTINEL} in the current directory.`],
+      { cwd: workspace });
+    checks.read_only_write_denied = classifyWriteProbe(write, sentinelExists(workspace));
+  } finally {
+    // In a `finally`, because a probe that throws would otherwise leave a private root behind for
+    // every run that failed — the runs most likely to be repeated.
+    if (ownWorkspace) await removeOwnedTree(ownWorkspace).catch(() => {});
+  }
 
   // 3. Timeout kill — observed, not asserted: the invocation must actually have been killed and its
   // group confirmed gone. A caller-supplied boolean is a label, not evidence.

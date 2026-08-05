@@ -97,16 +97,22 @@ export async function assertRoot(root) {
 export async function assertInside(root, target) {
   // Both sides must be resolved before they are compared. Comparing a lexical target against a
   // resolved root fails wherever the temp directory is itself a symlink (`/var` -> `/private/var`
-  // on macOS), and `path.resolve` has already normalised any `..` away, so the lexical pre-check
-  // that used to sit here rejected legitimate paths without catching anything the walk misses.
+  // on macOS), and `path.resolve` has already normalised any `..` away.
+  //
+  // **The final component and the intermediate ones are treated differently, and conflating them
+  // is an escape with no race in it.** The final component may be a symlink — the caller's own
+  // `classify` refuses it, and stopping here is what lets it report "this is a link" instead of
+  // "this is outside". An *intermediate* symlink is refused right here: an earlier revision walked
+  // past it to the root, so `/root/link/new.json` with `link -> /outside` resolved to `/root`,
+  // answered "inside", and then published through the link into `/outside`.
   const resolvedRoot = await fs.realpath(root);
-  let probe = path.resolve(target);
+  const target_ = path.resolve(target);
+  let probe = target_;
   while (true) {
     const kind = await classify(probe);
-    // Containment asks where the entry *is*, so a symlink is resolved no further than its own
-    // parent. Resolving through it would report the link's target as the location and answer
-    // "outside" for a link that sits perfectly well inside the root — and the caller would never
-    // learn it was a link at all, which is the thing that actually has to be refused.
+    if (kind === "symlink" && probe !== target_) {
+      throw new WriteError(`${probe}: intermediate path component is a symlink`);
+    }
     if (kind !== "absent" && kind !== "symlink") break;
     const parent = path.dirname(probe);
     if (parent === probe) throw new WriteError(`${target}: no existing ancestor`);
@@ -153,13 +159,18 @@ export async function scratch(dir, name, mode) {
  */
 async function stage(dir, name, content, mode) {
   const { handle, path: staged } = await scratch(dir, name, mode);
+  let published = false;
   try {
     await handle.writeFile(content, "utf8");
     await handle.chmod(mode);
     await handle.sync();
+    published = true;
     return staged;
   } finally {
     await handle.close();
+    // A scratch nobody will publish is a private file left behind, so it is removed on the way out
+    // of every failing path rather than only the ones the caller thought to catch.
+    if (!published) await fs.unlink(staged).catch(() => {});
   }
 }
 
@@ -259,7 +270,11 @@ export async function ensureDirAt(root, rel, mode = PRIVATE_DIR_MODE) {
  * upgraded from before this module, that is exactly the state the state directory is in.
  */
 export async function secureDirAt(root, rel, mode = PRIVATE_DIR_MODE) {
+  // Containment first: without it, a `..` or absolute `rel` chmods a directory outside the root,
+  // which is the same class of hole `assertRoot` exists to close one level up.
+  await assertRoot(root);
   const target = path.resolve(root, rel);
+  await assertInside(root, target);
   if (await classify(target) !== "dir") throw new WriteError(`${target}: not a directory`);
   const handle = await fs.open(target, constants.O_RDONLY);
   try {

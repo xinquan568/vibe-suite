@@ -701,19 +701,20 @@ class LifecycleRaces(RunnerCase):
 
     def setUp(self):
         super().setUp()
-        self.latch = self.ws / "latches"
         # vibe-103: the runner writes a latch signal only into an *owned* temp root — an env-supplied
-        # path is an operator input, not a licence to write anywhere. The marker below is what
-        # `isOwnedTempRoot` in scripts/lib/write.mjs checks (real 0700 directory, our uid, a stamp
-        # that parses); that module is the authority for the format, and this fixture mirrors it so
-        # the Python harness can hand a child a root it will accept.
-        self.latch.mkdir(mode=0o700)
-        self.latch.chmod(0o700)
-        marker = self.latch / ".vibe-suite-owned.json"
-        marker.write_text(
-            json.dumps({"_vibe-suite_owned": {"kind": "temp-root", "schema": 1}}) + "\n",
-            encoding="utf-8")
-        marker.chmod(0o600)
+        # path is an operator input, not a licence to write anywhere. The root is obtained FROM the
+        # primitive rather than hand-built here: duplicating the marker format in the harness would
+        # make this file a second source of truth about what ownership means, and the two copies
+        # would drift the first time the format changed.
+        made = subprocess.run(
+            ["node", "--input-type=module", "-e",
+             'const { pathToFileURL } = await import("node:url");'
+             ' const { makeOwnedTempDir } = await import(pathToFileURL(process.argv[1]).href);'
+             ' process.stdout.write(await makeOwnedTempDir("vibe-latch"));',
+             str(REPO_ROOT / "scripts" / "lib" / "write.mjs")],
+            capture_output=True, text=True, check=True)
+        self.latch = Path(made.stdout.strip())
+        self.addCleanup(shutil.rmtree, self.latch, ignore_errors=True)
 
     def run_latched(self, *args, fixture="emitter.mjs", timeout=60):
         self._spawned_fixtures.append(fixture)

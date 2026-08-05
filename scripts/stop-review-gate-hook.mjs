@@ -279,16 +279,19 @@ async function main() {
   // vibe-103: the prompt carries the session diff AND the bodies of untracked files, so it is
   // private content in a world-readable default. It goes into an owned 0700 temp root at 0600.
   const scratch = await makeOwnedTempDir("vibe-stop-gate");
-  const promptFile = path.join(scratch, "prompt.md");
-  await writeAtomic(scratch, promptFile, prompt, { mode: PRIVATE_FILE_MODE });
-
-  const args = [RUNNER, "--kind", "stop-gate", "--sandbox", "read-only",
-    "--timeout-ms", String(Math.max(5_000, left - 10_000)), "--prompt-file", promptFile];
-  if (gate.model) args.push("--model", gate.model);
-  else args.push("--no-model");                                        // backend default (P9)
-
   let dispatched;
   try {
+    // The whole use of the scratch root sits inside this try: an earlier revision started the
+    // cleanup only after the prompt was published, so a failure while writing it leaked a private
+    // 0700 root holding the session diff.
+    const promptFile = path.join(scratch, "prompt.md");
+    await writeAtomic(scratch, promptFile, prompt, { mode: PRIVATE_FILE_MODE });
+
+    const args = [RUNNER, "--kind", "stop-gate", "--sandbox", "read-only",
+      "--timeout-ms", String(Math.max(5_000, left - 10_000)), "--prompt-file", promptFile];
+    if (gate.model) args.push("--model", gate.model);
+    else args.push("--no-model");                                      // backend default (P9)
+
     dispatched = spawnSync(process.execPath, args, {
       cwd, encoding: "utf8", timeout: Math.max(5_000, remainingMs()), maxBuffer: OUTPUT_MAX_BUFFER,
     });

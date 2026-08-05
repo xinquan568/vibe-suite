@@ -37,10 +37,12 @@
 // exists yet", which is information.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { link, lstat, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+// Only the read side is imported directly: every mutation goes through `./write.mjs`, and an
+// unused raw mutator binding is a capability kept for no reason (vibe-103).
+import { lstat, readdir, readFile } from "node:fs/promises";
 
 import {
-  assertRoot, ensureDirAt, publishNew, secureDirAt, unlinkOwned, writeAtomic,
+  assertInside, assertRoot, ensureDirAt, publishNew, secureDirAt, unlinkOwned, writeAtomic,
   PRIVATE_FILE_MODE, STAMP_KEY,
 } from "./write.mjs";
 import path from "node:path";
@@ -419,10 +421,13 @@ function stamped(record) {
 
 export async function reapOrphanTemps(workspace, { now = Date.now() } = {}) {
   const dir = jobsDir(workspace);
-  // vibe-103: the jobs directory is a containment root, and a root that is itself a symlink is the
-  // escape it is supposed to contain. Before this check, a symlinked `.vibe-suite-state/jobs` sent
-  // an ordinary SessionStart/SessionEnd hook out of the workspace to delete a user's own files.
+  // vibe-103: trust is anchored at the WORKSPACE, not at the final jobs directory. Checking only
+  // the last component let `.vibe-suite-state` be a symlink whose `jobs` child was a real directory
+  // outside the workspace — assertRoot would accept it and the reaper would work there. assertInside
+  // refuses an intermediate symlinked component, so the whole chain has to be genuine.
   try {
+    await assertRoot(workspace);
+    await assertInside(workspace, dir);
     await assertRoot(dir);
   } catch {
     return 0;
@@ -434,6 +439,7 @@ export async function reapOrphanTemps(workspace, { now = Date.now() } = {}) {
     return 0;
   }
   let reaped = 0;
+  let failed = 0;
   for (const name of names) {
     if (!isReapCandidate(name)) continue;                              // never a .vN slot
     try {
@@ -447,8 +453,13 @@ export async function reapOrphanTemps(workspace, { now = Date.now() } = {}) {
       if (now - info.mtimeMs < TEMP_REAP_MIN_AGE_MS) continue;         // when in doubt, leave it
       if (await unlinkOwned(dir, name, [SCRATCH_KIND])) reaped += 1;
     } catch {
-      // A temp that vanished or cannot be lstat'd is left alone.
+      // A temp that vanished or cannot be lstat'd is left alone — but counted, because a reaper
+      // that silently swallows every error reports a clean sweep it did not perform.
+      failed += 1;
     }
+  }
+  if (failed > 0) {
+    process.stderr.write(`vibe-suite: ${failed} orphan temp(s) could not be examined\n`);
   }
   return reaped;
 }

@@ -218,8 +218,110 @@ test("a parent-created owned temp root is recognised by a SPAWNED CHILD", async 
   await removeOwnedTree(owned);
 });
 
+// ------------------------------------------------------- intermediate components and containment
+
+test("an INTERMEDIATE symlink cannot be published through — no race required", async () => {
+  // The escape a review found: with `root/link -> outside` and `outside/new.json` absent, walking
+  // past the link to the root answered "inside", and the final classify saw "absent" because lstat
+  // followed the link. Both writers then published into `outside`.
+  const root = scratchDir();
+  const outside = scratchDir();
+  symlinkSync(outside, path.join(root, "link"));
+  const dest = path.join(root, "link", "new.json");
+
+  await assert.rejects(() => writeAtomic(root, dest, "ours"), /intermediate path component/);
+  await assert.rejects(() => publishNew(root, dest, "ours"), /intermediate path component/);
+  assert.deepEqual(readdirSync(outside), [], "nothing may be published through the link");
+});
+
+test("secureDirAt cannot chmod outside its root", async () => {
+  const root = scratchDir();
+  const outside = scratchDir();
+  mkdirSync(path.join(outside, "victim"), { mode: 0o755 });
+  chmodSync(path.join(outside, "victim"), 0o755);
+
+  await assert.rejects(
+    () => secureDirAt(root, path.join("..", path.basename(outside), "victim")),
+    /escapes|resolves outside|intermediate/);
+  assert.equal(mode(path.join(outside, "victim")), 0o755, "an outside directory must be untouched");
+});
+
+test("a failed stage leaves no scratch behind", async () => {
+  const root = scratchDir();
+  // A directory at the destination makes writeAtomic refuse *after* it would have staged.
+  mkdirSync(path.join(root, "dest.json"));
+  await assert.rejects(() => writeAtomic(root, path.join(root, "dest.json"), "x"), /is a dir/);
+  assert.deepEqual(readdirSync(root).filter((n) => n.endsWith(".vibe-tmp")), [],
+    "a scratch nobody will publish is a private file left behind");
+});
+
 test("removeOwnedTree refuses a root it does not own", async () => {
   const bare = mkdtempSync(path.join(tmpdir(), "vibe-unowned-"));
   await assert.rejects(() => removeOwnedTree(bare), /not an owned temp root/);
   assert.ok(lstatSync(bare).isDirectory());
+});
+
+// ------------------------------------------------------------- the routed callers, not the library
+
+test("a record published by createRecord is 0600, and the state dir is 0700", async () => {
+  const { createRecord, jobsDir, newRecord, recordPath } = await import("../../scripts/lib/jobs.mjs");
+  const ws = mkdtempSync(path.join(tmpdir(), "routed-record-"));
+  const record = newRecord({
+    jobId: "job_00000000000000000000", kind: "review", sandbox: "read-only", effort: "low",
+    model: null, background: false, timeoutMs: 1000, claimDigest: null,
+  });
+  await createRecord(ws, record);
+
+  assert.equal(mode(recordPath(ws, "job_00000000000000000000")), PRIVATE_FILE_MODE,
+    "job records can hold raw model output");
+  assert.equal(mode(jobsDir(ws)), 0o700);
+  assert.equal(mode(path.join(ws, ".vibe-suite-state")), 0o700);
+});
+
+test("an ALREADY-0644 canonical record becomes 0600 when the store updates it", async () => {
+  const { createRecord, newRecord, recordPath, updateRecord } =
+    await import("../../scripts/lib/jobs.mjs");
+  const ws = mkdtempSync(path.join(tmpdir(), "routed-upgrade-"));
+  await createRecord(ws, newRecord({
+    jobId: "job_11111111111111111111", kind: "review", sandbox: "read-only", effort: "low",
+    model: null, background: false, timeoutMs: 1000, claimDigest: null,
+  }));
+  // The state an installation upgraded from before vibe-103 is actually in.
+  chmodSync(recordPath(ws, "job_11111111111111111111"), 0o644);
+
+  await updateRecord(ws, "job_11111111111111111111", { threadId: "t-1" });
+  assert.equal(mode(recordPath(ws, "job_11111111111111111111")), PRIVATE_FILE_MODE,
+    "preserve-by-default would leave it 0644 forever — the mode override is what fixes upgrades");
+});
+
+test("an existing 0755 state directory is tightened on the next store use", async () => {
+  const { createRecord, newRecord } = await import("../../scripts/lib/jobs.mjs");
+  const ws = mkdtempSync(path.join(tmpdir(), "routed-tighten-"));
+  mkdirSync(path.join(ws, ".vibe-suite-state", "jobs"), { recursive: true, mode: 0o755 });
+  chmodSync(path.join(ws, ".vibe-suite-state"), 0o755);
+  chmodSync(path.join(ws, ".vibe-suite-state", "jobs"), 0o755);
+
+  await createRecord(ws, newRecord({
+    jobId: "job_22222222222222222222", kind: "review", sandbox: "read-only", effort: "low",
+    model: null, background: false, timeoutMs: 1000, claimDigest: null,
+  }));
+  assert.equal(mode(path.join(ws, ".vibe-suite-state")), 0o700);
+  assert.equal(mode(path.join(ws, ".vibe-suite-state", "jobs")), 0o700);
+});
+
+test("the reaper trusts the WORKSPACE, not the last path component", async () => {
+  // `.vibe-suite-state` is a symlink whose `jobs` child is a real directory outside the workspace:
+  // asserting only the final component accepted it, and a stamped file there was deleted.
+  const { reapOrphanTemps } = await import("../../scripts/lib/jobs.mjs");
+  const ws = mkdtempSync(path.join(tmpdir(), "reaper-anchor-"));
+  const outside = scratchDir();
+  mkdirSync(path.join(outside, "jobs"));
+  const bait = path.join(outside, "jobs", "job_x.tmp.1.aaa");
+  writeFileSync(bait, JSON.stringify({ [STAMP_KEY]: { kind: "job-scratch", schema: 1 } }));
+  utimesSync(bait, SIX_HOURS_AGO(), SIX_HOURS_AGO());
+  symlinkSync(outside, path.join(ws, ".vibe-suite-state"));
+
+  assert.equal(await reapOrphanTemps(ws), 0);
+  assert.ok(readdirSync(path.join(outside, "jobs")).includes("job_x.tmp.1.aaa"),
+    "a stamp is copyable; the containment chain is what says the directory is ours");
 });

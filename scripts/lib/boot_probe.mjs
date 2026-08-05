@@ -98,7 +98,18 @@ child.stdout.on("data", (chunk) => {
     if (msg.jsonrpc !== "2.0" || msg.id !== 1) continue;
     if (msg.result?.serverInfo?.name) {
       const { name, version } = msg.result.serverInfo;
-      finish(0, `${target} booted; server reports ${sanitize(name)}@${sanitize(version ?? "?")}`);
+      // E7.1 (vibe-53): the acceptance's "pin mismatch fails loudly" contract. The launch target
+      // is what npx pins; the self-report is the server's own claim about what booted. A claim
+      // disagreeing with the request on name or version — or lacking a usable version — is a
+      // mismatch, reported with both values so the operator sees the disagreement, not a guess.
+      const at = target.lastIndexOf("@");
+      const reqName = target.slice(0, at), reqVersion = target.slice(at + 1);
+      if (typeof version !== "string" || name !== reqName || version !== reqVersion) {
+        const reported = `${sanitize(name)}@${typeof version === "string" ? sanitize(version) : "?"}`;
+        finish(1, `pin mismatch: requested ${target}, server reports ${reported}`);
+        return;
+      }
+      finish(0, `${target} booted; server reports ${sanitize(name)}@${sanitize(version)}`);
       return;
     }
     if (msg.error) {

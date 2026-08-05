@@ -1,0 +1,261 @@
+{
+ "tools": [
+  {
+   "name": "claude_code",
+   "description": "Send a task to an autonomous Claude Code agent. It reads/writes files, runs shell commands, searches codebases, and handles complex software engineering tasks end-to-end. Returns the result text plus a session_id for follow-ups via claude_code_reply.",
+   "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+     "prompt": {
+      "type": "string",
+      "description": "Task or question for Claude Code"
+     },
+     "run_id": {
+      "description": "Workflow run ID \u2014 groups related agent calls into one timeline. Auto-generated if omitted; returned in every response for propagation.",
+      "type": "string"
+     },
+     "cwd": {
+      "description": "Working directory (overrides CLAUDE_CWD)",
+      "type": "string"
+     },
+     "model": {
+      "description": "Model override (e.g. \"sonnet\", \"opus\", \"haiku\")",
+      "type": "string"
+     },
+     "tools": {
+      "description": "Restrict available tools to this list (intersects with server-level restriction)",
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "disallowedTools": {
+      "description": "Additional tools to block (unions with server-level blacklist)",
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "additionalDirs": {
+      "description": "Extra directories the agent can access for this invocation",
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "plugins": {
+      "description": "Additional plugin paths to load for this invocation (unions with server-level plugins)",
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "effort": {
+      "description": "Thinking effort override",
+      "type": "string",
+      "enum": [
+       "low",
+       "medium",
+       "high",
+       "max"
+      ]
+     },
+     "permissionMode": {
+      "description": "Permission mode override (can only tighten, never loosen)",
+      "type": "string",
+      "enum": [
+       "default",
+       "acceptEdits",
+       "plan"
+      ]
+     },
+     "maxTurns": {
+      "description": "Max conversation turns",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+     },
+     "maxBudgetUsd": {
+      "description": "Max spend in USD",
+      "type": "number",
+      "exclusiveMinimum": 0
+     },
+     "systemPrompt": {
+      "description": "Additional system prompt (appended to server default)",
+      "type": "string"
+     }
+    },
+    "required": [
+     "prompt"
+    ]
+   },
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "claude_code_reply",
+   "description": "Continue a previous claude_code conversation by session ID. Use this for follow-up questions, iterative refinement, or multi-step workflows that build on prior context.",
+   "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+     "session_id": {
+      "type": "string",
+      "description": "Session ID from a prior claude_code response"
+     },
+     "prompt": {
+      "type": "string",
+      "description": "Follow-up instruction or question"
+     },
+     "run_id": {
+      "description": "Workflow run ID \u2014 pass the same run_id from the original call to keep entries grouped.",
+      "type": "string"
+     },
+     "cwd": {
+      "description": "Working directory override",
+      "type": "string"
+     },
+     "model": {
+      "description": "Model override",
+      "type": "string"
+     },
+     "maxTurns": {
+      "description": "Max conversation turns",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+     },
+     "maxBudgetUsd": {
+      "description": "Max spend in USD",
+      "type": "number",
+      "exclusiveMinimum": 0
+     }
+    },
+    "required": [
+     "session_id",
+     "prompt"
+    ]
+   },
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "claude_code_timeline",
+   "description": "Query the cross-agent workflow timeline. No args: list all runs. run_id: show one run's agent sequence. session_id: retrieve timeline entry and session metadata. Use claude_code_transcript for full transcripts.",
+   "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+     "run_id": {
+      "description": "Show all entries for this workflow run, ordered by time",
+      "type": "string"
+     },
+     "session_id": {
+      "description": "Retrieve timeline entry and session metadata for a specific session",
+      "type": "string"
+     }
+    }
+   },
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "claude_code_transcript",
+   "description": "Retrieve the full conversation transcript for a session from Claude Code's storage. Returns chronological user/assistant messages. Use session_id from a prior query or timeline lookup.",
+   "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+     "session_id": {
+      "type": "string",
+      "description": "Session ID to retrieve transcript for"
+     },
+     "limit": {
+      "description": "Maximum number of messages to return",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+     },
+     "offset": {
+      "description": "Skip this many messages from the start",
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "include_system": {
+      "description": "Include system messages (default: false)",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "session_id"
+    ]
+   },
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "claude_code_sessions",
+   "description": "List Claude Code interactive session history, newest first. Scoped to the current project directory by default; pass all_projects=true to list sessions across every project on this machine. Returns session_id, title, first prompt, git branch, timestamps, and file size for each session. Pass a returned session_id to claude_code_transcript to read the full conversation.",
+   "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+     "all_projects": {
+      "description": "List sessions from every project on this machine instead of just the current one (default: false)",
+      "type": "boolean"
+     },
+     "cwd": {
+      "description": "Project directory to list sessions for (default: the server's working directory). Ignored when all_projects is true.",
+      "type": "string"
+     },
+     "limit": {
+      "description": "Maximum number of sessions to return",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+     },
+     "offset": {
+      "description": "Skip this many sessions from the start, for pagination (default: 0)",
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+     },
+     "include_worktrees": {
+      "description": "When listing one project, also include sessions from its sibling git worktrees (default: true)",
+      "type": "boolean"
+     }
+    }
+   },
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  },
+  {
+   "name": "claude_code_report",
+   "description": "Generate a self-contained HTML report of a workflow run. No args: list all runs. run_id: detailed report for that run with agent sequence, cost breakdown, and collapsible transcripts. Save the returned HTML to a file and open in a browser.",
+   "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+     "run_id": {
+      "description": "Generate detailed report for this run. Omit to list all runs.",
+      "type": "string"
+     },
+     "include_transcripts": {
+      "description": "Include full session transcripts in run reports (default: true, requires session persistence)",
+      "type": "boolean"
+     }
+    }
+   },
+   "execution": {
+    "taskSupport": "forbidden"
+   }
+  }
+ ]
+}

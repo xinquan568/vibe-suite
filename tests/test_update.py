@@ -65,11 +65,24 @@ def write_fake_server(path, behaviour="respond"):
             time.sleep(300); sys.exit(0)
         line = sys.stdin.readline()
         req = json.loads(line)
+        # The requested target rides in argv as ["-y", "<package>@<version>"]. Reporting it back
+        # is the honest-server default (E7.1's mismatch contract compares self-report to the
+        # request); the mismatch behaviours below are the liars the probe must now catch.
+        target = sys.argv[-1]
+        pkg, _, ver = target.rpartition("@")
+        info = {{"name": pkg, "version": ver}}
+        if behaviour == "wrong-name":
+            info["name"] = "impostor-octopus"
+        if behaviour == "wrong-version":
+            info["version"] = "9.9.9"
+        if behaviour == "no-version":
+            del info["version"]
+        if behaviour == "bad-version":
+            info["version"] = {{"major": 9}}
         if behaviour == "error":
             out = {{"jsonrpc": "2.0", "id": req["id"], "error": {{"code": -1, "message": "nope"}}}}
         else:
-            out = {{"jsonrpc": "2.0", "id": req["id"],
-                   "result": {{"serverInfo": {{"name": "fake-octopus", "version": "9.9.9"}}}}}}
+            out = {{"jsonrpc": "2.0", "id": req["id"], "result": {{"serverInfo": info}}}}
         print(json.dumps(out), flush=True)
         time.sleep(30)
         """), encoding="utf-8")
@@ -181,7 +194,34 @@ class Probe(unittest.TestCase):
     def test_handshake_succeeds_against_a_responding_server(self):
         proc = self.run_probe("respond")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("fake-octopus", proc.stdout)
+        self.assertIn("claude-octopus", proc.stdout)
+
+    # E7.1 (vibe-53) — the acceptance's mismatch contract: a self-report disagreeing with the
+    # requested target on name or version, or lacking a usable version, fails loudly. Before
+    # this contract the probe accepted any well-formed serverInfo.
+    def test_name_mismatch_fails_loudly(self):
+        proc = self.run_probe("wrong-name")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("mismatch", proc.stderr)
+        self.assertIn("impostor-octopus", proc.stderr)
+        self.assertIn("claude-octopus@1.2.3", proc.stderr)
+
+    def test_version_mismatch_fails_loudly(self):
+        proc = self.run_probe("wrong-version")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("mismatch", proc.stderr)
+        self.assertIn("9.9.9", proc.stderr)
+        self.assertIn("claude-octopus@1.2.3", proc.stderr)
+
+    def test_missing_reported_version_fails(self):
+        proc = self.run_probe("no-version")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("mismatch", proc.stderr)
+
+    def test_malformed_reported_version_fails(self):
+        proc = self.run_probe("bad-version")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("mismatch", proc.stderr)
 
     def test_spawn_argv_is_the_pinned_target(self):
         self.run_probe("respond")
@@ -264,7 +304,11 @@ class SimulatedPluginUpdate(unittest.TestCase):
         for item in (REPO_ROOT / "scripts" / "lib").iterdir():
             if item.is_file():
                 (self.plugin / "scripts" / "lib" / item.name).write_bytes(item.read_bytes())
+        # The copied lib carries whatever pin state the real tree ships (pending before E7.1,
+        # pin.txt after). Each test constructs its own premise via ship_pin()/explicit writes,
+        # so the baseline plugin must carry neither file.
         (self.plugin / "scripts" / "lib" / "claude-octopus-pin.pending").unlink(missing_ok=True)
+        (self.plugin / "scripts" / "lib" / "claude-octopus-pin.txt").unlink(missing_ok=True)
 
     def seed_stale_registration(self, pin="1.0.0"):
         stale = bridge.toml_server_upsert(UNRELATED_TOML, mcp_pin.SERVER_NAME,
@@ -380,3 +424,41 @@ class TestAdvisorReconcileStage(unittest.TestCase):
         self.assertIn("registered-undeclared->removed", stages["advisors"]["detail"])
         after = json.loads((ws / ".mcp.json").read_text())
         self.assertNotIn("orphan_advisor", after.get("mcpServers", {}))
+
+    def test_reconcile_failure_surfaces_as_advisors_fail_stage(self):
+        # E7.1 (vibe-53) characterization: when reconciliation cannot complete, the advisors
+        # stage reports FAIL in /vibe-suite:update's report instead of dying silently. The seed
+        # is a name collision — an unowned server squatting on a declared advisor's name —
+        # which reconcile refuses in every pin state.
+        ws = Path(tempfile.mkdtemp(prefix="vibe-update-advisors-"))
+        self.addCleanup(__import__("shutil").rmtree, ws, ignore_errors=True)
+        (ws / ".vibe-suite" / "agents").mkdir(parents=True)
+        (ws / ".vibe-suite" / "agents" / "floaty.md").write_text(
+            "---\n"
+            "description: |\n"
+            "  Judges floaty things.\n"
+            "  <example>\n"
+            "  Context: draft done.\n"
+            '  user: "Check this?"\n'
+            '  assistant: "Consulting floaty."\n'
+            "  </example>\n"
+            "  <example>\n"
+            "  Context: rename sweep.\n"
+            '  user: "Names ok?"\n'
+            '  assistant: "Consulting floaty."\n'
+            "  </example>\n"
+            "model: sonnet\n"
+            "max_turns: 4\n"
+            "max_budget_usd: 0.40\n"
+            "---\n\nValue the smallest true answer.\n", encoding="utf-8")
+        squatter = {"command": "their-server"}
+        (ws / ".mcp.json").write_text(json.dumps(
+            {"mcpServers": {"floaty": squatter}}, indent=2, sort_keys=True) + "\n")
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import update as update_mod
+        report = update_mod.run(ws, REPO_ROOT, probe_timeout=1)
+        stages = {s["stage"]: s for s in report.stages}
+        self.assertIn("advisors", stages)
+        self.assertEqual(stages["advisors"]["status"], "fail")
+        self.assertIn("floaty", stages["advisors"]["detail"])
+        self.assertIn("unowned", stages["advisors"]["detail"])

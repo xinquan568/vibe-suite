@@ -604,6 +604,12 @@ def check_mirrors(root, expected=None):
             bad(r["mirror"], "mirror path escapes codex/")
             continue
         src, mir = root / r["source"], root / r["mirror"]
+        if mir.exists():
+            try:
+                mir.resolve().relative_to(root.resolve())
+            except (ValueError, OSError, RuntimeError):
+                bad(r["mirror"], "mirror path resolves outside the plugin root (symlink)")
+                continue
         if not src.is_file():
             bad(r["source"], "recorded source is gone — mirror is orphaned")
         elif _sha256(src) != r["source_sha256"]:
@@ -683,12 +689,14 @@ def check_mirrors(root, expected=None):
             bad(dep_src, "declared copied dependency has no manifest record")
         elif not (root / dep_mirror).is_file():
             bad(dep_mirror, "declared copied dependency's mirror is missing")
-    mirrors_recorded = {r["mirror"] for r in records}
+    pairs_recorded = {(r["source"], r["mirror"]) for r in records}
     for gen_src, gen_mirror in sorted(expected.get("generated_outputs", {}).items()):
         if not (root / gen_src).exists():
-            continue   # a world without the source owes no mirror (fixture minimalism)
-        if gen_mirror not in mirrors_recorded:
-            bad(gen_mirror, "mandatory generated output has no manifest record")
+            bad(gen_src, "expected generated-output source is missing from the plugin")
+            continue
+        if (gen_src, gen_mirror) not in pairs_recorded:
+            bad(gen_mirror, "mandatory generated output lacks its exact "
+                            "source-to-mirror record")
         elif not (root / gen_mirror).is_file():
             bad(gen_mirror, "mandatory generated output's mirror is missing")
     if (root / "codex-src").is_dir():

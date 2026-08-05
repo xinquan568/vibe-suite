@@ -291,6 +291,57 @@ class FailureAtomicity(unittest.TestCase):
                          "a render-phase failure disturbed the committed tree")
 
 
+class SwapHardening(unittest.TestCase):
+    """Round-5 F1: removal failure, staging ownership, and the rename exchange."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mirror-swap-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = make_source_tree(self.tmp)
+        mirror_sync.generate(self.root, sets=FIXTURE_SETS)
+
+    def test_foreign_staging_dir_is_refused(self):
+        staging = self.root / "codex.staging"
+        staging.mkdir()
+        (staging / "users-own-file.txt").write_text("mine\n")
+        before = tree_digest(self.root / "codex")
+        with self.assertRaises(mirror_sync.MirrorError):
+            mirror_sync.generate(self.root, sets=FIXTURE_SETS)
+        self.assertTrue((staging / "users-own-file.txt").is_file(),
+                        "a foreign staging directory was destroyed")
+        self.assertEqual(tree_digest(self.root / "codex"), before)
+
+    def test_exchange_failure_restores_the_old_name(self):
+        before = tree_digest(self.root / "codex")
+        real = mirror_sync.bridge.rename_at
+        def failing(root, src, dst):
+            if src == "codex.staging" and dst == "codex":
+                raise OSError("injected exchange failure")
+            return real(root, src, dst)
+        mirror_sync.bridge.rename_at = failing
+        try:
+            with self.assertRaises(OSError):
+                mirror_sync.generate(self.root, sets=FIXTURE_SETS)
+        finally:
+            mirror_sync.bridge.rename_at = real
+        self.assertEqual(tree_digest(self.root / "codex"), before,
+                         "the old tree did not return after an exchange failure")
+
+    def test_persistent_publish_failure_leaves_committed_tree_untouched(self):
+        before = tree_digest(self.root / "codex")
+        real = mirror_sync.bridge.publish_new
+        def always_failing(rootp, dest, content, mode=0o644):
+            raise OSError("persistent write failure")
+        mirror_sync.bridge.publish_new = always_failing
+        try:
+            with self.assertRaises(OSError):
+                mirror_sync.generate(self.root, sets=FIXTURE_SETS)
+        finally:
+            mirror_sync.bridge.publish_new = real
+        self.assertEqual(tree_digest(self.root / "codex"), before,
+                         "staging failure must never reach the committed tree")
+
+
 class ProductionBinding(unittest.TestCase):
     def test_cli_surface_has_no_inventory_override(self):
         source = GEN_PATH.read_text()
@@ -315,6 +366,25 @@ class ProductionBinding(unittest.TestCase):
                          tuple(sorted(mirror_sync.ROAST_AGENTS)))
         self.assertEqual(dict(vc.MIRROR_EXPECTED["copied_deps"]),
                          dict(mirror_sync.COPIED_DEPS))
+
+    def test_generated_outputs_cross_pinned(self):
+        import importlib.machinery, importlib.util
+        loader = importlib.machinery.SourceFileLoader(
+            "vibe_check_mod3", str(REPO_ROOT / "bin" / "vibe-check"))
+        spec = importlib.util.spec_from_loader("vibe_check_mod3", loader)
+        vc = importlib.util.module_from_spec(spec)
+        loader.exec_module(vc)
+        self.assertEqual(dict(vc.MIRROR_EXPECTED["generated_outputs"]),
+                         dict(mirror_sync.GENERATED_OUTPUTS))
+
+    def test_roast_variant_matches_the_golden(self):
+        # Round-5 F5: exact normalized equality against the frozen golden — behavioral text
+        # cannot regress while a token check stays green.
+        import re as _re
+        golden = (FIX / "vibe-roast.golden.md").read_text(encoding="utf-8")
+        live = mirror_sync._roast_variant("GOLDEN-VERSION")
+        self.assertEqual(_re.sub(r"\s+", " ", live).strip(),
+                         _re.sub(r"\s+", " ", golden).strip())
 
     def test_production_tables_cover_the_roster(self):
         sys.path.insert(0, str(REPO_ROOT / "tests"))

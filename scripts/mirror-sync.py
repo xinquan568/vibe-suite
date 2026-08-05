@@ -463,12 +463,24 @@ def generate(root, sets=None):
     # The rendered set publishes to an audited STAGING tree first and is digest-verified
     # there, so the committed codex/ is only ever removed once every byte already exists on
     # disk. A publish_new that reports an existing destination is a failure, never ignored.
-    previous = {}
     codex = root / "codex"
-    staging_rel = "codex.staging"
-    if (root / staging_rel).exists():
+    staging_rel, old_rel = "codex.staging", "codex.old"
+    MARKER = ".vibe-suite-staging"
+    staging = root / staging_rel
+    if staging.exists():
+        # Only OUR staging (marker present) is removable; anything else is the user's.
+        if not (staging / MARKER).is_file():
+            raise MirrorError(f"{staging_rel} exists and is not ours - refusing to touch it")
         bridge.remove_tree_at(root, staging_rel)
+    if (root / old_rel).exists():
+        if not ((root / old_rel / MARKER).is_file()
+                or (root / old_rel / "MIRROR-MANIFEST.json").is_file()):
+            raise MirrorError(f"{old_rel} exists and is not ours - refusing to touch it")
+        bridge.remove_tree_at(root, old_rel)
     try:
+        bridge.ensure_dir_at(root, staging_rel)
+        if not bridge.publish_new(root, staging / MARKER, b"vibe-suite mirror staging\n"):
+            raise MirrorError("staging marker collision")
         for dest_rel in sorted(outputs):
             staged_rel = staging_rel + dest_rel[len("codex"):]
             bridge.ensure_dir_at(root, str(Path(staged_rel).parent))
@@ -479,33 +491,26 @@ def generate(root, sets=None):
             if hashlib.sha256(staged.read_bytes()).hexdigest() != \
                     hashlib.sha256(outputs[dest_rel]).hexdigest():
                 raise MirrorError(f"staging verification failed at {dest_rel}")
+        bridge.unlink_at(root, f"{staging_rel}/{MARKER}")
     except Exception:
-        if (root / staging_rel).exists():
+        if staging.exists() and (staging / MARKER).is_file():
             bridge.remove_tree_at(root, staging_rel)
         raise
-    if codex.exists():
-        for f in sorted(codex.rglob("*")):
-            if f.is_file():
-                previous[f.relative_to(root).as_posix()] = f.read_bytes()
-        bridge.remove_tree_at(root, "codex")
+    # The exchange: two audited renames. The old tree keeps every byte until the new one
+    # holds the name; any failure renames it straight back.
+    had_old = codex.exists()
+    if had_old:
+        bridge.rename_at(root, "codex", old_rel)
     try:
-        for dest_rel in sorted(outputs):
-            staged = root / (staging_rel + dest_rel[len("codex"):])
-            bridge.ensure_dir_at(root, str(Path(dest_rel).parent))
-            if not bridge.publish_new(root, root / dest_rel, staged.read_bytes()):
-                raise MirrorError(f"destination collision at {dest_rel}")
+        bridge.rename_at(root, staging_rel, "codex")
     except Exception:
-        try:
-            if codex.exists():
-                bridge.remove_tree_at(root, "codex")
-            for dest_rel in sorted(previous):
-                bridge.ensure_dir_at(root, str(Path(dest_rel).parent))
-                bridge.publish_new(root, root / dest_rel, previous[dest_rel])
-        finally:
-            if (root / staging_rel).exists():
-                bridge.remove_tree_at(root, staging_rel)
+        if had_old:
+            bridge.rename_at(root, old_rel, "codex")
+        if staging.exists():
+            bridge.remove_tree_at(root, staging_rel)
         raise
-    bridge.remove_tree_at(root, staging_rel)
+    if had_old:
+        bridge.remove_tree_at(root, old_rel)
     return manifest
 
 
@@ -547,6 +552,16 @@ def _validate_rendered(outputs):
         for m in set(re.findall(r"\$vibe-([a-z0-9-]+)", text)):
             if f"vibe-{m}" not in skills:
                 problems.append(f"{rel}: $vibe-{m} names no rendered skill")
+        for m in set(re.findall(r"`vibe-([a-z0-9-]+)`", text)):
+            # Non-skill vibe-* vocabulary that legitimately appears in prose: the plugin
+            # itself, the bin tools, the report prefix, the source-skill name vibe-core,
+            # and the reverse-MCP server. Everything else must name a rendered skill.
+            if m in ("suite", "check", "report", "badge", "core", "claude-mcp"):
+                continue
+            if m.startswith("report-"):
+                continue
+            if f"vibe-{m}" not in skills:
+                problems.append(f"{rel}: `vibe-{m}` names no rendered skill")
     return problems
 
 

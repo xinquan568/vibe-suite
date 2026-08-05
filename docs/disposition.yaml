@@ -199,14 +199,15 @@ mappings:
     disposition: M
     target: F9.6
     note: orphan; the F9.6 basis
-    delivered: [scripts/bridge_cli.py]
+    scheduled: S7
+    expected: [codex/AGENTS.md]
   - row: cc-suite:28
     tree: cc-suite
     paths: [schemas/audit-output.schema.json, scripts/lib/render.mjs]
     disposition: M
     target: [F2.5, F9.1]
     note: orphans
-    delivered: [schemas/audit-output.schema.json]
+    delivered: [schemas/audit-output.schema.json, scripts/lib/render.mjs]
   - row: cc-suite:29
     tree: cc-suite
     paths: [templates/agents/clarity_reviewer.md, templates/agents/deletion_advocate.md, templates/agents/documentation_critic.md, templates/agents/north_star_advisor.md, templates/agents/security_skeptic.md, templates/agents/simplicity_advocate.md]

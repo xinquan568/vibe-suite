@@ -121,8 +121,11 @@ _TARGET_PATH = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+\.[A-Za-z0-9]+$"
 #: these keys with stage and anchors matching exactly; a row graduating to `delivered:` is a
 #: data-only change. Every anchor must be ABSENT from the tree — an anchor that exists means the
 #: capability landed and the gate stays red until the row flips (self-expiry).
-#: All five are Stage-S8 (F10.x build/auditor) capabilities; anchors are the artifacts S8 delivers.
+#: Five are Stage-S8 (F10.x build/auditor) capabilities; cc-suite:27 is Stage-S7 — F9.6's mirror
+#: generator, which scripts/bridge_cli.py itself reports as landing in S7 (`codex/` today holds
+#: only the committed placeholder README). Anchors are the artifacts each stage delivers.
 SCHEDULED = {
+    "cc-suite:27": ("S7", ("codex/AGENTS.md",)),
     "nlpm:12": ("S8", ("bin/vibe-build-docs",)),
     "nlpm:13": ("S8", ("bin/vibe-build-case-studies-index", "bin/vibe-build-reference-md",
                        "bin/vibe-build-site-report-pages", "bin/vibe-build-vocab-data")),
@@ -336,16 +339,16 @@ def validate_schema(trees, mappings, function_ids):
         expected = mapping.get("expected")
         if disposition in PROMISING_DISPOSITIONS:
             if (delivered is None) == (scheduled is None):
-                errors.append(f"{where}: a promising row carries exactly one of 'delivered' or "
+                errors.append(f"{where}: {row}: a promising row carries exactly one of 'delivered' or "
                               "'scheduled' — the promise either landed or has a stage")
             if (scheduled is None) != (expected is None):
-                errors.append(f"{where}: 'scheduled' and 'expected' are required together")
+                errors.append(f"{where}: {row}: 'scheduled' and 'expected' are required together")
             if delivered is not None and (not isinstance(delivered, list) or not delivered):
-                errors.append(f"{where}: 'delivered' must be a non-empty list of artifact paths")
+                errors.append(f"{where}: {row}: 'delivered' must be a non-empty list of artifact paths")
             if scheduled is not None and not isinstance(scheduled, str):
-                errors.append(f"{where}: 'scheduled' must be a single stage id")
+                errors.append(f"{where}: {row}: 'scheduled' must be a single stage id")
             if expected is not None and (not isinstance(expected, list) or not expected):
-                errors.append(f"{where}: 'expected' must be a non-empty list of anchor paths")
+                errors.append(f"{where}: {row}: 'expected' must be a non-empty list of anchor paths")
             if isinstance(delivered, list) and delivered:
                 source_paths = mapping.get("paths") if isinstance(mapping.get("paths"), list) else []
                 # Where the artifact class is mechanically derivable, assert the semantic
@@ -354,22 +357,22 @@ def validate_schema(trees, mappings, function_ids):
                 if disposition in ("K", "K/M") and source_paths:
                     if (all(matches(p, "commands/**/*.md") for p in source_paths)
                             and not any(matches(d, "commands/**/*.md") for d in delivered)):
-                        errors.append(f"{where}: every source path is a command, but nothing in "
-                                      "'delivered' is one — a kept command must resurface under "
-                                      "commands/")
+                        errors.append(f"{where}: {row}: every source path is a command, but nothing "
+                                      "in 'delivered' is one — a kept command must resurface "
+                                      "under commands/")
                     if (all(p.endswith("/SKILL.md") for p in source_paths)
                             and not any(d.endswith("/SKILL.md") for d in delivered)):
-                        errors.append(f"{where}: every source path is a SKILL.md, but nothing in "
-                                      "'delivered' is one")
+                        errors.append(f"{where}: {row}: every source path is a SKILL.md, but nothing "
+                                      "in 'delivered' is one")
                 home = mapping.get("target")
                 if row in PATH_TARGET_ROWS and isinstance(home, str):
                     if not any(d == home or d.endswith("/" + home) for d in delivered):
-                        errors.append(f"{where}: the §6 home is the path {home!r} and "
+                        errors.append(f"{where}: {row}: the §6 home is the path {home!r} and "
                                       "'delivered' must include it")
         elif disposition in DISPOSITIONS:
             for key in ("delivered", "scheduled", "expected"):
                 if key in mapping:
-                    errors.append(f"{where}: {key!r} is forbidden on a {disposition} row — "
+                    errors.append(f"{where}: {row}: {key!r} is forbidden on a {disposition} row — "
                                   "G/R/D rows promise no reimplementation")
         if disposition in ("K/M", "M/K") and not mapping.get("note"):
             errors.append(f"{where}: a compound disposition must carry a note saying which is which")
@@ -402,7 +405,7 @@ def validate_schema(trees, mappings, function_ids):
         claimed_lists += [value for value in (delivered, expected) if isinstance(value, list)]
         for path in (p for one in claimed_lists for p in one):
             if path.startswith("/") or ".." in path.split("/") or path != path.strip():
-                errors.append(f"{where}: {path!r} is not a clean relative POSIX path")
+                errors.append(f"{where}: {row}: {path!r} is not a clean relative POSIX path")
 
     missing = [row for row in ROW_INVENTORY if row not in seen_rows]
     extra = [row for row in seen_rows if row not in ROW_INVENTORY]
@@ -495,6 +498,16 @@ def check_targets(root, mappings):
                 elif not full.is_file():
                     errors.append(f"{where}: {row}: delivered artifact {path!r} is a directory, "
                                   "not a file — a promise resolves to artifacts, not areas")
+            if row in SCHEDULED:
+                # A graduated row stays data-only, but it graduates INTO its promise: every frozen
+                # anchor must be covered by a delivered path (the anchor itself, or a file under an
+                # anchor directory). Without this, flipping to `delivered: [README.md]` would pass —
+                # exactly the false delivery assertion this gate exists to reject.
+                for anchor in SCHEDULED[row][1]:
+                    if not any(d == anchor or d.startswith(anchor + "/") for d in delivered):
+                        errors.append(f"{where}: {row}: graduated, but no delivered path covers "
+                                      f"the frozen anchor {anchor!r} — graduation means the "
+                                      "promised capability landed, not that some artifact exists")
         stage = mapping.get("scheduled")
         if stage is None:
             continue

@@ -317,7 +317,11 @@ class TestChain(DriverCase):
         r = self.drive_chain(chain, "--event", "link-run-outcome",
                              "--status", "pr_opened", "--pr", "12")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.load(chain)["links"][0]["status"], "waiting_merge")
+        data = self.load(chain)
+        self.assertEqual(data["links"][0]["status"], "waiting_merge")
+        self.assertEqual(data["links"][0]["pr"], 12,
+                         "the PR number must be in the PERSISTED record — the "
+                         "Step-9 regression (recorded before the transition persists)")
 
         data = self.load(chain)
         data["links"][0]["status"] = "running"
@@ -610,11 +614,61 @@ class TestConsumption(DriverCase):
             state = json.loads((root / "fx-9-manifest-mode-case" / "state.json").read_text())
             self.assertEqual(state["status"], "quota_paused")
 
+        with self.subTest(mutation="chain exit 0 edge target"):
+            def mutate(blocks):
+                blocks["watcher-exit-actions"]["0"]["effect"]["edge"]["to"] = "skipped"
+                del blocks["watcher-exit-actions"]["0"]["effect"]["then"]
+            ref = edit_reference(mutate)
+            chain = self.copy_fixture("chain-two-link") / "chain.json"
+            r = self.drive("chain", "--chain-file", str(chain), "--watcher-exit", "0",
+                           "--merge-commit", "abc", "--ancestor-verified", "true",
+                           reference=ref)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(chain.read_text())["links"][0]["status"],
+                             "skipped")
+
+        with self.subTest(mutation="chain exit 3 question effect"):
+            def mutate(blocks):
+                blocks["watcher-exit-actions"]["3"]["effect"]["by_classification"][
+                    "question"] = {"edge": {"from": "waiting_merge", "to": "skipped"}}
+            ref = edit_reference(mutate)
+            chain = self.copy_fixture("chain-two-link") / "chain.json"
+            r = self.drive("chain", "--chain-file", str(chain), "--watcher-exit", "3",
+                           "--classification", "question", "--babysit-round", "1",
+                           "--babysit-cap", "3", reference=ref)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(chain.read_text())["links"][0]["status"],
+                             "skipped")
+
+        with self.subTest(mutation="chain exit 4 timeline note"):
+            def mutate(blocks):
+                blocks["watcher-exit-actions"]["4"]["effect"]["timeline_note"] = \
+                    "custom-note-x"
+            ref = edit_reference(mutate)
+            d = self.copy_fixture("chain-two-link")
+            r = self.drive("chain", "--chain-file", str(d / "chain.json"),
+                           "--watcher-exit", "4", "--classification", "actionable",
+                           "--babysit-round", "1", "--babysit-cap", "3", reference=ref)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("custom-note-x", (d / "timeline.md").read_text())
+
+        with self.subTest(mutation="chain exit 7 pre-report"):
+            def mutate(blocks):
+                blocks["watcher-exit-actions"]["7"]["effect"]["pre_report"] = \
+                    "custom-action-x"
+            ref = edit_reference(mutate)
+            chain = self.copy_fixture("chain-two-link") / "chain.json"
+            r = self.drive("chain", "--chain-file", str(chain), "--watcher-exit", "7",
+                           "--merge-commit", "abc", "--ancestor-verified", "true",
+                           reference=ref)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("custom-action-x", r.stdout)
+
         ref_text = REFERENCE.read_text(encoding="utf-8")
         watcher = load_block(ref_text, "watcher-exit-actions")
         for code in sorted(watcher):
             if code in ("0", "3", "4", "7"):
-                continue  # input-carrying effects; remapped via their own paths above
+                continue  # their input-carrying effects are mutated individually above
             with self.subTest(mutation=f"chain exit {code} remapped"):
                 def mutate(blocks, code=code):
                     blocks["watcher-exit-actions"][code]["effect"] = {

@@ -137,6 +137,12 @@ def mode_iterate(decl, args):
     new_round = int(state.get("current_round", 1)) + 1
     round_dir = run / ops["creates"].replace("<N+1>", str(new_round)).rstrip("/")
     round_dir.mkdir(exist_ok=False)
+    if ops["override_key_type"] == "string round number":
+        override_key = str(new_round)
+    else:
+        raise DeclarationGap("iterate-operations", "override_key_type")
+    protected = {(run / name).resolve(): (run / name).read_bytes()
+                 for name in ops["never_writes"] if (run / name).is_file()}
 
     mode_record = ops["override_records"].get("review_mode")
     if mode_record is None:
@@ -160,12 +166,14 @@ def mode_iterate(decl, args):
         record_key = ops["override_records"].get(flag)
         if record_key is None:
             raise DeclarationGap("iterate-operations", f"override_records.{flag}")
-        state.setdefault(record_key, {})[str(new_round)] = value
-    for name in ops["never_writes"]:
-        pass  # declared; enforced by never opening those paths for write below
+        state.setdefault(record_key, {})[override_key] = value
     state["status"] = decl.need("iterate-operations", "transition", "to")
     state["current_round"] = new_round
     dump_json(run / "state.json", state)
+    for target, before in protected.items():
+        if not target.is_file() or target.read_bytes() != before:
+            raise Refusal(f"{target.name} is declared never-written and changed — "
+                          "refusing to leave the run in this state")
     print(f"iterate: {args.run_id} -> round {new_round}, status {state['status']}")
     return 0
 
@@ -176,6 +184,8 @@ def mode_resume(decl, args):
                 "sequences"):
         if key not in ops:
             raise DeclarationGap("resume-operations", key)
+    if ops["writes"] != []:
+        raise DeclarationGap("resume-operations", "writes")
     run = resolve_run(args.runs_root, args.run_id)
     state = load_json(run / "state.json")
     if status_partition(decl, state.get("status")) != ops["precondition_partition"]:
@@ -201,6 +211,8 @@ def mode_list(decl, args):
                 "resume_pointer_unless_status"):
         if key not in ops:
             raise DeclarationGap("list-operations", key)
+    if ops["writes"] != []:
+        raise DeclarationGap("list-operations", "writes")
     root = Path(args.runs_root)
     rows = []
     for child in root.iterdir() if root.is_dir() else []:
@@ -268,14 +280,18 @@ class Chain:
         link["status"] = to
         self.pending_lines.append(f"link {link.get('issue', '?')}: {frm} -> {to}")
         self.persist()
-        # The declared blanket rule: a link terminal that is not the declared survivor
-        # pauses the chain — unless the producing event declares itself exempt (skip).
+        # The declared blanket rule: a link terminal (no outgoing declared edges) that is
+        # not the declared survivor pauses the chain — unless the producing event
+        # declares itself exempt (skip). Both the terminal notion and the pause status
+        # are declaration-derived.
         survivor = self.ops["pause_on_link_terminal_not"]
-        run_enum = self.decl.block("run-status-enum")  # noqa: F841 — link vocab is chain's own
-        link_terminal = to not in ("running", "waiting_merge", "iterating", "pending")
+        if "on_link_terminal_chain_status" not in self.ops:
+            raise DeclarationGap("chain-operations", "on_link_terminal_chain_status")
+        pause_status = self.ops["on_link_terminal_chain_status"]
+        link_terminal = not self.ops["link_edges"].get(to)
         if link_terminal and to != survivor and not pause_exempt \
-                and self.data.get("status") not in ("paused",):
-            self.set_chain("paused")
+                and self.data.get("status") != pause_status:
+            self.set_chain(pause_status)
 
     def set_chain(self, status):
         vocab = (self.ops["chain_statuses"]["non_terminal"]
@@ -327,8 +343,16 @@ class Chain:
             effect = merged
         wrote = False
         for required in effect.get("requires", []):
-            if getattr(args, required, None) in (None, ""):
+            value = getattr(args, required, None)
+            if value in (None, ""):
                 raise Refusal(f"this effect requires --{required.replace('_', '-')}")
+            if required in ("babysit_round", "babysit_cap"):
+                try:
+                    if int(value) < 1:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    raise Refusal(f"--{required.replace('_', '-')} must be an "
+                                  "integer >= 1")
         if "requires" in effect and "ancestor_verified" in effect["requires"]:
             if args.ancestor_verified != "true":
                 raise Refusal("the merge commit is not verified as an ancestor of the "
@@ -337,17 +361,12 @@ class Chain:
             cls = args.classification
             if cls == "actionable":
                 semantics = self.decl.need("chain-operations", "babysit_round_semantics")
-                try:
-                    rnd, cap = int(args.babysit_round), int(args.babysit_cap)
-                except (TypeError, ValueError):
-                    raise Refusal("--babysit-round and --babysit-cap must be integers")
-                if rnd < 1 or cap < 1:
-                    raise Refusal("--babysit-round and --babysit-cap must be >= 1")
                 # The declared semantics: the 1-based ordinal about to run; it runs
                 # while round <= cap.
                 if "runs while round <= cap" not in semantics:
                     raise DeclarationGap("chain-operations", "babysit_round_semantics")
-                cls = "actionable_under_cap" if rnd <= cap else "actionable_at_cap"
+                within = int(args.babysit_round) <= int(args.babysit_cap)
+                cls = f"actionable_{'within' if within else 'beyond'}_cap"
             sub = effect["by_classification"].get(cls)
             if sub is None:
                 raise DeclarationGap("watcher-exit-actions",
@@ -360,10 +379,10 @@ class Chain:
             if link["status"] != effect["edge"]["from"]:
                 raise Refusal(f"link is {link['status']!r}; the declared effect edge "
                               f"starts at {effect['edge']['from']!r}")
+            if args.pr:
+                link["pr"] = int(args.pr)   # recorded BEFORE the transition persists
             self.move_link(link, effect["edge"]["to"])
             wrote = True
-            if args.pr:
-                link["pr"] = int(args.pr)
         if "cursor" in effect:
             if not args.cursor:
                 raise Refusal("this effect advances the cursor; pass --cursor")
@@ -423,7 +442,16 @@ def mode_chain(decl, args):
     notes = []
     if "timeline_note" in record.get("effect", {}):
         notes.append(record["effect"]["timeline_note"])
-    return chain.apply_effect(record["effect"], args, notes)
+    if "result_events" not in record:
+        raise DeclarationGap("watcher-exit-actions", f"{code}.result_events")
+    events = decl.need("chain-operations", "events")
+    for event in record["result_events"]:
+        if event not in events:
+            raise DeclarationGap("chain-operations", f"events.{event}")
+    rc = chain.apply_effect(record["effect"], args, notes)
+    if record["result_events"]:
+        print("awaiting result events: " + ", ".join(record["result_events"]))
+    return rc
 
 
 # --------------------------------------------------------------------------- manifest

@@ -169,7 +169,8 @@ the mapping, the commonest reason a round needs iterating had no status that `it
       }
     }
   },
-  "babysit_round_semantics": "the 1-based ordinal of the babysit round about to run; it runs while round <= cap"
+  "babysit_round_semantics": "the 1-based ordinal of the babysit round about to run; it runs while round <= cap",
+  "on_link_terminal_chain_status": "paused"
 }
 ```
 
@@ -232,13 +233,12 @@ map is what turns each into an action.
       "edge": {
         "from": "waiting_merge",
         "to": "closed_unmerged"
-      },
-      "chain": "paused"
+      }
     },
     "result_events": []
   },
   "3": {
-    "guidance": "classify the activity; actionable under cap disarms auto-merge and runs a babysit round before re-arming and advancing the cursor; a question notifies only; status-noise advances the cursor; at the cap, pause",
+    "guidance": "classify the activity; actionable under cap disarms auto-merge and runs a babysit round before re-arming and advancing the cursor; a question notifies only; status-noise advances the cursor; beyond the cap's rounds, pause",
     "effect": {
       "requires": [
         "classification",
@@ -246,22 +246,22 @@ map is what turns each into an action.
         "babysit_cap"
       ],
       "by_classification": {
-        "actionable_under_cap": {
-          "edge": {
-            "from": "waiting_merge",
-            "to": "iterating"
-          },
-          "report": "babysit-start"
-        },
-        "actionable_at_cap": {
-          "chain": "paused"
-        },
         "question": {
           "report": "notify",
           "writes": []
         },
         "status-noise": {
           "cursor": "advance"
+        },
+        "actionable_within_cap": {
+          "edge": {
+            "from": "waiting_merge",
+            "to": "iterating"
+          },
+          "report": "babysit-start"
+        },
+        "actionable_beyond_cap": {
+          "chain": "paused"
         }
       }
     },

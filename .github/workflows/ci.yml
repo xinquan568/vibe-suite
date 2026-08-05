@@ -258,3 +258,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/coverage-check.py
+
+  legacy-strings:
+    name: legacy strings (AC-6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No retired command namespace in any shipped runtime-reachable string. The sweep's
+      # scope is a total SWEPT/EXEMPT partition; an unclassified top-level entry fails the
+      # job rather than passing silently.
+      - name: AC-6 legacy-string sweep
+        run: bash tools/legacy-string-sweep.sh

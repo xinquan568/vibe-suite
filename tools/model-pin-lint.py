@@ -71,6 +71,8 @@ EXCLUDED = frozenset(
         ".gitattributes",  # root git configuration, same class as .gitignore (E6.2's CRLF fixture pin)
         ".gitignore",
         "LICENSE",
+        "CLAUDE.md",  # root documentation (project memory) — same class as README.md (E7.3)
+        "PRIVACY.md",  # root documentation — same class as README.md (E7.3)
         "README.md",  # root documentation; nested READMEs under a scanned directory ARE scanned
         "docs",
         "tests",  # a test asserting `o3-mini` is caught must contain `o3-mini`

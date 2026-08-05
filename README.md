@@ -11,7 +11,8 @@ Commands are namespaced `/vibe-suite:*`, which follows from `name` in
 
 ## Platform support
 
-**POSIX only** — bash, `python3`, `node`, and symlinks are assumed throughout. macOS and Linux are
+**POSIX only, Python 3.11+** — bash, `python3` (3.11 or newer), `node`, and symlinks are
+assumed throughout. macOS and Linux are
 supported; **Windows is not**, including via cmd/PowerShell. WSL works because it is POSIX. This is a
 deliberate v1 constraint inherited from all three projects this one references, stated explicitly
 rather than left to be discovered.
@@ -73,6 +74,70 @@ claude plugin validate .claude-plugin/plugin.json --strict # plugin.json + compo
 
 CI runs manifest validation, Python/Node lint, a pinned-model-identifier scan, and the test suite on
 every pull request.
+
+## Command catalog
+
+The manifest registers **29 commands, 14 agents, 24 skills** (the exact lists live in
+[`.claude-plugin/plugin.json`](.claude-plugin/plugin.json); `tests/test_doc_accuracy.py`
+holds these counts equal to the manifest and the files on disk). By group:
+
+- **Audit & quality** — `nl-audit`, `score`, `check`, `fix`, `test`, `trend`, `report`,
+  `security-scan`, `vocab`, `spec-sync`, `roast` (code interrogation), `bug-analyze`.
+- **Lifecycle & bridge** — `init`, `doctor`, `repair`, `update`, `config`, `bridge`,
+  `unbridge`, `preflight`, `advisor`.
+- **Cross-model & jobs** — `delegate`, `continue`, `jobs`, `refresh-knowledge`.
+- **Workflow loops** — `issue2pr`, `refine-proposal`, `runs-stats`, `ls`.
+
+## Migrating from cc-suite / nlpm / grill
+
+Old commands map to their vibe-suite successors as follows (derived from
+[`docs/disposition.yaml`](docs/disposition.yaml)):
+
+| Old | New | Notes |
+|---|---|---|
+| `/cc-suite:init` | `/vibe-suite:init` | merged with nlpm's init |
+| `/cc-suite:update` | `/vibe-suite:update` | |
+| `/cc-suite:repair` | `/vibe-suite:repair` | |
+| `/cc-suite:diagnose` | `/vibe-suite:doctor` | renamed |
+| `/cc-suite:setup` | `/vibe-suite:config` | renamed |
+| `/cc-suite:preflight` | `/vibe-suite:preflight` | |
+| `/cc-suite:unbridge` | `/vibe-suite:unbridge` | |
+| `/cc-suite:bridge-hooks` | `/vibe-suite:bridge` | one command, `hooks` subcommand |
+| `/cc-suite:bridge-mcp` | `/vibe-suite:bridge` | `mcp` subcommand |
+| `/cc-suite:bridge-skills` | `/vibe-suite:bridge` | `skills` subcommand |
+| `/cc-suite:add-agent` | `/vibe-suite:advisor` | `add` subcommand |
+| `/cc-suite:list-agents` | `/vibe-suite:advisor` | `list` subcommand |
+| `/cc-suite:remove-agent` | `/vibe-suite:advisor` | `remove` subcommand |
+| `/cc-suite:audit` | `/vibe-suite:roast` | `--engine codex`; nine dimensions preserved |
+| `/cc-suite:audit-fix` | `/vibe-suite:fix` | merged with nlpm's fix |
+| `/cc-suite:verify` | `/vibe-suite:fix` | verification folded into the fix loop |
+| `/cc-suite:audit-agent` | `/vibe-suite:nl-audit` | `--type agent` |
+| `/cc-suite:audit-command` | `/vibe-suite:nl-audit` | `--type command` |
+| `/cc-suite:audit-nlp` | `/vibe-suite:nl-audit` | `--type repo` |
+| `/cc-suite:audit-plugin` | `/vibe-suite:nl-audit` | `--type plugin` |
+| `/cc-suite:audit-rules` | `/vibe-suite:nl-audit` | `--type rules` |
+| `/cc-suite:audit-skill` | `/vibe-suite:nl-audit` | `--type skill` |
+| `/cc-suite:implement` | `/vibe-suite:delegate` | renamed |
+| `/cc-suite:review-plan` | the `refine-proposal` skill | `--review-mode single` |
+| `/cc-suite:bug-analyze` | `/vibe-suite:bug-analyze` | |
+| `/cc-suite:continue` | `/vibe-suite:continue` | |
+| `/cc-suite:cancel` | `/vibe-suite:jobs` | `cancel` subcommand |
+| `/cc-suite:result` | `/vibe-suite:jobs` | `result` subcommand |
+| `/cc-suite:status` | `/vibe-suite:jobs` | `status` subcommand |
+| `/cc-suite:refresh-knowledge` | `/vibe-suite:refresh-knowledge` | |
+| `/grill:roast` | `/vibe-suite:roast` | styles and add-ons preserved |
+| `/nlpm:ls` | `/vibe-suite:ls` | |
+| `/nlpm:score` | `/vibe-suite:score` | |
+| `/nlpm:fix` | `/vibe-suite:fix` | |
+| `/nlpm:check` | `/vibe-suite:check` | |
+| `/nlpm:test` | `/vibe-suite:test` | |
+| `/nlpm:vocab-drift` | `/vibe-suite:vocab` | `drift` subcommand |
+| `/nlpm:vocab-init` | `/vibe-suite:vocab` | `init` subcommand |
+| `/nlpm:security-scan` | `/vibe-suite:security-scan` | |
+| `/nlpm:trend` | `/vibe-suite:trend` | |
+| `/nlpm:report` | `/vibe-suite:report` | |
+| `/nlpm:init` | `/vibe-suite:init` | merged with cc-suite's init |
+| `/nlpm:spec-sync` | `/vibe-suite:spec-sync` | |
 
 ## Acknowledgements
 

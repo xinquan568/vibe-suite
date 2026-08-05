@@ -12,11 +12,17 @@ explicitly offline path — no network, vendored assets.
 
 ## What leaves your machine, and only when you invoke it
 
-- **Cross-model lanes.** Commands that dispatch to an external engine (`delegate`,
-  `continue`, `jobs`, `bug-analyze`, `roast --engine codex`, `fix --engine …`) pass
+- **Cross-model lanes.** Commands that dispatch to an external engine pass
   repository-derived prompts — file contents, diffs, findings — to the engine you configured
-  (Codex CLI today; an agy lane exists behind its gate). Those providers' own terms then
-  apply. No lane runs unless you invoke it.
+  (Codex CLI today; an agy lane exists behind its gate). The dispatching surfaces:
+  `delegate`, `continue`, `bug-analyze`, `roast --engine codex|agy|both`,
+  `fix --engine …`, `nl-audit` (cross-model audit lane), `score`/`security-scan` second
+  opinions where an engine flag is passed, the `refine-proposal` and `issue2pr` workflow
+  skills (their reviewer legs), and the **Stop-time review hook** — opt-in at setup, but
+  once enabled it dispatches automatically at session stops until disabled. `jobs` manages
+  the background jobs those dispatches create; it sends no prompts itself. Those providers'
+  own terms apply to what the lanes send. No lane runs unless you invoke it (or enabled the
+  hook).
 - **Preflight probes.** `/vibe-suite:preflight` contacts the configured engines to test
   connectivity and discover models.
 - **Knowledge refresh.** `/vibe-suite:refresh-knowledge` fetches documentation via Context7.
@@ -45,5 +51,6 @@ branch, not in your projects.
 
 ## Telemetry
 
-None. The suite collects nothing, phones nowhere, and keeps its run artifacts in your own
-tree.
+None. The suite has no analytics, no beacons, and no data collection of its own; the only
+network traffic is the disclosed operations above (engine dispatches you invoke, preflight
+probes, Context7 fetches, the pinned npm fetch), and run artifacts stay in your own tree.

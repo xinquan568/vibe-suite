@@ -33,18 +33,12 @@ class DocsExist(unittest.TestCase):
 
 
 class ReadmeCounts(unittest.TestCase):
-    def counts_from_disk(self):
-        m = manifest()
-        commands_disk = [p for p in (REPO_ROOT / "commands").rglob("*.md")
-                         if f"./{p.relative_to(REPO_ROOT).as_posix()}" in m["commands"]]
-        agents_disk = [p for p in (REPO_ROOT / "agents").glob("*.md")
-                       if f"./{p.relative_to(REPO_ROOT).as_posix()}" in m["agents"]]
-        skills_disk = [d for d in (REPO_ROOT / "skills").iterdir()
-                       if d.is_dir() and (d / "SKILL.md").is_file()
-                       and f"./{d.relative_to(REPO_ROOT).as_posix()}" in m["skills"]]
-        return len(commands_disk), len(agents_disk), len(skills_disk)
-
     def test_readme_counts_equal_manifest_and_disk(self):
+        # RAW disk inventories compared to the manifest inventories (F5): registration
+        # filtering on the disk side would hide unregistered extras. User-facing commands
+        # are commands/*.md outside shared/ (partials are user-invocable: false plumbing,
+        # registered separately by convention); agents are agents/*.md; skills are
+        # skills/*/SKILL.md directories.
         text = README.read_text(encoding="utf-8")
         m = manifest()
         stated = re.search(r"\*\*(\d+) commands, (\d+) agents, (\d+) skills\*\*", text)
@@ -53,7 +47,21 @@ class ReadmeCounts(unittest.TestCase):
         self.assertEqual((c, a, s),
                          (len(m["commands"]), len(m["agents"]), len(m["skills"])),
                          "README counts != manifest")
-        self.assertEqual((c, a, s), self.counts_from_disk(), "README counts != disk")
+        commands_disk = sorted(p.relative_to(REPO_ROOT).as_posix()
+                               for p in (REPO_ROOT / "commands").glob("*.md"))
+        agents_disk = sorted(p.relative_to(REPO_ROOT).as_posix()
+                             for p in (REPO_ROOT / "agents").glob("*.md"))
+        skills_disk = sorted(d.relative_to(REPO_ROOT).as_posix()
+                             for d in (REPO_ROOT / "skills").iterdir()
+                             if d.is_dir() and (d / "SKILL.md").is_file())
+        self.assertEqual(sorted(c[2:] for c in m["commands"]), commands_disk,
+                         "manifest commands != disk commands")
+        self.assertEqual(sorted(a[2:] for a in m["agents"]), agents_disk,
+                         "manifest agents != disk agents")
+        self.assertEqual(sorted(s[2:] for s in m["skills"]), skills_disk,
+                         "manifest skills != disk skills")
+        self.assertEqual((c, a, s),
+                         (len(commands_disk), len(agents_disk), len(skills_disk)))
 
     def test_python_floor_is_stated(self):
         self.assertIn("Python 3.11+", README.read_text(encoding="utf-8"))
@@ -63,9 +71,29 @@ class ReadmeCounts(unittest.TestCase):
         m = manifest()
         commands = {Path(c).stem for c in m["commands"]}
         skills = {Path(s).name for s in m["skills"]}
-        rows = re.findall(r"^\| `/(?:cc-suite|nlpm|grill):[a-z-]+`[^|]*\| ([^|]+) \|",
-                          text, re.M)
-        self.assertGreaterEqual(len(rows), 25, "migration table too small")
+        rows_full = re.findall(
+            r"^\| `(/(?:cc-suite|nlpm|grill):[a-z-]+)`[^|]*\| ([^|]+) \|", text, re.M)
+        # Exact-set coverage (F5): every user-facing command path in disposition.yaml's
+        # source rows appears as a table row, and nothing else does.
+        disp = (REPO_ROOT / "docs" / "disposition.yaml").read_text(encoding="utf-8")
+        expected = set()
+        for block in re.split(r"\n  - row: ", disp)[1:]:
+            tree = re.search(r"tree: (\S+)", block)
+            paths = re.search(r"paths: \[(.*?)\]", block, re.S)
+            if not tree or not paths:
+                continue
+            prefix = {"cc-suite": "cc-suite", "nlpm": "nlpm",
+                      "grill-for-claude": "grill"}.get(tree.group(1))
+            if prefix is None:
+                continue
+            for p2 in paths.group(1).split(","):
+                p2 = p2.strip()
+                if p2.startswith("commands/") and "shared/" not in p2 and p2.endswith(".md"):
+                    expected.add(f"/{prefix}:{Path(p2).stem}")
+        stated_old = {r[0] for r in rows_full}
+        self.assertEqual(stated_old, expected,
+                         "migration table rows != disposition's user-facing commands")
+        rows = [r[1] for r in rows_full]
         for new in rows:
             new = new.strip()
             if "no successor" in new:

@@ -111,12 +111,12 @@ Old commands map to their vibe-suite successors as follows (derived from
 | `/cc-suite:audit` | `/vibe-suite:roast` | `--engine codex`; nine dimensions preserved |
 | `/cc-suite:audit-fix` | `/vibe-suite:fix` | merged with nlpm's fix |
 | `/cc-suite:verify` | `/vibe-suite:fix` | verification folded into the fix loop |
-| `/cc-suite:audit-agent` | `/vibe-suite:nl-audit` | one NL auditor, typed scopes |
-| `/cc-suite:audit-command` | `/vibe-suite:nl-audit` | |
-| `/cc-suite:audit-nlp` | `/vibe-suite:nl-audit` | |
-| `/cc-suite:audit-plugin` | `/vibe-suite:nl-audit` | |
-| `/cc-suite:audit-rules` | `/vibe-suite:nl-audit` | |
-| `/cc-suite:audit-skill` | `/vibe-suite:nl-audit` | |
+| `/cc-suite:audit-agent` | `/vibe-suite:nl-audit` | `--type agent` |
+| `/cc-suite:audit-command` | `/vibe-suite:nl-audit` | `--type command` |
+| `/cc-suite:audit-nlp` | `/vibe-suite:nl-audit` | `--type repo` |
+| `/cc-suite:audit-plugin` | `/vibe-suite:nl-audit` | `--type plugin` |
+| `/cc-suite:audit-rules` | `/vibe-suite:nl-audit` | `--type rules` |
+| `/cc-suite:audit-skill` | `/vibe-suite:nl-audit` | `--type skill` |
 | `/cc-suite:implement` | `/vibe-suite:delegate` | renamed |
 | `/cc-suite:review-plan` | the `refine-proposal` skill | `--review-mode single` |
 | `/cc-suite:bug-analyze` | `/vibe-suite:bug-analyze` | |

@@ -138,7 +138,10 @@ def mode_iterate(decl, args):
     round_dir = run / ops["creates"].replace("<N+1>", str(new_round)).rstrip("/")
     round_dir.mkdir(exist_ok=False)
 
-    effective_mode = (state.get("review_mode_overrides", {})
+    mode_record = ops["override_records"].get("review_mode")
+    if mode_record is None:
+        raise DeclarationGap("iterate-operations", "override_records.review_mode")
+    effective_mode = (state.get(mode_record, {})
                       .get(str(state.get("current_round", 1)))
                       or state.get("review_mode"))
     supplied = {"review_mode": args.review_mode,
@@ -194,7 +197,8 @@ def mode_resume(decl, args):
 
 def mode_list(decl, args):
     ops = decl.block("list-operations")
-    for key in ("exclude_prefix", "writes", "order", "columns"):
+    for key in ("exclude_prefix", "writes", "order", "columns", "column_fields",
+                "resume_pointer_unless_status"):
         if key not in ops:
             raise DeclarationGap("list-operations", key)
     root = Path(args.runs_root)
@@ -211,14 +215,26 @@ def mode_list(decl, args):
     newest_first = "newest" in ops["order"]
     rows.sort(key=lambda r: r[0], reverse=newest_first)
     print(" | ".join(ops["columns"]))
+    fields = ops["column_fields"]
     for _mtime, name, state in rows:
         mode = (state.get("review_mode_overrides", {})
                 .get(str(state.get("current_round", 1))) or state.get("review_mode", "?"))
         status = state.get("status", "?")
-        pointer = "" if status in ("completed",) else f"resume {name}"
-        print(f"{name} | {status} | {state.get('source_id', '?')} | "
-              f"{state.get('current_step', '?')} | {mode} | "
-              f"{state.get('current_round', '?')} | {pointer}")
+        cells = []
+        for column in ops["columns"]:
+            source = fields.get(column)
+            if source is None:
+                raise DeclarationGap("list-operations", f"column_fields.{column}")
+            if source == "$dir":
+                cells.append(name)
+            elif source == "$effective_mode":
+                cells.append(str(mode))
+            elif source == "$resume_pointer":
+                cells.append("" if status in ops["resume_pointer_unless_status"]
+                             else f"resume {name}")
+            else:
+                cells.append(str(state.get(source, "?")))
+        print(" | ".join(cells))
     return 0
 
 
@@ -243,7 +259,7 @@ class Chain:
     def link(self):
         return self.data["links"][self.data.get("current_index", 0)]
 
-    def move_link(self, link, to):
+    def move_link(self, link, to, pause_exempt=False):
         frm = link["status"]
         if to not in self.ops["link_statuses"]:
             raise Refusal(f"{to!r} is not in the declared link vocabulary")
@@ -251,6 +267,15 @@ class Chain:
             raise Refusal(f"transition {frm} -> {to} is not a declared edge")
         link["status"] = to
         self.pending_lines.append(f"link {link.get('issue', '?')}: {frm} -> {to}")
+        self.persist()
+        # The declared blanket rule: a link terminal that is not the declared survivor
+        # pauses the chain — unless the producing event declares itself exempt (skip).
+        survivor = self.ops["pause_on_link_terminal_not"]
+        run_enum = self.decl.block("run-status-enum")  # noqa: F841 — link vocab is chain's own
+        link_terminal = to not in ("running", "waiting_merge", "iterating", "pending")
+        if link_terminal and to != survivor and not pause_exempt \
+                and self.data.get("status") not in ("paused",):
+            self.set_chain("paused")
 
     def set_chain(self, status):
         vocab = (self.ops["chain_statuses"]["non_terminal"]
@@ -259,6 +284,7 @@ class Chain:
             raise Refusal(f"{status!r} is not in the declared chain vocabulary")
         self.data["status"] = status
         self.pending_lines.append(f"chain: {status}")
+        self.persist()
 
     def advance(self):
         adv = self.decl.need("chain-operations", "events", "advance")
@@ -273,6 +299,7 @@ class Chain:
             self.move_link(nxt, to)
         else:
             self.set_chain(adv["on_last_link"]["chain"])
+            return
 
     def persist(self):
         for target in self.ops["persist_after_every_transition"]:
@@ -285,10 +312,17 @@ class Chain:
         self.pending_lines = []
 
     def apply_effect(self, effect, args, notes=()):
+        seen_aliases = set()
         while "as" in effect:
-            base = self.decl.need("chain-operations") if False else None
+            target = effect["as"]
+            if target in seen_aliases:
+                raise DeclarationGap("watcher-exit-actions",
+                                     f"as-cycle through {target!r}")
+            seen_aliases.add(target)
             watcher = self.decl.block("watcher-exit-actions")
-            merged = dict(watcher[effect["as"]]["effect"])
+            if target not in watcher or "effect" not in watcher[target]:
+                raise DeclarationGap("watcher-exit-actions", f"{target}.effect")
+            merged = dict(watcher[target]["effect"])
             merged.update({k: v for k, v in effect.items() if k != "as"})
             effect = merged
         wrote = False
@@ -302,8 +336,18 @@ class Chain:
         if "by_classification" in effect:
             cls = args.classification
             if cls == "actionable":
-                under = int(args.babysit_round) <= int(args.babysit_cap) - 1
-                cls = "actionable_under_cap" if under else "actionable_at_cap"
+                semantics = self.decl.need("chain-operations", "babysit_round_semantics")
+                try:
+                    rnd, cap = int(args.babysit_round), int(args.babysit_cap)
+                except (TypeError, ValueError):
+                    raise Refusal("--babysit-round and --babysit-cap must be integers")
+                if rnd < 1 or cap < 1:
+                    raise Refusal("--babysit-round and --babysit-cap must be >= 1")
+                # The declared semantics: the 1-based ordinal about to run; it runs
+                # while round <= cap.
+                if "runs while round <= cap" not in semantics:
+                    raise DeclarationGap("chain-operations", "babysit_round_semantics")
+                cls = "actionable_under_cap" if rnd <= cap else "actionable_at_cap"
             sub = effect["by_classification"].get(cls)
             if sub is None:
                 raise DeclarationGap("watcher-exit-actions",
@@ -336,10 +380,7 @@ class Chain:
             print(f"required action: {effect['report']}")
         for note in notes:
             self.pending_lines.append(note)
-        if wrote or self.pending_lines:
-            pause_not = self.ops["pause_on_link_terminal_not"]
-            link = self.data["links"][min(self.data.get("current_index", 0),
-                                          len(self.data["links"]) - 1)]
+        if self.pending_lines:
             self.persist()
         return 0
 
@@ -356,10 +397,9 @@ def mode_chain(decl, args):
             if link["status"] not in ev["from_any_of"]:
                 raise Refusal(f"skip applies from {ev['from_any_of']}, "
                               f"link is {link['status']!r}")
-            chain.move_link(link, ev["to"])
+            chain.move_link(link, ev["to"], pause_exempt=ev.get("pause_exempt", False))
             if ev.get("then") == "advance":
                 chain.advance()
-            chain.persist()
             return 0
         if "inputs" in ev:
             (input_name, domain), = ev["inputs"].items()
@@ -410,14 +450,16 @@ def mode_manifest(decl, args):
     if rel.parts and rel.parts[0] == "runs":
         rel = Path(*rel.parts[1:])   # the manifest convention is workspace-relative
     run = (runs_root / rel).resolve()
-    try:
-        run.relative_to(runs_root)
-    except ValueError:
-        raise Refusal(f"run_folder {run_folder!r} resolves outside --runs-root "
-                      "— containment refused")
-    if run == runs_root:
-        raise Refusal("run_folder names the runs root itself — refused")
-    run.mkdir(parents=True, exist_ok=False)
+    if "beneath --runs-root" in ops["containment"]:
+        try:
+            run.relative_to(runs_root)
+        except ValueError:
+            raise Refusal(f"run_folder {run_folder!r} resolves outside --runs-root "
+                          "— containment refused")
+        if run == runs_root:
+            raise Refusal("run_folder names the runs root itself — refused")
+    else:
+        raise DeclarationGap("manifest-operations", "containment")
     meta = {"schema_version": 2, "run_id": run.name,
             "source_id": manifest["subtask"]["id"],
             "profile": settings.get("profile", Path(args.profile).stem),
@@ -434,8 +476,16 @@ def mode_manifest(decl, args):
              "reviewer_backend_overrides": {},
              "current_step": 1, "current_round": 1,
              "status": ops["initial_status"]}
-    dump_json(run / "00-meta.json", meta)
-    dump_json(run / "state.json", state)
+    # The declared `creates` list drives what is written — remove an entry from the
+    # declaration and that artifact is not created (consumption, not presence-checking).
+    writers = {"run_folder": lambda: run.mkdir(parents=True, exist_ok=False),
+               "00-meta.json": lambda: dump_json(run / "00-meta.json", meta),
+               "state.json": lambda: dump_json(run / "state.json", state)}
+    for artifact in ops["creates"]:
+        writer = writers.get(artifact)
+        if writer is None:
+            raise DeclarationGap("manifest-operations", f"creates.{artifact}")
+        writer()
     print(f"manifest: run folder {run} created, status {ops['initial_status']}")
     return 0
 

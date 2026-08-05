@@ -12,6 +12,7 @@ driven here is the mode wrapper around them.
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -147,9 +148,18 @@ class TestResume(DriverCase):
         self.assertIn("iterate", r.stderr, "the declared redirect names iterate")
 
 
+def set_touch_order(root, newest_to_oldest):
+    """Deterministic last-touched times — git checkouts and copytree both reset dir
+    mtimes, so ordering must be pinned by the test, never inherited (the CI lesson)."""
+    base = 1754300000
+    for offset, name in enumerate(newest_to_oldest):
+        os.utime(Path(root) / name, (base - offset * 1000, base - offset * 1000))
+
+
 class TestList(DriverCase):
     def test_columns_order_and_exclusion(self):
         root = self.runs_root_with("underscore-suite") / "underscore-suite"
+        set_touch_order(root, ["run-a", "run-b"])
         before = tree_hash(root)
         r = self.drive("list", "--runs-root", str(root))
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -217,9 +227,12 @@ class TestChain(DriverCase):
         self.assertEqual(data["links"][1]["status"], "pending", "no advance past a pause")
 
     def test_exit3_classifications(self):
+        # The declared semantics: the 1-based ordinal about to run; it runs while
+        # round <= cap. Boundary battery: cap-1, cap, cap+1, and the cap-1 chain.
         cases = {
-            ("actionable", "1"): ("iterating", None, "babysit-start"),
-            ("actionable", "3"): ("waiting_merge", "paused", None),
+            ("actionable", "2"): ("iterating", None, "babysit-start"),   # cap-1 < cap
+            ("actionable", "3"): ("iterating", None, "babysit-start"),   # at cap: runs
+            ("actionable", "4"): ("waiting_merge", "paused", None),      # past cap
             ("question", "1"): ("waiting_merge", None, "notify"),
         }
         for (classification, rnd), (link_status, chain_status, report) in cases.items():
@@ -239,6 +252,27 @@ class TestChain(DriverCase):
                 if classification == "question":
                     self.assertEqual(tree_hash(chain.parent), before,
                                      "a question is report-only")
+
+    def test_exit3_cap_one_boundary(self):
+        for rnd, link_status, chain_status in (("1", "iterating", None),
+                                                ("2", "waiting_merge", "paused")):
+            with self.subTest(round=rnd):
+                chain, _ = self.chain_file()
+                r = self.drive_chain(chain, "--watcher-exit", "3",
+                                     "--classification", "actionable",
+                                     "--babysit-round", rnd, "--babysit-cap", "1")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                data = self.load(chain)
+                self.assertEqual(data["links"][0]["status"], link_status)
+                if chain_status:
+                    self.assertEqual(data["status"], chain_status)
+
+    def test_exit3_non_integer_inputs_refused(self):
+        chain, _ = self.chain_file()
+        r = self.drive_chain(chain, "--watcher-exit", "3",
+                             "--classification", "actionable",
+                             "--babysit-round", "soon", "--babysit-cap", "3")
+        self.assertEqual(r.returncode, 2)
 
     def test_exit3_status_noise_advances_cursor_only(self):
         chain, _ = self.chain_file()
@@ -308,6 +342,37 @@ class TestChain(DriverCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.load(chain)["status"], "complete")
 
+    def test_exit7_squash_report_then_merge_semantics(self):
+        chain, _ = self.chain_file()
+        r = self.drive_chain(chain, "--watcher-exit", "7",
+                             "--merge-commit", "abc1234", "--ancestor-verified", "true")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("squash", r.stdout, "the pre-report action is printed")
+        data = self.load(chain)
+        self.assertEqual(data["links"][0]["status"], "merged")
+        self.assertEqual(data["links"][1]["status"], "running")
+
+    def test_link_start_event(self):
+        chain, _ = self.chain_file()
+        data = self.load(chain)
+        data["links"][0]["status"] = "pending"
+        chain.write_text(json.dumps(data, indent=2) + "\n")
+        r = self.drive_chain(chain, "--event", "link-start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.load(chain)["links"][0]["status"], "running")
+
+    def test_skip_from_running(self):
+        chain, _ = self.chain_file()
+        data = self.load(chain)
+        data["links"][0]["status"] = "running"
+        chain.write_text(json.dumps(data, indent=2) + "\n")
+        r = self.drive_chain(chain, "--event", "skip")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = self.load(chain)
+        self.assertEqual(data["links"][0]["status"], "skipped")
+        self.assertEqual(data["links"][1]["status"], "running",
+                         "skip is pause-exempt and advances")
+
     def test_report_only_exits(self):
         for code in ("5",):
             with self.subTest(code=code):
@@ -371,82 +436,81 @@ class TestManifest(DriverCase):
 
 class TestConsumption(DriverCase):
     """The driver derives behavior from the declarations — proven by removal (fail
-    naming the gap) and by mutation (behavior follows the change), parameterized from
-    the blocks themselves so a future key joins the matrix without a test edit."""
-
-    LOAD_BEARING = {
-        "iterate-operations": None, "resume-operations": None, "list-operations": None,
-        "manifest-operations": None, "chain-operations": None,
-        "run-status-enum": None,
-    }
+    naming the gap, for EVERY key, probed by the mode that consumes it) and by mutation
+    (behavior follows the change), parameterized from the blocks themselves so a future
+    key joins the matrix without a test edit."""
 
     def keys_for(self, marker):
         block = load_block(REFERENCE.read_text(encoding="utf-8"), marker)
         return sorted(block.keys())
 
+    def probe(self, marker, key, ref):
+        """Drive the mode that consumes (marker, key); every probe must hit the gap."""
+        if marker == "chain-operations":
+            chain = self.copy_fixture("chain-two-link") / "chain.json"
+            if key == "babysit_round_semantics":
+                return self.drive("chain", "--chain-file", str(chain),
+                                  "--watcher-exit", "3", "--classification",
+                                  "actionable", "--babysit-round", "1",
+                                  "--babysit-cap", "3", reference=ref)
+            if key == "events":
+                return self.drive("chain", "--chain-file", str(chain),
+                                  "--event", "skip", reference=ref)
+            return self.drive("chain", "--chain-file", str(chain),
+                              "--watcher-exit", "2", reference=ref)
+        if marker == "manifest-operations":
+            root = Path(tempfile.mkdtemp(dir=self.work)) / "runs"
+            root.mkdir()
+            return self.drive("manifest", "--manifest",
+                              str(FIXTURES / "manifest-mode.json"),
+                              "--profile", str(REPO_ROOT / "tests" / "fixtures" /
+                                               "issue2pr" / "profiles" / "fixture.md"),
+                              "--runs-root", str(root), reference=ref)
+        if marker == "iterate-operations":
+            root = self.runs_root_with("terminal-run")
+            return self.drive("iterate", "terminal-run", "--runs-root", str(root),
+                              "--max-review-rounds", "3", reference=ref)
+        if marker == "list-operations":
+            root = self.runs_root_with("underscore-suite") / "underscore-suite"
+            return self.drive("list", "--runs-root", str(root), reference=ref)
+        root = self.runs_root_with("in-progress-run-none")
+        return self.drive("resume", "in-progress-run-none", "--runs-root", str(root),
+                          reference=ref)
+
     def test_removed_key_fails_naming_marker_and_key(self):
-        probes = {
-            "iterate-operations": ("iterate", ["iterate", "terminal-run"]),
-            "resume-operations": ("resume", ["resume", "in-progress-run-none"]),
-            "list-operations": ("list", ["list"]),
-            "chain-operations": ("chain", None),
-            "run-status-enum": ("resume", ["resume", "in-progress-run-none"]),
-        }
-        for marker, (kind, argv) in probes.items():
+        markers = ("iterate-operations", "resume-operations", "list-operations",
+                   "manifest-operations", "chain-operations", "run-status-enum")
+        for marker in markers:
             for key in self.keys_for(marker):
                 with self.subTest(marker=marker, key=key):
                     def mutate(blocks, marker=marker, key=key):
                         del blocks[marker][key]
                     ref = edit_reference(mutate)
-                    if kind == "chain":
-                        chain = self.copy_fixture("chain-two-link") / "chain.json"
-                        r = self.drive("chain", "--chain-file", str(chain),
-                                       "--watcher-exit", "2", reference=ref)
-                    else:
-                        root = self.runs_root_with(
-                            "terminal-run" if kind == "iterate"
-                            else "in-progress-run-none" if kind == "resume"
-                            else "underscore-suite")
-                        if kind == "list":
-                            root = root / "underscore-suite"
-                        r = self.drive(*argv, "--runs-root", str(root), reference=ref)
-                    if r.returncode == 0:
-                        continue  # a key this mode does not consume — legitimately inert
-                    self.assertEqual(r.returncode, 4, f"{marker}.{key}: {r.stderr}")
+                    r = self.probe(marker, key, ref)
+                    self.assertEqual(r.returncode, 4,
+                                     f"{marker}.{key} must be load-bearing for its "
+                                     f"probe: exit {r.returncode}\n{r.stderr}")
                     self.assertIn(marker, r.stderr)
                     self.assertIn(key, r.stderr)
 
-    def test_required_keys_are_actually_required(self):
-        """At least the spine of each mode must hit the gap path — guards the
-        removed-key test against a driver that consults nothing."""
-        spine = {
-            "iterate-operations": "transition",
-            "resume-operations": "sequences",
-            "list-operations": "columns",
-            "chain-operations": "link_edges",
-            "run-status-enum": "terminal",
-        }
-        for marker, key in spine.items():
-            with self.subTest(marker=marker, key=key):
-                def mutate(blocks, marker=marker, key=key):
-                    del blocks[marker][key]
-                ref = edit_reference(mutate)
-                if marker == "chain-operations":
-                    chain = self.copy_fixture("chain-two-link") / "chain.json"
-                    r = self.drive("chain", "--chain-file", str(chain),
-                                   "--watcher-exit", "2", reference=ref)
-                elif marker == "iterate-operations":
-                    root = self.runs_root_with("terminal-run")
-                    r = self.drive("iterate", "terminal-run", "--runs-root", str(root),
-                                   reference=ref)
-                elif marker == "list-operations":
-                    root = self.runs_root_with("underscore-suite") / "underscore-suite"
-                    r = self.drive("list", "--runs-root", str(root), reference=ref)
-                else:
-                    root = self.runs_root_with("in-progress-run-none")
-                    r = self.drive("resume", "in-progress-run-none",
-                                   "--runs-root", str(root), reference=ref)
-                self.assertEqual(r.returncode, 4, f"{marker}.{key} must be load-bearing")
+    def test_watcher_code_removal_is_declared_catch_all_behavior(self):
+        """Removing a non-catch-all code falls to the declared catch-all (paused) —
+        behavior, not a gap; removing the catch-all itself IS the gap."""
+        def drop_two(blocks):
+            del blocks["watcher-exit-actions"]["2"]
+        chain = self.copy_fixture("chain-two-link") / "chain.json"
+        r = self.drive("chain", "--chain-file", str(chain), "--watcher-exit", "2",
+                       reference=edit_reference(drop_two))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(chain.read_text())["status"], "paused")
+
+        def drop_catch_all(blocks):
+            del blocks["watcher-exit-actions"]["1"]
+        chain = self.copy_fixture("chain-two-link") / "chain.json"
+        r = self.drive("chain", "--chain-file", str(chain), "--watcher-exit", "42",
+                       reference=edit_reference(drop_catch_all))
+        self.assertEqual(r.returncode, 4)
+        self.assertIn("watcher-exit-actions", r.stderr)
 
     def test_behavior_follows_mutation(self):
         with self.subTest(mutation="iterate target status"):
@@ -488,6 +552,7 @@ class TestConsumption(DriverCase):
                 blocks["list-operations"]["order"] = "last-touched, oldest first"
             ref = edit_reference(mutate)
             root = self.runs_root_with("underscore-suite") / "underscore-suite"
+            set_touch_order(root, ["run-a", "run-b"])
             r = self.drive("list", "--runs-root", str(root), reference=ref)
             lines = [l for l in r.stdout.splitlines()[1:] if l.startswith("run-")]
             self.assertEqual([l.split()[0] for l in lines], ["run-b", "run-a"])
@@ -499,6 +564,36 @@ class TestConsumption(DriverCase):
             root = self.runs_root_with("underscore-suite") / "underscore-suite"
             r = self.drive("list", "--runs-root", str(root), reference=ref)
             self.assertNotIn("run-a", r.stdout)
+
+        with self.subTest(mutation="list columns subset"):
+            def mutate(blocks):
+                blocks["list-operations"]["columns"] = ["run-id", "status"]
+            ref = edit_reference(mutate)
+            root = self.runs_root_with("underscore-suite") / "underscore-suite"
+            set_touch_order(root, ["run-a", "run-b"])
+            r = self.drive("list", "--runs-root", str(root), reference=ref)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            rows = [l for l in r.stdout.splitlines()[1:] if l.strip()]
+            for row in rows:
+                self.assertEqual(len(row.split(" | ")), 2,
+                                 "row cells follow the declared column set")
+
+        with self.subTest(mutation="manifest creates without state.json"):
+            def mutate(blocks):
+                blocks["manifest-operations"]["creates"] = ["run_folder", "00-meta.json"]
+            ref = edit_reference(mutate)
+            root = Path(tempfile.mkdtemp(dir=self.work)) / "runs"
+            root.mkdir()
+            r = self.drive("manifest", "--manifest",
+                           str(FIXTURES / "manifest-mode.json"),
+                           "--profile", str(REPO_ROOT / "tests" / "fixtures" /
+                                            "issue2pr" / "profiles" / "fixture.md"),
+                           "--runs-root", str(root), reference=ref)
+            self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+            run = root / "fx-9-manifest-mode-case"
+            self.assertTrue((run / "00-meta.json").is_file())
+            self.assertFalse((run / "state.json").exists(),
+                             "an artifact absent from the declared creates is not written")
 
         with self.subTest(mutation="manifest initial_status"):
             def mutate(blocks):
@@ -523,15 +618,14 @@ class TestConsumption(DriverCase):
             with self.subTest(mutation=f"chain exit {code} remapped"):
                 def mutate(blocks, code=code):
                     blocks["watcher-exit-actions"][code]["effect"] = {
-                        "edge": {"from": "waiting_merge", "to": "failed"},
-                        "chain": "paused"}
+                        "edge": {"from": "waiting_merge", "to": "skipped"}}
                 ref = edit_reference(mutate)
                 chain = self.copy_fixture("chain-two-link") / "chain.json"
                 r = self.drive("chain", "--chain-file", str(chain),
                                "--watcher-exit", code, reference=ref)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 data = json.loads(chain.read_text())
-                self.assertEqual(data["links"][0]["status"], "failed")
+                self.assertEqual(data["links"][0]["status"], "skipped")
 
         with self.subTest(mutation="edge removed from the legal set"):
             def mutate(blocks):
@@ -571,6 +665,40 @@ class TestDeclarationCoherence(unittest.TestCase):
         for code, record in watcher.items():
             with self.subTest(exit=code):
                 walk(record["effect"])
+
+    def test_declared_edges_equal_event_produced_edges(self):
+        """Closure: every declared link edge has a producer, and every produced edge is
+        declared — the orphan-edge class the Step-8 review found cannot recur silently."""
+        text = REFERENCE.read_text(encoding="utf-8")
+        chain = load_block(text, "chain-operations")
+        watcher = load_block(text, "watcher-exit-actions")
+        produced = set()
+
+        def collect(effect):
+            if not isinstance(effect, dict):
+                return
+            if "edge" in effect:
+                produced.add((effect["edge"]["from"], effect["edge"]["to"]))
+            for value in effect.values():
+                if isinstance(value, dict):
+                    collect(value)
+
+        for record in watcher.values():
+            collect(record["effect"])
+        for name, event in chain["events"].items():
+            if "edge" in event:
+                produced.add((event["edge"]["from"], event["edge"]["to"]))
+            for sub in (event.get("effects") or {}).values():
+                collect(sub)
+            if name == "skip":
+                for frm in event["from_any_of"]:
+                    produced.add((frm, event["to"]))
+            if name == "advance":
+                produced.add((event["next_link"]["from"], event["next_link"]["to"]))
+        declared = {(frm, to) for frm, tos in chain["link_edges"].items()
+                    for to in tos}
+        self.assertEqual(declared, produced,
+                         "declared edges and event-produced edges must be one set")
 
     def test_docstrings_state_the_fresh_reading_limit(self):
         for path in (Path(__file__), DRIVER):

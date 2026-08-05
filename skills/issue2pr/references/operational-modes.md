@@ -85,7 +85,6 @@ the mapping, the commonest reason a round needs iterating had no status that `it
       "merged",
       "iterating",
       "closed_unmerged",
-      "failed",
       "skipped"
     ],
     "iterating": [
@@ -134,7 +133,8 @@ the mapping, the commonest reason a round needs iterating had no status that `it
         "waiting_merge"
       ],
       "to": "skipped",
-      "then": "advance"
+      "then": "advance",
+      "pause_exempt": true
     },
     "babysit-finish": {
       "inputs": {
@@ -168,7 +168,8 @@ the mapping, the commonest reason a round needs iterating had no status that `it
         "chain": "complete"
       }
     }
-  }
+  },
+  "babysit_round_semantics": "the 1-based ordinal of the babysit round about to run; it runs while round <= cap"
 }
 ```
 
@@ -213,7 +214,8 @@ map is what turns each into an action.
         "to": "merged"
       },
       "then": "advance"
-    }
+    },
+    "result_events": []
   },
   "1": {
     "guidance": "this code and any unmapped exit: re-check PR state by hand; if nothing explains it, pause and notify",
@@ -221,7 +223,8 @@ map is what turns each into an action.
       "chain": "paused",
       "report": "manual-recheck",
       "catch_all_for_unmapped": true
-    }
+    },
+    "result_events": []
   },
   "2": {
     "guidance": "mark the link closed_unmerged, then pause and notify",
@@ -231,7 +234,8 @@ map is what turns each into an action.
         "to": "closed_unmerged"
       },
       "chain": "paused"
-    }
+    },
+    "result_events": []
   },
   "3": {
     "guidance": "classify the activity; actionable under cap disarms auto-merge and runs a babysit round before re-arming and advancing the cursor; a question notifies only; status-noise advances the cursor; at the cap, pause",
@@ -260,34 +264,43 @@ map is what turns each into an action.
           "cursor": "advance"
         }
       }
-    }
+    },
+    "result_events": [
+      "babysit-finish"
+    ]
   },
   "4": {
     "guidance": "run a babysit round whose feedback is the failing check log, with the same disarm, re-arm, cap and cursor handling as exit 3",
     "effect": {
       "as": "3",
       "timeline_note": "failing-check feedback"
-    }
+    },
+    "result_events": [
+      "babysit-finish"
+    ]
   },
   "5": {
     "guidance": "notify the heartbeat and re-arm the watcher unchanged — a timeout is not a pause",
     "effect": {
       "report": "re-arm",
       "writes": []
-    }
+    },
+    "result_events": []
   },
   "6": {
     "guidance": "pause and notify; ten consecutive state probes failed, so credentials or the network are the likely cause",
     "effect": {
       "chain": "paused"
-    }
+    },
+    "result_events": []
   },
   "7": {
     "guidance": "squash-merge the PR directly, then handle it as exit 0",
     "effect": {
       "pre_report": "squash-merge",
       "as": "0"
-    }
+    },
+    "result_events": []
   }
 }
 ```
@@ -442,6 +455,18 @@ the existing body.
     "effective review mode",
     "round",
     "resume pointer"
+  ],
+  "column_fields": {
+    "run-id": "$dir",
+    "status": "status",
+    "source": "source_id",
+    "current step": "current_step",
+    "effective review mode": "$effective_mode",
+    "round": "current_round",
+    "resume pointer": "$resume_pointer"
+  },
+  "resume_pointer_unless_status": [
+    "completed"
   ]
 }
 ```

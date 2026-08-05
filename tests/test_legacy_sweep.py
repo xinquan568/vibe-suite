@@ -104,6 +104,13 @@ class SweepContract(unittest.TestCase):
             proc = run_sweep(root)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
+    def test_outside_a_repository_is_exit_2(self):
+        # F1 residue: enumeration failure is the loud exit-2 class, never a silent clean.
+        with tempfile.TemporaryDirectory(prefix="sweep-norepo-") as tmp:
+            proc = run_sweep(tmp)
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            self.assertIn("repository", proc.stdout + proc.stderr)
+
     def test_unknown_flag_is_exit_2(self):
         proc = run_sweep(REPO_ROOT, "--definitely-not-a-flag")
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)

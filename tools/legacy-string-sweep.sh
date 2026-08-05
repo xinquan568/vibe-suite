@@ -10,7 +10,7 @@
 # EXEMPT, and an entry in neither is an error, never a silent pass.
 #
 # Exit: 0 clean · 1 hits (file:line: pattern) · 2 usage/environment error.
-set -u
+set -u -o pipefail
 
 if [ "$#" -gt 0 ]; then
   echo "legacy-string-sweep: unknown argument '$1' (the sweep takes none)" >&2

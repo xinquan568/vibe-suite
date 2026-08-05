@@ -127,6 +127,34 @@ class PrivacyAnchors(unittest.TestCase):
         self.assertNotIn("local-only", text.lower())
         self.assertIn("future", text.lower())
 
+    def test_dispatch_claims_anchor_to_implementation_artifacts(self):
+        # F5 residue: every dispatch surface PRIVACY names must exist as the artifact that
+        # implements it — the claim is checked against disk, not against itself.
+        text = PRIVACY.read_text(encoding="utf-8")
+        anchors = {
+            "delegate": "commands/delegate.md",
+            "continue": "commands/continue.md",
+            "bug-analyze": "commands/bug-analyze.md",
+            "roast": "commands/roast.md",
+            "nl-audit": "commands/nl-audit.md",
+            "preflight": "commands/preflight.md",
+            "refresh-knowledge": "commands/refresh-knowledge.md",
+            "refine-proposal": "skills/refine-proposal/SKILL.md",
+            "issue2pr": "skills/issue2pr/SKILL.md",
+        }
+        for name, rel in anchors.items():
+            with self.subTest(surface=name):
+                self.assertIn(name, text, f"PRIVACY does not name {name}")
+                self.assertTrue((REPO_ROOT / rel).is_file(),
+                                f"named surface {name} lacks its artifact {rel}")
+        # the Stop-time hook's implementation
+        self.assertTrue((REPO_ROOT / "scripts" /
+                         "stop-review-gate-hook.mjs").is_file())
+        self.assertIn("Stop-time review hook", text)
+        # the names-not-values bridge rule is implemented where PRIVACY says it is
+        bridge_cli = (REPO_ROOT / "scripts" / "bridge_cli.py").read_text(encoding="utf-8")
+        self.assertIn("value is withheld", bridge_cli.replace("*", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -95,6 +95,11 @@ empty, truncated, or not covering the issues it was asked about. The hop fires f
 three-field diagnostic header accompanies only the first, because nothing is broken to restore when an
 engine simply answered badly.
 
+A **nothing usable** answer is first **re-asked exactly once**, for only the fenced block, per the
+contract's [verdict parsing](../skills/vibe-core/references/reviewer-contract.md#verdict-parsing)
+rules; an **unreachable** engine is not re-asked, because nothing answered. A second unusable
+answer — or the unreachable condition — degrades as follows.
+
 The `codex → manual` hop still runs in both cases: perform the in-session assessment and disclose it.
 But **it does not satisfy verification** in either case, because the assessing engine is the one that
 made the fix. An engine that returned nothing has not verified anything, so treating its silence as a
@@ -120,6 +125,7 @@ satisfy its letter and invert its purpose. Do not "restore consistency" by remov
 - floor: 1
 - ceiling: 5
 - default: 3
+- floor-reason: since mechanical repairs alone can close a light report in a single round
 - continue-verdicts: `NOT FIXED`, `PARTIAL`
 - stop-verdicts: `REGRESSED`
 - at-cap: stop and report

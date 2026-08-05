@@ -3,8 +3,8 @@
 Every generator-critic loop in vibe-suite runs on this contract. It exists so that a `major` raised in
 one loop means what a `major` means in another, and so that a run which *looks* reviewed actually was.
 
-The loops that must cite it: `/vibe-suite:refine-proposal`, `/vibe-suite:issue2pr`, the verify pass, the
-stop-review gate, and the audit and contribute gates. A loop cites the subsection it relies on; it does
+The loops that must cite it: `/vibe-suite:refine-proposal`, `/vibe-suite:issue2pr`, `/vibe-suite:fix`,
+the verify pass, the stop-review gate, and the audit and contribute gates. A loop cites the subsection it relies on; it does
 not restate the rule, because a second statement of a rule is the beginning of two rules.
 
 **Where this reference and an operative authority disagree, the authority wins.** Three of the rules
@@ -79,6 +79,11 @@ The cap on review rounds is `max_review_rounds`, set by `--max-review-rounds`. I
 bare list of numbers cannot say which is which, and a reader who guesses wrong gets a cap nobody chose. The floors differ for a real reason, and a loop that declared one without a reason would be
 diverging from this contract even while matching its key.
 
+A loop whose rounds are not review rounds may declare **its own cap identifier and flag** —
+`/vibe-suite:fix` counts fix-verify rounds under `--max-rounds` — stated in its `## Round bounds`
+block. The labelled domain, the floor reason, the clamp rule, and the no-redefinition discipline
+bind regardless of the flag's name.
+
 Clamping is **not** per-loop:
 
 - an out-of-range integer clamps to the nearest bound, with a notice naming the supplied and the
@@ -111,6 +116,11 @@ Parsing it is four steps, and the third is the one that gets dropped:
 
 Step 3 is more work than raising an error, which is why it is stated as an obligation. A parse failure
 is information about one round, not grounds for discarding the rest.
+
+A loop whose verdicts are **per-issue** — `fix`'s `FIXED` / `NOT FIXED` / `PARTIAL` / `REGRESSED` —
+declares **no synthetic run-level** terminal status. What it must declare, in its Round bounds
+block, is **which per-issue verdicts continue the loop and which stop it**; inventing a run-level
+status for such a loop would invert the verdicts' meaning.
 
 ## The closure machine
 

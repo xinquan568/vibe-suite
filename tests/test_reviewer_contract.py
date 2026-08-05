@@ -8,6 +8,8 @@ module pins its contents and grades its consumers.
 
 **The acceptance criterion has no subject yet, and that shaped the design.** It grades whether
 `skills/refine-proposal/` (#41) and `skills/issue2pr/` (#42) cite the contract without restating it.
+(vibe-123 later grew the registry to a third consumer, `commands/fix.md` — the first single-file
+entry, graded identically.)
 Neither exists — they ship at links 2 and 3 of this chain. A glob over `skills/*` would pass over an
 empty set today and keep passing after they land uncited, which is the failure mode worth engineering
 against.
@@ -38,6 +40,7 @@ CONTRACT = REPO_ROOT / "skills" / "vibe-core" / "references" / "reviewer-contrac
 REQUIRED_CONSUMERS = {
     "skills/refine-proposal": 41,   # E5.2
     "skills/issue2pr": 42,          # E5.3
+    "commands/fix.md": 123,         # vibe-123 — a single-file consumer, graded identically
 }
 
 #: The per-loop round-cap domains D2 fixed. Divergence hides here: two loops can agree on the key and
@@ -45,6 +48,7 @@ REQUIRED_CONSUMERS = {
 DOMAINS = {
     "skills/refine-proposal": {"floor": 1, "ceiling": 5, "default": 3},
     "skills/issue2pr": {"floor": 2, "ceiling": 5, "default": 2},
+    "commands/fix.md": {"floor": 1, "ceiling": 5, "default": 3},
 }
 
 CAP_KEY = "max_review_rounds"
@@ -280,9 +284,9 @@ class TestRegistry(unittest.TestCase):
         """Non-emptiness would not catch deletion — dropping one entry leaves the rest satisfiable."""
         self.assertEqual(
             REQUIRED_CONSUMERS,
-            {"skills/refine-proposal": 41, "skills/issue2pr": 42},
-            "the consumer registry changed; F6.3 names these two and the acceptance criterion "
-            "grades exactly them")
+            {"skills/refine-proposal": 41, "skills/issue2pr": 42, "commands/fix.md": 123},
+            "the consumer registry changed; F6.3 named the two skill consumers and #123 grew the "
+            "registry to three — the acceptance criterion grades exactly these")
 
     def test_every_consumer_has_a_domain(self):
         self.assertEqual(set(DOMAINS), set(REQUIRED_CONSUMERS),
@@ -382,6 +386,23 @@ class TestContractContent(unittest.TestCase):
     def test_no_pinned_model_id(self):
         hits = [l for l in self.text.splitlines() if MODEL_PIN.search(l) and "never" not in l.lower()]
         self.assertEqual(hits, [], f"P9: pinned model id in the contract: {hits}")
+
+    def test_per_issue_loops_declare_routing_not_a_run_status(self):
+        """vibe-123's decision, recorded in the contract: fix keeps per-issue verdicts, and what a
+        per-issue loop owes is routing, not a synthetic run-level status."""
+        self.assertIn("per-issue", self.norm)
+        self.assertIn("no synthetic run-level", self.norm)
+        self.assertRegex(self.norm, r"which per-issue verdicts continue the loop and which stop it")
+
+    def test_a_consumer_may_declare_its_own_cap_flag(self):
+        """The reconciliation vibe-123 needed: fix counts fix-verify rounds under --max-rounds."""
+        self.assertIn("its own cap identifier and flag", self.norm)
+        self.assertIn("regardless of the flag's name", self.norm)
+
+    def test_fix_is_in_the_loops_that_must_cite_it_list(self):
+        """Section-scoped to the intro, so a mention elsewhere cannot satisfy it."""
+        intro = self.text.split("\n## ", 1)[0]
+        self.assertIn("/vibe-suite:fix", intro)
 
     def test_the_skill_points_at_the_reference(self):
         self.assertIn(CONTRACT_LINK, SKILL.read_text(encoding="utf-8"),
@@ -560,10 +581,14 @@ class TestConsumerConformance(unittest.TestCase):
     """The acceptance criterion. Absent consumers are reported, not skipped silently."""
 
     def consumer_files(self, rel):
-        directory = REPO_ROOT / rel
-        if not directory.is_dir():
-            return None
-        return sorted(directory.rglob("*.md"))
+        """A consumer is a directory of markdown or a single markdown file (vibe-123 added the
+        first file entry). Absent either way -> None, so pending-at-issue reporting is preserved."""
+        path = REPO_ROOT / rel
+        if path.is_file():
+            return [path]
+        if path.is_dir():
+            return sorted(path.rglob("*.md"))
+        return None
 
     def test_each_consumer_is_absent_or_cites_a_resolvable_subsection(self):
         for rel, issue in sorted(REQUIRED_CONSUMERS.items()):

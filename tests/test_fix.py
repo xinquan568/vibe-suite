@@ -197,6 +197,12 @@ class TestVerifierOutage(FixTestCase):
 
     def test_the_loop_stops_and_the_edits_are_kept(self):
         self.assertRegex(self.norm, r"stops after this round")
+
+    def test_unusable_verdict_is_reasked_exactly_once(self):
+        """vibe-123: the contract's verdict-parsing rule adopted in place of fall-back-and-stop —
+        an unusable answer is re-asked once for only the block; an unreachable engine is not."""
+        self.assertRegex(self.norm, r"re-ask(?:ed)? exactly once")
+        self.assertIn("reviewer-contract.md#verdict-parsing", self.text)
         self.assertRegex(self.norm, r"edits already made are kept|stopping is not rolling back")
 
     def test_the_exception_states_its_reason(self):

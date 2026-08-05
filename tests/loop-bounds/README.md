@@ -37,14 +37,14 @@ made twice before; this file exists partly so the third time is harder.
 `fix`'s `FIXED` / `NOT FIXED` / `PARTIAL` / `REGRESSED` are **per-issue verdicts**, and `NOT FIXED` and
 `PARTIAL` normally *continue* the loop. Reading them as terminal statuses would invert their meaning.
 
-## `fix` does not satisfy AC-4's re-ask clause
+## `fix` satisfies AC-4's re-ask clause since #123
 
-It cites no section of the reviewer contract — it predates it — and its unusable-verification path
-falls back and stops rather than re-asking once.
-
-That is a gap in the artifact, not in this harness. **Issue #123** is filed to close it. This harness
-**characterises** the gap: it asserts `fix` does *not* cite the contract, so the test fails the day
-#123 lands and the assertion is inverted then.
+It predated the contract, and its unusable-verification path once fell back and stopped rather than
+re-asking. **Issue #123** closed that gap: `fix` is a registered consumer of the reviewer contract,
+cites its verdict-parsing section, re-asks an unusable verdict exactly once before degrading, and
+declares its continue/stop verdict routing in its Round bounds block. The harness test that once
+characterised the gap was inverted the day #123 landed — exactly as its docstring ordered when it
+recorded the gap.
 
 ## `loops.json` holds nothing a document could disagree with
 
@@ -137,6 +137,7 @@ row's **holds** is scoped to the declaration and nothing wider.
 
 **Issue #125 landed** that structured declaration, and the golden fixture was deleted with it rather
 than kept alongside — two mechanisms for one property is how the weaker one gets read as the
-stronger. **#123** remains open: it brings `fix` under the reviewer contract (the re-ask clause and
-registry membership above), touches the same file, and inverts this harness's characterisation test
-when it lands.
+stronger. **#123 then landed too**: `fix` is a registered consumer of the reviewer contract (the
+re-ask clause and registry membership above), its block carries the contract's required floor
+reason, and this harness's characterisation test was inverted — the sequence both issues' texts
+planned, completed in order.

@@ -21,9 +21,9 @@ already made — that is why it is written down here rather than only fixed.
 `blocker` stops `issue2pr` in its first round, before the update loop, so the cap is never reached and
 the run merely *looks* bounded. `fix` has no severity at all. See `tests/loop-bounds/README.md`.
 
-**`fix` does not satisfy AC-4's re-ask clause**, and the test below asserts that it does not. That is a
-characterisation of a real gap — issue **#123** is filed to close it, and this test fails the day it
-lands, which is when the assertion should be inverted.
+**All three loops satisfy AC-4's re-ask clause since #123** brought `fix` under the contract. The
+test that once characterised the gap now asserts its closure — inverted the day #123 landed, exactly
+as its docstring ordered when it recorded the gap.
 """
 
 import json
@@ -50,7 +50,9 @@ EXPECTED_DOMAIN = {
     "fix": {"floor": 1, "ceiling": 5, "default": 3},
 }
 
-CITES_CONTRACT = {"issue2pr": True, "refine-proposal": True, "fix": False}
+#: The authoritative citing-consumer set, CONSUMED by the delegation tests below — flipping an
+#: entry changes what is graded (vibe-123 made fix True when it joined the contract).
+CITES_CONTRACT = {"issue2pr": True, "refine-proposal": True, "fix": True}
 
 TERMINAL_STATUS = {"issue2pr": "EXIT_MAX_ROUNDS", "refine-proposal": None, "fix": None}
 
@@ -108,7 +110,7 @@ def extract_section(text, heading):
 
 
 #: The complete field set of a `## Round bounds` declaration, and the grammar's whole vocabulary.
-ROUND_BOUNDS_FIELDS = ("flag", "floor", "ceiling", "default",
+ROUND_BOUNDS_FIELDS = ("flag", "floor", "ceiling", "default", "floor-reason",
                        "continue-verdicts", "stop-verdicts", "at-cap")
 
 
@@ -325,8 +327,9 @@ class TestExtraction(unittest.TestCase):
                                  "the document's declaration and the expectation disagree; one of "
                                  "them is wrong and the diff says which")
 
-    def test_the_two_registered_consumers_declare_a_round_bounds_block(self):
-        for name in ("issue2pr", "refine-proposal"):
+    def test_every_contract_consumer_declares_a_round_bounds_block(self):
+        """All three since vibe-123; driven by the same authoritative set as the citation test."""
+        for name in sorted(CITES_CONTRACT):
             with self.subTest(loop=name):
                 self.assertEqual(LOOPS[name]["cap_declaration"], "round-bounds-block")
 
@@ -372,6 +375,7 @@ class TestRoundBoundsAsData(unittest.TestCase):
         "- floor: 1",
         "- ceiling: 5",
         "- default: 3",
+        "- floor-reason: since one round can suffice",
         "- continue-verdicts: `NOT FIXED`, `PARTIAL`",
         "- stop-verdicts: `REGRESSED`",
         "- at-cap: stop and report",
@@ -417,7 +421,7 @@ class TestRoundBoundsAsData(unittest.TestCase):
 
 
 class TestContractDelegation(unittest.TestCase):
-    """Which loops delegate the re-ask rule, and which does not."""
+    """Every registered consumer delegates the re-ask rule to the contract (fix joined at #123)."""
 
     def test_the_contract_states_the_re_ask_rule_once(self):
         text = CONTRACT.read_text(encoding="utf-8")
@@ -429,25 +433,25 @@ class TestContractDelegation(unittest.TestCase):
         self.assertIn("never abort", body)
 
     def test_the_registered_consumers_cite_it(self):
-        for name in ("issue2pr", "refine-proposal"):
+        """Driven by CITES_CONTRACT, so the mapping is consumed rather than decorative."""
+        for name, cites in sorted(CITES_CONTRACT.items()):
+            if not cites:
+                continue
             with self.subTest(loop=name):
                 self.assertTrue(cites_contract(name))
                 self.assertIn("reviewer-contract.md#verdict-parsing", document(name),
                               "delegating the rule means citing the section that states it")
 
-    def test_fix_does_not_cite_the_contract(self):
-        """**A characterisation, not an endorsement.**
+    def test_fix_cites_the_contract(self):
+        """Inverted by vibe-123, exactly as the recording test's docstring ordered.
 
-        `fix` predates the contract and its unusable-verification path falls back and stops rather than
-        re-asking once, so AC-4's re-ask clause does not hold for it. Issue **#123** is filed to close
-        that.
-
-        This test **fails the day #123 lands**, which is when it should be inverted. It starts green on
-        purpose: it records a gap rather than driving work, and a gap nobody records is one nobody
-        closes.
+        `fix` predated the contract; #123 registered it as a consumer, added the floor-reason to
+        its Round bounds block, and its unusable-verification path now re-asks exactly once before
+        degrading. The gap this test once characterised is closed, so it asserts the closure.
         """
-        self.assertFalse(cites_contract("fix"),
-                         "#123 has landed — invert this assertion and add `fix` to the registry")
+        self.assertTrue(cites_contract("fix"),
+                        "#123 landed this citation; losing it reopens the AC-4 re-ask gap")
+        self.assertIn("reviewer-contract.md#verdict-parsing", document("fix"))
 
     def test_the_gap_is_recorded_where_a_reader_will_find_it(self):
         self.assertIn("#123", README.read_text(encoding="utf-8"))

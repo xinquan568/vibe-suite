@@ -9,6 +9,6 @@
   },
   "fix": {
     "document": "commands/fix.md",
-    "cap_declaration": "prose-flag"
+    "cap_declaration": "round-bounds-block"
   }
 }

@@ -1,5 +1,5 @@
 ---
-description: "Take a findings report from roast, nl-audit, score or security-scan and drive a bounded fix-verify loop: mechanical repairs first, then a model fixer, then a fresh read-only verification by the engine that did not make the fix. Per-issue verdicts, an NL re-score with deltas, and a cap of at most five rounds."
+description: "Take a findings report from roast, nl-audit, score or security-scan and drive a bounded fix-verify loop: mechanical repairs first, then a model fixer, then a fresh read-only verification by the engine that did not make the fix. Per-issue verdicts, an NL re-score with deltas, and a round loop bounded by its Round bounds declaration."
 argument-hint: "[report-file|scope] [--severity all|high] [--fixer claude|codex] [--max-rounds 1-5]"
 ---
 
@@ -114,15 +114,27 @@ This is a deliberate exception to `fallback.md`, and the reason is that verifica
 not "produce a verdict" but "produce an *independent* one". Applying the partial unchanged would
 satisfy its letter and invert its purpose. Do not "restore consistency" by removing it.
 
+## Round bounds
+
+- flag: `--max-rounds`
+- floor: 1
+- ceiling: 5
+- default: 3
+- continue-verdicts: `NOT FIXED`, `PARTIAL`
+- stop-verdicts: `REGRESSED`
+- at-cap: stop and report
+
 ## Step 5 — the round loop
 
-`--max-rounds` 1–5, **default 3**. A round is: fix the issues still open → verify → keep going while
-any remain `NOT FIXED` or `PARTIAL`. `FIXED` issues leave the loop; a `REGRESSED` issue stops the loop
-and is reported for a human, because re-running the change that caused it is the wrong move.
+A round is: fix the issues still open → verify. The bounds, the verdicts that continue a round or
+stop the loop, and the at-cap behavior are declared in [Round bounds](#round-bounds) — the harness
+reads that block as data, not this prose. `FIXED` issues leave the loop; a `REGRESSED` issue is
+reported for a human rather than retried, because re-running the change that caused it is the
+wrong move.
 
-The loop also stops when the cap is reached, when nothing remains open, or per step 4's outage rule.
+The loop also stops when nothing remains open, or per step 4's outage rule.
 **The harness proving the bound holds is E5.6 (#45)**, which the acceptance assigns there; this
-command specifies the cap and does not claim that coverage.
+command carries the declaration and does not claim that coverage.
 
 ## Step 6 — NL artifacts re-score
 

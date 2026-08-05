@@ -497,6 +497,12 @@ MIRROR_EXPECTED = {
     "copied_deps": {
         "schemas/audit-output.schema.json": "codex/schemas/audit-output.schema.json",
     },
+    "generated_outputs": {
+        "commands/roast.md": "codex/skills/vibe-roast/SKILL.md",
+        "commands/shared/classify.md": "codex/skills/vibe-auditing/references/classify.md",
+        "commands/shared/discover.md": "codex/skills/vibe-auditing/references/discover.md",
+        ".claude-plugin/plugin.json": "codex/README.md",
+    },
 }
 
 
@@ -519,11 +525,26 @@ def check_mirrors(root, expected=None):
     except (OSError, json.JSONDecodeError) as exc:
         bad("codex/MIRROR-MANIFEST.json", f"manifest unparseable: {exc}")
         return out
+    if not isinstance(doc, dict):
+        bad("codex/MIRROR-MANIFEST.json", "manifest is not a JSON object")
+        return out
     for key in ("schema", "plugin_version", "records", "out_of_scope", "exclusions",
                 "sets"):
         if key not in doc:
             bad("codex/MIRROR-MANIFEST.json", f"manifest missing key {key!r}")
             return out
+    if not isinstance(doc.get("sets"), dict):
+        bad("codex/MIRROR-MANIFEST.json", "manifest 'sets' is not an object")
+        return out
+    for key in ("knowledge", "workflow", "roast_agents"):
+        v = doc["sets"].get(key)
+        if not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+            bad("codex/MIRROR-MANIFEST.json",
+                f"manifest sets.{key} is not a list of strings")
+            return out
+    if not isinstance(doc["sets"].get("copied_deps", {}), dict):
+        bad("codex/MIRROR-MANIFEST.json", "manifest sets.copied_deps is not an object")
+        return out
 
     try:
         plugin_version = json.loads(
@@ -562,6 +583,13 @@ def check_mirrors(root, expected=None):
         if ".." in r["source"].split("/") or r["source"].startswith("/"):
             bad(r["source"], "source path escapes the plugin root")
             continue
+        resolved = (root / r["source"])
+        if resolved.exists():
+            try:
+                resolved.resolve().relative_to(root.resolve())
+            except ValueError:
+                bad(r["source"], "source path resolves outside the plugin root (symlink)")
+                continue
         well_formed.append(r)
     records = well_formed
     for r in records:
@@ -596,6 +624,9 @@ def check_mirrors(root, expected=None):
             bad(rel, "file under codex/ is not accounted for in the manifest")
 
     for row in doc["out_of_scope"] + doc["exclusions"]:
+        if not isinstance(row, dict):
+            bad("codex/MIRROR-MANIFEST.json", f"non-object out_of_scope/exclusion row: {row!r}")
+            continue
         if not row.get("reason"):
             bad(row.get("source", "?"), "row lacks a non-empty reason")
 
@@ -624,7 +655,8 @@ def check_mirrors(root, expected=None):
             if d.name not in declared_skills:
                 bad(f"skills/{d.name}/",
                     "skill directory not classified in the production inventory")
-    oos_sources = {row.get("source") for row in doc["out_of_scope"]}
+    oos_sources = {row.get("source") for row in doc["out_of_scope"]
+                   if isinstance(row, dict)}
     for wf in sets["workflow"]:
         if f"skills/{wf}/" not in oos_sources:
             bad(f"skills/{wf}/", "workflow skill lacks its out-of-scope row")
@@ -651,6 +683,14 @@ def check_mirrors(root, expected=None):
             bad(dep_src, "declared copied dependency has no manifest record")
         elif not (root / dep_mirror).is_file():
             bad(dep_mirror, "declared copied dependency's mirror is missing")
+    mirrors_recorded = {r["mirror"] for r in records}
+    for gen_src, gen_mirror in sorted(expected.get("generated_outputs", {}).items()):
+        if not (root / gen_src).exists():
+            continue   # a world without the source owes no mirror (fixture minimalism)
+        if gen_mirror not in mirrors_recorded:
+            bad(gen_mirror, "mandatory generated output has no manifest record")
+        elif not (root / gen_mirror).is_file():
+            bad(gen_mirror, "mandatory generated output's mirror is missing")
     if (root / "codex-src").is_dir():
         for d in sorted(p for p in (root / "codex-src").iterdir() if p.is_dir()):
             require_files(f"codex-src/{d.name}", "codex-src")

@@ -22,10 +22,22 @@ pass; this skill owns arguments, sequencing and the report only.
 Resolve the target with the scope grammar: an empty scope means uncommitted changes
 (`git diff HEAD --name-only`); `staged` means staged changes (`git diff --cached
 --name-only`); `commit -N` means the last N commits (`git diff HEAD~N --name-only`); an
-explicit path is read from the filesystem without git. Enforce configured skip patterns from
-the project's `.vibe-suite.md`. An empty resolved list stops with "No changes detected in
-scope. Nothing to review." A trivial resolved set — formatting-only or comment-only changes —
-asks for confirmation before a full interrogation is spent on it.
+explicit path is read from the filesystem without git. An empty resolved list stops with
+"No changes detected in scope. Nothing to review."
+
+Skip patterns come from the suite's single config reader (`python3 scripts/lib/config.py
+--json <root>`), never from parsing `.vibe-suite.md` directly. Filter the resolved list
+against every configured pattern as a glob; when ALL files are dropped, stop and say that
+everything in scope is excluded by the project's skip patterns, naming the config file.
+
+The trivial-change gate runs before any expensive pass. Trivial only when ALL hold: total
+code changes ≤ 5 lines excluding blanks and comments; purely mechanical (typos, formatting,
+whitespace, import reordering, comment edits, config version bumps); no logic, control-flow
+or data-handling change whatsoever. NEVER trivial, however small the diff: any logic,
+conditional, loop or data-flow change (a single character counts); security-sensitive paths
+(auth, crypto, permissions, payments, sessions); a dependency added or removed (a lockfile is
+never trivial); runtime-behaviour config; error handling or validation. A trivial verdict
+ASKS before skipping — "Skip" recommended against "Analyze anyway" — never skips silently.
 
 ## Styles and depth
 

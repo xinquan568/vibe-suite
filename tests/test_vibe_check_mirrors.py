@@ -43,6 +43,10 @@ FIXTURE_EXPECTED = {
     "workflow": FIXTURE_SETS["workflow"],
     "roast_agents": FIXTURE_SETS["roast_agents"],
     "copied_deps": FIXTURE_SETS["copied_deps"],
+    "generated_outputs": {
+        "commands/roast.md": "codex/skills/vibe-roast/SKILL.md",
+        ".claude-plugin/plugin.json": "codex/README.md",
+    },
 }
 
 
@@ -148,6 +152,58 @@ class MirrorsClass(unittest.TestCase):
             [sys.executable, str(REPO_ROOT / "bin" / "vibe-check"), str(self.root),
              "--mirrors"], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+
+    def test_deleting_a_mandatory_generated_output_fails(self):
+        # Round-4 F1: the variant, the partial copies and the README are anchored outputs —
+        # removing any pair (record + mirror) is a finding, not a silent shrink.
+        for gen_mirror in ("codex/skills/vibe-roast/SKILL.md", "codex/README.md"):
+            with self.subTest(mirror=gen_mirror):
+                mirror_sync.generate(self.root, sets=FIXTURE_SETS)
+                (self.root / gen_mirror).unlink()
+                doc = self.manifest()
+                doc["records"] = [r for r in doc["records"] if r["mirror"] != gen_mirror]
+                self.write_manifest(doc)
+                proc = run_check(self.root)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn(gen_mirror.rsplit("/", 1)[-1], proc.stdout)
+
+    def test_malformed_types_yield_findings_not_tracebacks(self):
+        # Round-4 F5: scalar documents, non-object rows, non-string set members.
+        cases = [
+            "42\n",
+            json.dumps({"schema": 1, "plugin_version": "x", "records": "nope",
+                        "out_of_scope": [], "exclusions": [], "sets": {}}),
+            json.dumps({"schema": 1, "plugin_version": "x", "records": [],
+                        "out_of_scope": [17], "exclusions": [], "sets":
+                        {"knowledge": [], "workflow": [], "roast_agents": [],
+                         "copied_deps": {}}}),
+            json.dumps({"schema": 1, "plugin_version": "x", "records": [],
+                        "out_of_scope": [], "exclusions": [], "sets":
+                        {"knowledge": [3], "workflow": [], "roast_agents": [],
+                         "copied_deps": {}}}),
+        ]
+        for i, payload in enumerate(cases):
+            with self.subTest(case=i):
+                self.manifest_path.write_text(payload)
+                proc = run_check(self.root)   # must not raise
+                self.assertEqual(proc.returncode, 1)
+
+    def test_symlink_escaping_source_is_a_finding(self):
+        outdir = tempfile.mkdtemp(prefix="vc-outside-")
+        self.addCleanup(shutil.rmtree, outdir, True)
+        outside = Path(outdir) / "outside.md"
+        outside.write_text("outside\n")
+        link = self.root / "sneaky.md"
+        link.symlink_to(outside)
+        doc = self.manifest()
+        doc["records"].append({"source": "sneaky.md",
+                               "mirror": "codex/skills/vibe-alpha/SKILL.md",
+                               "source_sha256": "0" * 64, "mirror_sha256": "0" * 64,
+                               "transform": "verbatim", "dropped_keys": []})
+        self.write_manifest(doc)
+        proc = run_check(self.root)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("resolves outside", proc.stdout)
 
     def test_shrunken_declaration_is_itself_a_finding(self):
         # B1: a manifest that reclassifies or shrinks a set cannot pass — the declarations

@@ -194,6 +194,27 @@ class GeneratorFixture(unittest.TestCase):
             self.assertTrue(row["reason"], row)
         self.assertEqual(self.manifest["plugin_version"], "9.9.9-fixture")
 
+    def test_slash_occurrence_ledger_is_exact(self):
+        # Round-4 F3: counts cover the COMPLETE source text, frontmatter included. The
+        # fixture's alpha source carries score x1 and roast x1 in its body.
+        occ = self.manifest["transform_notes"]["slash_occurrences"]
+        self.assertEqual(occ.get("skills/alpha/SKILL.md"), {"roast": 1, "score": 1})
+
+    def test_production_frontmatter_occurrences_are_counted(self):
+        # skills/auditing/SKILL.md carries nl-audit in BOTH frontmatter and body (2 total);
+        # this pins the full-text rule against the real tree without generating it.
+        text = (REPO_ROOT / "skills" / "auditing" / "SKILL.md").read_text(encoding="utf-8")
+        import re as _re
+        want = len(_re.findall(r"/vibe-suite:nl-audit", text))
+        self.assertGreaterEqual(want, 2)
+        counted = {}
+        for m in _re.findall(r"/vibe-suite:([a-z0-9-]+)", text):
+            counted[m] = counted.get(m, 0) + 1
+        _, _, counts = mirror_sync._transform_markdown(
+            text, source_rel="skills/auditing/SKILL.md", target_name="vibe-auditing",
+            version="0", name_map={})
+        self.assertEqual(counts.get("nl-audit"), counted["nl-audit"])
+
     def test_link_integrity_of_generated_tree(self):
         problems = mirror_sync.check_links(self.root / "codex")
         self.assertEqual(problems, [])

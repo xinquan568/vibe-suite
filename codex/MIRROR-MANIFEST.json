@@ -265,7 +265,7 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-roast/SKILL.md",
-      "mirror_sha256": "e6904d3e9ab3c9d06c7f6763bad0c81d19d4a261dc963b151e968aa344bcab80",
+      "mirror_sha256": "14cf552edbde9ab3f19ac6a5b9e7d93677efa74699a5c97dd063bdb0c18f251f",
       "source": "commands/roast.md",
       "source_sha256": "230bcd93b8dcd853da76e9257f848fba50bd833cd4270d79246dc12eeb8e848e",
       "transform": "variant"
@@ -475,7 +475,7 @@
         "update": 1
       },
       "skills/auditing/SKILL.md": {
-        "nl-audit": 1,
+        "nl-audit": 2,
         "security-scan": 1
       },
       "skills/conventions-codex/SKILL.md": {
@@ -485,7 +485,7 @@
         "init": 1
       },
       "skills/roasting/SKILL.md": {
-        "roast": 1
+        "roast": 2
       },
       "skills/rules/SKILL.md": {
         "fix": 2,
@@ -499,7 +499,7 @@
       },
       "skills/testing/SKILL.md": {
         "score": 2,
-        "test": 4
+        "test": 5
       },
       "skills/vibe-core/SKILL.md": {
         "fix": 1,

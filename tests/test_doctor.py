@@ -110,37 +110,46 @@ class TestCleanProject(DoctorCase):
                         h.update(f.relative_to(plugin).as_posix().encode())
                         h.update(f.read_bytes())
                 return h.hexdigest()
-            env_root = str(plugin)
+            import json as _json
+            import os as _os
+            import subprocess as _sp
+
+            def run_doctor():
+                """The REAL entry — doctor subprocess from the OUTSIDE workspace with
+                CLAUDE_PLUGIN_ROOT pointing at the temp plugin (round-4 F6)."""
+                env = dict(_os.environ, CLAUDE_PLUGIN_ROOT=str(plugin))
+                proc = _sp.run([sys.executable, str(plugin / "scripts" / "doctor.py"),
+                                "--workspace", str(self.ws), "--json"],
+                               capture_output=True, text=True, env=env, timeout=300)
+                return _json.loads(proc.stdout)
+
             # absent
             _sh.rmtree(plugin / "codex")
-            findings, capabilities = [], []
-            import importlib.util as _ilu
-            spec = _ilu.spec_from_file_location("doctor_mod",
-                                                REPO_ROOT / "scripts" / "doctor.py")
-            doctor_mod = _ilu.module_from_spec(spec)
-            spec.loader.exec_module(doctor_mod)
-            doctor_mod.check_mirror_staleness(Path(env_root), findings, capabilities)
-            self.assertEqual(findings, [])
-            self.assertEqual(capabilities[0]["check"], "mirror-staleness")
-            self.assertEqual(capabilities[0]["status"], "unavailable")
-            # regenerate, then go stale
-            import subprocess as _sp
+            report = run_doctor()
+            caps = {c["check"]: c for c in report["capabilities"]}
+            self.assertEqual(caps["mirror-staleness"]["status"], "unavailable")
+            self.assertNotIn("mirror-staleness",
+                             {f["check"] for f in report["findings"]})
+            # clean
             _sp.run([sys.executable, str(plugin / "scripts" / "mirror-sync.py"),
                      "generate", "--root", str(plugin)], check=True, capture_output=True)
-            findings, capabilities = [], []
-            doctor_mod.check_mirror_staleness(Path(env_root), findings, capabilities)
-            self.assertEqual(findings, [], "a fresh mirror reported stale")
+            report = run_doctor()
+            self.assertNotIn("mirror-staleness",
+                             {f["check"] for f in report["findings"]})
+            self.assertNotIn("mirror-staleness",
+                             {c["check"] for c in report["capabilities"]})
+            # stale, read-only
             victim = plugin / "codex" / "README.md"
             victim.write_text(victim.read_text() + "tamper\n")
             before = tree_hash()
-            findings, capabilities = [], []
-            doctor_mod.check_mirror_staleness(Path(env_root), findings, capabilities)
-            self.assertEqual(len(findings), 1)
-            self.assertEqual(findings[0]["severity"], "[HIGH]")
-            self.assertIn("bridge mirrors", findings[0]["finding"])
-            self.assertIn("CLAUDE_PLUGIN_ROOT", findings[0]["finding"])
-            self.assertFalse(findings[0]["auto_fixable"])
-            self.assertEqual(tree_hash(), before, "the doctor check wrote to the plugin")
+            report = run_doctor()
+            rows = [f for f in report["findings"] if f["check"] == "mirror-staleness"]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["severity"], "[HIGH]")
+            self.assertIn("bridge mirrors", rows[0]["finding"])
+            self.assertIn("CLAUDE_PLUGIN_ROOT", rows[0]["finding"])
+            self.assertFalse(rows[0]["auto_fixable"])
+            self.assertEqual(tree_hash(), before, "the doctor run wrote to the plugin")
 
     def test_every_capability_names_what_blocks_it(self):
         self.install()

@@ -51,6 +51,15 @@ COPIED_DEPS = {
 #: commands/shared partials copied under vibe-auditing (set-(a) links rewritten to them).
 AUDITING_PARTIALS = ("classify", "discover")
 
+#: Every mandatory generated output beyond the per-set files: source -> mirror. The checker
+#: carries the same table; deleting any pair is a finding, not a silent shrink.
+GENERATED_OUTPUTS = {
+    "commands/roast.md": "codex/skills/vibe-roast/SKILL.md",
+    "commands/shared/classify.md": "codex/skills/vibe-auditing/references/classify.md",
+    "commands/shared/discover.md": "codex/skills/vibe-auditing/references/discover.md",
+    ".claude-plugin/plugin.json": "codex/README.md",
+}
+
 #: Slash-command dispositions (frozen from the analysis's 16-command inventory): roast is
 #: rewritten to its mirrored identity; every other command is kept literal under the banner
 #: note. A command missing from this table is a generation error, never a silent pass.
@@ -152,9 +161,10 @@ def _transform_markdown(text, *, source_rel, target_name, version, name_map,
             body = body.replace(f"(../../commands/shared/{part}.md)",
                                 f"(references/{part}.md)")
 
-    # slash-command dispositions, with per-occurrence accounting (A-1)
+    # slash-command dispositions, with per-occurrence accounting (A-1) over the COMPLETE
+    # source text — frontmatter descriptions included, since the rewrite touches them too
     slash_counts = {}
-    for m in re.findall(r"/vibe-suite:([a-z0-9-]+)", body):
+    for m in re.findall(r"/vibe-suite:([a-z0-9-]+)", text):
         slash_counts[m] = slash_counts.get(m, 0) + 1
     for m in sorted(slash_counts):
         if m in SLASH_REWRITE:
@@ -212,10 +222,22 @@ runtime IS the single engine, so nothing needs selecting or cross-checking betwe
 Resolve the target with the scope grammar: an empty scope means uncommitted changes
 (`git diff HEAD --name-only`); `staged` means staged changes (`git diff --cached
 --name-only`); `commit -N` means the last N commits (`git diff HEAD~N --name-only`); an
-explicit path is read from the filesystem without git. Enforce configured skip patterns from
-the project's `.vibe-suite.md`. An empty resolved list stops with "No changes detected in
-scope. Nothing to review." A trivial resolved set — formatting-only or comment-only changes —
-asks for confirmation before a full interrogation is spent on it.
+explicit path is read from the filesystem without git. An empty resolved list stops with
+"No changes detected in scope. Nothing to review."
+
+Skip patterns come from the suite's single config reader (`python3 scripts/lib/config.py
+--json <root>`), never from parsing `.vibe-suite.md` directly. Filter the resolved list
+against every configured pattern as a glob; when ALL files are dropped, stop and say that
+everything in scope is excluded by the project's skip patterns, naming the config file.
+
+The trivial-change gate runs before any expensive pass. Trivial only when ALL hold: total
+code changes ≤ 5 lines excluding blanks and comments; purely mechanical (typos, formatting,
+whitespace, import reordering, comment edits, config version bumps); no logic, control-flow
+or data-handling change whatsoever. NEVER trivial, however small the diff: any logic,
+conditional, loop or data-flow change (a single character counts); security-sensitive paths
+(auth, crypto, permissions, payments, sessions); a dependency added or removed (a lockfile is
+never trivial); runtime-behaviour config; error handling or validation. A trivial verdict
+ASKS before skipping — "Skip" recommended against "Analyze anyway" — never skips silently.
 
 ## Styles and depth
 
@@ -437,9 +459,30 @@ def generate(root, sets=None):
     if problems:
         raise MirrorError("rendered tree failed validation: " + "; ".join(problems[:10]))
 
-    # ---- phase 3: swap, with rollback ----------------------------------------------------
+    # ---- phase 3: staged swap, with rollback ----------------------------------------------
+    # The rendered set publishes to an audited STAGING tree first and is digest-verified
+    # there, so the committed codex/ is only ever removed once every byte already exists on
+    # disk. A publish_new that reports an existing destination is a failure, never ignored.
     previous = {}
     codex = root / "codex"
+    staging_rel = "codex.staging"
+    if (root / staging_rel).exists():
+        bridge.remove_tree_at(root, staging_rel)
+    try:
+        for dest_rel in sorted(outputs):
+            staged_rel = staging_rel + dest_rel[len("codex"):]
+            bridge.ensure_dir_at(root, str(Path(staged_rel).parent))
+            if not bridge.publish_new(root, root / staged_rel, outputs[dest_rel]):
+                raise MirrorError(f"staging collision at {staged_rel}")
+        for dest_rel in sorted(outputs):
+            staged = root / (staging_rel + dest_rel[len("codex"):])
+            if hashlib.sha256(staged.read_bytes()).hexdigest() != \
+                    hashlib.sha256(outputs[dest_rel]).hexdigest():
+                raise MirrorError(f"staging verification failed at {dest_rel}")
+    except Exception:
+        if (root / staging_rel).exists():
+            bridge.remove_tree_at(root, staging_rel)
+        raise
     if codex.exists():
         for f in sorted(codex.rglob("*")):
             if f.is_file():
@@ -447,16 +490,22 @@ def generate(root, sets=None):
         bridge.remove_tree_at(root, "codex")
     try:
         for dest_rel in sorted(outputs):
+            staged = root / (staging_rel + dest_rel[len("codex"):])
             bridge.ensure_dir_at(root, str(Path(dest_rel).parent))
-            bridge.publish_new(root, root / dest_rel, outputs[dest_rel])
+            if not bridge.publish_new(root, root / dest_rel, staged.read_bytes()):
+                raise MirrorError(f"destination collision at {dest_rel}")
     except Exception:
-        # restore the previous tree byte-for-byte before re-raising
-        if codex.exists():
-            bridge.remove_tree_at(root, "codex")
-        for dest_rel in sorted(previous):
-            bridge.ensure_dir_at(root, str(Path(dest_rel).parent))
-            bridge.publish_new(root, root / dest_rel, previous[dest_rel])
+        try:
+            if codex.exists():
+                bridge.remove_tree_at(root, "codex")
+            for dest_rel in sorted(previous):
+                bridge.ensure_dir_at(root, str(Path(dest_rel).parent))
+                bridge.publish_new(root, root / dest_rel, previous[dest_rel])
+        finally:
+            if (root / staging_rel).exists():
+                bridge.remove_tree_at(root, staging_rel)
         raise
+    bridge.remove_tree_at(root, staging_rel)
     return manifest
 
 

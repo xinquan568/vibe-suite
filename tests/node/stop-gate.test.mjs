@@ -104,6 +104,23 @@ test("enabled: a seeded defect in an UNTRACKED file blocks — and only because 
   assert.ok(sent.includes("new-defect.js"));
 });
 
+test("the PUBLISHED prompt file is 0600 inside a 0700 scratch root", () => {
+  // vibe-103: the prompt carries the session diff AND untracked file bodies, so its permissions are
+  // a privacy property of the hook. The fixture reads them from inside the child, the one moment
+  // the file is guaranteed to exist — the hook removes the scratch root once the child returns.
+  const dir = repo({ enabled: true });
+  seedDefect(dir);
+  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const result = runHook(dir, { fixture: "gate-prompt-mode.mjs", probe });
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.ok(existsSync(probe), `the fixture never ran: ${result.stdout}\n${result.stderr}`);
+  const seen = JSON.parse(readFileSync(probe, "utf8"));
+  assert.equal(seen.promptMode, "600",
+    "a world-readable prompt would publish the session diff to every local account");
+  assert.equal(seen.scratchMode, "700");
+});
+
 test("untracked collection: spaced names included, symlinks and outside targets excluded, caps disclosed", () => {
   const dir = repo({ enabled: true });
   writeFileSync(path.join(dir, "spaced name.txt"), "SPACED-CONTENT-PRESENT\n");

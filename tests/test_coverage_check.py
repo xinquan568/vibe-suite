@@ -41,16 +41,18 @@ _CLONE_NAMES = ("cc-suite", "grill-for-claude", "nlpm")
 
 
 def resolve_pinned_trees(env=None, repo_root=REPO_ROOT):
-    """The pinned-tree root. An explicit VIBE_SUITE_PINNED_TREES always wins and is
-    returned unchecked — with the variable set, absence is the caller's *failure*, never
-    a skip (CI sets it, so CI can never green-skip). Unset, the documented layout
-    defaults apply in order: the main checkout's sibling codes/ (repo_root.parent), then
-    the run-worktree four-parent path; the first existing directory containing at least
-    one known clone wins. None means no candidate resolved — the local-skip case."""
+    """The pinned-tree root. Explicitness is *key membership*, not value truthiness: a
+    set VIBE_SUITE_PINNED_TREES always wins — returned unchecked when non-empty, None
+    when empty — and the caller treats set-but-unresolved as a *failure*, never a skip
+    (CI sets it, so CI can never green-skip). Unset, the documented layout defaults apply
+    in order: the main checkout's sibling codes/ (repo_root.parent), then the
+    run-worktree four-parent path; the first existing directory containing at least one
+    known clone wins. None with the variable unset means no candidate — the local-skip
+    case."""
     env = os.environ if env is None else env
-    explicit = env.get(PINNED_TREES_ENV)
-    if explicit:
-        return Path(explicit)
+    if PINNED_TREES_ENV in env:
+        value = env[PINNED_TREES_ENV]
+        return Path(value) if value else None
     for cand in (repo_root.parent,
                  repo_root.parent.parent.parent.parent / "codes"):
         if cand.is_dir() and any((cand / name).is_dir() for name in _CLONE_NAMES):
@@ -73,10 +75,10 @@ def verify_manifest(tree, repo, pin, manifest_path):
     try:
         subprocess.run([sys.executable, str(GEN), str(tree), "--repo", repo,
                         "--ref", pin, "--out", str(out)], capture_output=True, check=True)
-        regenerated = out.read_text(encoding="utf-8")
+        regenerated = out.read_bytes()
     finally:
         shutil.rmtree(out.parent, ignore_errors=True)
-    if regenerated != manifest_path.read_text(encoding="utf-8"):
+    if regenerated != manifest_path.read_bytes():
         return ("manifest",
                 f"{repo}.json is stale against pinned {pin}; regenerate with "
                 f"gen-source-manifest.py --ref {pin}")
@@ -597,8 +599,11 @@ class TestManifestsAreReproducible(unittest.TestCase):
 
     def test_regenerating_a_pinned_manifest_reproduces_it(self):
         root = resolve_pinned_trees()
-        strict = bool(os.environ.get(PINNED_TREES_ENV))
+        strict = PINNED_TREES_ENV in os.environ
         if root is None:
+            if strict:
+                self.fail(f"{PINNED_TREES_ENV} is set but empty — with the variable set, "
+                          "an unresolved root is a failure, never a skip")
             self.skipTest("no pinned-tree layout resolves and "
                           f"{PINNED_TREES_ENV} is unset (local machines only)")
         for repo, pin in cc.PINS.items():
@@ -633,18 +638,25 @@ class TestReproducibilityMachinery(unittest.TestCase):
             ["git", "-C", str(tree), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
              *args], capture_output=True, text=True, check=True).stdout.strip()
 
-    def _mini_repo(self, root):
-        """(tree, first_commit) — two commits, HEAD left on the second."""
+    def _first_commit(self, root):
+        """(tree, first_commit) — one commit so far; HEAD == first."""
         tree = root / "cc-suite"
         tree.mkdir(parents=True)
         (tree / "one.md").write_text("one\n")
         self._git(tree, "init", "-q")
         self._git(tree, "add", "-A")
         self._git(tree, "commit", "-q", "-m", "first")
-        first = self._git(tree, "rev-parse", "HEAD")
+        return tree, self._git(tree, "rev-parse", "HEAD")
+
+    def _second_commit(self, tree):
         (tree / "two.md").write_text("two\n")
         self._git(tree, "add", "-A")
         self._git(tree, "commit", "-q", "-m", "second")
+
+    def _mini_repo(self, root):
+        """(tree, first_commit) — two commits, HEAD left on the second."""
+        tree, first = self._first_commit(root)
+        self._second_commit(tree)
         return tree, first
 
     def _gen(self, tree, pin, out):
@@ -679,12 +691,37 @@ class TestReproducibilityMachinery(unittest.TestCase):
         self.assertIsNone(resolve_pinned_trees(env={}, repo_root=repo_root))
 
     def test_off_pin_head_is_ok(self):
+        """The expected manifest is generated while HEAD == first, so it cannot be an
+        artifact of --ref-ignoring HEAD reads; only then does HEAD move to the second
+        commit. Its content is asserted before verification: the hermetic proof that
+        --ref was honored on both generations."""
         root = self._root()
-        tree, first = self._mini_repo(root)
+        tree, first = self._first_commit(root)
         manifest = root / "cc-suite.json"
         self._gen(tree, first, manifest)
+        expected = json.loads(manifest.read_text())
+        self.assertEqual(expected["commit"], first)
+        self.assertIn("one.md", expected["files"])
+        self.assertNotIn("two.md", expected["files"])
+        self._second_commit(tree)
         verdict, message = verify_manifest(tree, "cc-suite", first, manifest)
         self.assertEqual(verdict, "ok", message)
+
+    def test_resolver_empty_explicit_is_failure_material(self):
+        self.assertIsNone(resolve_pinned_trees(env={PINNED_TREES_ENV: ""},
+                                               repo_root=Path("/nonexistent")))
+
+    def test_shipped_test_fails_strictly_on_missing_root(self):
+        """Set-strict end to end: the shipped test run with the variable pointing at a
+        nonexistent path (or set empty) must exit non-zero, never green-skip."""
+        for value in ("/nonexistent-pinned-trees", ""):
+            with self.subTest(value=value or "(empty)"):
+                r = subprocess.run(
+                    [sys.executable, "-m", "unittest", "-q",
+                     "tests.test_coverage_check.TestManifestsAreReproducible"],
+                    cwd=REPO_ROOT, capture_output=True, text=True,
+                    env={**os.environ, PINNED_TREES_ENV: value})
+                self.assertNotEqual(r.returncode, 0, r.stderr)
 
     def test_unservable_pin_blames_checkout(self):
         root = self._root()

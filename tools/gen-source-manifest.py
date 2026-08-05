@@ -116,7 +116,9 @@ def main(argv=None):
             commit, files = commit_at(args.tree, args.ref), git_files_at(args.tree, args.ref)
         else:
             commit, files = head_commit(args.tree), git_files(args.tree)
-    args.out.write_text(render(args.repo, commit, files), encoding="utf-8")
+    # Bytes, not text: universal-newline translation on any platform would break the
+    # byte-identity contract the reproducibility check enforces (vibe-132).
+    args.out.write_bytes(render(args.repo, commit, files).encode("utf-8"))
     sys.stderr.write(f"{args.repo}: {len(files)} files at "
                      f"{commit[:7] if commit else 'unpinned'} -> {args.out}\n")
     return 0

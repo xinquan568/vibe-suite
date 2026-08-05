@@ -48,7 +48,6 @@ MEMORY_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
 #: row is indistinguishable from a passing one.
 UNAVAILABLE = (
     ("manifest-vs-disk", "E3.5 (#30) — bin/vibe-check"),
-    ("mirror-staleness", "E7.2 — the hash manifest; E3.5 defers the full check to 'live after E7.2'"),
     ("version-coherence", "F4.4 (#30) — marketplace.json carries no version to compare"),
     ("legacy-auditor-data", "§7A row 9 — migration records completion on the destination branch, "
                             "so a project-local command has no readable receipt"),
@@ -241,6 +240,35 @@ def check_legacy(ws, out):
                            f"confirmation, so /vibe-suite:init migrates them", False))
 
 
+def check_mirror_staleness(plugin_root, findings, capabilities):
+    """E7.2 (vibe-54): live when the plugin ships its hash manifest; the absent-manifest
+    state stays a capability row (an installation fact, not a defect). Read-only — the
+    comparison is delegated to the one reader, bin/vibe-check --mirrors."""
+    import subprocess
+    plugin_root = Path(plugin_root)
+    if not (plugin_root / "codex" / "MIRROR-MANIFEST.json").is_file():
+        capabilities.append({"check": "mirror-staleness", "status": "unavailable",
+                             "blocked_on": "the plugin ships no codex/MIRROR-MANIFEST.json — "
+                                           "regenerate via /vibe-suite:bridge mirrors"})
+        return
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(plugin_root / "bin" / "vibe-check"), str(plugin_root),
+             "--mirrors"], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        findings.append(finding("[HIGH]", "mirror-staleness",
+                                f"mirror check could not run: {exc}", False))
+        return
+    if proc.returncode == 0:
+        return
+    detail = (proc.stdout or proc.stderr or "").strip().replace("\n", "; ")[:400]
+    findings.append(finding(
+        "[HIGH]", "mirror-staleness",
+        f"the codex/ mirror disagrees with its manifest: {detail} — regenerate via "
+        "/vibe-suite:bridge mirrors (or python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/"
+        "mirror-sync.py\" generate --root \"${CLAUDE_PLUGIN_ROOT}\")", False))
+
+
 def check_retired_names(plugin_root, out):
     """F1.7: no retired command name may appear in any runtime string.
 
@@ -373,6 +401,7 @@ def diagnose(ws):
                                            "recorded a plugin version"})
     for check, blocked in UNAVAILABLE:
         capabilities.append({"check": check, "status": "unavailable", "blocked_on": blocked})
+    check_mirror_staleness(HERE.parent, findings, capabilities)
     knowledge = knowledge_capability(findings)
     if isinstance(knowledge, dict) and "status" in knowledge:
         capabilities.append(knowledge)

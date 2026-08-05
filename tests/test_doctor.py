@@ -85,7 +85,9 @@ class TestCleanProject(DoctorCase):
         report = self.report()
         statuses = {c["check"]: c["status"] for c in report["capabilities"]}
         self.assertEqual(statuses.get("manifest-vs-disk"), "unavailable")
-        self.assertEqual(statuses.get("mirror-staleness"), "unavailable")
+        # E7.2: mirror-staleness is LIVE when the plugin ships its manifest — a clean live
+        # check contributes neither a finding nor an unavailable row.
+        self.assertNotIn("mirror-staleness", statuses)
         self.assertEqual(self.severities(report), ["[GOOD]"])
 
     def test_every_capability_names_what_blocks_it(self):

@@ -14,6 +14,7 @@ the owned `Stop` entry `init` writes, but the *project's* hooks in `.claude/sett
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -219,10 +220,62 @@ def _open_parent(ws, rel):
     return bridge.open_dir_chain(ws, Path(rel).parent.parts)
 
 
+def _link_mirror_skills(ws, report, plugin_root):
+    """E7.2 (vibe-54): `.agents/skills` as a REAL directory of per-skill links into the
+    plugin's generated `codex/skills` — one-level discovery depth, user entries preserved
+    beside ours, ownership per link. The exact legacy owned symlink (`../.claude/skills`)
+    is migrated: replaced by the directory form, with per-skill links to
+    `../../.claude/skills/<name>` for skills the legacy link previously exposed so nothing
+    reachable disappears. Any other `.agents/skills` shape is the user's — refused."""
+    mirror = Path(plugin_root) / "codex" / "skills"
+    skills_dir = ws / ".agents" / "skills"
+    legacy_exposed = []
+    if skills_dir.is_symlink():
+        if os.readlink(skills_dir) == "../.claude/skills":
+            claude_skills = ws / ".claude" / "skills"
+            if claude_skills.is_dir():
+                legacy_exposed = sorted(p.name for p in claude_skills.iterdir()
+                                        if p.is_dir() and p.name != "vibe-suite")
+            bridge.unlink_at(ws, ".agents/skills")
+            report.append("skills: migrated legacy .agents/skills symlink to directory form")
+        else:
+            report.append(f"skills: .agents/skills points at {os.readlink(skills_dir)} — "
+                          "refused, not replaced")
+            return
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    for d in sorted(p for p in mirror.iterdir() if p.is_dir()):
+        entry = skills_dir / d.name
+        target = d
+        if entry.is_symlink():
+            if os.readlink(entry) == str(target):
+                continue
+            report.append(f"skills: .agents/skills/{d.name} points elsewhere — refused")
+            continue
+        if entry.exists():
+            report.append(f"skills: .agents/skills/{d.name} is the user's — refused")
+            continue
+        bridge.symlink_at(ws, f".agents/skills/{d.name}", target)
+        report.append(f"skills: .agents/skills/{d.name} → {target}")
+    for name in legacy_exposed:
+        entry = skills_dir / name
+        if entry.exists() or entry.is_symlink():
+            continue
+        bridge.symlink_at(ws, f".agents/skills/{name}",
+                          Path("../../.claude/skills") / name)
+        report.append(f"skills: .agents/skills/{name} → ../../.claude/skills/{name} "
+                      "(legacy exposure preserved)")
+
+
 def link_skills(ws, report, plugin_root):
-    """Two links. The plugin link leaves the project by design; `.agents/skills` does not."""
-    for rel, target in ((".claude/skills/vibe-suite", Path(plugin_root) / "skills"),
-                        (".agents/skills", Path("../.claude/skills"))):
+    """The plugin link leaves the project by design; `.agents/skills` does not. With a
+    generated mirror present, `.agents/skills` takes the per-skill directory form
+    (see _link_mirror_skills); without one, the legacy whole-tree link stands."""
+    if (Path(plugin_root) / "codex" / "skills").is_dir():
+        pairs = ((".claude/skills/vibe-suite", Path(plugin_root) / "skills"),)
+    else:
+        pairs = ((".claude/skills/vibe-suite", Path(plugin_root) / "skills"),
+                 (".agents/skills", Path("../.claude/skills")))
+    for rel, target in pairs:
         path = ws / rel
         try:
             # Opened, not merely checked: a path validated and then used is validated at a different
@@ -252,6 +305,11 @@ def link_skills(ws, report, plugin_root):
                 report.append(f"skills: {rel} appeared concurrently — left as it is")
         except (OSError, bridge.BridgeError) as exc:
             report.append(f"skills: {rel} could not be linked ({exc})")
+    if (Path(plugin_root) / "codex" / "skills").is_dir():
+        try:
+            _link_mirror_skills(ws, report, plugin_root)
+        except (OSError, bridge.BridgeError) as exc:
+            report.append(f"skills: mirror wiring failed ({exc})")
 
 
 def main(argv=None):
@@ -273,9 +331,22 @@ def main(argv=None):
         if wanted in ("mcp", "all"):
             mirror_mcp(ws, report)
         if wanted in ("mirrors", "all"):
-            # Specified as a stub by E2.5. A silent no-op would read as success.
-            report.append("mirrors: not yet available — the codex/ mirror generator lands in S7 "
-                          "(E7.2). Nothing was regenerated.")
+            # E7.2 (vibe-54): regenerate the plugin's codex/ mirror at the PLUGIN ROOT —
+            # never the user workspace. A missing generator or failing run is loud.
+            plugin_root = Path(args.plugin_root or HERE.parent)
+            gen = plugin_root / "scripts" / "mirror-sync.py"
+            if not gen.is_file():
+                print(f"error: mirrors: generator not found at {gen}", file=sys.stderr)
+                return 1
+            proc = subprocess.run(
+                [sys.executable, str(gen), "generate", "--root", str(plugin_root)],
+                capture_output=True, text=True)
+            if proc.returncode != 0:
+                print(f"error: mirrors: regeneration failed — {proc.stderr.strip()}",
+                      file=sys.stderr)
+                return 1
+            report.append(f"mirrors: regenerated at {plugin_root} "
+                          f"({proc.stdout.strip() or 'ok'})")
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

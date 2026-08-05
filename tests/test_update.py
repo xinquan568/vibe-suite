@@ -324,6 +324,15 @@ class SimulatedPluginUpdate(unittest.TestCase):
         # so the baseline plugin must carry neither file.
         (self.plugin / "scripts" / "lib" / "claude-octopus-pin.pending").unlink(missing_ok=True)
         (self.plugin / "scripts" / "lib" / "claude-octopus-pin.txt").unlink(missing_ok=True)
+        # E7.2: bridge "all" now runs the mirrors leg. The fixture's mirror-sync.py is a tiny
+        # driver (the documented fixture seam) — the production CLI stays un-overridable.
+        (self.plugin / "scripts" / "mirror-sync.py").write_text(
+            "#!/usr/bin/env python3\n# SPDX-License-Identifier: ISC\n"
+            "import pathlib, sys\n"
+            "root = pathlib.Path(sys.argv[sys.argv.index('--root') + 1])\n"
+            "(root / 'codex').mkdir(exist_ok=True)\n"
+            "(root / 'codex' / 'MIRROR-MANIFEST.json').write_text('{}')\n"
+            "print('driver ok')\n", encoding="utf-8")
 
     def seed_stale_registration(self, pin="1.0.0"):
         stale = bridge.toml_server_upsert(UNRELATED_TOML, mcp_pin.SERVER_NAME,

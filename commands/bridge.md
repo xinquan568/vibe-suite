@@ -1,5 +1,5 @@
 ---
-description: "Bridge sub-operations: skills|hooks|mcp|mirrors|all (default all). Symlinks the plugin's skills, mirrors the project's Claude hooks into .codex/ for the five events both tools share, and mirrors .mcp.json servers into config.toml — never copying secret values. mirrors regenerates the codex/ tree and lands in S7."
+description: "Bridge sub-operations: skills|hooks|mcp|mirrors|all (default all). Symlinks the plugin's skills, mirrors the project's Claude hooks into .codex/ for the five events both tools share, and mirrors .mcp.json servers into config.toml — never copying secret values. mirrors regenerates the codex/ tree via scripts/mirror-sync.py (E7.2)."
 argument-hint: "[skills|hooks|mcp|mirrors|all]"
 ---
 
@@ -55,5 +55,8 @@ rather than rewritten.
 
 ## `mirrors`
 
-Not available yet. The `codex/` mirror generator lands in **S7 (E7.2)**; until then this reports that
-and regenerates nothing, rather than succeeding silently.
+Regenerates the plugin's `codex/` mirror at the PLUGIN ROOT (never the user workspace) by
+running `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/mirror-sync.py" generate --root
+"${CLAUDE_PLUGIN_ROOT}"`. A missing generator or a failing run is a loud per-leg failure and
+exit 1 — never a silent skip. Regeneration is byte-idempotent; `bin/vibe-check --mirrors`
+verifies the result.

@@ -249,7 +249,11 @@ class TestRetiredCommandNames(unittest.TestCase):
                 except (UnicodeDecodeError, OSError):
                     continue
                 rel = path.relative_to(REPO_ROOT).as_posix()
-                if rel == "skills/vocabulary/SKILL.md":
+                if rel in ("skills/vocabulary/SKILL.md",
+                           "codex/skills/vibe-vocabulary/SKILL.md"):
+                    # The vocabulary skill DOCUMENTS retired names (a retirement record is
+                    # not a reference), and its generated mirror inherits that ruling —
+                    # staleness binds the mirror's bytes to the already-exempted source.
                     text = RETIREMENT_RECORD_LINES.sub("", text)
                 for pattern in RETIRED_COMMAND_PATTERNS:
                     if pattern.search(text):

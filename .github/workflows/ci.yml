@@ -176,7 +176,36 @@ jobs:
         with:
           node-version: 'lts/*'
 
+      # vibe-132: the manifest-reproducibility check gates only where the pinned trees
+      # exist, and CI checks out none of them — so fetch each at its PINS commit into the
+      # runner temp (object database only; --ref regeneration needs no working tree). The
+      # pins are read from tools/coverage-check.py, never restated here: two statements
+      # of one fact is the defect class this issue exists to end.
+      - name: Fetch pinned source trees (vibe-132)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > "$RUNNER_TEMP/pins.txt"
+          import importlib.util
+          spec = importlib.util.spec_from_file_location("cc", "tools/coverage-check.py")
+          cc = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(cc)
+          print("\n".join(f"{r} {c}" for r, c in cc.PINS.items()))
+          PY
+          while read -r repo pin; do
+            dir="$RUNNER_TEMP/pinned-trees/$repo"
+            git init -q "$dir"
+            git -C "$dir" remote add origin "https://github.com/xiaolai/$repo.git"
+            if ! git -C "$dir" fetch -q --depth 1 origin "$pin"; then
+              # Server policy may refuse an unadvertised SHA: fall back to the remote
+              # heads (still no checkout), then require the object outright below.
+              git -C "$dir" fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
+            fi
+            git -C "$dir" cat-file -e "$pin^{commit}"
+          done < "$RUNNER_TEMP/pins.txt"
+
       - name: Run the suite
+        env:
+          VIBE_SUITE_PINNED_TREES: ${{ runner.temp }}/pinned-trees
         run: |
           set -euo pipefail
           tmp=$(mktemp)

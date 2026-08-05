@@ -225,7 +225,8 @@ Everything above governs what a **finding** is. A separate reference governs how
 runs**: [`references/reviewer-contract.md`](references/reviewer-contract.md).
 
 Load it when producing or consuming a generator-critic loop — `/vibe-suite:refine-proposal`,
-`/vibe-suite:issue2pr`, the verify pass, the stop-review gate, the audit and contribute gates. It fixes
+`/vibe-suite:issue2pr`, `/vibe-suite:fix`, the verify pass, the stop-review gate, the audit and
+contribute gates. It fixes
 the reviewer backends and their six-obligation contract matrix, the review modes `none|single|full`,
 the `max_review_rounds` cap and its clamp rule, fenced-verdict parsing, the finding-closure machine,
 the same-model refusal with its `--allow-self-review` escape, model resolution, provenance, and the

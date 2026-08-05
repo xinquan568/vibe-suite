@@ -85,8 +85,71 @@ class TestCleanProject(DoctorCase):
         report = self.report()
         statuses = {c["check"]: c["status"] for c in report["capabilities"]}
         self.assertEqual(statuses.get("manifest-vs-disk"), "unavailable")
-        self.assertEqual(statuses.get("mirror-staleness"), "unavailable")
+        # E7.2: mirror-staleness is LIVE when the plugin ships its manifest — a clean live
+        # check contributes neither a finding nor an unavailable row.
+        self.assertNotIn("mirror-staleness", statuses)
         self.assertEqual(self.severities(report), ["[GOOD]"])
+
+    def test_mirror_staleness_states(self):
+        """E7.2 (round-4): absent manifest → capability row; stale mirror → HIGH with the
+        plugin-root remediation; the check is read-only and runs from a workspace OUTSIDE
+        the plugin root (CLAUDE_PLUGIN_ROOT resolution)."""
+        import hashlib
+        import shutil as _sh
+        import sys
+        import tempfile as _tf
+        self.install()
+        with _tf.TemporaryDirectory(prefix="doctor-plugin-") as tmp:
+            plugin = Path(tmp) / "plugin"
+            _sh.copytree(REPO_ROOT, plugin, symlinks=True,
+                         ignore=_sh.ignore_patterns(".git", "node_modules", "__pycache__"))
+            def tree_hash():
+                h = hashlib.sha256()
+                for f in sorted(plugin.rglob("*")):
+                    if f.is_file():
+                        h.update(f.relative_to(plugin).as_posix().encode())
+                        h.update(f.read_bytes())
+                return h.hexdigest()
+            import json as _json
+            import os as _os
+            import subprocess as _sp
+
+            def run_doctor():
+                """The REAL entry — doctor subprocess from the OUTSIDE workspace with
+                CLAUDE_PLUGIN_ROOT pointing at the temp plugin (round-4 F6)."""
+                env = dict(_os.environ, CLAUDE_PLUGIN_ROOT=str(plugin))
+                proc = _sp.run([sys.executable, str(plugin / "scripts" / "doctor.py"),
+                                "--workspace", str(self.ws), "--json"],
+                               capture_output=True, text=True, env=env, timeout=300)
+                return _json.loads(proc.stdout)
+
+            # absent
+            _sh.rmtree(plugin / "codex")
+            report = run_doctor()
+            caps = {c["check"]: c for c in report["capabilities"]}
+            self.assertEqual(caps["mirror-staleness"]["status"], "unavailable")
+            self.assertNotIn("mirror-staleness",
+                             {f["check"] for f in report["findings"]})
+            # clean
+            _sp.run([sys.executable, str(plugin / "scripts" / "mirror-sync.py"),
+                     "generate", "--root", str(plugin)], check=True, capture_output=True)
+            report = run_doctor()
+            self.assertNotIn("mirror-staleness",
+                             {f["check"] for f in report["findings"]})
+            self.assertNotIn("mirror-staleness",
+                             {c["check"] for c in report["capabilities"]})
+            # stale, read-only
+            victim = plugin / "codex" / "README.md"
+            victim.write_text(victim.read_text() + "tamper\n")
+            before = tree_hash()
+            report = run_doctor()
+            rows = [f for f in report["findings"] if f["check"] == "mirror-staleness"]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["severity"], "[HIGH]")
+            self.assertIn("bridge mirrors", rows[0]["finding"])
+            self.assertIn("CLAUDE_PLUGIN_ROOT", rows[0]["finding"])
+            self.assertFalse(rows[0]["auto_fixable"])
+            self.assertEqual(tree_hash(), before, "the doctor run wrote to the plugin")
 
     def test_every_capability_names_what_blocks_it(self):
         self.install()

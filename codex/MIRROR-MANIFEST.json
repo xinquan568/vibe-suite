@@ -1,0 +1,528 @@
+{
+  "exclusions": [
+    {
+      "reason": "engine-selection machinery \u2014 collapsed to the single native lane in the sequential variant",
+      "set": "b",
+      "source": "commands/shared/fallback.md"
+    },
+    {
+      "reason": "engine-selection machinery \u2014 collapsed to the single native lane in the sequential variant",
+      "set": "b",
+      "source": "commands/shared/model-selection.md"
+    },
+    {
+      "reason": "scope grammar inlined into the vibe-roast variant",
+      "set": "b",
+      "source": "commands/shared/scope-parse.md"
+    }
+  ],
+  "generator": "scripts/mirror-sync.py",
+  "out_of_scope": [
+    {
+      "reason": "user-invocable workflow skill \u2014 outside F9.6 set (a)",
+      "set": "a",
+      "source": "skills/issue2pr/"
+    },
+    {
+      "reason": "user-invocable workflow skill \u2014 outside F9.6 set (a)",
+      "set": "a",
+      "source": "skills/refine-proposal/"
+    },
+    {
+      "reason": "user-invocable workflow skill \u2014 outside F9.6 set (a)",
+      "set": "a",
+      "source": "skills/runs-stats/"
+    }
+  ],
+  "plugin_version": "0.0.1",
+  "records": [
+    {
+      "dropped_keys": [],
+      "mirror": "codex/README.md",
+      "mirror_sha256": "5a5fd70b7a718db321bfbf4a10e2b5e77e26b1966b9361e00c79d95b6b73abb6",
+      "source": ".claude-plugin/plugin.json",
+      "source_sha256": "acf6cd5b1dc70c22064a8030d60455daeb448def261144a5461e6c15cf4dfe54",
+      "transform": "generated"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/schemas/audit-output.schema.json",
+      "mirror_sha256": "6b89e1d4e3c9395b51981397b0400691197ed531e5ef760027d79b324af6e55a",
+      "source": "schemas/audit-output.schema.json",
+      "source_sha256": "6b89e1d4e3c9395b51981397b0400691197ed531e5ef760027d79b324af6e55a",
+      "transform": "verbatim"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/audit-fix/SKILL.md",
+      "mirror_sha256": "55144db27ffc5a6126be29e3a4e1972d5de2ff48cd6c99a5220a6348d7340f98",
+      "source": "codex-src/audit-fix/SKILL.md",
+      "source_sha256": "0595ca3f7715423826ed288775a0e44858cf823441eee086c65e4e2e77dc4c40",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/audit/SKILL.md",
+      "mirror_sha256": "6ae99ec00487b63a375d9908487d7026f874b08e6044e5b86157438837320b22",
+      "source": "codex-src/audit/SKILL.md",
+      "source_sha256": "f2d1c6fe4690d8bed3d0c5835a7699612c1814d1fcc201f11a557e79cd2d9fdc",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/claude-debug/SKILL.md",
+      "mirror_sha256": "f16f039d399592e370d0b874d04c8406851e9ec07e12a37b8176c57d4e90bf23",
+      "source": "codex-src/claude-debug/SKILL.md",
+      "source_sha256": "f3a00a5e89b8caa8c49d6978730486f194b5a35327b2bac2648795892f79ac6c",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/claude-implement/SKILL.md",
+      "mirror_sha256": "3839cd3a040ec92c05b61c81fe2f6dd740fdf58e7dc7017b185f480725cfa60b",
+      "source": "codex-src/claude-implement/SKILL.md",
+      "source_sha256": "67478380c08b5e851298828d32bac00a610c6da2f21f4d3465ee4e0391790cee",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/claude-plan/SKILL.md",
+      "mirror_sha256": "87e645929c1e94bdf123c691403407157ca83af7a277dc498f8b70d30858c995",
+      "source": "codex-src/claude-plan/SKILL.md",
+      "source_sha256": "36f174be6b1ce891ab0fe35ca170823f85fd76b54c9f9c7437dfcf6c411eeb7a",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/claude-review/SKILL.md",
+      "mirror_sha256": "96cb7bd3fd6db02295e91d59714016fa185a17055799c4bd376e241c66fffad5",
+      "source": "codex-src/claude-review/SKILL.md",
+      "source_sha256": "f1873549a3c720b87aa5ed82cb39de73642cc4f8fc465ec347a7265e6a18ebaf",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/verify/SKILL.md",
+      "mirror_sha256": "f8c98c35c41026fc9a62da5782098f0ad2e4b5bc5079e152a6ba9ee9669a837c",
+      "source": "codex-src/verify/SKILL.md",
+      "source_sha256": "36e3783d144cde8a29bf590d7f1fdbf82fa0c41974003ef4cb9e20a82e620a98",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-agent-design/SKILL.md",
+      "mirror_sha256": "1289aa236ddffee6bb5a441a1a7d7a2e7ae66af29bf42d18f140cc12b848cb3d",
+      "source": "skills/agent-design/SKILL.md",
+      "source_sha256": "1032d80d521bae7662d3add34cc24ff349725390844751d48888666d2d38ea5e",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-auditing/SKILL.md",
+      "mirror_sha256": "294a7a248eed4092de54d58c23bd77bc5315deb3488b2e7c4b0547c8854db7f1",
+      "source": "skills/auditing/SKILL.md",
+      "source_sha256": "f62f3db874ff73448e95e1593a314b20a8fc6e62a676ddd02b85b130d15c4a83",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-auditing/references/classify.md",
+      "mirror_sha256": "938dbf91d9e2f4a1c2bc5d976696119d391fd7baadefb012d05ba8105c967c8f",
+      "source": "commands/shared/classify.md",
+      "source_sha256": "dcb83b3be320ed9079f390c17311b0970d3c4e68d1dcad30d3bf70589008d31c",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-auditing/references/discover.md",
+      "mirror_sha256": "275a543bd290e81c799e7378ed5cb234fa49a9ea8173838e4928a31fc8548e22",
+      "source": "commands/shared/discover.md",
+      "source_sha256": "247323ccc2a9ab4bb1ba8983861a91ebaa6c4add5de901dc479930d8bebcccdf",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-conventions-antigravity/SKILL.md",
+      "mirror_sha256": "86925d9d77018f7f1d34edd8f1054c2983695e6433b4e4264b60ea0e8685013e",
+      "source": "skills/conventions-antigravity/SKILL.md",
+      "source_sha256": "0da9d8271525d5277b95c07cceebb5e1b79f43581be255ac823cb10689d5c41b",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-conventions-claude/SKILL.md",
+      "mirror_sha256": "efd0ffcf715a8eeda50e63dc801d145ec117304d81b1846133fda92e54be76dd",
+      "source": "skills/conventions-claude/SKILL.md",
+      "source_sha256": "c09bc5c92e6121fbeb578e1e9f758c9134d4c0b4c7718c537355f3db1e060cc2",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-conventions-claude/references/reference.md",
+      "mirror_sha256": "6dbfaa1d7b0d587cdf4951cc49575fd06be083191e543da3ac2166e32ae673a7",
+      "source": "skills/conventions-claude/references/reference.md",
+      "source_sha256": "43dd2271d8e05e5909563865f976fbf40f33076aef8610eef62424b1baebeb27",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-conventions-codex/SKILL.md",
+      "mirror_sha256": "85272c20522bef808967a6d7665d035d6be983a3dcf48f98ea2fd0407c6590d7",
+      "source": "skills/conventions-codex/SKILL.md",
+      "source_sha256": "fec92977a7f158410ae9634e1fc97d3ab880dfee9c2dc1a3c59e657752b62611",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-conventions/SKILL.md",
+      "mirror_sha256": "d73e8a8aa9230cf8fea385da2323355462014a786b669ddafea22d5f54b58312",
+      "source": "skills/conventions/SKILL.md",
+      "source_sha256": "b39f3ba981542429fde35d49721a0ca6641c3b54f9528e1ef70c098710fcb2cb",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-orchestration/SKILL.md",
+      "mirror_sha256": "56b6365e4e227f08397f5fb3e24808eabb8b84d74cf62e51c77734febcf1c932",
+      "source": "skills/orchestration/SKILL.md",
+      "source_sha256": "f8ec13b00e409135e51a5882e06b10ba91c405dade774e756f81cb8ca67f58bb",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-patterns/SKILL.md",
+      "mirror_sha256": "af6e1b07fe6fc7601a3aab4a8f3bcf4eed9fcc8b73eb62298a90ab3b9a1b55fd",
+      "source": "skills/patterns/SKILL.md",
+      "source_sha256": "b6450e8d1bc0e8e3e86396e6392c316fe33f1f2e397c827e6db6b104ffab3653",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [
+        "model",
+        "tools"
+      ],
+      "mirror": "codex/skills/vibe-roast-architecture/SKILL.md",
+      "mirror_sha256": "4aea5b81d921c7c174415d7308c64c957ae9dc2cc620330870807be8fb33affe",
+      "source": "agents/architecture.md",
+      "source_sha256": "651c708e447e2a945957c35d508db5fa62815ed43cd2a9b670d5d419951ed69c",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [
+        "model",
+        "tools"
+      ],
+      "mirror": "codex/skills/vibe-roast-edge-cases/SKILL.md",
+      "mirror_sha256": "59a6017d7677d110c69644172bd53b747c60af59df0e96a645de865b6bd56d3d",
+      "source": "agents/edge-cases.md",
+      "source_sha256": "a0b3025d415f1a0ee74d1bbd675c26c176dd94e4adc97b5463f1d0d56169b097",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [
+        "model",
+        "tools"
+      ],
+      "mirror": "codex/skills/vibe-roast-error-handling/SKILL.md",
+      "mirror_sha256": "54e8c41bcb6164de2b46acb9f13aaeda7dd55f92b114b11d26591ba1245e2e9b",
+      "source": "agents/error-handling.md",
+      "source_sha256": "c87c8ea184a35f6e5288cd98dc8b162b41dc088f2070c38a6507c33fe21ec290",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [
+        "model",
+        "tools"
+      ],
+      "mirror": "codex/skills/vibe-roast-recon/SKILL.md",
+      "mirror_sha256": "e43fe6d29b72b38769ced5f8978f766b46a2ca74809aceec2450e57c090d93a2",
+      "source": "agents/recon.md",
+      "source_sha256": "d355c92486818a0331a75f124f5ab28b67ceed350b08702226d2a81135989c21",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [
+        "model",
+        "tools"
+      ],
+      "mirror": "codex/skills/vibe-roast-security/SKILL.md",
+      "mirror_sha256": "42a73c531e26227651bf25774b75e3a30532cf9bd66fbb56e181f58552762317",
+      "source": "agents/security.md",
+      "source_sha256": "ba4809d3b92e7e646b32d7c853f3813b5b680470d540ee21bbbb3db1e0db212e",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [
+        "model",
+        "tools"
+      ],
+      "mirror": "codex/skills/vibe-roast-testing/SKILL.md",
+      "mirror_sha256": "c861c9049b0a3d47d513ce4bf91f78bae78fadb153800b761d406dc7ade78696",
+      "source": "agents/testing.md",
+      "source_sha256": "3985b662fb9a836c558071330c87a5446775f776fc3abc558887d51096198430",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-roast/SKILL.md",
+      "mirror_sha256": "14cf552edbde9ab3f19ac6a5b9e7d93677efa74699a5c97dd063bdb0c18f251f",
+      "source": "commands/roast.md",
+      "source_sha256": "230bcd93b8dcd853da76e9257f848fba50bd833cd4270d79246dc12eeb8e848e",
+      "transform": "variant"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-roasting/SKILL.md",
+      "mirror_sha256": "65300f0643c5baef2773269396b73443649129e74c71aad523f5321f4a676f1d",
+      "source": "skills/roasting/SKILL.md",
+      "source_sha256": "7479df1cb1844f96c195fad32e87fbb1c3b36623b7a3946df8d2844881aba9ac",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-rules/SKILL.md",
+      "mirror_sha256": "233ad0b613de4d440cf792a7d14c0b52a8a6f3423985553b48e3e7238411a2fb",
+      "source": "skills/rules/SKILL.md",
+      "source_sha256": "df018db37dabeb221df4531fd303956283252c93a09c8837b552d808c9ee2944",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-scoring/SKILL.md",
+      "mirror_sha256": "87d3d9d2323f4bb1aabe9bb2d4482f9b1b0e78276ad842e18dadc9085a4013b7",
+      "source": "skills/scoring/SKILL.md",
+      "source_sha256": "43b894332b2adc271ecccee4efed01b0fba5677a964aaf0ad2cb55d47b3096a7",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-scoring/references/calibration-examples.md",
+      "mirror_sha256": "44b7f894673f7e9b4059f7a1ddb8486d83314038410374c70b8d4d288da613d8",
+      "source": "skills/scoring/references/calibration-examples.md",
+      "source_sha256": "595d9c074ebf0932d17704ff75e55417694c9b14e2c3097e766c95caa05f6e7f",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-security/SKILL.md",
+      "mirror_sha256": "de349099fd64a78b73102f0fdcd18ea029f34a449703918b5643cbd6014b8991",
+      "source": "skills/security/SKILL.md",
+      "source_sha256": "c5771f6f891b5562151696e343d00ce86fefb11d1dc9975aae2a1b3cab70e683",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-testing/SKILL.md",
+      "mirror_sha256": "a50e8090afb8a66e700f38173f691c79369d501b1829e9890d97acc5dd702c05",
+      "source": "skills/testing/SKILL.md",
+      "source_sha256": "750e8620ff764398169e244df6d3401dcba48dfc933874238cd0d236633b39b6",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-vibe-core/SKILL.md",
+      "mirror_sha256": "b8db1ac4299996721fb8278ebb08b18fda0aeee08e90741faef944cc4798771a",
+      "source": "skills/vibe-core/SKILL.md",
+      "source_sha256": "80019e86014a286e1ac4294def19997ddbe81c70be9bdb91670c01b3d95953e9",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-vibe-core/references/reviewer-contract.md",
+      "mirror_sha256": "e58bd90984f5507de9dd176631f1b751adc6812bbe843538c594648d411171cf",
+      "source": "skills/vibe-core/references/reviewer-contract.md",
+      "source_sha256": "4ce8cab62ab6ae3313952a52ebdd0b3c443c7f4f81bfe54fadfc996b2535ab32",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-vibe-core/references/severity.md",
+      "mirror_sha256": "1928047020f1b5d8af3c9c7e28b84c308f2696ffd627450caff8d362b72c1c4a",
+      "source": "skills/vibe-core/references/severity.md",
+      "source_sha256": "2de8e41b82e326efae69850d3cbb16bad2e215b1b683115ec3c10e1a21846b08",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-vocabulary/SKILL.md",
+      "mirror_sha256": "971177e967bca259dff87559975836f826bc2797ac4b84bd304714f35240118d",
+      "source": "skills/vocabulary/SKILL.md",
+      "source_sha256": "73b3437bf53d154485cdd50210ff281b9e54c57073e250b4ef33f79dd6d0559e",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-vocabulary/registry.yaml",
+      "mirror_sha256": "c55778c710d33fa552da14c7c6010cc7d0e6fb0063b5c1ae1838c8c454cc2b0e",
+      "source": "skills/vocabulary/registry.yaml",
+      "source_sha256": "c55778c710d33fa552da14c7c6010cc7d0e6fb0063b5c1ae1838c8c454cc2b0e",
+      "transform": "verbatim"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-writing-agents/SKILL.md",
+      "mirror_sha256": "b4abfba667f12cca983466111776350b910e1ea640df69a532961847c3cc6bd6",
+      "source": "skills/writing-agents/SKILL.md",
+      "source_sha256": "f6cd66d02d2293542e016524e4b08b167ebe60a9a6ab93da3ddd75e062dfc010",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-writing-hooks/SKILL.md",
+      "mirror_sha256": "081c4a0768071ab19d811c5b59de81f53045b80a746f29d059e0042837c30f77",
+      "source": "skills/writing-hooks/SKILL.md",
+      "source_sha256": "3609279a1ffa0dd0e4ee0695b20fb0d47af662a956ad035047689e5f5b6119fa",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-writing-plugins/SKILL.md",
+      "mirror_sha256": "d8b01e9c4df8386dd3cdbb3a8bd6209087bbcb4b707cffff84548cf67f6ed464",
+      "source": "skills/writing-plugins/SKILL.md",
+      "source_sha256": "399ea5bb920de2bd01cc07d12727cec463c5460f74d58eb60ae027d2b002cfc2",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-writing-prompts/SKILL.md",
+      "mirror_sha256": "aebce66170b9b04202e5f8c10ed69385d24d10803f0cfdd3f3e8b2b0b4dcd974",
+      "source": "skills/writing-prompts/SKILL.md",
+      "source_sha256": "4475038a0f211a4984fec354a12e3a40403960f220b891f348ae82740f23e719",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-writing-rules/SKILL.md",
+      "mirror_sha256": "108a185f743b32cc4d02c244fa5cbd70abc69cfe7deb539aee5fa75dd553eb33",
+      "source": "skills/writing-rules/SKILL.md",
+      "source_sha256": "358c3454e9edd44dc168cde537ef6c0286e6df55042112c853e2a5ca4d9e9a13",
+      "transform": "markdown"
+    },
+    {
+      "dropped_keys": [],
+      "mirror": "codex/skills/vibe-writing-skills/SKILL.md",
+      "mirror_sha256": "ddab58552d2b0fc5d657a19ad20534d6d512a25eb301fc75fd6b2b94868f2b28",
+      "source": "skills/writing-skills/SKILL.md",
+      "source_sha256": "bbd6ee4e9a19fc7e7075dcf2f289dcbee9131324201b8145588d0a612ed5f58f",
+      "transform": "markdown"
+    }
+  ],
+  "schema": 1,
+  "sets": {
+    "copied_deps": {
+      "schemas/audit-output.schema.json": "codex/schemas/audit-output.schema.json"
+    },
+    "knowledge": [
+      "agent-design",
+      "auditing",
+      "conventions",
+      "conventions-antigravity",
+      "conventions-claude",
+      "conventions-codex",
+      "orchestration",
+      "patterns",
+      "roasting",
+      "rules",
+      "scoring",
+      "security",
+      "testing",
+      "vibe-core",
+      "vocabulary",
+      "writing-agents",
+      "writing-hooks",
+      "writing-plugins",
+      "writing-prompts",
+      "writing-rules",
+      "writing-skills"
+    ],
+    "roast_agents": [
+      "architecture",
+      "edge-cases",
+      "error-handling",
+      "recon",
+      "security",
+      "testing"
+    ],
+    "workflow": [
+      "issue2pr",
+      "refine-proposal",
+      "runs-stats"
+    ]
+  },
+  "transform_notes": {
+    "globs_rule": "globs maps to metadata.short-description (no live source carries globs today; proven on a synthetic fixture)",
+    "slash_literal": [
+      "advisor",
+      "bridge",
+      "check",
+      "fix",
+      "init",
+      "issue2pr",
+      "jobs",
+      "nl-audit",
+      "refine-proposal",
+      "repair",
+      "scan",
+      "score",
+      "security-scan",
+      "test",
+      "update"
+    ],
+    "slash_occurrences": {
+      "skills/agent-design/SKILL.md": {
+        "advisor": 3,
+        "repair": 1,
+        "update": 1
+      },
+      "skills/auditing/SKILL.md": {
+        "nl-audit": 2,
+        "security-scan": 1
+      },
+      "skills/conventions-codex/SKILL.md": {
+        "bridge": 1
+      },
+      "skills/orchestration/SKILL.md": {
+        "init": 1
+      },
+      "skills/roasting/SKILL.md": {
+        "roast": 2
+      },
+      "skills/rules/SKILL.md": {
+        "fix": 2,
+        "score": 2
+      },
+      "skills/scoring/SKILL.md": {
+        "score": 2
+      },
+      "skills/security/SKILL.md": {
+        "security-scan": 2
+      },
+      "skills/testing/SKILL.md": {
+        "score": 2,
+        "test": 5
+      },
+      "skills/vibe-core/SKILL.md": {
+        "fix": 1,
+        "issue2pr": 1,
+        "jobs": 1,
+        "refine-proposal": 1
+      },
+      "skills/vibe-core/references/reviewer-contract.md": {
+        "fix": 2,
+        "issue2pr": 1,
+        "refine-proposal": 1
+      },
+      "skills/vocabulary/SKILL.md": {
+        "check": 1,
+        "score": 1
+      },
+      "skills/writing-plugins/SKILL.md": {
+        "scan": 1,
+        "score": 1
+      }
+    },
+    "slash_rewritten": [
+      "roast"
+    ]
+  }
+}

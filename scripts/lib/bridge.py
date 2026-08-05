@@ -283,6 +283,25 @@ def _remove_tree_fd(parent_fd, name):
 _ROOT_PIN = {}
 
 
+def rename_at(root, src_rel, dst_rel):
+    """Atomically rename SRC to DST inside the root, both parents opened descriptor-relative
+    (E7.2 / vibe-54 - the mirror swap's exchange step). DST must not exist; the caller owns
+    collision policy. Descriptor-relative on both ends, so neither parent is resolved twice."""
+    assert_root(root)
+    src, dst = Path(src_rel), Path(dst_rel)
+    assert_inside(root, Path(root) / src)
+    assert_inside(root, Path(root) / dst)
+    src_fd = open_dir_chain(root, src.parent.parts)
+    try:
+        dst_fd = open_dir_chain(root, dst.parent.parts)
+        try:
+            os.rename(src.name, dst.name, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
+        finally:
+            os.close(dst_fd)
+    finally:
+        os.close(src_fd)
+
+
 def symlink_at(root, rel, target):
     """Create `root/rel` -> `target`, relative to the audited descent.
 

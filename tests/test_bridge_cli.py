@@ -33,6 +33,20 @@ class BridgeCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.plugin, ignore_errors=True)
         (self.plugin / "skills").mkdir()
 
+    def seed_mirror_driver(self):
+        """E7.2 fixture seam: the fixture's own copy of mirror-sync.py is a tiny driver —
+        the production CLI surface stays un-overridable."""
+        driver = self.plugin / "scripts" / "mirror-sync.py"
+        driver.parent.mkdir(parents=True, exist_ok=True)
+        driver.write_text(
+            "#!/usr/bin/env python3\n# SPDX-License-Identifier: ISC\n"
+            "import pathlib, sys\n"
+            "root = pathlib.Path(sys.argv[sys.argv.index('--root') + 1])\n"
+            "d = root / 'codex'\n"
+            "d.mkdir(exist_ok=True)\n"
+            "(d / 'MIRROR-MANIFEST.json').write_text('{}')\n"
+            "print('driver ok')\n")
+
     def run_bridge(self, *args):
         return subprocess.run(
             ["python3", str(CLI), *args, "--workspace", str(self.ws),
@@ -159,13 +173,16 @@ class TestSkills(BridgeCase):
 
 
 class TestSubcommands(BridgeCase):
-    def test_mirrors_says_it_is_not_available(self):
+    def test_mirrors_without_a_generator_fails_loudly(self):
+        # E7.2 premise change: the mirrors leg is live. A plugin missing its generator is a
+        # broken installation, and silence would read as success — the failure is loud.
         result = self.run_bridge("mirrors")
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("S7", result.stdout, "a silent no-op would read as success")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("generator not found", result.stdout + result.stderr)
 
-    def test_all_runs_the_three_implementable_ones(self):
+    def test_all_runs_all_four_legs(self):
         self.seed_mcp()
+        self.seed_mirror_driver()
         out = self.run_bridge("all").stdout
         for prefix in ("skills:", "hooks:", "mcp:", "mirrors:"):
             self.assertIn(prefix, out)
@@ -416,3 +433,83 @@ class TestAdvisorMirrorSkip(unittest.TestCase):
                          "the advisor path owns both stores; the mirror must skip its entries")
         self.assertIn("foreign_env", toml, "foreign env servers still mirror names-only")
         self.assertNotIn("secret-value", toml)
+
+
+class TestMirrorWiring(BridgeCase):
+    """E7.2 (vibe-54): per-skill mirror links in a real .agents/skills directory, the legacy
+    migration, and the mirrors regeneration leg."""
+
+    def seed_mirror(self):
+        d = self.plugin / "codex" / "skills" / "vibe-alpha"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text("---\nname: vibe-alpha\ndescription: a\n---\nx\n")
+
+    def test_fresh_install_creates_per_skill_links(self):
+        self.seed_mirror()
+        self.run_bridge("skills")
+        entry = self.ws / ".agents" / "skills" / "vibe-alpha"
+        self.assertTrue((self.ws / ".agents" / "skills").is_dir())
+        self.assertFalse((self.ws / ".agents" / "skills").is_symlink())
+        self.assertTrue(entry.is_symlink())
+        self.assertTrue((entry / "SKILL.md").is_file())
+
+    def test_no_mirror_keeps_the_legacy_link(self):
+        self.run_bridge("skills")
+        agents_link = self.ws / ".agents" / "skills"
+        self.assertTrue(agents_link.is_symlink())
+        self.assertEqual(os.readlink(agents_link), "../.claude/skills")
+
+    def test_legacy_owned_link_is_migrated_and_prior_exposure_preserved(self):
+        self.seed_mirror()
+        (self.ws / ".claude" / "skills" / "mine").mkdir(parents=True)
+        (self.ws / ".claude" / "skills" / "mine" / "SKILL.md").write_text("m\n")
+        (self.ws / ".agents").mkdir()
+        os.symlink("../.claude/skills", self.ws / ".agents" / "skills")
+        self.run_bridge("skills")
+        skills_dir = self.ws / ".agents" / "skills"
+        self.assertTrue(skills_dir.is_dir() and not skills_dir.is_symlink())
+        self.assertTrue((skills_dir / "vibe-alpha").is_symlink())
+        self.assertTrue((skills_dir / "mine" / "SKILL.md").is_file(),
+                        "previously exposed skill vanished in the migration")
+
+    def test_user_owned_agents_link_is_refused_untouched(self):
+        self.seed_mirror()
+        (self.ws / "my-skills").mkdir()
+        (self.ws / ".agents").mkdir()
+        os.symlink("../my-skills", self.ws / ".agents" / "skills")
+        result = self.run_bridge("skills")
+        self.assertEqual(os.readlink(self.ws / ".agents" / "skills"), "../my-skills")
+        self.assertIn("refused", result.stdout + result.stderr)
+
+    def test_colliding_user_entry_is_refused_per_entry(self):
+        self.seed_mirror()
+        (self.ws / ".agents" / "skills" / "vibe-alpha").mkdir(parents=True)
+        (self.ws / ".agents" / "skills" / "vibe-alpha" / "SKILL.md").write_text("user\n")
+        result = self.run_bridge("skills")
+        self.assertEqual((self.ws / ".agents" / "skills" / "vibe-alpha" / "SKILL.md")
+                         .read_text(), "user\n")
+        self.assertIn("vibe-alpha", result.stdout + result.stderr)
+
+    def test_mirrors_leg_runs_the_generator_and_is_idempotent(self):
+        self.seed_mirror_driver()
+        first = self.run_bridge("mirrors")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertTrue((self.plugin / "codex" / "MIRROR-MANIFEST.json").is_file())
+        import hashlib
+        def tree_hash():
+            h = hashlib.sha256()
+            for f in sorted(self.plugin.rglob("*")):
+                if f.is_file():
+                    h.update(f.relative_to(self.plugin).as_posix().encode())
+                    h.update(f.read_bytes())
+            return h.hexdigest()
+        before = tree_hash()
+        second = self.run_bridge("mirrors")
+        self.assertEqual(second.returncode, 0)
+        self.assertEqual(tree_hash(), before,
+                         "a second mirrors run changed the plugin tree")
+
+    def test_missing_generator_fails_loudly(self):
+        result = self.run_bridge("mirrors")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("mirror", (result.stdout + result.stderr).lower())

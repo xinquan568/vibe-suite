@@ -1,5 +1,5 @@
 ---
-description: "Bridge sub-operations: skills|hooks|mcp|mirrors|all (default all). Symlinks the plugin's skills, mirrors the project's Claude hooks into .codex/ for the five events both tools share, and mirrors .mcp.json servers into config.toml — never copying secret values. mirrors regenerates the codex/ tree and lands in S7."
+description: "Bridge sub-operations: skills|hooks|mcp|mirrors|all (default all). Symlinks the plugin's skills, mirrors the project's Claude hooks into .codex/ for the five events both tools share, and mirrors .mcp.json servers into config.toml — never copying secret values. mirrors regenerates the codex/ tree via scripts/mirror-sync.py (E7.2)."
 argument-hint: "[skills|hooks|mcp|mirrors|all]"
 ---
 
@@ -46,7 +46,17 @@ Only the five events both tools share cross: `SessionStart`, `UserPromptSubmit`,
 goes to `.codex/hooks.vibe-suite.json` instead, and says so. Where it holds only our owned entry,
 that entry is preserved through the mirror.
 
-## `skills` — two links
+## `skills`
+
+**Mirror topology (E7.2).** When the plugin ships a generated `codex/skills` tree,
+`.agents/skills` is a REAL directory of per-skill symlinks — one entry per mirrored skill
+pointing into the plugin's `codex/skills/<name>` — so Codex discovers every skill at the
+documented one-level depth, and the user's own entries live safely beside ours. The exact
+legacy owned symlink (`.agents/skills → ../.claude/skills`) is migrated to the directory form
+with per-skill links preserving everything it previously exposed; any OTHER `.agents/skills`
+shape (a user-owned symlink elsewhere, a colliding user entry) is refused per entry, touching
+nothing. Without a generated mirror the legacy whole-tree link stands.
+ — two links
 
 `.claude/skills/vibe-suite` → the installed plugin's skills, and `.agents/skills` →
 `../.claude/skills`. The first **leaves your project by design** — it points at the plugin. A real
@@ -55,5 +65,8 @@ rather than rewritten.
 
 ## `mirrors`
 
-Not available yet. The `codex/` mirror generator lands in **S7 (E7.2)**; until then this reports that
-and regenerates nothing, rather than succeeding silently.
+Regenerates the plugin's `codex/` mirror at the PLUGIN ROOT (never the user workspace) by
+running `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/mirror-sync.py" generate --root
+"${CLAUDE_PLUGIN_ROOT}"`. A missing generator or a failing run is a loud per-leg failure and
+exit 1 — never a silent skip. Regeneration is byte-idempotent; `bin/vibe-check --mirrors`
+verifies the result.

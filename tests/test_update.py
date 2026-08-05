@@ -324,6 +324,30 @@ class SimulatedPluginUpdate(unittest.TestCase):
         # so the baseline plugin must carry neither file.
         (self.plugin / "scripts" / "lib" / "claude-octopus-pin.pending").unlink(missing_ok=True)
         (self.plugin / "scripts" / "lib" / "claude-octopus-pin.txt").unlink(missing_ok=True)
+        # E7.2: bridge "all" now runs the mirrors leg. The fixture's mirror-sync.py is a tiny
+        # driver (the documented fixture seam) — the production CLI stays un-overridable.
+        # The driver IMPORTS the real generator and injects fixture sets through the
+        # Python-API seam (the frozen A-5 design) — the production CLI stays un-overridable.
+        (self.plugin / ".claude-plugin").mkdir(exist_ok=True)
+        (self.plugin / ".claude-plugin" / "plugin.json").write_text(json.dumps(
+            {"name": "vibe-suite", "version": "0.0.0-fixture", "description": "x",
+             "commands": [], "agents": [], "skills": ["./skills/probe"]}) + "\n")
+        probe = self.plugin / "skills" / "probe"
+        probe.mkdir(parents=True, exist_ok=True)
+        (probe / "SKILL.md").write_text(
+            "---\nname: probe\ndescription: Probe knowledge.\n---\n\nprobe\n")
+        (self.plugin / "scripts" / "mirror-sync.py").write_text(
+            "#!/usr/bin/env python3\n# SPDX-License-Identifier: ISC\n"
+            "import importlib.util, pathlib, sys\n"
+            f"spec = importlib.util.spec_from_file_location('real_mirror_sync', "
+            f"{str(REPO_ROOT / 'scripts' / 'mirror-sync.py')!r})\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(mod)\n"
+            "root = pathlib.Path(sys.argv[sys.argv.index('--root') + 1])\n"
+            "mod.generate(root, sets={'knowledge': ('probe',), 'workflow': (),\n"
+            "                         'roast_agents': (), 'copied_deps': {},\n"
+            "                         'auditing_partials': ()})\n"
+            "print('fixture driver: generated via the API seam')\n", encoding="utf-8")
 
     def seed_stale_registration(self, pin="1.0.0"):
         stale = bridge.toml_server_upsert(UNRELATED_TOML, mcp_pin.SERVER_NAME,

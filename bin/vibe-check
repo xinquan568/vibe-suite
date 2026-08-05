@@ -474,6 +474,259 @@ def check_hook_case(root, manifest):
     return findings
 
 
+def _sha256(path):
+    import hashlib
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+#: E7.2 (vibe-54): the checker's OWN production inventories — deliberately duplicated from
+#: scripts/mirror-sync.py and cross-pinned by tests/test_mirror_sync.py, so a corrupted
+#: manifest cannot shrink the oracle by editing its own declarations. `expected=None` uses
+#: these production tables; the parameter is an API-only test seam (the CLI passes nothing).
+MIRROR_EXPECTED = {
+    "knowledge": (
+        "agent-design", "auditing", "conventions", "conventions-antigravity",
+        "conventions-claude", "conventions-codex", "orchestration", "patterns", "roasting",
+        "rules", "scoring", "security", "testing", "vibe-core", "vocabulary",
+        "writing-agents", "writing-hooks", "writing-plugins", "writing-prompts",
+        "writing-rules", "writing-skills",
+    ),
+    "workflow": ("issue2pr", "refine-proposal", "runs-stats"),
+    "roast_agents": ("architecture", "edge-cases", "error-handling", "recon", "security",
+                     "testing"),
+    "copied_deps": {
+        "schemas/audit-output.schema.json": "codex/schemas/audit-output.schema.json",
+    },
+    "generated_outputs": {
+        "commands/roast.md": "codex/skills/vibe-roast/SKILL.md",
+        "commands/shared/classify.md": "codex/skills/vibe-auditing/references/classify.md",
+        "commands/shared/discover.md": "codex/skills/vibe-auditing/references/discover.md",
+        ".claude-plugin/plugin.json": "codex/README.md",
+    },
+}
+
+
+def check_mirrors(root, expected=None):
+    """E7.2 (vibe-54): validate codex/ against MIRROR-MANIFEST.json — both hash directions,
+    per-file universe on both sides, version drift, duplicates, containment, generated
+    frontmatter, reasoned rows. Inventory expectations come from MIRROR_EXPECTED (production
+    tables), never from the manifest's own declarations: the declarations are COMPARED to the
+    expectation, so a manifest that shrinks or reclassifies a set is itself a finding."""
+    root = Path(root)
+    expected = expected or MIRROR_EXPECTED
+    out = []
+    mpath = root / "codex" / "MIRROR-MANIFEST.json"
+
+    def bad(path, detail):
+        out.append(finding("mirrors", path, detail))
+
+    try:
+        doc = json.loads(mpath.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        bad("codex/MIRROR-MANIFEST.json", f"manifest unparseable: {exc}")
+        return out
+    if not isinstance(doc, dict):
+        bad("codex/MIRROR-MANIFEST.json", "manifest is not a JSON object")
+        return out
+    for key in ("schema", "plugin_version", "records", "out_of_scope", "exclusions",
+                "sets"):
+        if key not in doc:
+            bad("codex/MIRROR-MANIFEST.json", f"manifest missing key {key!r}")
+            return out
+    if not isinstance(doc.get("sets"), dict):
+        bad("codex/MIRROR-MANIFEST.json", "manifest 'sets' is not an object")
+        return out
+    for key in ("knowledge", "workflow", "roast_agents"):
+        v = doc["sets"].get(key)
+        if not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+            bad("codex/MIRROR-MANIFEST.json",
+                f"manifest sets.{key} is not a list of strings")
+            return out
+    if not isinstance(doc["sets"].get("copied_deps", {}), dict):
+        bad("codex/MIRROR-MANIFEST.json", "manifest sets.copied_deps is not an object")
+        return out
+
+    try:
+        plugin_version = json.loads(
+            (root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+    except (OSError, json.JSONDecodeError, KeyError):
+        plugin_version = None
+    if plugin_version is not None and doc["plugin_version"] != plugin_version:
+        bad("codex/MIRROR-MANIFEST.json",
+            f"plugin version drift: manifest stamped {doc['plugin_version']!r}, "
+            f"plugin.json says {plugin_version!r} — regenerate the mirror")
+
+    records = doc["records"] if isinstance(doc.get("records"), list) else None
+    if records is None:
+        bad("codex/MIRROR-MANIFEST.json", "manifest 'records' is not a list")
+        return out
+    for key in ("out_of_scope", "exclusions"):
+        if not isinstance(doc.get(key), list):
+            bad("codex/MIRROR-MANIFEST.json", f"manifest {key!r} is not a list")
+            return out
+    if doc.get("schema") != 1:
+        bad("codex/MIRROR-MANIFEST.json",
+            f"unsupported manifest schema {doc.get('schema')!r}")
+        return out
+    seen_src, seen_mirror = set(), set()
+    well_formed = []
+    for r in records:
+        if not isinstance(r, dict):
+            bad("codex/MIRROR-MANIFEST.json", f"record is not an object: {r!r}")
+            continue
+        missing = [f for f in ("source", "mirror", "source_sha256", "mirror_sha256")
+                   if not isinstance(r.get(f), str)]
+        if missing:
+            bad(str(r.get("mirror") or r.get("source") or "?"),
+                f"record missing/malformed field(s): {', '.join(missing)}")
+            continue
+        if ".." in r["source"].split("/") or r["source"].startswith("/"):
+            bad(r["source"], "source path escapes the plugin root")
+            continue
+        resolved = (root / r["source"])
+        if resolved.exists():
+            try:
+                resolved.resolve().relative_to(root.resolve())
+            except ValueError:
+                bad(r["source"], "source path resolves outside the plugin root (symlink)")
+                continue
+        well_formed.append(r)
+    records = well_formed
+    for r in records:
+        if r["mirror"] in seen_mirror:
+            bad(r["mirror"], "duplicate record for this mirror path")
+        seen_mirror.add(r["mirror"])
+        key = (r["source"], r["mirror"])
+        if key in seen_src:
+            bad(r["mirror"], "duplicate record (source, mirror) pair")
+        seen_src.add(key)
+        if ".." in r["mirror"].split("/") or not r["mirror"].startswith("codex/"):
+            bad(r["mirror"], "mirror path escapes codex/")
+            continue
+        src, mir = root / r["source"], root / r["mirror"]
+        if mir.exists():
+            try:
+                mir.resolve().relative_to(root.resolve())
+            except (ValueError, OSError, RuntimeError):
+                bad(r["mirror"], "mirror path resolves outside the plugin root (symlink)")
+                continue
+        if not src.is_file():
+            bad(r["source"], "recorded source is gone — mirror is orphaned")
+        elif _sha256(src) != r["source_sha256"]:
+            bad(r["source"], "source changed since generation — mirror is stale")
+        if not mir.is_file():
+            bad(r["mirror"], "recorded mirror file is missing")
+        elif _sha256(mir) != r["mirror_sha256"]:
+            bad(r["mirror"], "mirror bytes differ from the manifest — hand-edited?")
+
+    mirrored = {r["mirror"] for r in records}
+    for f in sorted((root / "codex").rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(root).as_posix()
+        if rel == "codex/MIRROR-MANIFEST.json":
+            continue
+        if rel not in mirrored:
+            bad(rel, "file under codex/ is not accounted for in the manifest")
+
+    for row in doc["out_of_scope"] + doc["exclusions"]:
+        if not isinstance(row, dict):
+            bad("codex/MIRROR-MANIFEST.json", f"non-object out_of_scope/exclusion row: {row!r}")
+            continue
+        if not row.get("reason"):
+            bad(row.get("source", "?"), "row lacks a non-empty reason")
+
+    sets = doc["sets"] if isinstance(doc.get("sets"), dict) else {}
+    for key in ("knowledge", "workflow", "roast_agents"):
+        declared = tuple(sorted(sets.get(key, ()))) if isinstance(sets.get(key), list) \
+            else tuple(sets.get(key, ()))
+        want = tuple(sorted(expected[key]))
+        if tuple(sorted(declared)) != want:
+            bad("codex/MIRROR-MANIFEST.json",
+                f"declared set {key!r} differs from the production inventory "
+                f"(declared {sorted(declared)!r}, expected {sorted(want)!r})")
+    declared_deps = sets.get("copied_deps", {})
+    if dict(declared_deps) != dict(expected["copied_deps"]):
+        bad("codex/MIRROR-MANIFEST.json",
+            "declared copied_deps differ from the production inventory")
+    # From here every requirement derives from the EXPECTED inventory, not the manifest.
+    sets = {"knowledge": tuple(sorted(expected["knowledge"])),
+            "workflow": tuple(sorted(expected["workflow"])),
+            "roast_agents": tuple(sorted(expected["roast_agents"])),
+            "copied_deps": dict(expected["copied_deps"])}
+    declared_skills = set(sets["knowledge"]) | set(sets["workflow"])
+    skills_dir = root / "skills"
+    if skills_dir.is_dir():
+        for d in sorted(p for p in skills_dir.iterdir() if p.is_dir()):
+            if d.name not in declared_skills:
+                bad(f"skills/{d.name}/",
+                    "skill directory not classified in the production inventory")
+    oos_sources = {row.get("source") for row in doc["out_of_scope"]
+                   if isinstance(row, dict)}
+    for wf in sets["workflow"]:
+        if f"skills/{wf}/" not in oos_sources:
+            bad(f"skills/{wf}/", "workflow skill lacks its out-of-scope row")
+    sources_recorded = {r["source"] for r in records if isinstance(r, dict)
+                        and isinstance(r.get("source"), str)}
+
+    def require_files(src_dir, label):
+        if not (root / src_dir).is_dir():
+            bad(src_dir, f"declared {label} member has no source directory")
+            return
+        for f in sorted((root / src_dir).rglob("*")):
+            if f.is_file():
+                rel = f.relative_to(root).as_posix()
+                if rel not in sources_recorded:
+                    bad(rel, f"file of declared {label} member has no manifest record")
+
+    for k in sets["knowledge"]:
+        require_files(f"skills/{k}", "knowledge")
+    for a in sets["roast_agents"]:
+        if f"agents/{a}.md" not in sources_recorded:
+            bad(f"agents/{a}.md", "expected roast agent has no manifest record")
+    for dep_src, dep_mirror in sorted(sets["copied_deps"].items()):
+        if dep_src not in sources_recorded:
+            bad(dep_src, "declared copied dependency has no manifest record")
+        elif not (root / dep_mirror).is_file():
+            bad(dep_mirror, "declared copied dependency's mirror is missing")
+    pairs_recorded = {(r["source"], r["mirror"]) for r in records}
+    for gen_src, gen_mirror in sorted(expected.get("generated_outputs", {}).items()):
+        if not (root / gen_src).exists():
+            bad(gen_src, "expected generated-output source is missing from the plugin")
+            continue
+        if (gen_src, gen_mirror) not in pairs_recorded:
+            bad(gen_mirror, "mandatory generated output lacks its exact "
+                            "source-to-mirror record")
+        elif not (root / gen_mirror).is_file():
+            bad(gen_mirror, "mandatory generated output's mirror is missing")
+    if (root / "codex-src").is_dir():
+        for d in sorted(p for p in (root / "codex-src").iterdir() if p.is_dir()):
+            require_files(f"codex-src/{d.name}", "codex-src")
+
+    for r in records:
+        mir = root / r["mirror"]
+        if not mir.is_file() or not r["mirror"].endswith("SKILL.md"):
+            continue
+        try:
+            text = mir.read_text(encoding="utf-8")
+            if not text.startswith("---\n"):
+                bad(r["mirror"], "generated SKILL.md lacks frontmatter")
+                continue
+            fm = text[4:text.index("\n---", 4)]
+            keys = dict(re.findall(r"^([a-z-]+):\s*(.*)$", fm, re.M))
+            dirname = Path(r["mirror"]).parent.name
+            if keys.get("name") != dirname:
+                bad(r["mirror"], f"generated frontmatter name {keys.get('name')!r} does "
+                                 f"not match its directory {dirname!r}")
+            if not keys.get("description"):
+                bad(r["mirror"], "generated frontmatter lacks a description")
+            if f"version: {doc['plugin_version']}" not in fm:
+                bad(r["mirror"], "generated frontmatter lacks the stamped metadata version")
+        except (ValueError, OSError) as exc:
+            bad(r["mirror"], f"generated frontmatter unreadable: {exc}")
+    return out
+
+
 def check_monorepo(root):
     findings = []
     for marker in sorted(root.rglob(".claude-plugin")):
@@ -575,11 +828,17 @@ def main(argv=None):
 
     if not report_only:
         if args.mirrors:
-            # the deferred class refuses before anything else pre-E7.2 — its refusal
-            # governs every composition that engages directory mode
-            print("vibe-check: mirror hash manifest not found; ships with E7.2/F9.6",
-                  file=sys.stderr)
-            return 2
+            # E7.2 (vibe-54): the reader half of the staleness contract. An absent manifest
+            # keeps the historical refusal (exit 2) — "no manifest" is an installation
+            # state, not a finding about the mirror. With a manifest present, the class
+            # joins the normal directory flow below.
+            mroot = Path(args.dir) if args.dir is not None else Path(".")
+            if not (mroot / "codex" / "MIRROR-MANIFEST.json").is_file():
+                print("vibe-check: mirror hash manifest not found; ships with E7.2/F9.6",
+                      file=sys.stderr)
+                return 2
+            findings.extend(check_mirrors(mroot))
+            checked["mirrors"] = True
         root_display = args.dir if args.dir is not None else "."
         root = Path(root_display)
         if not root.is_dir():

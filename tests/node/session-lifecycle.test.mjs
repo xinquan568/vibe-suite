@@ -5,7 +5,7 @@
 
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -37,14 +37,22 @@ test("BOTH events reap orphan temps and report abandoned jobs WITHOUT rewriting 
     await createRecord(ws, abandonedRecord("job_aaaaaaaaaaaaaaaaaaaa"));
     const before = await readRecord(ws, "job_aaaaaaaaaaaaaaaaaaaa");
 
+    // vibe-103: an orphan is collectible only if it carries the ownership stamp this suite writes.
+    // The fixture used to be a bare "{}", which the reaper deleted on the strength of its name —
+    // the defect, not the feature. A same-named unstamped file is added to prove it now survives.
     const orphan = path.join(jobsDir(ws), "job_bbbbbbbbbbbbbbbbbbbb.tmp.123.deadbeef");
-    writeFileSync(orphan, "{}");
+    writeFileSync(orphan, JSON.stringify({ "_vibe-suite_owned": { kind: "job-scratch", schema: 1 } }));
+    const foreign = path.join(jobsDir(ws), "job_dddddddddddddddddddd.tmp.123.cafebabe");
+    writeFileSync(foreign, "{}");
     const old = (Date.now() - TEMP_REAP_MIN_AGE_MS - 60_000) / 1000;
     utimesSync(orphan, old, old);
+    utimesSync(foreign, old, old);
 
     const result = runHook(ws, event);
     assert.equal(result.status, 0, `${event}: ${result.stderr}`);
     assert.ok(result.stderr.includes("reaped 1 orphan temp"), `${event}: ${result.stderr}`);
+    assert.ok(readdirSync(jobsDir(ws)).includes(path.basename(foreign)),
+      `${event}: an unstamped file matching the temp pattern must survive`);
     assert.ok(result.stderr.includes("looks abandoned"), `${event}: ${result.stderr}`);
 
     const after = await readRecord(ws, "job_aaaaaaaaaaaaaaaaaaaa");

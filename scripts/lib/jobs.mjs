@@ -37,7 +37,14 @@
 // exists yet", which is information.
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { link, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+// Only the read side is imported directly: every mutation goes through `./write.mjs`, and an
+// unused raw mutator binding is a capability kept for no reason (vibe-103).
+import { lstat, readdir, readFile } from "node:fs/promises";
+
+import {
+  assertInside, assertRoot, ensureDirAt, publishNew, secureDirAt, unlinkOwned, writeAtomic,
+  PRIVATE_FILE_MODE, STAMP_KEY,
+} from "./write.mjs";
 import path from "node:path";
 
 export const STATE_DIRNAME = ".vibe-suite-state";
@@ -141,6 +148,8 @@ export function newRecord({ jobId, kind, sandbox, effort, model, background, tim
 async function readPublished(workspace, jobId) {
   const raw = await readFile(recordPath(workspace, jobId), "utf8");
   const parsed = JSON.parse(raw);
+  // The stamp is provenance for the reaper, not part of the record contract every consumer reads.
+  delete parsed[STAMP_KEY];
   if (typeof parsed?.version !== "number") {
     throw new JobStoreError(`${recordPath(workspace, jobId)}: record has no version`);
   }
@@ -259,10 +268,11 @@ async function commit(workspace, jobId, version) {
   const current = await readPublished(workspace, jobId).catch(() => null);
   if (current && current.version >= version) return true;        // already published at or past this
 
-  const staging = path.join(jobsDir(workspace),
-    `${jobId}.pub.${process.pid}.${randomBytes(6).toString("hex")}`);
-  await writeFile(staging, content, "utf8");
-  await rename(staging, recordPath(workspace, jobId));
+  // vibe-103: publication is still temp + rename, but through the audited primitive — the scratch
+  // is created O_EXCL|O_NOFOLLOW at 0600, a symlinked canonical is refused instead of replaced, and
+  // the mode is explicit so a record that predates this change stops being 0644.
+  await writeAtomic(jobsDir(workspace), recordPath(workspace, jobId), content,
+    { mode: PRIVATE_FILE_MODE });
   return true;
 }
 
@@ -274,7 +284,7 @@ async function commit(workspace, jobId, version) {
  * `REJECT` to decline. Returns the committed record.
  */
 export async function transact(workspace, jobId, updater, { attempts = 50 } = {}) {
-  await mkdir(jobsDir(workspace), { recursive: true });
+  await ensureState(workspace);
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const current = await readCanonical(workspace, jobId);
@@ -287,43 +297,45 @@ export async function transact(workspace, jobId, updater, { attempts = 50 } = {}
 
     const target = current.version + 1;
     const candidate = { ...next, version: target, updatedAt: new Date().toISOString() };
-    const temp = path.join(jobsDir(workspace),
-      `${jobId}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`);
-    await writeFile(temp, JSON.stringify(candidate, null, 2) + "\n", "utf8");
 
-    try {
-      await link(temp, slotPath(workspace, jobId, target));    // the CAS
-      await unlink(temp);                                       // the slot is now the surviving link
+    // The CAS, unchanged in kind: `publishNew` stages the content and hard-links it into the slot,
+    // so the slot still becomes visible with its content already whole, and EEXIST still means
+    // exactly one writer won. What is new is that the scratch is exclusive, private and stamped,
+    // and that its cleanup proves ownership rather than trusting the path.
+    const won = await publishNew(jobsDir(workspace), slotPath(workspace, jobId, target),
+      JSON.stringify(stamped(candidate), null, 2) + "\n", { mode: PRIVATE_FILE_MODE });
+
+    if (won) {
       await commit(workspace, jobId, target);
       return candidate;
-    } catch (error) {
-      await unlink(temp).catch(() => {});
-      if (error.code !== "EEXIST") throw error;
-
-      // Someone else holds this version. Either they committed it, or they died before committing.
-      const now = await readCanonical(workspace, jobId).catch(() => null);
-      if (!now || now.version < target) await rollForward(workspace, jobId, target);
-      // Either way, loop: re-read and re-run the updater against the new state.
     }
+
+    // Someone else holds this version. Either they committed it, or they died before committing.
+    const now = await readCanonical(workspace, jobId).catch(() => null);
+    if (!now || now.version < target) await rollForward(workspace, jobId, target);
+    // Either way, loop: re-read and re-run the updater against the new state.
   }
   throw new JobStoreError(`${jobId}: gave up after ${attempts} contended attempts`);
 }
 
 /** Create the initial record. Distinct from `transact` because there is nothing to compare against. */
 export async function createRecord(workspace, record) {
-  await mkdir(jobsDir(workspace), { recursive: true });
-  const target = recordPath(workspace, record.jobId);
-  const temp = `${target}.tmp.${process.pid}.${randomBytes(6).toString("hex")}`;
-  await writeFile(temp, JSON.stringify(record, null, 2) + "\n", "utf8");
-  try {
-    await link(temp, target);
-  } catch (error) {
-    await unlink(temp).catch(() => {});
-    if (error.code === "EEXIST") throw new JobStoreError(`${record.jobId}: record already exists`);
-    throw error;
-  }
-  await unlink(temp).catch(() => {});
+  await ensureState(workspace);
+  const created = await publishNew(jobsDir(workspace), recordPath(workspace, record.jobId),
+    JSON.stringify(stamped(record), null, 2) + "\n", { mode: PRIVATE_FILE_MODE });
+  if (!created) throw new JobStoreError(`${record.jobId}: record already exists`);
   return record;
+}
+
+/**
+ * The state directory is private, and `ensureDirAt`'s creation mode cannot fix one that already
+ * exists — an installation upgraded from before vibe-103 has it at 0755, holding records that can
+ * contain raw model output. `secureDirAt` tightens it through its descriptor on every run.
+ */
+async function ensureState(workspace) {
+  await ensureDirAt(workspace, path.join(STATE_DIRNAME, "jobs"));
+  await secureDirAt(workspace, STATE_DIRNAME);
+  await secureDirAt(workspace, path.join(STATE_DIRNAME, "jobs"));
 }
 
 /** Patch fields. `transact` already refuses to leave a terminal state. */
@@ -400,8 +412,26 @@ export function resultLine(record) {
  * Reap orphan temps only. **Version slots are never deleted, at any age** — an uncommitted slot is
  * recoverable protocol state, and deleting it is the ABA race this design exists to remove.
  */
+const SCRATCH_KIND = "job-scratch";
+
+/** Every scratch this store publishes carries the stamp, so the reaper can prove ownership. */
+function stamped(record) {
+  return { ...record, [STAMP_KEY]: { kind: SCRATCH_KIND, schema: 1 } };
+}
+
 export async function reapOrphanTemps(workspace, { now = Date.now() } = {}) {
   const dir = jobsDir(workspace);
+  // vibe-103: trust is anchored at the WORKSPACE, not at the final jobs directory. Checking only
+  // the last component let `.vibe-suite-state` be a symlink whose `jobs` child was a real directory
+  // outside the workspace — assertRoot would accept it and the reaper would work there. assertInside
+  // refuses an intermediate symlinked component, so the whole chain has to be genuine.
+  try {
+    await assertRoot(workspace);
+    await assertInside(workspace, dir);
+    await assertRoot(dir);
+  } catch {
+    return 0;
+  }
   let names;
   try {
     names = await readdir(dir);
@@ -409,19 +439,40 @@ export async function reapOrphanTemps(workspace, { now = Date.now() } = {}) {
     return 0;
   }
   let reaped = 0;
+  let failed = 0;
   for (const name of names) {
-    if (!name.includes(".tmp.") && !name.includes(".pub.")) continue;   // never a .vN slot
-    const full = path.join(dir, name);
+    if (!isReapCandidate(name)) continue;                              // never a .vN slot
     try {
-      const info = await stat(full);
-      if (now - info.mtimeMs < TEMP_REAP_MIN_AGE_MS) continue;          // when in doubt, leave it
-      await unlink(full);
-      reaped += 1;
+      // `lstat`, not `stat`: judging a symlink by its target's mtime is how an old outside file
+      // qualified for deletion. And ownership is proven by the stamp inside the file, read through
+      // the open handle — a name pattern is not ownership, which is the other half of the same
+      // defect. An unstamped match survives; failing to collect our own temp is a leak, deleting
+      // someone else's file is a defect, and the two are not the same size.
+      const info = await lstat(path.join(dir, name));
+      if (!info.isFile()) continue;
+      if (now - info.mtimeMs < TEMP_REAP_MIN_AGE_MS) continue;         // when in doubt, leave it
+      if (await unlinkOwned(dir, name, [SCRATCH_KIND])) reaped += 1;
     } catch {
-      // A temp that vanished or cannot be stat'd is left alone.
+      // A temp that vanished or cannot be lstat'd is left alone — but counted, because a reaper
+      // that silently swallows every error reports a clean sweep it did not perform.
+      failed += 1;
     }
   }
+  if (failed > 0) {
+    process.stderr.write(`vibe-suite: ${failed} orphan temp(s) could not be examined\n`);
+  }
   return reaped;
+}
+
+/**
+ * The reaper's candidate set: this suite's own scratch names, in both the current `.vibe-tmp` form
+ * and the legacy `.tmp.`/`.pub.` forms a crash before vibe-103 may have left behind. Canonical
+ * records and version slots are excluded by shape, so no amount of stamping brings them into range.
+ */
+function isReapCandidate(name) {
+  if (/^job_[0-9a-f]{20}\.json$/.test(name)) return false;              // canonical
+  if (/\.v\d+\.json$/.test(name)) return false;                         // version slot
+  return name.endsWith(".vibe-tmp") || name.includes(".tmp.") || name.includes(".pub.");
 }
 
 // ---------------------------------------------------------------------------------------------

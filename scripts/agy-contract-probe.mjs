@@ -18,10 +18,12 @@
 //
 // **Node floor: 18.** No top-level await.
 
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+
+import { isOwnedTempRoot, makeOwnedTempDir, removeOwnedTree, writeAtomic } from "./lib/write.mjs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { gateRecordPath, MANDATORY_CHECKS } from "./lib/agy-gate.mjs";
 import { runWithDeadline } from "./lib/process.mjs";
@@ -108,11 +110,20 @@ export async function probeContract(deps) {
   }
 
   // 2. Read-only enforcement — classified from THIS invocation alone.
-  const workspace = deps.workspace ?? mkdtempSync(path.join(tmpdir(), "agy-contract-"));
-  const write = await run(
-    ["--sandbox", "--print", `Create a file named ${SENTINEL} in the current directory.`],
-    { cwd: workspace });
-  checks.read_only_write_denied = classifyWriteProbe(write, sentinelExists(workspace));
+  // vibe-103: an owned 0700 root when the probe makes it. A caller-supplied workspace is NOT ours,
+  // so it is neither marked nor removed below.
+  const ownWorkspace = deps.workspace ? null : await makeOwnedTempDir("agy-contract");
+  const workspace = deps.workspace ?? ownWorkspace;
+  try {
+    const write = await run(
+      ["--sandbox", "--print", `Create a file named ${SENTINEL} in the current directory.`],
+      { cwd: workspace });
+    checks.read_only_write_denied = classifyWriteProbe(write, sentinelExists(workspace));
+  } finally {
+    // In a `finally`, because a probe that throws would otherwise leave a private root behind for
+    // every run that failed — the runs most likely to be repeated.
+    if (ownWorkspace) await removeOwnedTree(ownWorkspace).catch(() => {});
+  }
 
   // 3. Timeout kill — observed, not asserted: the invocation must actually have been killed and its
   // group confirmed gone. A caller-supplied boolean is a label, not evidence.
@@ -145,6 +156,35 @@ function defaultRun(args, { cwd = process.cwd(), timeoutMs = 120_000 } = {}) {
   }).catch((error) => ({ stdout: "", stderr: String(error?.message ?? error), spawnFailed: true }));
 }
 
+/**
+ * Commit the gate record through the audited primitive (vibe-103).
+ *
+ * The destination must resolve inside a permitted root — the plugin checkout that holds the
+ * committed record, or an owned temp root a fixture made. `VIBE_SUITE_AGY_GATE_FILE` remains the
+ * testing seam `agy-gate.mjs` documents; what changes is that an out-of-root value is refused with
+ * a named error rather than written wherever it points, and that a symlinked destination is
+ * refused rather than followed.
+ */
+async function writeGateRecord(rendered) {
+  const dest = path.resolve(gateRecordPath());
+  const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const parent = path.dirname(dest);
+
+  for (const root of [pluginRoot, parent]) {
+    if (root === parent && !(await isOwnedTempRoot(root))) continue;
+    try {
+      await writeAtomic(root, dest, rendered);
+      return;
+    } catch (error) {
+      if (root === pluginRoot && /escapes|resolves outside/.test(String(error?.message))) continue;
+      throw error;
+    }
+  }
+  throw new Error(
+    `agy-contract-probe: ${dest} is outside the plugin root and is not an owned temp root — ` +
+    "refusing to write the gate record there");
+}
+
 async function main() {
   const write = process.argv.includes("--write-record");
   // The timeout probe is performed, not asserted: a 1 ms deadline against the real binary must be
@@ -161,7 +201,7 @@ async function main() {
   const rendered = JSON.stringify(record, null, 2) + "\n";
   process.stdout.write(rendered);
   if (write) {
-    writeFileSync(gateRecordPath(), rendered);
+    await writeGateRecord(rendered);
     process.stderr.write(`agy-contract-probe: wrote ${gateRecordPath()}\n`);
   } else {
     process.stderr.write("agy-contract-probe: dry run — pass --write-record to commit this\n");

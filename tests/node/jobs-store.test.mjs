@@ -131,11 +131,19 @@ test("REJECT declines without writing", async () => {
 test("orphan temps are reaped only past the age bound; version slots never", async () => {
   const ws = workspace();
   await seed(ws);
-  writeFileSync(path.join(jobsDir(ws), "job_test.tmp.999.abc"), "{}", "utf8");
+  // vibe-103: the temp must carry the ownership stamp to be collectible. This fixture wrote a bare
+  // "{}" and asserted one deletion, so it would fail against a store that proves ownership — which
+  // is the point: a name pattern was never evidence that the file was ours. It gains the stamp, and
+  // an unstamped file matching the same pattern is added to prove that one survives.
+  writeFileSync(path.join(jobsDir(ws), "job_test.tmp.999.abc"),
+    JSON.stringify({ "_vibe-suite_owned": { kind: "job-scratch", schema: 1 } }), "utf8");
+  writeFileSync(path.join(jobsDir(ws), "job_other.tmp.998.def"), "{}", "utf8");
   writeFileSync(path.join(jobsDir(ws), "job_test.v9.json"), "{}", "utf8");
 
   assert.equal(await reapOrphanTemps(ws), 0, "a fresh temp must not be reaped");
   assert.equal(await reapOrphanTemps(ws, { now: Date.now() + 7 * 60 * 60 * 1000 }), 1);
+  assert.ok(readdirSync(jobsDir(ws)).includes("job_other.tmp.998.def"),
+    "an unstamped file is not ours to delete, whatever its name looks like");
   assert.ok(readdirSync(jobsDir(ws)).includes("job_test.v9.json"),
     "a version slot is never reaped, at any age");
 });

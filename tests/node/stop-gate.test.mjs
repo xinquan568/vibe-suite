@@ -10,6 +10,7 @@
 
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -102,6 +103,33 @@ test("enabled: a seeded defect in an UNTRACKED file blocks — and only because 
   const sent = promptSentTo(probe);
   assert.ok(sent.includes(MARKER), "the untracked file's content must reach the reviewer");
   assert.ok(sent.includes("new-defect.js"));
+});
+
+test("the PUBLISHED prompt file is 0600 inside a 0700 scratch root", () => {
+  // vibe-103: the prompt carries the session diff AND untracked file bodies, so its permissions are
+  // a privacy property of the hook. The fixture reads them from inside the child, the one moment
+  // the file is guaranteed to exist — the hook removes the scratch root once the child returns.
+  const dir = repo({ enabled: true });
+  // A per-run nonce in the FILENAME: it lands in `git status --porcelain` near the top of the
+  // prompt, so the byte cap cannot truncate it away, and no other scratch root can contain it.
+  const nonce = `nonce-${randomUUID()}`;
+  seedDefect(dir, `defect-${nonce}.js`);
+  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const result = runHook(dir, {
+    fixture: "gate-prompt-mode.mjs", probe, env: { VIBE_TEST_PROMPT_NONCE: nonce },
+  });
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.ok(existsSync(probe), `the fixture never ran: ${result.stdout}\n${result.stderr}`);
+  const seen = JSON.parse(readFileSync(probe, "utf8"));
+  // These bits belong to THIS invocation's prompt: the nonce makes the match unique, and the
+  // fixture treats two candidates as an error rather than picking one — identical prompts across
+  // concurrent runs were how the previous content-equality oracle could name the wrong file.
+  assert.equal(seen.candidates, 1, "exactly one scratch root may carry this run's nonce");
+  assert.equal(seen.promptMatched, true, "the observed file must be this invocation's prompt");
+  assert.equal(seen.promptMode, "600",
+    "a world-readable prompt would publish the session diff to every local account");
+  assert.equal(seen.scratchMode, "700");
 });
 
 test("untracked collection: spaced names included, symlinks and outside targets excluded, caps disclosed", () => {

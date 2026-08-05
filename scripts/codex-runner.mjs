@@ -38,7 +38,11 @@
 
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
+
+import {
+  ensureDirAt, isOwnedTempRoot, writeAtomic, PRIVATE_FILE_MODE,
+} from "./lib/write.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -71,8 +75,12 @@ function latchDir() {
 async function signalLatch(name) {
   const dir = latchDir();
   if (!dir) return;
-  await mkdir(dir, { recursive: true });
-  await writeFile(path.join(dir, `${name}.signal`), "1", "utf8").catch(() => {});
+  // vibe-103: an env-supplied path is an operator input, not a licence to write anywhere. The latch
+  // must live in an owned temp root (the suite's own) — nothing else is a permitted destination.
+  if (!(await isOwnedTempRoot(dir))) return;
+  await ensureDirAt(dir, ".");
+  await writeAtomic(dir, path.join(dir, `${name}.signal`), "1",
+    { mode: PRIVATE_FILE_MODE }).catch(() => {});
 }
 
 async function awaitLatch(name, { timeoutMs = 30_000 } = {}) {

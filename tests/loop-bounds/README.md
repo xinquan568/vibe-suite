@@ -137,6 +137,7 @@ row's **holds** is scoped to the declaration and nothing wider.
 
 **Issue #125 landed** that structured declaration, and the golden fixture was deleted with it rather
 than kept alongside — two mechanisms for one property is how the weaker one gets read as the
-stronger. **#123** remains open: it brings `fix` under the reviewer contract (the re-ask clause and
-registry membership above), touches the same file, and inverts this harness's characterisation test
-when it lands.
+stronger. **#123 then landed too**: `fix` is a registered consumer of the reviewer contract (the
+re-ask clause and registry membership above), its block carries the contract's required floor
+reason, and this harness's characterisation test was inverted — the sequence both issues' texts
+planned, completed in order.

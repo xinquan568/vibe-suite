@@ -71,22 +71,37 @@ def extract_section(text, heading):
     spaces before the first line render it as a code block while a stripped comparison still
     matches).
     """
+    def fence_scan(lines):
+        """Yield (line, fenced) with real CommonMark-shaped fence tracking: a fence opens with
+        three or more backticks OR tildes, and closes only on the same character at at least the
+        opening length — so a ``` inside a ```` block is content, and ~~~ fences fence at all
+        (the naive startswith("```") toggle missed both, and each miss admitted a decoy)."""
+        open_fence = None
+        for line in lines:
+            match = re.match(r"(`{3,}|~{3,})", line.lstrip())
+            if match:
+                token = match.group(1)
+                if open_fence is None:
+                    open_fence = (token[0], len(token))
+                    yield line, True
+                    continue
+                if token[0] == open_fence[0] and len(token) >= open_fence[1]:
+                    open_fence = None
+                    yield line, True
+                    continue
+                yield line, True
+                continue
+            yield line, open_fence is not None
+
     lines = text.splitlines()
-    fenced, starts = False, []
-    for i, line in enumerate(lines):
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-            continue
-        if not fenced and line.rstrip() == heading:
-            starts.append(i)
+    starts = [i for i, (line, fenced) in enumerate(fence_scan(lines))
+              if not fenced and line.rstrip() == heading]
     if len(starts) != 1:
         raise AssertionError(
             "expected exactly one %r heading outside a code fence, found %d" % (heading, len(starts)))
-    fenced, body = False, []
-    for line in lines[starts[0] + 1:]:
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-        elif not fenced and line.startswith("## "):
+    body = []
+    for line, fenced in fence_scan(lines[starts[0] + 1:]):
+        if not fenced and line.startswith("## "):
             break
         body.append(line)
     return "\n".join(body)
@@ -110,12 +125,12 @@ def parse_round_bounds(text):
     body = extract_section(text, "## Round bounds")
     fields = {}
     for raw in body.splitlines():
-        line = raw.strip()
-        if not line:
+        if not raw.strip():
             continue
-        match = re.fullmatch(r"- ([a-z-]+): (.+)", line)
+        match = re.fullmatch(r"- ([a-z-]+): (.+)", raw.rstrip())
         if not match:
-            raise AssertionError("not a '- field: value' bullet: %r" % raw)
+            raise AssertionError(
+                "not a top-level '- field: value' bullet (indentation included): %r" % raw)
         key, value = match.group(1), match.group(2).strip()
         if key not in ROUND_BOUNDS_FIELDS:
             raise AssertionError("unknown field %r" % key)
@@ -334,11 +349,18 @@ class TestRoundBoundsAsData(unittest.TestCase):
                           "default": fields["default"]}, EXPECTED_DOMAIN["fix"])
 
     def test_the_cli_hint_agrees_with_the_block(self):
-        """The argument-hint is the one place a number may echo the block — machine-checked."""
+        """The argument-hint is the one place a number may echo the block — machine-checked.
+
+        The match is scoped to the frontmatter `argument-hint:` value: a document-wide search
+        would let stray prose satisfy the assertion after the hint itself lost its range.
+        """
         fields = parse_round_bounds(document("fix"))
-        hint = re.search(r"--max-rounds (\d+)-(\d+)", document("fix"))
-        self.assertIsNotNone(hint, "the argument-hint no longer names the flag's range")
-        self.assertEqual((int(hint.group(1)), int(hint.group(2))),
+        front = document("fix").split("---\n", 2)[1]
+        hint_line = re.search(r"(?m)^argument-hint:\s*(.+)$", front)
+        self.assertIsNotNone(hint_line, "fix.md declares no argument-hint")
+        rng = re.search(r"--max-rounds (\d+)-(\d+)", hint_line.group(1))
+        self.assertIsNotNone(rng, "the argument-hint no longer names the flag's range")
+        self.assertEqual((int(rng.group(1)), int(rng.group(2))),
                          (fields["floor"], fields["ceiling"]),
                          "the CLI hint may echo the block, and must agree with it")
 
@@ -379,6 +401,14 @@ class TestRoundBoundsAsData(unittest.TestCase):
                 good.replace("- flag: `--max-rounds`", "- flag: `--max-rounds` `-r`"),
             "non-integer numeric": good.replace("- default: 3", "- default: three"),
             "trailing prose after verdicts": good.replace("`PARTIAL`", "`PARTIAL` while open"),
+            "declaration indented as a code block":
+                good.replace("\n- ", "\n    - "),
+            "declaration wholly inside a tilde fence":
+                "# doc\n\n~~~\n" + good[good.index("## Round bounds"):]
+                + "\n~~~\n",
+            "long fence not closed by a shorter one":
+                "# doc\n\n````\n```\n" + good[good.index("## Round bounds"):]
+                + "\n````\n",
         }
         for name, text in cells.items():
             with self.subTest(cell=name):

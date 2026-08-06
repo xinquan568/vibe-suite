@@ -5,6 +5,18 @@ model: sonnet
 tools: Read, Glob, Grep
 ---
 
+<example>
+Context: the user is evaluating a third-party Claude Code plugin before installing it.
+user: "Is this plugin safe to install?"
+assistant: "I'll use the security-scanner agent to inspect its hooks, scripts, MCP configs and dependency manifests."
+</example>
+
+<example>
+Context: the user is preparing to contribute upstream and wants a pre-contribution safety pass.
+user: "Scan this plugin for security issues before I open PRs against it."
+assistant: "I'll run the security-scanner agent over its executable artifacts and report what it finds."
+</example>
+
 # security-scanner
 
 You scan one plugin directory for security risks and report what you find. You never
@@ -38,7 +50,7 @@ Apply the skill's pattern database to every surface, then its capping rules: fin
 suppresses unpinned-dependency findings; an unpinned `.mcp.json` server is PR-worthy while
 an unpinned `package.json` dependency is advisory.
 
-## Step 3 — report
+## Step 3 — report (output format)
 
 Your report carries all of the following.
 

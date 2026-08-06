@@ -1,0 +1,99 @@
+# The AC-7 pre-release quality gate (E7.4 / vibe-56) — P7's dogfood: the suite must pass its
+# own quality tooling before a release is cut.
+#
+# Two readings are recorded here because AC-7's prose predates what shipped:
+#
+#   * "§5.0 counts vs disk" — §5.0 (2026-07-18) both undercounts categories that later stages
+#     grew and overcounts categories whose artifacts belong to stage S8, which has not run.
+#     tools/inventory-report.py --check states a reviewed rule per row (exact / at-least /
+#     reconciled / pending-S8) and fails on any violation, so the check gates without
+#     asserting a figure no release could reach.
+#   * "/vibe-suite:test green (14 agent specs)" — that command's runner dispatches the tester
+#     AGENT, and a GitHub runner has no Claude session. This job runs the DETERMINISTIC
+#     residue (the frozen 14-agent spec inventory, per-spec schema and depth, artifact
+#     resolution). The judgment lane stays an operator-run step; this job does not claim it.
+name: pre-release-quality-gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["release/**"]
+  pull_request:
+    paths:
+      - ".claude-plugin/**"
+      - "agents/**"
+      - "bin/**"
+      - "codex/**"
+      - "codex-src/**"
+      - "commands/**"
+      - "hooks/**"
+      - "scripts/**"
+      - "skills/**"
+      - "tests/**"
+      - "tools/**"
+      - ".vibe-test/**"
+      - ".claude/**"
+      - "auditor/**"
+      - "docs/disposition.yaml"
+      - "schemas/**"
+      - "templates/**"
+      - "README.md"
+      - "CLAUDE.md"
+      - "PRIVACY.md"
+      - ".vibe-suite.md"
+      - ".mcp.json"
+      - ".lsp.json"
+      - "settings.json"
+      - ".github/workflows/pre-release-quality-gate.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  pre-release-quality-gate:
+    name: pre-release quality gate (AC-7)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 1/5 — the suite scores at or above its Strict threshold. 80 is passed explicitly:
+      # .vibe-suite.md declares no score_threshold, so an inherited value would be 70.
+      - name: score (Strict 80)
+        run: python3 tools/release-score.py --threshold 80
+
+      # 2/5 — the NL spec corpus contract (see the header note on the judgment lane).
+      - name: test — spec-corpus contract (14 agent specs)
+        run: python3 -m unittest tests.test_vibe_test_specs -v
+
+      # 3/5 — the generated codex/ mirror agrees with its sources, both hash directions.
+      - name: mirrors
+        run: bin/vibe-check . --mirrors
+
+      # 4/5 — documentation counts match disk, and the §5.0 inventory rules hold.
+      - name: doc accuracy and §5.0 inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_doc_accuracy
+          python3 tools/inventory-report.py --check
+
+      # 5/5 — the Node audited-write boundary (vibe-153). This gate's test step is the NL spec
+      # runner, not CI's `test` job, so the lint is NOT inherited transitively — hence its own
+      # step here. Discovery is null-safe and anti-vacuous: zero modules fails.
+      - name: write discipline (Node)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t modules < <(git ls-files -z -- 'scripts/*.mjs' 'scripts/**/*.mjs')
+          if [ "${#modules[@]}" -eq 0 ]; then
+            echo "no shipped .mjs discovered — the check would pass vacuously" >&2
+            exit 1
+          fi
+          echo "inspecting ${#modules[@]} module(s)"
+          node tests/node/no-raw-fs-writes.mjs "${modules[@]}"

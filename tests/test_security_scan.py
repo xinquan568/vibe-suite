@@ -133,8 +133,14 @@ FROZEN_PATTERN_NAMES = {
 #: Re-blessed by E4.5 (vibe-39), which added the --second-opinion lane. The clause tests above were
 #: updated FIRST, in the same commit, so this hash was recomputed over text a clause test already
 #: accepts -- re-blessing before that would silence the outer layer while the inner one still failed.
+#: Re-blessed again by E7.4 (vibe-56): the AC-7 release gate scores every shipped artifact at
+#: Strict 80, and this agent scored 75 -- missing the mandatory <example> blocks (R09, -15) and
+#: an output-format heading (R12, -10). Two examples were added and "## Step 3 -- report" became
+#: "## Step 3 -- report (output format)". NO contract sentence was added, removed or reworded:
+#: every clause test above passed unchanged BEFORE this hash was recomputed, which is the same
+#: ordering vibe-39 established.
 CONTRACT_SHA256 = {
-    "agent": "50764f2c774362617a14dbc0aa26a85c3a5fff2260804d66390c8722a0253b47",
+    "agent": "5de90ababd4d9beb6a6409134e83f7cf94261c733216446bb7c6d36504d18d50",
     "command": "f26d3f99c6b4aaff471bc9b642d9cd91f30b6a72deba871666cc89eac338e13f",
 }
 

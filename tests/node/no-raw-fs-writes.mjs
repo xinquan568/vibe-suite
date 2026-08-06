@@ -115,6 +115,17 @@ const REGEX_OK_WORDS = new Set([
 
 class Refusal extends Error {}
 
+/** The top-level area a checked file belongs to (its `scripts/` or `tests/` root). */
+function corpusRootOf(file) {
+  const abs = path.resolve(file);
+  const parts = abs.split(path.sep);
+  for (const marker of ["scripts", "tests"]) {
+    const idx = parts.lastIndexOf(marker);
+    if (idx !== -1) return parts.slice(0, idx + 1).join(path.sep);
+  }
+  return path.dirname(abs);
+}
+
 /** Tokens: identifiers, punctuation, strings (value kept); templates and regexes elided. */
 function tokenize(source) {
   const out = [];
@@ -236,11 +247,23 @@ function tokenize(source) {
   return out;
 }
 
-function assertProvenance(spec, escaped) {
+function assertProvenance(spec, escaped, fromFile) {
   // An escaped specifier means the checker's literal and Node's resolved value can differ
   // (`"node:\\x66s"` resolves to node:fs). Refuse rather than compare a wrong string.
   if (escaped) throw new Refusal("import specifier contains escapes");
-  if (spec.startsWith("./") || spec.startsWith("../")) return;
+  if (spec.startsWith("./") || spec.startsWith("../")) {
+    // A relative import must land inside the CHECKED corpus — the top-level area the
+    // importing file lives in. One that climbs out reaches a module this run never judged,
+    // so its exports are unknown provenance and it refuses.
+    if (fromFile) {
+      const target = path.resolve(path.dirname(path.resolve(fromFile)), spec);
+      const area = path.resolve(corpusRootOf(fromFile));
+      if (target !== area && !target.startsWith(area + path.sep)) {
+        throw new Refusal(`relative import leaves the checked corpus: ${spec}`);
+      }
+    }
+    return;
+  }
   if (spec.startsWith("node:")) return;
   if (FS_SPECIFIERS.has(spec)) return;
   throw new Refusal(`import provenance outside the accepted set: ${spec}`);
@@ -304,7 +327,7 @@ function acceptedOpenBinding(toks, nameIndex) {
   return null;
 }
 
-function classifyModule(source) {
+function classifyModule(source, fromFile) {
   const toks = tokenize(source);
   const caps = new Map();
   const handles = new Set();
@@ -333,7 +356,7 @@ function classifyModule(source) {
         const spec = at(j + 1);
         if (spec.type !== "string") throw new Refusal("export-from with a non-literal specifier");
         if (FS_SPECIFIERS.has(spec.value)) throw new Refusal("re-export of an fs module");
-        assertProvenance(spec.value, spec.escaped);
+        assertProvenance(spec.value, spec.escaped, fromFile);
       }
       continue;
     }
@@ -385,7 +408,7 @@ function classifyModule(source) {
     }
     const spec = at(j);
     if (spec.type !== "string") throw new Refusal("import with a non-literal specifier");
-    assertProvenance(spec.value, spec.escaped);
+    assertProvenance(spec.value, spec.escaped, fromFile);
     importSpans.push([k, j]);
     if (CAPABILITY_MODULES.has(spec.value)) {
       if (namespaceName) dangerous.add(namespaceName);
@@ -429,9 +452,9 @@ function classifyModule(source) {
       throw new Refusal(`capability-factory binding used: ${t.value}`);
     }
     if (FORBIDDEN_CALLEES.has(t.value) && !caps.has(t.value) && !insideImport) {
-      const isCall = next.type === "punct" && next.value === "(";
-      const isNewed = prev.type === "word" && prev.value === "new";
-      if (isCall || isNewed) throw new Refusal(`forbidden construct: ${t.value}`);
+      // ANY appearance refuses — `const e = eval; e(src)` aliases the capability without
+      // ever calling the forbidden name in place.
+      throw new Refusal(`forbidden construct: ${t.value}`);
       if (prev.type === "punct" && prev.value === ".") {
         throw new Refusal(`indirect ${t.value} reference`);
       }
@@ -441,11 +464,17 @@ function classifyModule(source) {
       // eval the rejected tokenizer missed. Not a dialect production, in any position.
       throw new Refusal("indirect constructor reference");
     }
-    if (FORBIDDEN_OBJECTS.has(t.value) && next.type === "punct" && next.value === ".") {
-      const member = at(k + 2);
-      const called = at(k + 3).type === "punct" && at(k + 3).value === "(";
-      if (called && member.type === "word" && !BENIGN_HOST_MEMBERS.has(member.value)) {
-        throw new Refusal(`reflective/host call: ${t.value}.${member.value}`);
+    if (FORBIDDEN_OBJECTS.has(t.value) && next.type === "punct") {
+      if (next.value === "[") {
+        // A computed member on a host object names something the checker cannot read.
+        throw new Refusal(`computed host access: ${t.value}[…]`);
+      }
+      if (next.value === ".") {
+        const member = at(k + 2);
+        const called = at(k + 3).type === "punct" && at(k + 3).value === "(";
+        if (called && member.type === "word" && !BENIGN_HOST_MEMBERS.has(member.value)) {
+          throw new Refusal(`reflective/host call: ${t.value}.${member.value}`);
+        }
       }
     }
 
@@ -497,7 +526,7 @@ export function inspect(file) {
     return { verdict: "refused", detail: `unreadable: ${err.message}` };
   }
   try {
-    return { verdict: classifyModule(source), detail: "" };
+    return { verdict: classifyModule(source, file), detail: "" };
   } catch (err) {
     if (err instanceof Refusal) return { verdict: "refused", detail: err.message };
     return { verdict: "refused", detail: `internal: ${err.message}` };

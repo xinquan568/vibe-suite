@@ -174,6 +174,15 @@ const REVIEW_REGRESSIONS = {
     'import { writeFile } from "node:fs/promises";\nexport const api = { writeFile };\n',
     "refused"],
   // a local shadowing a capability name is not silently accepted
+  // a relative import that climbs out of the checked corpus reaches unjudged exports
+  outsideCorpusRelative: [
+    'import { helper } from "../../../elsewhere/thing.mjs";\nexport const x = helper;\n',
+    "refused"],
+  // aliasing a forbidden capability without calling the forbidden name in place
+  aliasedEval: ['const e = eval;\ne("x");\n', "refused"],
+  aliasedFunctionCtor: ['const F = Function;\nF("return 1")();\n', "refused"],
+  computedHostAccess: ['process["binding"]("fs");\n', "refused"],
+  computedGlobalThis: ['globalThis["process"].binding("fs");\n', "refused"],
   shadowedLocal: [
     'import { writeFile } from "node:fs/promises";\n'
     + 'export function f() { const writeFile = 1; return writeFile; }\n', "refused"],
@@ -197,7 +206,7 @@ const CLEAN = {
   readOnlyHandle: 'import { open } from "node:fs/promises";\n'
     + 'export async function head(p) {\n  const h = await open(p, "r");\n'
     + '  const out = await h.read();\n  await h.close();\n  return out;\n}\n',
-  relativeImport: 'import { publish } from "../lib/write.mjs";\n'
+  relativeImport: 'import { publish } from "./write.mjs";\n'
     + 'export const go = (p, d) => publish(p, d);\n',
   templatesAndRegex: 'const re = /a\\/b/g;\nexport const t = (x) => `v:${x.replace(re, "-")}`;\n',
   // an import ALIAS is a declaration, not a use — this was a false positive

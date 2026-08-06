@@ -6,8 +6,9 @@ loops, bridged to Codex CLI.
 Commands are namespaced `/vibe-suite:*`, which follows from `name` in
 [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json).
 
-> **Status:** scaffold. The manifest pair, directory skeleton and CI are in place; commands, agents
-> and skills land issue by issue and register themselves in the manifest as they do.
+> **Status:** stage S7 complete — the suite installs and runs. The catalog below is what
+> ships today; stage S8 (the auditor unit and the public site) has not shipped, and the
+> `auditor/` tree carries documentation only.
 
 ## Platform support
 
@@ -74,6 +75,51 @@ claude plugin validate .claude-plugin/plugin.json --strict # plugin.json + compo
 
 CI runs manifest validation, Python/Node lint, a pinned-model-identifier scan, and the test suite on
 every pull request.
+
+## Install
+
+**From the marketplace** (in Claude Code):
+
+```
+/plugin marketplace add xinquan568/vibe-suite
+/plugin install vibe-suite@vibe-suite
+```
+
+The marketplace entry and the plugin resolve from the same repository and the same commit, so
+what you install always matches the listing you installed it from.
+
+**From a clone**, if you would rather read the source first:
+
+```bash
+git clone https://github.com/xinquan568/vibe-suite.git
+```
+
+then, in Claude Code, `/plugin marketplace add /path/to/vibe-suite` followed by the same
+`/plugin install` line.
+
+**Then initialize and verify.** Installing populates Claude Code's plugin cache; it does not
+touch your project. Run these in the project you want the suite to work on, in this order:
+
+```
+/vibe-suite:init      # writes the config, bridges, and sentinels this project needs
+/vibe-suite:doctor    # reports health — run it after init, not before
+```
+
+`doctor` reports `not-initialised` on a project where `init` has not run yet, which is
+expected rather than a fault.
+
+Prerequisites are the ones in [Platform support](#platform-support) above: POSIX, Python
+3.11+, Node ≥ 18.
+
+**Trying it without touching your setup.** `CLAUDE_CONFIG_DIR` points Claude Code at a
+throwaway profile, so an install can be exercised and discarded:
+
+```bash
+export CLAUDE_CONFIG_DIR=$(mktemp -d)
+claude plugin marketplace add /path/to/vibe-suite
+claude plugin install vibe-suite@vibe-suite
+claude plugin list        # Status: enabled
+```
 
 ## Command catalog
 

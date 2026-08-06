@@ -93,12 +93,20 @@ class TestMarketplaceManifest(unittest.TestCase):
         self.assertEqual(self.manifest["plugins"][0].get("name"), PLUGIN_NAME)
 
     def test_source_pointer_shape(self):
-        # This object is what a local install resolves. A malformed source would pass a mere
-        # presence check while making the plugin uninstallable.
+        # What an install resolves. The intent of this check has not changed — a malformed
+        # source passes a presence check while breaking installation — but E7.5 (vibe-57)
+        # narrowed the correct shape on evidence: a separate `github` object resolves
+        # INDEPENDENTLY of the marketplace fetch, so the listing and the installed bytes can
+        # come from different commits. A smoke run this way silently installed origin/main
+        # instead of the branch under test. `"./"` means "this same repository, this same
+        # commit", which is true here because the marketplace ships inside the plugin repo.
         source = self.manifest["plugins"][0].get("source")
-        self.assertIsInstance(source, dict, "source must be an object")
-        self.assertEqual(source.get("source"), "github")
-        self.assertEqual(source.get("repo"), REPO_SLUG)
+        self.assertEqual(source, "./",
+                         "the plugin ships in the marketplace's own repository; a separate "
+                         "source lets the two resolve to different commits")
+        # the repository identity still has to be stated, and still has to be this repo
+        self.assertEqual(self.manifest["owner"]["url"].rsplit("/", 1)[-1],
+                         REPO_SLUG.split("/")[0])
 
 
 class TestComponentRegistration(unittest.TestCase):

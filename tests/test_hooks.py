@@ -27,9 +27,23 @@ class TestHookRegistration(unittest.TestCase):
         self.assertTrue(HOOKS_JSON.is_file(), "hooks/hooks.json is missing")
         self.manifest = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
 
-    def test_plugin_manifest_points_at_the_hook_file(self):
+    def test_plugin_manifest_does_not_redeclare_the_standard_hook_file(self):
+        """Inverted by E7.5 (vibe-57) on evidence from a real install, not on taste.
+
+        This asserted `hooks == "./hooks/hooks.json"` until a clean-profile install showed
+        what that produces: Claude Code loads `hooks/hooks.json` AUTOMATICALLY, so declaring
+        it again fails the whole plugin with "Duplicate hooks file detected" — the install
+        reported `✘ failed to load` and no command, agent or skill was available. The
+        manifest key exists for ADDITIONAL hook files; the standard one must not appear.
+        """
         plugin = json.loads(PLUGIN_MANIFEST.read_text(encoding="utf-8"))
-        self.assertEqual(plugin.get("hooks"), "./hooks/hooks.json")
+        declared = plugin.get("hooks")
+        entries = [] if declared is None else (
+            [declared] if isinstance(declared, str) else list(declared))
+        for entry in entries:
+            self.assertNotIn("hooks/hooks.json", entry,
+                             "the standard hooks file is auto-loaded; re-declaring it makes "
+                             "the plugin fail to load on every clean install")
 
     def test_nested_settings_shape_with_exactly_the_four_events(self):
         hooks = self.manifest.get("hooks")

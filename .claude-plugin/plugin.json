@@ -1,7 +1,7 @@
 {
   "name": "vibe-suite",
   "version": "0.0.1",
-  "description": "Vibe coding suite for Claude Code \u2014 NL-artifact quality tooling, cross-model review, and workflow loops, bridged to Codex CLI.",
+  "description": "Vibe coding suite for Claude Code — NL-artifact quality tooling, cross-model review, and workflow loops, bridged to Codex CLI.",
   "author": {
     "name": "Eric Y. Liu"
   },
@@ -46,7 +46,6 @@
     "./commands/update.md",
     "./commands/vocab.md"
   ],
-  "hooks": "./hooks/hooks.json",
   "agents": [
     "./agents/checker.md",
     "./agents/scanner.md",

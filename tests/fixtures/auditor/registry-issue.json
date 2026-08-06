@@ -1,0 +1,17 @@
+{
+  "issue": {
+    "number": 901,
+    "title": "Audit candidate: acme/claude-toolkit",
+    "labels": ["audit-candidate"],
+    "state": "open",
+    "body": "Repo: https://github.com/acme/claude-toolkit\nStars: 742\nArtifacts: 12"
+  },
+  "repo": {
+    "full_name": "acme/claude-toolkit",
+    "stargazers_count": 742,
+    "archived": false,
+    "pushed_at": "2026-07-30T00:00:00Z",
+    "artifact_count": 12,
+    "default_branch": "main"
+  }
+}

@@ -121,3 +121,52 @@ Every step above is idempotent as written: label creation targets only the missi
 settings PATCH/PUT/POST calls are no-ops (or 409) when already enabled; the branch push is skipped
 when the ref exists and never forced. A full re-provision is therefore safe to run end to end, and
 partial state is always advanced, never rewound.
+
+## Pipeline operation (E8.2)
+
+The audit-and-contribute pipeline (F10.1): eighteen workflows staged under `auditor/workflows/`,
+**inert by design** — GitHub runs workflows only from `.github/workflows/`, and activation is a
+deliberate later act (owner: open; at the latest, E8.7 must activate `auditor-integration-test`).
+Eleven of the eighteen carry cron triggers and twelve react to issue events; none may go live
+before the helper scripts (E8.3), the migrated ops data (E8.5) and the AC-8 preflight (E8.7) exist.
+
+### The state machine
+
+`audit-candidate` → `audit-ready` → `audit-complete` → `contribute-approved` → `prs-submitted` →
+`case-study-ready` → `complete`, with a **human approval gate between every automated stage**:
+`discover` files candidates; a human adds `audit-ready`; `audit` scores and exits
+`audit-complete`; a human adds `contribute-approved` after reading the report; `contribute`
+submits capped, gated PRs and exits `prs-submitted`; `track` (cron) records outcomes and promotes
+to `case-study-ready`; `case-study` writes (or worthiness-skips) the article and closes at
+`complete`. `daily-report` (cron) is a pure observer.
+
+### Code/data topology (D9)
+
+Every data-writing workflow uses a dual checkout: code from `main` at the workspace root, the
+`auditor-data` branch at `_data/`. Data categories live flattened on the data branch —
+`reports/ audits/ ledgers/ articles/ exemplars/` plus `registry/repos.json` — with the four
+append-only ledgers under `ledgers/` (`findings.jsonl`, `disagreements.jsonl`, `events.jsonl`,
+`vocab-advisories.jsonl`). Contracts: `auditor/SCHEMAS.md`.
+
+### Registry bootstrap (performed 2026-08-06)
+
+`registry/repos.json` is pipeline *state*, deliberately excluded from E8.5's migration; stages
+**refuse with `REFUSE:registry-missing`** when it is absent and never create it silently. The
+bootstrap (empty shape per SCHEMAS.md, `{"repos": {}}`) was committed to `auditor-data` by this
+item — idempotent: an existing file is never rewritten by re-provisioning. Re-run shape: check
+`git ls-remote origin auditor-data`, fetch the branch, add the file only if absent, push without
+force.
+
+### Deferred E8.3 seams
+
+Helper scripts under `auditor/scripts/` do not exist yet. Every workflow reference to one sits
+behind an existence check marked `# deferred:E8.3` and fails with a named error
+(`REFUSE:helper-missing-until-E8.3`) if reached before E8.3 lands; the tested decision logic in
+the `# stage-logic:` / `# logic:` / `# gate:` blocks is self-contained and does not need them.
+
+### Secrets behavior (recap; provisioning above)
+
+`PAT_TOKEN` absent → audit-only mode (the pipeline stops at `audit-complete`). `OPENAI_API_KEY`
+absent → the case-study cover degrades to a templated SVG and the article still publishes.
+`CLAUDE_CODE_OAUTH_TOKEN` absent → every model-judged stage fails preflight naming the secret.
+The contribute workflow separates the model job from the PAT-bearing job; no job holds both.

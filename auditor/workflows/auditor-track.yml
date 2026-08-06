@@ -1,0 +1,145 @@
+# ported from the nlpm auditor at capability parity
+# auditor-track — every 4 hours, refresh PR snapshots for contributed repos,
+# classify outcomes (merged / open / cla_blocked / applied_separately /
+# rejected), promote contributed to tracked exactly once, flag case-study
+# candidates (label plus an explicit dispatch, because label events made with
+# the default token never trigger other workflows), and emit finding_outcome
+# events once per transition, recomputed against the prior registry snapshot.
+# Comment bodies are capped at 4000 characters when snapshotted because a
+# downstream workflow feeds them to a classifier. No model.
+name: auditor-track
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+  actions: write
+concurrency:
+  group: auditor-track
+  cancel-in-progress: false
+env:
+  CODE_DIR: ${{ github.workspace }}
+  DATA_DIR: ${{ github.workspace }}/_data
+  REGISTRY: ${{ github.workspace }}/_data/registry/repos.json
+  EVENT_LOG: ${{ github.workspace }}/_data/ledgers/events.jsonl
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      -   uses: actions/checkout@v4
+          with:
+            ref: auditor-data
+            path: _data
+            persist-credentials: false
+      - name: Refresh PR snapshots from live targets
+        run: |
+          # Fail-soft per PR — a fetch error skips that PR with a politeness
+          # delay rather than failing the run. Merging preserves any
+          # backfill-provenance fields already on the record (fingerprints and
+          # rule ids are never wiped by a snapshot refresh).
+          set -euo pipefail
+          [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
+          while IFS="$(printf '\t')" read -r repo pr; do
+            [ -n "$repo" ] || continue
+            SNAP="$(gh pr view "$pr" --repo "$repo" --json state,mergedAt,closedAt,updatedAt,comments,statusCheckRollup 2> /dev/null || true)"
+            if [ -z "$SNAP" ]; then
+              sleep 1
+              continue
+            fi
+            NEXT="$REGISTRY.next"
+            jq --arg r "$repo" --arg p "$pr" --argjson s "$SNAP" \
+              '.repos[$r].prs[$p] = ((.repos[$r].prs[$p] // {number: ($p | tonumber), outcome: null, fingerprints: [], rule_ids: []}) + {state: ($s.state // ""), mergedAt: ($s.mergedAt // null), closedAt: ($s.closedAt // null), updatedAt: ($s.updatedAt // null), statusCheckRollup: ($s.statusCheckRollup // []), comments: [(($s.comments // [])[]) | {author: ((.author.login) // ""), authorAssociation: (.authorAssociation // ""), body: ((.body // "")[0:4000])}]})' \
+              "$REGISTRY" > "$NEXT" && mv "$NEXT" "$REGISTRY"
+            sleep 1
+          done < <(jq -r '.repos | to_entries[] | select(.value.status == "contributed" or .value.status == "tracked" or .value.status == "complete") | .key as $r | (.value.pipeline_prs // [])[] | [$r, (. | tostring)] | @tsv' "$REGISTRY")
+          echo "snapshots refreshed"
+      - run: |
+          # Classify outcomes, promote one-shot, flag case-study candidates,
+          # and emit finding_outcome events exactly once per transition. The
+          # applied-separately phrase families are case-insensitive and kept
+          # regex-only (no shell-interpolatable metacharacters).
+          # stage-logic:track
+          set -euo pipefail
+          TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
+          APPLIED_RE='closed in favor of|consolidated fix|already (landed|resolved|fixed)|resolved on main|fixed on main|applied separately|superseded by'
+          NEXT="$REGISTRY.next"
+          jq --arg pat "$APPLIED_RE" '
+            .repos |= with_entries(
+              if ((.value.status // "") == "contributed" or (.value.status // "") == "tracked" or (.value.status // "") == "complete")
+              then .value.prs = ((.value.prs // {}) | with_entries(
+                .value = (.value + {outcome: (
+                  if ((.value.state // "") == "MERGED") or ((.value.mergedAt // null) != null) then "merged"
+                  elif (.value.state // "") == "OPEN" then
+                    (if ([(.value.statusCheckRollup // [])[] | select((((.name // .context) // "") | test("^cla"; "i"))) | select((((.conclusion // .state) // "") | test("fail|error"; "i")))] | length) > 0
+                     then "cla_blocked" else "open" end)
+                  elif (.value.state // "") == "CLOSED" then
+                    (if ([(.value.comments // [])[] | select((((.author // "") | test("\\[bot\\]$")) | not)) | select(((.body // "") | test($pat; "i")))] | length) > 0
+                     then "applied_separately" else "rejected" end)
+                  else (.value.outcome // null) end)})))
+              else . end)
+            | .repos |= with_entries(
+                if ((.value.status // "") == "contributed")
+                   and (([(.value.prs // {})[] | select(.outcome == "open" or .outcome == "cla_blocked")] | length) == 0)
+                   and (((.value.prs // {}) | length) > 0)
+                then .value.status = "tracked" else . end)
+            | .repos |= with_entries(
+                if (([(.value.prs // {})[] | select(.outcome == "merged" or .outcome == "applied_separately")] | length) > 0)
+                then .value.case_study_candidate = true else . end)
+          ' "$REGISTRY" > "$NEXT"
+          jq -c --arg t "$TS" --slurpfile old "$REGISTRY" '
+            ($old[0].repos // {}) as $o
+            | .repos | to_entries[] | .key as $repo
+            | (.value.prs // {}) | to_entries[]
+            | (($o[$repo].prs[.key].outcome) // null) as $prior
+            | select(((.value.outcome // null) != null) and (.value.outcome != $prior))
+            | {event: "finding_outcome", timestamp: $t, repo: $repo, pr: (.key | tonumber), outcome: .value.outcome, prior: $prior, fingerprints: (.value.fingerprints // []), rule_ids: (.value.rule_ids // [])}
+          ' "$NEXT" >> "$EVENT_LOG"
+          jq -r --slurpfile old "$REGISTRY" '
+            ($old[0].repos // {}) as $o
+            | .repos | to_entries[]
+            | select((.value.case_study_candidate // false) and ((($o[.key].case_study_candidate) // false) | not))
+            | [.key, (((.value.audit_issue) // 0) | tostring)] | @tsv
+          ' "$NEXT" | while IFS="$(printf '\t')" read -r repo issue; do
+            [ -n "$repo" ] || continue
+            [ "$issue" != "0" ] || continue
+            gh issue edit "$issue" --add-label case-study-ready
+            gh issue comment "$issue" --body "vibe-suite auditor: PR outcomes for $repo qualify it for a case study; dispatching the case-study workflow."
+            gh workflow run auditor-case-study.yml -f repo="$repo" -f issue_number="$issue"
+          done
+          mv "$NEXT" "$REGISTRY"
+          echo "PASS"
+          # /stage-logic
+      - run: |
+          set -euo pipefail
+          cd "$DATA_DIR"
+          # deferred:E8.3 — protected-path guard lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
+          else
+            echo "REFUSE:helper-missing-until-E8.3"
+            exit 1
+          fi
+          git add registry ledgers
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git config user.name "vibe-suite-auditor"
+          git config user.email "auditor@users.noreply.github.com"
+          git commit -m "auditor-track record PR outcomes and promotions"
+          # deferred:E8.3 — retrying push helper lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
+          else
+            echo "REFUSE:helper-missing-until-E8.3"
+            exit 1
+          fi

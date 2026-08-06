@@ -1,0 +1,131 @@
+# ported from the nlpm auditor at capability parity
+# auditor-docs-diff — "Docs Diff". Weekly, Tuesday off-peak versus the other
+# auditor crons; no model. Reads the citation index (URL to citing rules,
+# quotes and last-verified dates), fetches every cited documentation URL,
+# compares content hashes against the prior store, files one docs-drift
+# issue per changed URL (or comments on the existing open one), and commits
+# the updated hash store even when nothing drifted so newly cited URLs are
+# bootstrapped. Never auto-updates rules; drift is surfaced, judgment stays
+# human. Fetch failures are counted and surfaced, never fatal.
+name: auditor-docs-diff
+on:
+  schedule:
+    - cron: "0 6 * * 2"
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: auditor-docs-diff
+  cancel-in-progress: false
+env:
+  CODE_DIR: ${{ github.workspace }}
+  DATA_DIR: ${{ github.workspace }}/_data
+  REGISTRY: ${{ github.workspace }}/_data/registry/repos.json
+  EVENT_LOG: ${{ github.workspace }}/_data/ledgers/events.jsonl
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      -   uses: actions/checkout@v4
+          with:
+            ref: auditor-data
+            path: _data
+            persist-credentials: false
+      - name: Diff cited documentation
+        run: |
+          # Hash-store contract: citations file in, fetch each URL, compare
+          # against the prior store, write the updated store; the commit
+          # step below runs even when nothing drifted (bootstrap).
+          # logic:docs-diff
+          set -euo pipefail
+          TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ ! -f "$REGISTRY" ]; then
+            echo "REFUSE:registry-missing"
+            exit 1
+          fi
+          CITATIONS="${CITATIONS:-$DATA_DIR/ledgers/docs-citations.json}"
+          HASH_STORE="${HASH_STORE:-$DATA_DIR/ledgers/docs-hashes.json}"
+          if [ ! -f "$CITATIONS" ]; then
+            echo "SKIP:no-citations"
+            exit 0
+          fi
+          mkdir -p "$DATA_DIR/ledgers"
+          if [ ! -f "$HASH_STORE" ]; then
+            printf '%s\n' '{}' > "$HASH_STORE"
+          fi
+          CHANGED=0
+          BOOTSTRAPPED=0
+          UNCHANGED=0
+          FAILED=0
+          NEXT="$HASH_STORE.tmp"
+          cp "$HASH_STORE" "$NEXT"
+          while IFS= read -r url; do
+            if [ -z "$url" ]; then
+              continue
+            fi
+            BODY_HASH=""
+            if PAGE="$(curl -fsSL --max-time 20 "$url" 2>/dev/null)"; then
+              BODY_HASH="$(printf '%s' "$PAGE" | shasum -a 256 | cut -d' ' -f1)"
+            fi
+            if [ -z "$BODY_HASH" ]; then
+              FAILED=$((FAILED+1))
+              continue
+            fi
+            PRIOR="$(jq -r --arg u "$url" '.[$u] // ""' "$NEXT")"
+            if [ -z "$PRIOR" ]; then
+              BOOTSTRAPPED=$((BOOTSTRAPPED+1))
+            elif [ "$PRIOR" = "$BODY_HASH" ]; then
+              UNCHANGED=$((UNCHANGED+1))
+              continue
+            else
+              CHANGED=$((CHANGED+1))
+              TITLE="docs drift detected for $url"
+              RULES_TXT="$(jq -r --arg u "$url" '.[$u].rules // [] | join(", ")' "$CITATIONS" 2>/dev/null || echo unknown)"
+              QUOTE_TXT="$(jq -r --arg u "$url" '.[$u].quote // "none recorded"' "$CITATIONS" 2>/dev/null || echo unknown)"
+              BODY_TEXT="$(printf '%s\n' "Cited documentation changed upstream." "URL $url" "Citing rules ${RULES_TXT:-unknown}" "Recorded quote ${QUOTE_TXT:-unknown}" "" "Manual revalidation" "1. Re-read the changed page." "2. Compare each citing rule quote against the new text." "3. Update or retire the affected rules by hand." "4. Refresh the last-verified date in the citations file.")"
+              # per-URL dedupe: comment on the existing open issue instead
+              # of filing a duplicate
+              NUM="$(gh issue list --state open --label docs-drift --search "$TITLE" --json number --jq '.[0].number' 2>/dev/null | head -n 1)"
+              if [ -n "$NUM" ]; then
+                gh issue comment "$NUM" --body "$BODY_TEXT" \
+                  || echo "issue comment failed; tolerated"
+              else
+                gh issue create --title "$TITLE" --label docs-drift --body "$BODY_TEXT" \
+                  || echo "issue create failed; tolerated"
+              fi
+            fi
+            jq --arg u "$url" --arg h "$BODY_HASH" '.[$u] = $h' "$NEXT" > "$NEXT.new"
+            mv "$NEXT.new" "$NEXT"
+          done < <(jq -r 'keys[]' "$CITATIONS")
+          mv "$NEXT" "$HASH_STORE"
+          jq -cn --arg t "$TS" --argjson c "$CHANGED" --argjson b "$BOOTSTRAPPED" --argjson u "$UNCHANGED" --argjson f "$FAILED" \
+            '{event: "docs_diff", timestamp: $t, changed: $c, bootstrapped: $b, unchanged: $u, fetch_failed: $f}' >> "$EVENT_LOG"
+          echo "changed=$CHANGED bootstrapped=$BOOTSTRAPPED unchanged=$UNCHANGED fetch_failed=$FAILED"
+          echo "PASS"
+          # /logic
+      - run: |
+          set -euo pipefail
+          cd "$DATA_DIR"
+          git add ledgers/docs-hashes.json ledgers/events.jsonl
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git config user.name "vibe-suite-auditor"
+          git config user.email "auditor@users.noreply.github.com"
+          git commit -m "auditor-docs-diff refresh the docs hash store"
+          # deferred:E8.3 — retrying push helper (5 attempts with conflict
+          # resolution, hard fail on the 5th) lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
+          else
+            echo "REFUSE:push-helper-missing-until-E8.3"
+            exit 1
+          fi

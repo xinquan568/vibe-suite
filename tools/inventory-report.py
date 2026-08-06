@@ -62,8 +62,19 @@ ROWS = [
      lambda r: len([p for p in (r / "bin").glob("vibe-build-*")])),
     ("Advisor templates", 6, EXACT,
      lambda r: len(list((r / "templates" / "advisors").glob("*.md")))),
-    ("Auditor-unit workflows", 24, PENDING_S8,
+    # SS5.0's 24 auditor-unit workflows, split by delivering item (vibe-59): E8.2 landed the 18
+    # pipeline workflows (full glob, so a stray auditor YAML breaks the row); E8.4 owes the
+    # site/release set. The site row counts the five outstanding names across BOTH possible homes
+    # (the reference keeps site workflows under .github/workflows/); pre-release-quality-gate is
+    # excluded because E7.4 delivered it before S8. Targets sum to 24 -- asserted by
+    # tests/test_inventory_rows.py, which also proves 17/19 fail and the self-expiry fires.
+    ("Auditor pipeline workflows (E8.2)", 18, EXACT,
      lambda r: len(list((r / "auditor").rglob("*.yml")))),
+    ("Auditor site/release workflows (E8.4)", 6, PENDING_S8,
+     lambda r: len([n for n in ("deploy-site", "self-check", "site-preview",
+                                "site-preview-cleanup", "site-validate")
+                    if (r / ".github" / "workflows" / (n + ".yml")).is_file()
+                    or (r / "auditor" / "workflows" / (n + ".yml")).is_file()])),
     ("Auditor helper scripts", 30, PENDING_S8,
      lambda r: len(list((r / "auditor").rglob("*.py")))),
 ]

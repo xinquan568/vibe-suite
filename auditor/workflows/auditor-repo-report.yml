@@ -1,0 +1,118 @@
+# ported from the nlpm auditor at capability parity
+# auditor-repo-report — operator-driven backfill of per-repo HTML reports.
+# Re-renders WITHOUT re-auditing (presentation refresh only); the same render
+# also runs at the tail of the audit and vocab-drift workflows. Concurrency is
+# keyed by the repo input so different repos backfill in parallel while
+# duplicate requests for the same repo serialize. No model.
+name: auditor-repo-report
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: owner/name for one repo, or the literal "all" to backfill every audited repo
+        required: true
+        default: all
+permissions:
+  contents: write
+concurrency:
+  group: auditor-repo-report-${{ github.event.inputs.repo }}
+  cancel-in-progress: false
+env:
+  CODE_DIR: ${{ github.workspace }}
+  DATA_DIR: ${{ github.workspace }}/_data
+  REGISTRY: ${{ github.workspace }}/_data/registry/repos.json
+  EVENT_LOG: ${{ github.workspace }}/_data/ledgers/events.jsonl
+  REPO: ${{ github.event.inputs.repo }}
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      -   uses: actions/checkout@v4
+          with:
+            ref: auditor-data
+            path: _data
+            persist-credentials: false
+      - name: Render per-repo reports
+        run: |
+          # All-mode silently skips registry entries lacking a markdown audit
+          # and never fails on a single bad render; single-repo mode is strict.
+          # logic:repo-report
+          set -euo pipefail
+          TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          REPO="${REPO:-all}"
+          case "$REPO" in
+            all) ;;
+            */*) ;;
+            *) echo "REFUSE:invalid-repo-input"; exit 2 ;;
+          esac
+          [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
+          REPORTS="$DATA_DIR/reports"
+          AUDITS="$DATA_DIR/audits"
+          mkdir -p "$REPORTS"
+          RENDERED=0
+          FAILED=0
+          render_one() {
+            slug="$(printf '%s' "$1" | tr '/' '-')"
+            if [ ! -f "$AUDITS/$slug.md" ]; then
+              return 1
+            fi
+            {
+              printf '<!-- vibe-suite auditor per-repo report; self-contained, file:// openable -->\n'
+              printf '<h1>audit report %s</h1>\n' "$1"
+              printf '<p>rendered %s from the committed audit and the global logs</p>\n' "$TS"
+            } > "$REPORTS/$slug.html"
+          }
+          if [ "$REPO" = "all" ]; then
+            for full in $(jq -r '.repos | keys[]' "$REGISTRY"); do
+              if render_one "$full"; then
+                RENDERED=$((RENDERED+1))
+              else
+                echo "skip $full no markdown audit on the data branch"
+              fi
+            done
+          else
+            if render_one "$REPO"; then
+              RENDERED=$((RENDERED+1))
+            else
+              FAILED=$((FAILED+1))
+            fi
+            if [ "$FAILED" -ne 0 ]; then
+              echo "REFUSE:render-failed"
+              exit 1
+            fi
+          fi
+          jq -cn --arg t "$TS" --arg s "$REPO" --argjson r "$RENDERED" --argjson f "$FAILED" \
+            '{event: "repo_report_backfill", timestamp: $t, scope: $s, rendered: $r, failed: $f}' >> "$EVENT_LOG"
+          echo "PASS"
+          # /logic
+      - run: |
+          set -euo pipefail
+          cd "$DATA_DIR"
+          # deferred:E8.3 — protected-path guard lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
+          else
+            echo "REFUSE:guard-helper-missing-until-E8.3"
+            exit 1
+          fi
+          git add reports ledgers/events.jsonl
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git config user.name "vibe-suite-auditor"
+          git config user.email "auditor@users.noreply.github.com"
+          git commit -m "auditor-repo-report backfill per-repo reports"
+          # deferred:E8.3 — retrying push helper lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
+          else
+            echo "REFUSE:push-helper-missing-until-E8.3"
+            exit 1
+          fi

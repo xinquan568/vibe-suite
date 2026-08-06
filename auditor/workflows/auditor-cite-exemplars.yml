@@ -1,0 +1,132 @@
+# ported from the nlpm auditor at capability parity
+# auditor-cite-exemplars — "Propose Rule Citations". Weekly, one hour after
+# refine-rules, and explicitly deterministic: no model, the edits are
+# mechanical. Check mode scans exemplar frontmatter for exemplifies fields
+# and emits the proposal list; apply mode inserts marker-wrapped real-world
+# example citation blocks into the rules catalog on a dated branch and opens
+# a human-review PR. Rulebook citations never auto-merge; idempotent marker
+# anchors make re-runs update in place instead of stacking duplicates.
+name: auditor-cite-exemplars
+on:
+  schedule:
+    - cron: "0 10 * * 0"
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: auditor-cite-exemplars
+  cancel-in-progress: false
+env:
+  CODE_DIR: ${{ github.workspace }}
+  DATA_DIR: ${{ github.workspace }}/_data
+  REGISTRY: ${{ github.workspace }}/_data/registry/repos.json
+  EVENT_LOG: ${{ github.workspace }}/_data/ledgers/events.jsonl
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  cite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      -   uses: actions/checkout@v4
+          with:
+            ref: auditor-data
+            path: _data
+            persist-credentials: false
+      - name: Check citation drift
+        run: |
+          # Check mode of the check/apply contract: read-only over the code
+          # checkout, writes only the proposal list under the data dir.
+          # Exits by printing SKIP when there is nothing to apply; the apply
+          # step below is gated on the proposal list existing and non-empty.
+          # logic:cite-exemplars
+          set -euo pipefail
+          if [ ! -f "$REGISTRY" ]; then
+            echo "REFUSE:registry-missing"
+            exit 1
+          fi
+          OPEN_COUNT="$(gh pr list --state open --label exemplar-citation-proposal | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "${OPEN_COUNT:-0}" -gt 0 ]; then
+            echo "SKIP:open-proposal-exists"
+            exit 0
+          fi
+          EXDIR="$DATA_DIR/exemplars"
+          PROPOSALS="$DATA_DIR/ledgers/citation-proposals.txt"
+          mkdir -p "$DATA_DIR/ledgers"
+          : > "$PROPOSALS"
+          FILES=0
+          FOUND=0
+          for f in "$EXDIR"/*.md; do
+            if [ ! -e "$f" ]; then
+              continue
+            fi
+            base="$(basename "$f")"
+            if [ "$base" = "README.md" ]; then
+              continue
+            fi
+            FILES=$((FILES+1))
+            RULES="$(sed -n '/^---$/,/^---$/p' "$f" | sed -n 's/^exemplifies:[ ]*//p' | tr ',' ' ')"
+            for rule in $RULES; do
+              if [ -z "$rule" ]; then
+                continue
+              fi
+              printf 'PROPOSE:%s <- exemplars/%s\n' "$rule" "$base" >> "$PROPOSALS"
+              FOUND=$((FOUND+1))
+            done
+          done
+          if [ "$FILES" -eq 0 ]; then
+            rm -f "$PROPOSALS"
+            echo "SKIP:no-exemplars"
+            exit 0
+          fi
+          if [ "$FOUND" -eq 0 ]; then
+            rm -f "$PROPOSALS"
+            echo "SKIP:in-sync"
+            exit 0
+          fi
+          cat "$PROPOSALS"
+          echo "PASS"
+          # /logic
+      - run: |
+          # Apply mode: only runs when check mode left a non-empty proposal
+          # list. Edits the rules catalog on a dated branch and opens the
+          # human-review PR; this workflow never merges anything itself.
+          set -euo pipefail
+          PROPOSALS="$DATA_DIR/ledgers/citation-proposals.txt"
+          if [ ! -s "$PROPOSALS" ]; then
+            echo "no citation drift; nothing to apply"
+            exit 0
+          fi
+          DATE="$(date -u +%Y-%m-%d)"
+          BRANCH="exemplar-citations/$DATE"
+          cd "$CODE_DIR"
+          git checkout -b "$BRANCH"
+          # deferred:E8.3 — the citation applier lands with the scripts item
+          if [ -x auditor/scripts/apply-rule-citations.sh ]; then
+            bash auditor/scripts/apply-rule-citations.sh "$PROPOSALS"
+          else
+            echo "REFUSE:citation-helper-missing-until-E8.3"
+            exit 1
+          fi
+          git config user.name "vibe-suite-auditor"
+          git config user.email "auditor@users.noreply.github.com"
+          git commit -am "auditor-cite-exemplars refresh rule citations for $DATE"
+          git push origin "$BRANCH"
+          BODY="$DATA_DIR/ledgers/citation-pr-body.md"
+          printf '%s\n' \
+            "Weekly exemplar citation refresh for $DATE." \
+            "" \
+            "Every edit is a marker-wrapped real-world-example block in the rules catalog; marker anchors keep re-runs idempotent." \
+            "" \
+            "Review checklist" \
+            "- [ ] each citation resolves to a published exemplar on the auditor-data branch" \
+            "- [ ] no rule text outside the markers changed" \
+            "- [ ] never auto-merge; a maintainer merges this by hand" \
+            > "$BODY"
+          gh pr create --title "auditor refresh of exemplar citations ($DATE)" --label exemplar-citation-proposal --body-file "$BODY"
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}

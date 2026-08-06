@@ -1,0 +1,109 @@
+# ported from the nlpm auditor at capability parity
+# auditor-render-dashboard — render the cross-repo HTML dashboard from the
+# append-only global logs and the registry, then commit it to the data branch.
+# Daily at 22:30 UTC, deliberately chained 30 minutes after the daily report so
+# that report's committed outputs are visible to the renderer. No model.
+name: auditor-render-dashboard
+on:
+  schedule:
+    - cron: "30 22 * * *"
+  workflow_dispatch:
+    inputs:
+      since:
+        description: optional ISO date; drop records older than this from the render
+        required: false
+        default: ""
+permissions:
+  contents: write
+concurrency:
+  group: auditor-render-dashboard
+  cancel-in-progress: false
+env:
+  CODE_DIR: ${{ github.workspace }}
+  DATA_DIR: ${{ github.workspace }}/_data
+  REGISTRY: ${{ github.workspace }}/_data/registry/repos.json
+  EVENT_LOG: ${{ github.workspace }}/_data/ledgers/events.jsonl
+  SINCE: ${{ github.event.inputs.since }}
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      -   uses: actions/checkout@v4
+          with:
+            ref: auditor-data
+            path: _data
+            persist-credentials: false
+      - name: Render the cross-repo dashboard
+        run: |
+          # Missing or empty logs degrade to zero counts rather than failing;
+          # the docs subtree ships alongside so rule-id anchors never 404.
+          # logic:render-dashboard
+          set -euo pipefail
+          TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
+          SINCE="${SINCE:-}"
+          REPORTS="$DATA_DIR/reports"
+          mkdir -p "$REPORTS"
+          count_records() {
+            if [ ! -f "$1" ]; then
+              echo 0
+              return 0
+            fi
+            { jq -c --arg s "$SINCE" 'select($s == "" or ((.timestamp // "") >= $s))' "$1" 2> /dev/null || true; } | wc -l | tr -d ' '
+          }
+          FINDINGS="$(count_records "$DATA_DIR/ledgers/findings.jsonl")"
+          ADVISORIES="$(count_records "$DATA_DIR/ledgers/vocab-advisories.jsonl")"
+          EVENTS="$(count_records "$EVENT_LOG")"
+          REPOS="$(jq '.repos | length' "$REGISTRY")"
+          OUT="$REPORTS/dashboard.html"
+          {
+            printf '<!-- vibe-suite auditor cross-repo dashboard; self-contained, file:// openable -->\n'
+            printf '<h1>vibe-suite auditor dashboard</h1>\n'
+            printf '<p>generated %s</p>\n' "$TS"
+            printf '<ul>\n'
+            printf '<li>repos tracked %s</li>\n' "$REPOS"
+            printf '<li>findings %s</li>\n' "$FINDINGS"
+            printf '<li>vocab advisories %s</li>\n' "$ADVISORIES"
+            printf '<li>lifecycle events %s</li>\n' "$EVENTS"
+            printf '</ul>\n'
+            printf '<p><a href="docs/index.html">rule docs</a></p>\n'
+          } > "$OUT"
+          mkdir -p "$REPORTS/docs"
+          if [ ! -f "$REPORTS/docs/index.html" ]; then
+            printf '<h1>vibe-suite auditor rule docs</h1>\n' > "$REPORTS/docs/index.html"
+          fi
+          jq -cn --arg t "$TS" --argjson r "$REPOS" --argjson f "$FINDINGS" --argjson a "$ADVISORIES" \
+            '{event: "dashboard_rendered", timestamp: $t, repos: $r, findings: $f, advisories: $a}' >> "$EVENT_LOG"
+          echo "PASS"
+          # /logic
+      - run: |
+          set -euo pipefail
+          cd "$DATA_DIR"
+          # deferred:E8.3 — protected-path guard lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
+          else
+            echo "REFUSE:guard-helper-missing-until-E8.3"
+            exit 1
+          fi
+          git add reports ledgers/events.jsonl
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git config user.name "vibe-suite-auditor"
+          git config user.email "auditor@users.noreply.github.com"
+          git commit -m "auditor-render-dashboard refresh cross-repo dashboard"
+          # deferred:E8.3 — retrying push helper lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
+          else
+            echo "REFUSE:push-helper-missing-until-E8.3"
+            exit 1
+          fi

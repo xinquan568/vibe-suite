@@ -1,0 +1,162 @@
+# ported from the nlpm auditor at capability parity
+# auditor-batch-processor — label-driven phase machine that advances repos
+# through the discover -> audit -> contribute pipeline. The labels ARE the
+# state store; this job only reads pipeline state and emits label transitions.
+# No model, no data-branch writes; the auditor-data checkout is read-only
+# (registry and rule-health inputs). Weekly repo cap 2 is enforced here AND in
+# the contribute pr-caps gate (belt and braces per F10.1).
+name: auditor-batch-processor
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: max repos to audit per batch
+        required: false
+        default: "5"
+      dry_run:
+        description: log intended actions without applying labels
+        required: false
+        default: "false"
+permissions:
+  contents: read
+  issues: write
+  actions: write
+concurrency:
+  group: auditor-batch-processor
+  cancel-in-progress: false
+env:
+  CODE_DIR: ${{ github.workspace }}
+  DATA_DIR: ${{ github.workspace }}/_data
+  REGISTRY: ${{ github.workspace }}/_data/registry/repos.json
+  EVENT_LOG: ${{ github.workspace }}/_data/ledgers/events.jsonl
+  BATCH_SIZE: ${{ github.event.inputs.batch_size || '5' }}
+  DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      -   uses: actions/checkout@v4
+          with:
+            ref: auditor-data
+            path: _data
+            persist-credentials: false
+      - run: |
+          set -euo pipefail
+          # Idempotent label preflight. Applying a nonexistent label fails
+          # silently (a documented incident left 48 candidates unlabeled), so
+          # the two pipeline labels are created up front, already-exists errors
+          # swallowed.
+          gh label create "exemplar-candidate" --color "0e8a16" \
+            --description "clean case-study candidate, score at least 90 and security not blocked" \
+            2> /dev/null || true
+          gh label create "exemplar-published" --color "5319e7" \
+            --description "exemplar article published" 2> /dev/null || true
+          echo "pipeline labels present"
+      - name: Five-phase label machine
+        run: |
+          set -euo pipefail
+          case "$BATCH_SIZE" in
+            *[!0-9]*|'') echo "REFUSE:invalid-batch-size"; exit 1 ;;
+          esac
+          [ "$BATCH_SIZE" -ge 1 ] && [ "$BATCH_SIZE" -le 50 ] || { echo "REFUSE:invalid-batch-size"; exit 1; }
+          [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
+          apply() {
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "DRY-RUN would edit issue $1 add $2 remove ${3:-nothing}"
+              return 0
+            fi
+            if [ -n "${3:-}" ]; then
+              gh issue edit "$1" --add-label "$2" --remove-label "$3"
+            else
+              gh issue edit "$1" --add-label "$2"
+            fi
+          }
+          repo_of() {
+            printf '%s\n' "${1#Audit candidate: }"
+          }
+          score_of() {
+            jq -r --arg r "$1" '.repos[$r].score // 0' "$REGISTRY"
+          }
+          security_of() {
+            jq -r --arg r "$1" '.repos[$r].security // "UNKNOWN"' "$REGISTRY"
+          }
+          # phase 0 — auto-label clean high-scoring audits as exemplar candidates
+          # (contract score >= 90 and security not blocked)
+          while IFS=$'\t' read -r num title; do
+            [ -n "$num" ] || continue
+            repo="$(repo_of "$title")"
+            score="$(score_of "$repo")"
+            sec="$(security_of "$repo")"
+            if [ "$score" -ge 90 ] && [ "$sec" != "BLOCKED" ]; then
+              apply "$num" "exemplar-candidate"
+            fi
+          done < <(gh issue list --state open --label "audit-complete" --limit 200 \
+            --json number,title --jq '.[] | [.number, .title] | @tsv' 2> /dev/null || true)
+          # phase 1 — compute the low-landing-rate suppression set once per run
+          # (rule with >= 20 hits, >= 5 contributed, merged ratio < 0.15); the
+          # health computation is fail-soft and opt-out via SUPPRESSION_DISABLED
+          SUPPRESSED="[]"
+          if [ "${SUPPRESSION_DISABLED:-false}" != "true" ] && [ -f "$DATA_DIR/ledgers/findings.jsonl" ]; then
+            SUPPRESSED="$(jq -s '[group_by(.rule_id)[]
+              | {rule: (.[0].rule_id // ""), hits: length, contributed: ([.[] | select(.contributed == true)] | length), merged: ([.[] | select(.outcome == "merged")] | length)}
+              | select(.hits >= 20 and .contributed >= 5 and ((.merged / .contributed) < 0.15))
+              | .rule]' "$DATA_DIR/ledgers/findings.jsonl" 2> /dev/null || echo '[]')"
+          fi
+          echo "suppressed low-landing-rate rules $SUPPRESSED"
+          # phase 2 — promote completed audits toward contribution, subject to
+          # the suppression set and the weekly repo cap 2
+          CUTOFF="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2> /dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)"
+          while IFS=$'\t' read -r num title; do
+            [ -n "$num" ] || continue
+            repo="$(repo_of "$title")"
+            week=0
+            if [ -f "$EVENT_LOG" ]; then
+              week="$(jq -s --arg r "$repo" --arg c "$CUTOFF" \
+                '[.[] | select(.event == "prs_submitted" and .repo == $r and ((.timestamp // "") >= $c))] | length' \
+                "$EVENT_LOG" 2> /dev/null || echo 0)"
+            fi
+            if [ "$week" -ge 2 ]; then
+              echo "defer $repo weekly repo cap reached"
+              continue
+            fi
+            allhigh="false"
+            sc="$DATA_DIR/audits/$(printf '%s' "$repo" | tr '/' '-').findings.jsonl"
+            if [ -f "$sc" ]; then
+              allhigh="$(jq -s --argjson sup "$SUPPRESSED" \
+                '[.[] | select(.confidence == "high")] as $h
+                 | ($h | length) > 0 and ([$h[] | select((.rule_id // "") as $r | ($sup | index($r)) != null)] | length) == ($h | length)' \
+                "$sc" 2> /dev/null || echo false)"
+            fi
+            if [ "$allhigh" = "true" ]; then
+              echo "suppress promotion for $repo every high-confidence finding is on a low-landing-rate rule"
+              continue
+            fi
+            apply "$num" "contribute-approved" "audit-complete"
+          done < <(gh issue list --state open --label "audit-complete" --limit 200 \
+            --json number,title --jq '.[] | [.number, .title] | @tsv' 2> /dev/null || true)
+          # phase 3 — select the next audit batch, capped by BATCH_SIZE
+          picked=0
+          while IFS=$'\t' read -r num title; do
+            [ -n "$num" ] || continue
+            if [ "$picked" -ge "$BATCH_SIZE" ]; then
+              break
+            fi
+            apply "$num" "audit-ready" "audit-candidate"
+            picked=$((picked+1))
+          done < <(gh issue list --state open --label "audit-candidate" --limit 200 \
+            --json number,title --jq '.[] | [.number, .title] | @tsv' 2> /dev/null || true)
+          echo "audit batch selected $picked of cap $BATCH_SIZE"
+          # phase 4 — pipeline census for the run log (read-only observability)
+          for label in audit-candidate audit-ready audit-complete contribute-approved prs-submitted case-study-ready; do
+            n="$(gh issue list --state open --label "$label" --limit 1000 --json number --jq 'length' 2> /dev/null || echo 0)"
+            echo "pipeline $label ${n:-0}"
+          done
+          echo "PASS"

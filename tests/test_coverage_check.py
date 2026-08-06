@@ -1037,8 +1037,9 @@ class TestTargetEnforcement(TargetCase):
         self.assertIn("code change", result.stderr)
 
     def test_scheduled_anchor_decoy_fails(self):
+        # nlpm:21 is the exemplar scheduled row since nlpm:20 graduated with E8.2 (vibe-59).
         result = self.mutated(
-            "nlpm:20", lambda b: self.set_field(b, "expected", "[never/lands.md]"))
+            "nlpm:21", lambda b: self.set_field(b, "expected", "[never/lands.md]"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("frozen", result.stderr)
 
@@ -1076,8 +1077,8 @@ class TestTargetEnforcement(TargetCase):
     def test_renamed_scheduled_row_fails(self):
         # Renaming a scheduled row is not a way around the frozen set: the new id is outside
         # both the row inventory and the frozen keys.
-        result = self.mutated("nlpm:20", lambda b: b.replace(
-            "  - row: nlpm:20\n", "  - row: nlpm:26\n", 1))
+        result = self.mutated("nlpm:21", lambda b: b.replace(
+            "  - row: nlpm:21\n", "  - row: nlpm:26\n", 1))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("frozen scheduled set", result.stderr)
 
@@ -1094,7 +1095,7 @@ class TestTargetEnforcement(TargetCase):
 class TestScheduledListing(TargetCase):
     """D2's visibility promise: every run with a parseable disposition prints the scheduled rows."""
 
-    ROWS = ("cc-suite:27", "nlpm:12", "nlpm:13", "nlpm:20", "nlpm:21", "nlpm:23")
+    ROWS = ("cc-suite:27", "nlpm:12", "nlpm:13", "nlpm:21", "nlpm:23")  # nlpm:20 graduated (vibe-59)
 
     def test_listing_appears_on_a_passing_run(self):
         result = self.run_check()

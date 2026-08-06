@@ -1,0 +1,241 @@
+# ported from the nlpm auditor at capability parity
+# auditor-discover — weekly GitHub search for public repos that ship natural
+# language programming artifacts, gated on stars, freshness, and artifact
+# bounds. Worthy candidates get one audit-candidate tracking issue each plus a
+# registry record (never a record without a live issue); a human then adds
+# audit-ready to start the audit, or closes the issue. Uniquely among the
+# stage workflows a newer discover run cancels an older one. No model.
+name: auditor-discover
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: preview results without creating issues or writing state
+        required: false
+        type: boolean
+        default: false
+      min_stars:
+        description: minimum star count
+        required: false
+        type: number
+        default: 500
+      max_age_days:
+        description: freshness gate — skip repos with no push within this window
+        required: false
+        type: number
+        default: 180
+      min_artifacts:
+        description: minimum NL artifact count to qualify
+        required: false
+        type: number
+        default: 5
+      max_artifacts:
+        description: ceiling above which a repo is presumed generated or mirrored
+        required: false
+        type: number
+        default: 100
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: auditor-discover
+  cancel-in-progress: true
+env:
+  CODE_DIR: ${{ github.workspace }}
+  DATA_DIR: ${{ github.workspace }}/_data
+  REGISTRY: ${{ github.workspace }}/_data/registry/repos.json
+  EVENT_LOG: ${{ github.workspace }}/_data/ledgers/events.jsonl
+  CANDIDATE_DIR: ${{ github.workspace }}/_candidates
+  DRY_RUN: ${{ github.event.inputs.dry_run }}
+  MIN_STARS: ${{ github.event.inputs.min_stars }}
+  MAX_AGE_DAYS: ${{ github.event.inputs.max_age_days }}
+  MIN_ARTIFACTS: ${{ github.event.inputs.min_artifacts }}
+  MAX_ARTIFACTS: ${{ github.event.inputs.max_artifacts }}
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      -   uses: actions/checkout@v4
+          with:
+            ref: auditor-data
+            path: _data
+            persist-credentials: false
+      - name: Search for candidates and stage per-candidate files
+        run: |
+          # Fail-soft search fan-out; dedup against the registry, the case-study
+          # deny list mined from published articles, and vendor-default owners
+          # (denied and CLA-gated orgs are cheaper to drop here than to fail at
+          # contribute). Empty or erroring tree probes coerce to zero.
+          set -euo pipefail
+          [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
+          mkdir -p "$CANDIDATE_DIR"
+          ALL="$CANDIDATE_DIR/_all.jsonl"
+          NEW="$CANDIDATE_DIR/_new.jsonl"
+          DENY="$CANDIDATE_DIR/_deny.txt"
+          : > "$ALL"
+          printf '%s\n' "xinquan568/vibe-suite" > "$DENY"
+          if ls "$DATA_DIR"/articles/*.md > /dev/null 2>&1; then
+            { grep -hEo 'github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' "$DATA_DIR"/articles/*.md || true; } | sed 's#github\.com/##' | sort -u >> "$DENY"
+          fi
+          QUERY_LIST=(
+            "claude code plugin in:name,description,readme"
+            "claude skills SKILL.md in:readme"
+            "claude subagents in:name,description,readme"
+            "claude slash commands in:name,description,readme"
+            "claude hooks configuration in:name,description,readme"
+            "AGENTS.md agent instructions in:readme"
+            "agent workflow prompt library in:name,description"
+            "claude plugin marketplace in:name,description,readme"
+          )
+          for q in "${QUERY_LIST[@]}"; do
+            gh api -X GET search/repositories -f q="$q" -f sort=stars -f per_page=30 \
+              --jq '.items[]? | {full_name, stargazers_count, archived, pushed_at, description, default_branch}' \
+              >> "$ALL" 2> /dev/null || true
+            sleep 2
+          done
+          jq -c -s --slurpfile reg "$REGISTRY" --rawfile deny "$DENY" '
+            ($deny | split("\n") | map(select(length > 0) | ascii_downcase)) as $d
+            | map(select(.full_name != null))
+            | group_by(.full_name) | map(max_by(.stargazers_count // 0))
+            | map(select((.full_name | ascii_downcase) as $n | ($d | index($n)) | not))
+            | map(select(.full_name as $n | ($reg[0].repos | has($n)) | not))
+            | map(select((.full_name | split("/")[0] | ascii_downcase) as $o
+                | (["anthropics", "google", "googleapis", "googlecloudplatform"] | index($o)) | not))
+            | sort_by(-(.stargazers_count // 0)) | .[:20] | .[]
+          ' "$ALL" > "$NEW" || : > "$NEW"
+          i=0
+          while IFS= read -r rec; do
+            [ -n "$rec" ] || continue
+            name="$(printf '%s' "$rec" | jq -r '.full_name')"
+            branch="$(printf '%s' "$rec" | jq -r '.default_branch // "main"')"
+            count="$(gh api "repos/$name/git/trees/$branch?recursive=1" \
+              --jq '[.tree[]? | select(.type == "blob") | select(.path | test("(^|/)(\\.claude|\\.agents|\\.codex|commands|agents|skills|prompts|hooks)/|(^|/)(AGENTS|CLAUDE|SKILL)\\.md$"))] | length' \
+              2> /dev/null || echo 0)"
+            case "$count" in ''|*[!0-9]*) count=0 ;; esac
+            i=$((i+1))
+            printf '%s' "$rec" | jq -c --argjson c "$count" '{repo: (. + {artifact_count: $c})}' > "$CANDIDATE_DIR/candidate-$i.json"
+            sleep 2
+          done < "$NEW"
+          rm -f "$ALL" "$NEW" "$DENY"
+          echo "staged $i candidate file(s)"
+      - run: |
+          # Gate every staged candidate through the discovery state machine; a
+          # subshell per candidate so a SKIP exit never ends the whole loop.
+          set -euo pipefail
+          shopt -s nullglob
+          PROCESSED=0
+          for f in "$CANDIDATE_DIR"/candidate-*.json; do
+            PROCESSED=$((PROCESSED+1))
+            (
+              export FIXTURE="$f"
+              # stage-logic:discover
+              set -euo pipefail
+              TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
+              if [ ! -f "${FIXTURE:-}" ]; then
+                echo "SKIP:no-candidate-file"
+                exit 0
+              fi
+              DRY_RUN="${DRY_RUN:-false}"
+              MIN_STARS="${MIN_STARS:-500}"
+              MAX_AGE_DAYS="${MAX_AGE_DAYS:-180}"
+              MIN_ARTIFACTS="${MIN_ARTIFACTS:-5}"
+              MAX_ARTIFACTS="${MAX_ARTIFACTS:-100}"
+              NAME="$(jq -r '.repo.full_name // empty' "$FIXTURE")"
+              if [ -z "$NAME" ]; then
+                echo "SKIP:candidate-unparseable"
+                exit 0
+              fi
+              STARS="$(jq -r '.repo.stargazers_count // 0' "$FIXTURE")"
+              ARTIFACTS="$(jq -r '.repo.artifact_count // 0' "$FIXTURE")"
+              ARCHIVED="$(jq -r '.repo.archived // false' "$FIXTURE")"
+              case "$STARS" in ''|*[!0-9]*) STARS=0 ;; esac
+              case "$ARTIFACTS" in ''|*[!0-9]*) ARTIFACTS=0 ;; esac
+              if [ "$ARCHIVED" = "true" ]; then
+                echo "SKIP:archived $NAME"
+                exit 0
+              fi
+              if [ "$STARS" -lt "$MIN_STARS" ]; then
+                echo "SKIP:stars-below-floor $NAME ($STARS < $MIN_STARS)"
+                exit 0
+              fi
+              NOW="$(date -u +%s)"
+              CUTOFF=$((NOW - MAX_AGE_DAYS * 86400))
+              PUSHED="$(jq -r '(.repo.pushed_at // "1970-01-01T00:00:00Z") | fromdateiso8601' "$FIXTURE" 2> /dev/null || echo 0)"
+              case "$PUSHED" in ''|*[!0-9]*) PUSHED=0 ;; esac
+              if [ "$PUSHED" -lt "$CUTOFF" ]; then
+                echo "SKIP:stale-no-recent-push $NAME"
+                exit 0
+              fi
+              if [ "$ARTIFACTS" -lt "$MIN_ARTIFACTS" ]; then
+                echo "SKIP:artifact-floor $NAME ($ARTIFACTS < $MIN_ARTIFACTS)"
+                exit 0
+              fi
+              if [ "$ARTIFACTS" -gt "$MAX_ARTIFACTS" ]; then
+                echo "SKIP:artifact-ceiling-manual-review $NAME ($ARTIFACTS > $MAX_ARTIFACTS)"
+                exit 0
+              fi
+              echo "WORTHY $NAME stars=$STARS artifacts=$ARTIFACTS"
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "dry-run: would create the audit-candidate issue and registry record for $NAME"
+                echo "PASS"
+                exit 0
+              fi
+              DESC="$(jq -r '.repo.description // ""' "$FIXTURE")"
+              BODY="$(printf 'Repo: https://github.com/%s\nStars: %s\nArtifacts: %s\n\nReview checklist:\n- confirm the repo really ships NL artifacts\n- add the audit-ready label to start the audit, or close this issue' "$NAME" "$STARS" "$ARTIFACTS")"
+              ISSUE_OUT="$(gh issue create --title "Audit candidate: $NAME" --label audit-candidate --body "$BODY" 2> /dev/null || true)"
+              ISSUE_NUM="$(printf '%s' "$ISSUE_OUT" | grep -Eo '[0-9]+$' | tail -n 1 || true)"
+              if [ -n "$ISSUE_NUM" ]; then
+                NEXT="$REGISTRY.next"
+                jq --arg n "$NAME" --arg d "$DESC" --argjson s "$STARS" --argjson a "$ARTIFACTS" --argjson i "$ISSUE_NUM" \
+                  '.repos[$n] = ((.repos[$n] // {}) + {status: "discovered", stars: $s, artifact_count: $a, description: $d, audit_issue: $i, pipeline_prs: ((.repos[$n].pipeline_prs) // []), prs: ((.repos[$n].prs) // {})})' \
+                  "$REGISTRY" > "$NEXT"
+                mv "$NEXT" "$REGISTRY"
+              else
+                echo "issue number unparsed; registry record for $NAME skipped so the next cycle retries"
+              fi
+              jq -cn --arg t "$TS" --arg r "$NAME" --argjson s "$STARS" --argjson a "$ARTIFACTS" \
+                '{event: "repo_discovered", timestamp: $t, repo: $r, stars: $s, artifacts: $a}' >> "$EVENT_LOG"
+              echo "PASS"
+              # /stage-logic
+            )
+            sleep 2
+          done
+          echo "processed $PROCESSED candidate file(s)"
+      - run: |
+          set -euo pipefail
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "dry-run: skipping data-branch commit"
+            exit 0
+          fi
+          cd "$DATA_DIR"
+          # deferred:E8.3 — protected-path guard lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
+          else
+            echo "REFUSE:helper-missing-until-E8.3"
+            exit 1
+          fi
+          git add registry ledgers
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git config user.name "vibe-suite-auditor"
+          git config user.email "auditor@users.noreply.github.com"
+          git commit -m "auditor-discover record discovered candidates"
+          # deferred:E8.3 — retrying push helper lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
+          else
+            echo "REFUSE:helper-missing-until-E8.3"
+            exit 1
+          fi

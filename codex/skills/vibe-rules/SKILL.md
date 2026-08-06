@@ -1,6 +1,6 @@
 ---
 name: vibe-rules
-description: The 51 rules of natural language programming — the style guide NL code quality is judged against. Apply when you write, review, or improve an NL artifact of any kind: a skill, agent, command, rule file, hook, prompt, plugin, or project memory file (whether CLAUDE.md, AGENTS.md, or GEMINI.md).
+description: "The 51 rules of natural language programming — the style guide NL code quality is judged against. Apply when you write, review, or improve an NL artifact of any kind: a skill, agent, command, rule file, hook, prompt, plugin, or project memory file (whether CLAUDE.md, AGENTS.md, or GEMINI.md)."
 metadata:
   version: 0.0.1
 ---

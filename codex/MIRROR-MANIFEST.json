@@ -41,7 +41,7 @@
       "mirror": "codex/README.md",
       "mirror_sha256": "5a5fd70b7a718db321bfbf4a10e2b5e77e26b1966b9361e00c79d95b6b73abb6",
       "source": ".claude-plugin/plugin.json",
-      "source_sha256": "acf6cd5b1dc70c22064a8030d60455daeb448def261144a5461e6c15cf4dfe54",
+      "source_sha256": "4894e7e3b550f81ad5b75d3c7d70b1d7e13d83400355e021d31f7c6263053bf2",
       "transform": "generated"
     },
     {
@@ -281,9 +281,9 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-rules/SKILL.md",
-      "mirror_sha256": "233ad0b613de4d440cf792a7d14c0b52a8a6f3423985553b48e3e7238411a2fb",
+      "mirror_sha256": "71438dac513a74da68ac98a875d848d6ab482a16dee2d37a8121cc427dcc0881",
       "source": "skills/rules/SKILL.md",
-      "source_sha256": "df018db37dabeb221df4531fd303956283252c93a09c8837b552d808c9ee2944",
+      "source_sha256": "3772bc3890bca2f72c30f408e622f3c5e593e6b7d936df27e437bc70e5f151c4",
       "transform": "markdown"
     },
     {

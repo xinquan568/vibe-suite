@@ -32,11 +32,11 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      -   uses: actions/checkout@v4
-          with:
-            ref: auditor-data
-            path: _data
-            persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: auditor-data
+          path: _data
+          persist-credentials: false
       - name: Check citation drift
         run: |
           # Check mode of the check/apply contract: read-only over the code

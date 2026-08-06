@@ -33,11 +33,11 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      -   uses: actions/checkout@v4
-          with:
-            ref: auditor-data
-            path: _data
-            persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: auditor-data
+          path: _data
+          persist-credentials: false
       - name: Diff cited documentation
         run: |
           # Hash-store contract: citations file in, fetch each URL, compare
@@ -105,8 +105,12 @@ jobs:
             mv "$NEXT.new" "$NEXT"
           done < <(jq -r 'keys[]' "$CITATIONS")
           mv "$NEXT" "$HASH_STORE"
-          jq -cn --arg t "$TS" --argjson c "$CHANGED" --argjson b "$BOOTSTRAPPED" --argjson u "$UNCHANGED" --argjson f "$FAILED" \
-            '{event: "docs_diff", timestamp: $t, changed: $c, bootstrapped: $b, unchanged: $u, fetch_failed: $f}' >> "$EVENT_LOG"
+          # §7 envelope: the counts live under `data`, never at top level
+          RUN_ID="${GITHUB_RUN_ID:-0}"
+          RUN_NUMBER="${GITHUB_RUN_NUMBER:-0}"
+          case "$RUN_NUMBER" in ''|*[!0-9]*) RUN_NUMBER=0 ;; esac
+          jq -cn --arg t "$TS" --arg ri "$RUN_ID" --argjson rn "$RUN_NUMBER" --argjson c "$CHANGED" --argjson b "$BOOTSTRAPPED" --argjson u "$UNCHANGED" --argjson f "$FAILED" \
+            '{timestamp: $t, workflow: "auditor-docs-diff", event: "docs_diff", run_id: $ri, run_number: $rn, data: {changed: $c, bootstrapped: $b, unchanged: $u, fetch_failed: $f}}' >> "$EVENT_LOG"
           echo "changed=$CHANGED bootstrapped=$BOOTSTRAPPED unchanged=$UNCHANGED fetch_failed=$FAILED"
           echo "PASS"
           # /logic

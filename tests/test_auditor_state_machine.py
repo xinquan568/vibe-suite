@@ -182,9 +182,14 @@ class TestAudit(StageBase):
             self.assertTrue(ledger.exists())
             recs = [json.loads(x) for x in ledger.read_text().splitlines()]
             self.assertEqual(len(recs), 4)
+            # vibe-59 round 6: findings are emitted in the SCHEMAS.md envelope
+            # {timestamp, workflow, event, run_id, run_number, data:{...}}, so the payload
+            # fields live under .data. This assertion predates that contract.
             for rec in recs:
-                for field in ("timestamp", "fingerprint", "repo", "rule_id", "confidence"):
-                    self.assertIn(field, rec)
+                self.assertIn("timestamp", rec)
+                self.assertIn("data", rec, f"record is not enveloped: {sorted(rec)}")
+                for field in ("fingerprint", "repo", "rule_id", "confidence"):
+                    self.assertIn(field, rec["data"])
             self.assertEqual(sb.registry()["repos"]["acme/claude-toolkit"]["status"], "audited")
             calls = " ".join(sb.gh_calls())
             self.assertIn("--add-label", calls)
@@ -314,6 +319,14 @@ class TestNonStageDataWriters(unittest.TestCase):
             self.assertIsNotNone(block, f"no logic block for {name}")
             sb = Sandbox()
             try:
+                if name == "exemplar":
+                    # vibe-59 round 6: exemplar REFUSES rather than publishing a fabricated stub
+                    # when the model wrote nothing, so the happy path must supply model output.
+                    (sb.data / "exemplars").mkdir(exist_ok=True)
+                    (sb.data / "exemplars" / "acme-claude-toolkit.md").write_text(
+                        "---\nslug: acme-claude-toolkit\nrepo: acme/claude-toolkit\n"
+                        "audited: 2026-08-06\ncommit_sha: cafebabe\nscore: 92\n"
+                        "exemplifies:\n  - R07\n---\n\nEvidence body.\n", encoding="utf-8")
                 with self.subTest(workflow=name, case="fixture-run"):
                     r = sb.run(block, env={"SCORE": "92", "SECURITY": "CLEAR"})
                     self.assertEqual(r.returncode, 0, f"{name}: {r.stdout} {r.stderr}")

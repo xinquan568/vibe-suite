@@ -88,6 +88,25 @@ jobs:
           security_of() {
             jq -r --arg r "$1" '.repos[$r].security // "UNKNOWN"' "$REGISTRY"
           }
+          # Weekly repo cap reads. This workflow is a ledger CONSUMER: under the
+          # SCHEMAS.md section 7 envelope the discriminator and the timestamp sit
+          # at the top level and the repo lives at `.data.repo`, so both reads
+          # resolve the repo through `data`.
+          # How many PRs this one repo already got inside the window — a repo
+          # already inside the window costs no new slot.
+          week_prs_of() {
+            jq -s --arg r "$1" --arg c "$2" \
+              '[.[] | select(.event == "prs_submitted" and (.data.repo // "") == $r and ((.timestamp // "") >= $c))] | length' \
+              "$EVENT_LOG" 2> /dev/null || echo 0
+          }
+          # The cap itself is DISTINCT repos globally in the trailing 7 days, not
+          # per-repo event volume: the constraint being enforced is how many
+          # separate maintainer communities this pipeline touches in a week.
+          week_repos_in_window() {
+            jq -s --arg c "$1" \
+              '[.[] | select(.event == "prs_submitted" and ((.timestamp // "") >= $c)) | (.data.repo // "")] | unique | length' \
+              "$EVENT_LOG" 2> /dev/null || echo 0
+          }
           # phase 0 — auto-label clean high-scoring audits as exemplar candidates
           # (contract score >= 90 and security not blocked)
           while IFS=$'\t' read -r num title; do
@@ -105,27 +124,36 @@ jobs:
           # health computation is fail-soft and opt-out via SUPPRESSION_DISABLED
           SUPPRESSED="[]"
           if [ "${SUPPRESSION_DISABLED:-false}" != "true" ] && [ -f "$DATA_DIR/ledgers/findings.jsonl" ]; then
-            SUPPRESSED="$(jq -s '[group_by(.rule_id)[]
+            SUPPRESSED="$(jq -s '[(map(.data // .) | group_by(.rule_id)[])
               | {rule: (.[0].rule_id // ""), hits: length, contributed: ([.[] | select(.contributed == true)] | length), merged: ([.[] | select(.outcome == "merged")] | length)}
               | select(.hits >= 20 and .contributed >= 5 and ((.merged / .contributed) < 0.15))
               | .rule]' "$DATA_DIR/ledgers/findings.jsonl" 2> /dev/null || echo '[]')"
           fi
           echo "suppressed low-landing-rate rules $SUPPRESSED"
           # phase 2 — promote completed audits toward contribution, subject to
-          # the suppression set and the weekly repo cap 2
+          # the suppression set and the global weekly cap of 2 distinct repos
           CUTOFF="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2> /dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)"
+          WEEK_REPOS=0
+          if [ -f "$EVENT_LOG" ]; then
+            WEEK_REPOS="$(week_repos_in_window "$CUTOFF")"
+          fi
+          echo "distinct repos with PRs in the trailing 7 days $WEEK_REPOS"
           while IFS=$'\t' read -r num title; do
             [ -n "$num" ] || continue
             repo="$(repo_of "$title")"
             week=0
             if [ -f "$EVENT_LOG" ]; then
-              week="$(jq -s --arg r "$repo" --arg c "$CUTOFF" \
-                '[.[] | select(.event == "prs_submitted" and .repo == $r and ((.timestamp // "") >= $c))] | length' \
-                "$EVENT_LOG" 2> /dev/null || echo 0)"
+              week="$(week_prs_of "$repo" "$CUTOFF")"
             fi
-            if [ "$week" -ge 2 ]; then
-              echo "defer $repo weekly repo cap reached"
-              continue
+            if [ "$week" -eq 0 ]; then
+              # A repo not yet inside the window would consume a fresh slot;
+              # count promotions made in this run too, or one run could approve
+              # a whole batch of new repos against a cap of 2.
+              if [ "$WEEK_REPOS" -ge 2 ]; then
+                echo "defer $repo weekly repo cap reached"
+                continue
+              fi
+              WEEK_REPOS=$((WEEK_REPOS+1))
             fi
             allhigh="false"
             sc="$DATA_DIR/audits/$(printf '%s' "$repo" | tr '/' '-').findings.jsonl"

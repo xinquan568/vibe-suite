@@ -74,31 +74,49 @@ def lint(text, name="workflow.yml"):
     lines = text.split("\n")
     if "\t" in text:
         v.append("tab character")
-    # top-level keys + duplicate detection per indent block
-    seen_stack = [(-1, set())]
-    for i, ln in enumerate(lines, 1):
-        if not ln.strip() or ln.lstrip().startswith("#"):
+    # top-level keys + duplicate detection per MAPPING (sequence items included).
+    # Each `- ` item opens its own mapping scope at the content column, so a key repeated
+    # inside one step is a duplicate while the same key across sibling steps is not.
+    stack = []          # [(column, {keys seen in that mapping})]
+    idx = 0
+    while idx < len(lines):
+        raw = lines[idx]
+        i = idx + 1
+        idx += 1
+        if not raw.strip() or raw.lstrip().startswith("#"):
             continue
-        indent = len(ln) - len(ln.lstrip(" "))
-        if ln.strip().startswith("- "):
-            continue  # sequence items may repeat
-        m = re.match(r"^( *)([A-Za-z_][A-Za-z0-9_./ -]*):(\s|$)", ln)
+        indent = len(raw) - len(raw.lstrip(" "))
+        body, dash = raw, re.match(r"^( *)-(\s+|$)", raw)
+        if dash:
+            if indent % 2:
+                v.append(f"line {i}: off-grid indentation ({indent})")
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            stack.append((indent + 2, set()))
+            body, indent = " " * (indent + 2) + raw[dash.end():], indent + 2
+            if not body.strip():
+                continue
+        m = re.match(r"^ *([A-Za-z_][A-Za-z0-9_./ -]*):(\s|$)", body)
         if not m:
             continue
-        if indent % 2:
+        if not dash and indent % 2:
             v.append(f"line {i}: off-grid indentation ({indent})")
-        key = m.group(2)
-        while seen_stack and seen_stack[-1][0] >= indent:
-            seen_stack.pop()
-        parent = seen_stack[-1][1] if seen_stack else set()
-        tag = (indent, key)
-        if tag in parent:
+        key = m.group(1)
+        while stack and stack[-1][0] > indent:
+            stack.pop()
+        if not stack or stack[-1][0] < indent:
+            stack.append((indent, set()))
+        if key in stack[-1][1]:
             v.append(f"line {i}: duplicate key '{key}'")
-        parent.add(tag)
-        seen_stack.append((indent, {(indent, key)} if False else parent and set()))
-        seen_stack[-1] = (indent, set())
+        stack[-1][1].add(key)
         if indent == 0 and key not in TOP_KEYS:
             v.append(f"line {i}: unknown top-level key '{key}'")
+        # a block scalar's body is shell/prose, not a mapping — skip it wholesale
+        if re.match(r"^[|>][-+0-9]*$", body[m.end():].strip()):
+            while idx < len(lines) and (
+                    not lines[idx].strip()
+                    or len(lines[idx]) - len(lines[idx].lstrip(" ")) > indent):
+                idx += 1
     # duplicate top-level keys (simpler, reliable pass)
     tops = [re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", ln).group(1)
             for ln in lines if re.match(r"^[A-Za-z_][A-Za-z0-9_-]*:", ln)]
@@ -122,6 +140,21 @@ def lint(text, name="workflow.yml"):
         for step in _steps(body):
             if not any(re.match(r"\s*(uses|run):", ln) for ln in step):
                 v.append(f"job '{jname}': step with neither uses nor run")
+    # expression delimiter pairing — must run BEFORE the pair regex, which only ever sees
+    # balanced spans and is therefore blind to a `${{` that is never closed.
+    scan = 0
+    while True:
+        open_at = text.find("${{", scan)
+        if open_at < 0:
+            break
+        close_at = text.find("}}", open_at + 3)
+        nested_at = text.find("${{", open_at + 3)
+        if close_at < 0 or (0 <= nested_at < close_at):
+            v.append("line %d: unclosed expression delimiter"
+                     % (text.count("\n", 0, open_at) + 1))
+            if close_at < 0:
+                break
+        scan = close_at + 2
     # expressions
     for m in EXPR.finditer(text):
         inner = m.group(1).strip()
@@ -338,7 +371,28 @@ class TestMutations(unittest.TestCase):
             self.GOOD.replace("      - name: x\n        run: echo ok\n",
                               "      - name: x\n        id: nothing\n"))
 
-    def test_unclosed_expression_or_bad_root(self):
+    def test_duplicate_key_in_sequence_step(self):
+        """A `- ` step mapping repeating a key it already set ON the dash line.
+
+        YAML duplicate keys are silently last-wins, so the first `run:` never executes.
+        The dash line is skipped wholesale by the duplicate pass, so the key it introduces
+        is never recorded and the repeat inside the same mapping goes unseen.
+        """
+        self._assert_flagged(self.GOOD.replace(
+            "      - name: x\n        run: echo ok\n",
+            "      - run: echo ok\n        run: echo again\n"))
+
+    def test_unclosed_expression_is_flagged(self):
+        """A genuinely unterminated `${{` — no closing braces anywhere in the file.
+
+        The pair regex only ever sees balanced `${{ ... }}` spans, so an expression that is
+        never closed is invisible to it: the file lints clean while Actions rejects it.
+        """
+        broken = self.GOOD.replace("run: echo ok", "run: echo ${{ github.event.number")
+        self.assertNotIn("}}", broken, "fixture must be genuinely unclosed")
+        self._assert_flagged(broken)
+
+    def test_bad_expression_root_is_flagged(self):
         self._assert_flagged(self.GOOD.replace(
             "run: echo ok", "run: echo ${{ hacks.password }}"))
 
@@ -355,9 +409,18 @@ class TestMutations(unittest.TestCase):
         r = subprocess.run(["bash", "-n", f.name], capture_output=True)
         self.assertNotEqual(r.returncode, 0)
 
+    @staticmethod
+    def dated_model_id():
+        """Assemble a dated model id at RUNTIME so no complete literal is committed (P9).
+
+        A fixture that ships the whole id is itself a pinned model id in the tree; the
+        predicate under test is the lint's, not the repository's willingness to store one.
+        """
+        return "-".join(["claude", "haiku", "4", "5", "2025" + "10" + "01"])
+
     def test_dated_model_pin(self):
         self._assert_flagged(self.GOOD.replace(
-            "run: echo ok", "run: tool --model claude-haiku-4-5-20251001"))
+            "run: echo ok", f"run: echo {self.dated_model_id()}"))
 
     def test_unguarded_scripts_reference(self):
         self._assert_flagged(self.GOOD.replace(
@@ -375,6 +438,42 @@ class TestMutations(unittest.TestCase):
     def test_unknown_secret(self):
         self._assert_flagged(self.GOOD.replace(
             "run: echo ok", "run: echo ${{ secrets.SNEAKY_TOKEN }}"))
+
+
+DATED_MODEL_ID = re.compile(
+    r"\b(?:claude|gpt|gemini)-[a-z0-9]+(?:[-.][a-z0-9]+)*-20[0-9]{6}\b")
+PIN_FREE_TREES = ("tests", "auditor")
+
+
+class TestNoCommittedModelIds(unittest.TestCase):
+    """P9 at fixture level: a dated model id must be assembled at runtime, never committed.
+
+    `tools/model-pin-lint.py` guards the shipped artifacts; nothing guards the test corpus,
+    so a fixture that stores the complete id re-introduces exactly the pin the rule bans.
+    Every legitimate use — lint mutations, model-pin-lint's own fixtures — can build the id
+    from fragments at runtime and stays expressive.
+    """
+
+    def test_no_complete_model_id_in_tree(self):
+        hits = []
+        for tree in PIN_FREE_TREES:
+            root = REPO / tree
+            self.assertTrue(root.is_dir(), f"{root} missing")
+            for path in sorted(root.rglob("*")):
+                if not path.is_file() or "__pycache__" in path.parts:
+                    continue
+                try:
+                    text = path.read_text()
+                except (UnicodeDecodeError, OSError):
+                    continue
+                for i, ln in enumerate(text.split("\n"), 1):
+                    for m in DATED_MODEL_ID.finditer(ln):
+                        hits.append(f"{path.relative_to(REPO)}:{i}: {m.group(0)}")
+        self.assertEqual(
+            hits, [],
+            f"{len(hits)} complete dated model id literal(s) committed under "
+            f"{'/, '.join(PIN_FREE_TREES)}/; assemble them at runtime instead:\n  "
+            + "\n  ".join(hits))
 
 
 if __name__ == "__main__":

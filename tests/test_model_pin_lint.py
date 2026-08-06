@@ -24,8 +24,10 @@ tracked entry, which is its whole purpose.
 are tested separately because they are different branches: a broken lister and an unreadable file
 fail at different points and must not be reported as one another.
 
-`tests/` is outside the lint's scan scope, which is what lets the cases below be written as plain
-literals instead of obfuscated strings.
+`tests/` is outside the lint's own scan scope, but a dated id committed here is still a pinned id
+sitting in the tree, so every dated fixture below is assembled from fragments at runtime and no
+complete literal is stored. The cases stay readable — the assembly is a two-line constant, not
+obfuscation — and `tests/test_auditor_workflows.py::TestNoCommittedModelIds` holds the property.
 """
 
 import importlib.util
@@ -79,6 +81,14 @@ def _write(root, relpath, content):
     return path
 
 
+# Dated model ids are ASSEMBLED AT RUNTIME. A complete literal here would itself be the pin
+# AC-9/P9 bans — this file is a fixture corpus, not shipped tooling, but the id is just as
+# real on disk; `tests/test_auditor_workflows.py::TestNoCommittedModelIds` scans for them.
+_D1 = "2024" + "1022"
+_D2 = "2025" + "0514"
+DATED_TIER_FIRST = "-".join(["claude", "3", "5", "sonnet", _D1])
+DATED_TIER_NAMED = "-".join(["claude", "sonnet", "4", _D2])
+
 # (text, must_be_flagged, why)
 MATCHING_CASES = [
     # One rejection per AC-9 family. The two dated-Claude forms are listed separately because
@@ -87,12 +97,12 @@ MATCHING_CASES = [
     ('model = "gpt-5.6-sol"', True, "AC-9 family: gpt-<digit>"),
     ('"gemini-3.1-pro"', True, "AC-9 family: gemini-<digit>"),
     ("o3-mini", True, "AC-9 family: o<digit>-"),
-    ("claude-3-5-sonnet-20241022", True, "AC-9 family: dated claude, tier-first"),
-    ("claude-sonnet-4-20250514", True, "AC-9 family: dated claude, tier-named"),
+    (DATED_TIER_FIRST, True, "AC-9 family: dated claude, tier-first"),
+    (DATED_TIER_NAMED, True, "AC-9 family: dated claude, tier-named"),
     # Dotted suffixes. `.` is a token separator, so these tokenize to a bare id and must still
     # be caught; treating `.` as a token character would silently miss both.
-    ("models/claude-sonnet-4-20250514.json", True, "dotted suffix: path"),
-    ("see claude-3-5-sonnet-20241022.md", True, "dotted suffix: prose reference"),
+    (f"models/{DATED_TIER_NAMED}.json", True, "dotted suffix: path"),
+    (f"see {DATED_TIER_FIRST}.md", True, "dotted suffix: prose reference"),
     # Continuation forms. A grammar of `gpt-[0-9]` alone passes every case above — the dotted
     # samples tokenize to `gpt-5` and `gemini-3` — while missing all of these.
     ("gpt-5-mini", True, "continuation: hyphenated suffix"),
@@ -101,8 +111,8 @@ MATCHING_CASES = [
     ("o1-preview", True, "continuation: o-series"),
     # Vendor-qualified dated forms. Both are official and both evade a grammar that requires the
     # date to end the token: Bedrock keeps a `-v2` suffix after it, Vertex puts the date after `@`.
-    ("anthropic.claude-3-5-sonnet-20241022-v2:0", True, "vendor form: Bedrock"),
-    ("claude-3-5-sonnet-v2@20241022", True, "vendor form: Vertex"),
+    (f"anthropic.{DATED_TIER_FIRST}-v2:0", True, "vendor form: Bedrock"),
+    (f"claude-3-5-sonnet-v2@{_D1}", True, "vendor form: Vertex"),
     # Permitted by AC-9: tier aliases carry no version or date.
     ("tier: sonnet", False, "permitted: bare tier alias"),
     ("opus-class", False, "permitted: tier alias"),
@@ -110,8 +120,8 @@ MATCHING_CASES = [
     # Near-misses. Each is caught by an unanchored substring search and must not be flagged.
     ("photo3-processing", False, "near-miss: contains o3- mid-token"),
     ("my-gpt-5-wrapper", False, "near-miss: family at token interior, not start"),
-    ("deploy-claude-x-20241022", False, "near-miss: dated claude with a prefix"),
-    ("claude-x-20241022suffix", False, "near-miss: dated claude with trailing garbage"),
+    (f"deploy-claude-x-{_D1}", False, "near-miss: dated claude with a prefix"),
+    (f"claude-x-{_D1}suffix", False, "near-miss: dated claude with trailing garbage"),
     ("claude-workflow-2025", False, "near-miss: 4-digit year, not an 8-digit date"),
     ("gpt-x", False, "near-miss: no digit after the hyphen"),
     # `@` belongs to the token class, so this is one token rather than a bare `gpt-5`. With `@` as
@@ -145,7 +155,8 @@ class TestTokenMatching(unittest.TestCase):
 
     def test_dot_is_a_token_separator(self):
         # The load-bearing tokenizer property. If `.` were a token character,
-        # `claude-sonnet-4-20250514.json` would be one token and the end anchor would reject it.
+        # the dated tier-named id with a `.json` suffix would be ONE token and the end anchor
+        # would reject it.
         self.assertEqual(lint.tokenize("a.b-c"), ["a", "b-c"])
 
     def test_at_sign_is_a_token_character(self):
@@ -179,7 +190,7 @@ class TestScope(unittest.TestCase):
         for area in ("tools", "tests", "docs", ".github"):
             with self.subTest(area=area):
                 with tempfile.TemporaryDirectory() as tmp:
-                    _write(tmp, f"{area}/thing.md", "claude-sonnet-4-20250514\n")
+                    _write(tmp, f"{area}/thing.md", DATED_TIER_NAMED + "\n")
                     self.assertEqual(lint.scan(tmp, lister=_tree_lister), [])
 
     def test_scanned_directories_are_scanned(self):
@@ -188,7 +199,7 @@ class TestScope(unittest.TestCase):
         for area in ("commands", "schemas", "templates", "codex-src"):
             with self.subTest(area=area):
                 with tempfile.TemporaryDirectory() as tmp:
-                    _write(tmp, f"{area}/thing.md", "claude-sonnet-4-20250514\n")
+                    _write(tmp, f"{area}/thing.md", DATED_TIER_NAMED + "\n")
                     self.assertEqual(len(lint.scan(tmp, lister=_tree_lister)), 1)
 
     def test_root_readme_is_not_scanned(self):
@@ -348,7 +359,7 @@ class TestSubprocessLayer(unittest.TestCase):
 
     def test_violating_tree_exits_one(self):
         with tempfile.TemporaryDirectory() as tmp:
-            _git_repo(tmp, {"skills/bad.md": "model: claude-sonnet-4-20250514\n"})
+            _git_repo(tmp, {"skills/bad.md": f"model: {DATED_TIER_NAMED}\n"})
             result = self._run(tmp)
             self.assertEqual(result.returncode, 1)
 

@@ -31,11 +31,11 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      -   uses: actions/checkout@v4
-          with:
-            ref: auditor-data
-            path: _data
-            persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: auditor-data
+          path: _data
+          persist-credentials: false
       - run: |
           set -euo pipefail
           YEAR="$(date -u +%Y)"

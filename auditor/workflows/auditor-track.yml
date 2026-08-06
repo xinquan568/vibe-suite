@@ -1,12 +1,18 @@
 # ported from the nlpm auditor at capability parity
 # auditor-track — every 4 hours, refresh PR snapshots for contributed repos,
-# classify outcomes (merged / open / cla_blocked / applied_separately /
-# rejected), promote contributed to tracked exactly once, flag case-study
-# candidates (label plus an explicit dispatch, because label events made with
-# the default token never trigger other workflows), and emit finding_outcome
-# events once per transition, recomputed against the prior registry snapshot.
-# Comment bodies are capped at 4000 characters when snapshotted because a
-# downstream workflow feeds them to a classifier. No model.
+# recover fingerprints and rule ids from the sentinel-bounded metadata block at
+# the tail of each PR body (auditor/SCHEMAS.md section 9), classify outcomes
+# (merged / open / cla_blocked / applied_separately / rejected), promote
+# contributed to tracked exactly once, scan PR comments and upstream issues for
+# rule adoption, flag case-study candidates (label plus an explicit dispatch,
+# because label events made with the default token never trigger other
+# workflows), and emit finding_outcome events once per transition — plus a
+# stale_90d variant emitted at most once per PR, held by a sticky registry flag
+# — all recomputed against the prior registry snapshot. Comment bodies are
+# capped at 4000 characters when snapshotted and the snapshot hash is computed
+# over the CAPPED payload, because a downstream workflow feeds them to a
+# classifier. The run lands its commits through a PR, never a direct push.
+# No model.
 name: auditor-track
 on:
   schedule:
@@ -16,6 +22,7 @@ permissions:
   contents: write
   issues: write
   actions: write
+  pull-requests: write
 concurrency:
   group: auditor-track
   cancel-in-progress: false
@@ -42,37 +49,69 @@ jobs:
       - name: Refresh PR snapshots from live targets
         run: |
           # Fail-soft per PR — a fetch error skips that PR with a politeness
-          # delay rather than failing the run. Merging preserves any
-          # backfill-provenance fields already on the record (fingerprints and
-          # rule ids are never wiped by a snapshot refresh).
+          # delay rather than failing the run. The PR body carries the
+          # sentinel-bounded JSON metadata block of SCHEMAS.md section 9 as its
+          # LAST element; the tail-most block wins, malformed JSON degrades to
+          # an empty object, and a body with no block at all leaves whatever
+          # fingerprints and rule ids the record already holds untouched, so a
+          # snapshot refresh never wipes backfilled provenance.
           set -euo pipefail
           [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
           while IFS="$(printf '\t')" read -r repo pr; do
             [ -n "$repo" ] || continue
-            SNAP="$(gh pr view "$pr" --repo "$repo" --json state,mergedAt,closedAt,updatedAt,comments,statusCheckRollup 2> /dev/null || true)"
+            SNAP="$(gh pr view "$pr" --repo "$repo" --json state,mergedAt,closedAt,updatedAt,body,comments,statusCheckRollup 2> /dev/null || true)"
             if [ -z "$SNAP" ]; then
               sleep 1
               continue
             fi
             NEXT="$REGISTRY.next"
             jq --arg r "$repo" --arg p "$pr" --argjson s "$SNAP" \
-              '.repos[$r].prs[$p] = ((.repos[$r].prs[$p] // {number: ($p | tonumber), outcome: null, fingerprints: [], rule_ids: []}) + {state: ($s.state // ""), mergedAt: ($s.mergedAt // null), closedAt: ($s.closedAt // null), updatedAt: ($s.updatedAt // null), statusCheckRollup: ($s.statusCheckRollup // []), comments: [(($s.comments // [])[]) | {author: ((.author.login) // ""), authorAssociation: (.authorAssociation // ""), body: ((.body // "")[0:4000])}]})' \
+              '([($s.body // "") | match("<!--\\s*vibe-suite-auditor-meta-begin\\s*(\\{[\\s\\S]*?\\})\\s*vibe-suite-auditor-meta-end\\s*-->"; "g")] | last) as $m | (if $m == null then {} else (try (($m.captures[0].string) | fromjson) catch {}) end) as $meta | [($meta.findings // [])[] | .fingerprint | select(. != null)] as $fps | [($meta.findings // [])[] | .rule_id | select(. != null)] as $rids | ((.repos[$r].prs[$p]) // {number: ($p | tonumber), outcome: null, fingerprints: [], rule_ids: [], stale_90d_emitted: false}) as $prior | .repos[$r].prs[$p] = ($prior + {state: ($s.state // ""), mergedAt: ($s.mergedAt // null), closedAt: ($s.closedAt // null), updatedAt: ($s.updatedAt // null), statusCheckRollup: ($s.statusCheckRollup // []), comments: [(($s.comments // [])[]) | {author: ((.author.login) // ""), authorAssociation: (.authorAssociation // ""), body: ((.body // "")[0:4000])}], fingerprints: (if ($fps | length) > 0 then $fps else ($prior.fingerprints // []) end), rule_ids: (if ($rids | length) > 0 then $rids else ($prior.rule_ids // []) end)})' \
               "$REGISTRY" > "$NEXT" && mv "$NEXT" "$REGISTRY"
             sleep 1
           done < <(jq -r '.repos | to_entries[] | select(.value.status == "contributed" or .value.status == "tracked" or .value.status == "complete") | .key as $r | (.value.pipeline_prs // [])[] | [$r, (. | tostring)] | @tsv' "$REGISTRY")
           echo "snapshots refreshed"
       - run: |
-          # Classify outcomes, promote one-shot, flag case-study candidates,
-          # and emit finding_outcome events exactly once per transition. The
-          # applied-separately phrase families are case-insensitive and kept
-          # regex-only (no shell-interpolatable metacharacters).
+          # Classify outcomes, promote one-shot, record rule adoption, flag
+          # case-study candidates, snapshot rejection threads, and emit
+          # finding_outcome events exactly once per transition. The
+          # applied-separately and rule-adoption phrase families are
+          # case-insensitive and kept regex-only (no shell-interpolatable
+          # metacharacters). Every appended record carries the SCHEMAS.md
+          # section 7 envelope; the join payload lives under `data`.
           # stage-logic:track
           set -euo pipefail
           TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
+          RUN_ID="${GITHUB_RUN_ID:-local}"
+          RUN_NUMBER="${GITHUB_RUN_NUMBER:-0}"
+          case "$RUN_NUMBER" in *[!0-9]*|"") RUN_NUMBER=0 ;; esac
+          LEDGERS="$DATA_DIR/ledgers"
+          mkdir -p "$LEDGERS"
+          DISAGREE="$LEDGERS/disagreements.jsonl"
+          [ -f "$DISAGREE" ] || : > "$DISAGREE"
+          SHATOOL="shasum -a 256"
+          if command -v sha256sum > /dev/null 2>&1; then
+            SHATOOL="sha256sum"
+          fi
+          STALE_CUTOFF=$(( $(date -u +%s) - 7776000 ))
           APPLIED_RE='closed in favor of|consolidated fix|already (landed|resolved|fixed)|resolved on main|fixed on main|applied separately|superseded by'
+          ADOPTION_RE='hardening pr|backfill|backfilling|adopted (the|this|your) rule|rolled out the rule|changelog.*(audit|auditor)'
+          # Rule-adoption scan, source 2 of 2 — upstream issues on the target
+          # whose titles name this project. Fail-soft: an unreachable target
+          # contributes no signal instead of failing the run. Source 1 is the
+          # PR comment thread, matched inside the registry pass below.
+          ADOPT_UPSTREAM='[]'
+          while IFS= read -r repo; do
+            [ -n "$repo" ] || continue
+            ISSUES="$(gh issue list --repo "$repo" --state all --search "vibe-suite in:title" --limit 50 --json title,body 2> /dev/null || true)"
+            if [ -n "$ISSUES" ] && printf '%s' "$ISSUES" | jq -e --arg pat "$ADOPTION_RE" '[(.[]? | ((.title // "") + " " + (.body // ""))) | select(test($pat; "i"))] | length > 0' > /dev/null 2>&1; then
+              ADOPT_UPSTREAM="$(printf '%s' "$ADOPT_UPSTREAM" | jq -c --arg r "$repo" '. + [$r]')"
+            fi
+            sleep 1
+          done < <(jq -r '.repos | to_entries[] | select(.value.status == "contributed" or .value.status == "tracked" or .value.status == "complete") | .key' "$REGISTRY")
           NEXT="$REGISTRY.next"
-          jq --arg pat "$APPLIED_RE" '
+          jq --arg pat "$APPLIED_RE" --arg adopt "$ADOPTION_RE" --argjson upstream "$ADOPT_UPSTREAM" --argjson cutoff "$STALE_CUTOFF" '
             .repos |= with_entries(
               if ((.value.status // "") == "contributed" or (.value.status // "") == "tracked" or (.value.status // "") == "complete")
               then .value.prs = ((.value.prs // {}) | with_entries(
@@ -84,8 +123,19 @@ jobs:
                   elif (.value.state // "") == "CLOSED" then
                     (if ([(.value.comments // [])[] | select((((.author // "") | test("\\[bot\\]$")) | not)) | select(((.body // "") | test($pat; "i")))] | length) > 0
                      then "applied_separately" else "rejected" end)
-                  else (.value.outcome // null) end)})))
+                  else (.value.outcome // null) end)})
+                | .value = (.value + {stale_90d_emitted: (
+                  if (((.value.stale_90d_emitted // false)) | not) and ((.value.outcome // "") == "open")
+                  then ((try ((.value.updatedAt // "") | fromdateiso8601) catch null) as $u | ($u != null) and ($u <= $cutoff))
+                  else ((.value.stale_90d_emitted // false)) end)})))
               else . end)
+            | .repos |= with_entries(
+                .key as $k
+                | if ((.value.status // "") == "contributed" or (.value.status // "") == "tracked" or (.value.status // "") == "complete")
+                then .value.rule_adopted = (((.value.rule_adopted // false))
+                  or (([(.value.prs // {})[] | (.comments // [])[] | select((((.author // "") | test("\\[bot\\]$")) | not)) | select(((.body // "") | test($adopt; "i")))] | length) > 0)
+                  or (($upstream | index($k)) != null))
+                else . end)
             | .repos |= with_entries(
                 if ((.value.status // "") == "contributed")
                    and (([(.value.prs // {})[] | select(.outcome == "open" or .outcome == "cla_blocked")] | length) == 0)
@@ -95,14 +145,40 @@ jobs:
                 if (([(.value.prs // {})[] | select(.outcome == "merged" or .outcome == "applied_separately")] | length) > 0)
                 then .value.case_study_candidate = true else . end)
           ' "$REGISTRY" > "$NEXT"
-          jq -c --arg t "$TS" --slurpfile old "$REGISTRY" '
+          jq -c --arg t "$TS" --arg rid "$RUN_ID" --argjson rnum "$RUN_NUMBER" --slurpfile old "$REGISTRY" '
+            ($old[0].repos // {}) as $o
+            | .repos | to_entries[] | .key as $repo
+            | (.value.prs // {}) | to_entries[] | .key as $pk | .value as $pr
+            | (($o[$repo].prs[$pk].outcome) // null) as $prior
+            | (($o[$repo].prs[$pk].stale_90d_emitted) // false) as $prior_stale
+            | (if ($pr.outcome // "") == "merged" then "merged"
+               elif ($pr.outcome // "") == "open" then "open"
+               elif ($pr.outcome // "") == "cla_blocked" then "cla_blocked"
+               elif (($pr.outcome // "") == "rejected") or (($pr.outcome // "") == "applied_separately") then "closed_unmerged"
+               else null end) as $state
+            | {repo: $repo, pr: ($pk | tonumber), fingerprints: ($pr.fingerprints // []), rule_ids: ($pr.rule_ids // [])} as $join
+            | [ (if (($pr.outcome // null) != null) and ($pr.outcome != $prior)
+                 then ($join + {pr_state: $state, outcome: $pr.outcome, prior: $prior}) else empty end),
+                (if (($pr.stale_90d_emitted // false) == true) and ($prior_stale != true)
+                 then ($join + {pr_state: "stale_90d", outcome: ($pr.outcome // null), prior: $prior}) else empty end) ]
+            | .[]
+            | {timestamp: $t, workflow: "auditor-track", event: "finding_outcome", run_id: $rid, run_number: $rnum, data: .}
+          ' "$NEXT" >> "$EVENT_LOG"
+          jq -r --slurpfile old "$REGISTRY" '
             ($old[0].repos // {}) as $o
             | .repos | to_entries[] | .key as $repo
             | (.value.prs // {}) | to_entries[]
-            | (($o[$repo].prs[.key].outcome) // null) as $prior
-            | select(((.value.outcome // null) != null) and (.value.outcome != $prior))
-            | {event: "finding_outcome", timestamp: $t, repo: $repo, pr: (.key | tonumber), outcome: .value.outcome, prior: $prior, fingerprints: (.value.fingerprints // []), rule_ids: (.value.rule_ids // [])}
-          ' "$NEXT" >> "$EVENT_LOG"
+            | select((.value.outcome == "rejected") or (.value.outcome == "applied_separately"))
+            | select((($o[$repo].prs[.key].outcome) // null) != .value.outcome)
+            | [$repo, .key] | @tsv
+          ' "$NEXT" | while IFS="$(printf '\t')" read -r repo pr; do
+            [ -n "$repo" ] || continue
+            PRREC="$(jq -c --arg r "$repo" --arg p "$pr" '.repos[$r].prs[$p] // {}' "$NEXT")"
+            CAPPED="$(printf '%s' "$PRREC" | jq -c '[((.comments // [])[]) | {author: (.author // ""), authorAssociation: (.authorAssociation // ""), body: ((.body // "")[0:4000])}]')"
+            HASH="sha256:$(printf '%s' "$CAPPED" | $SHATOOL | awk '{print $1}')"
+            jq -cn --arg t "$TS" --arg rid "$RUN_ID" --argjson rnum "$RUN_NUMBER" --arg r "$repo" --argjson p "$pr" --arg h "$HASH" --argjson c "$CAPPED" --argjson rec "$PRREC" \
+              '{timestamp: $t, workflow: "auditor-track", event: "pr_comments_snapshot", run_id: $rid, run_number: $rnum, data: {repo: $r, pr: $p, pr_state: "closed_unmerged", comments_hash: $h, fingerprints: ($rec.fingerprints // []), rule_ids: ($rec.rule_ids // []), comments: $c}}' >> "$DISAGREE"
+          done
           jq -r --slurpfile old "$REGISTRY" '
             ($old[0].repos // {}) as $o
             | .repos | to_entries[]
@@ -125,7 +201,7 @@ jobs:
           if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
             bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
           else
-            echo "REFUSE:helper-missing-until-E8.3"
+            echo "REFUSE:guard-helper-missing-until-E8.3"
             exit 1
           fi
           git add registry ledgers
@@ -136,10 +212,15 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-track record PR outcomes and promotions"
-          # deferred:E8.3 — retrying push helper lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
+          # Track never pushes straight at auditor-data: its registry rewrites
+          # race the other stages, so the run's commits go up on a branch and
+          # land through a PR the helper opens.
+          # deferred:E8.3 — the commit-via-PR helper lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/commit-via-pr.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/commit-via-pr.sh" --base auditor-data --branch "auditor-track-${GITHUB_RUN_ID:-local}"
           else
-            echo "REFUSE:helper-missing-until-E8.3"
+            echo "REFUSE:commit-via-pr-helper-missing-until-E8.3"
             exit 1
           fi
+        env:
+          PAT_SECRET: ${{ secrets.PAT_TOKEN }}

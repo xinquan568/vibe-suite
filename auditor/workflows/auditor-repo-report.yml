@@ -40,36 +40,103 @@ jobs:
             persist-credentials: false
       - name: Render per-repo reports
         run: |
-          # All-mode silently skips registry entries lacking a markdown audit
-          # and never fails on a single bad render; single-repo mode is strict.
+          # All-mode silently skips registry entries lacking a markdown audit and
+          # never fails on a single bad render; single-repo mode is strict. Both
+          # ledgers are read through the SCHEMAS section-7 envelope (payload under
+          # `.data`), and the backfill event is appended in that same envelope.
           # logic:repo-report
           set -euo pipefail
           TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           REPO="${REPO:-all}"
+          [ -n "$REPO" ] || REPO="all"
           case "$REPO" in
             all) ;;
             */*) ;;
             *) echo "REFUSE:invalid-repo-input"; exit 2 ;;
           esac
           [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
+          RUN_ID="${GITHUB_RUN_ID:-local}"
+          RUN_NUMBER="${GITHUB_RUN_NUMBER:-0}"
+          case "$RUN_NUMBER" in
+            ''|*[!0-9]*) RUN_NUMBER=0 ;;
+          esac
           REPORTS="$DATA_DIR/reports"
           AUDITS="$DATA_DIR/audits"
+          FINDING_LOG="$DATA_DIR/ledgers/findings.jsonl"
+          VOCAB_LOG="$DATA_DIR/ledgers/vocab-advisories.jsonl"
           mkdir -p "$REPORTS"
           RENDERED=0
           FAILED=0
+          for_repo() {
+            [ -f "$1" ] || return 0
+            jq -c --arg r "$2" 'select(type == "object") | select((.data.repo // "") == $r)' "$1" 2> /dev/null || true
+          }
+          rows() { for_repo "$1" "$2" | jq -s -r "$3" 2> /dev/null || true; }
           render_one() {
-            slug="$(printf '%s' "$1" | tr '/' '-')"
-            if [ ! -f "$AUDITS/$slug.md" ]; then
-              return 1
-            fi
+            repo="$1"
+            slug="$(printf '%s' "$repo" | tr '/' '-')"
+            [ -f "$AUDITS/$slug.md" ] || return 1
+            repo_html="$(printf '%s' "$repo" | jq -Rr '@html')"
+            n_find="$(for_repo "$FINDING_LOG" "$repo" | wc -l | tr -d ' ')"
+            n_adv="$(for_repo "$VOCAB_LOG" "$repo" | wc -l | tr -d ' ')"
+            score="$(jq -r --arg r "$repo" '((.repos[$r].score) // "n/a") | tostring | @html' "$REGISTRY")"
+            status="$(jq -r --arg r "$repo" '((.repos[$r].status) // "unknown") | tostring | @html' "$REGISTRY")"
+            # each finding row carries its own in-page anchor; the rule index below
+            # links to the first row of each rule, so every anchor resolves locally
+            f_rows="$(rows "$FINDING_LOG" "$repo" '[.[] | .data] | to_entries | .[] | "<tr id=\"finding-" + (.key | tostring) + "\"><td>" + ((.value.rule_id // "UNCLASSIFIED") | tostring | @html) + "</td><td>" + ((.value.file // "-") | tostring | @html) + "</td><td>" + ((.value.line // "-") | tostring | @html) + "</td><td>" + ((.value.severity // "info") | tostring | @html) + "</td><td>" + ((.value.confidence // "medium") | tostring | @html) + "</td></tr>"')"
+            [ -n "$f_rows" ] || f_rows='<tr><td colspan="5">no findings recorded for this repo</td></tr>'
+            r_rows="$(rows "$FINDING_LOG" "$repo" '[.[] | .data] | to_entries | group_by(.value.rule_id // "UNCLASSIFIED") | map({r: (.[0].value.rule_id // "UNCLASSIFIED"), n: length, f: (.[0].key)}) | sort_by([(0 - .n), .r])[] | "<tr><td><a href=\"#finding-" + (.f | tostring) + "\">" + (.r | tostring | @html) + "</a></td><td>" + (.n | tostring) + "</td></tr>"')"
+            [ -n "$r_rows" ] || r_rows='<tr><td colspan="2">no findings recorded for this repo</td></tr>'
+            a_rows="$(rows "$VOCAB_LOG" "$repo" '[.[] | .data] | .[] | "<tr><td>" + ((.disposition // "unknown") | tostring | @html) + "</td><td>" + (((.terms // []) | join(", ")) | @html) + "</td><td>" + ((.confidence // "medium") | tostring | @html) + "</td><td>" + ((.suggested_canonical // "-") | tostring | @html) + "</td><td>" + ((.files_affected // 0) | tostring) + "</td></tr>"')"
+            [ -n "$a_rows" ] || a_rows='<tr><td colspan="5">no vocab advisories for this repo</td></tr>'
+            p_rows="$(jq -r --arg r "$repo" '((.repos[$r].prs) // {}) | to_entries | sort_by(.key)[] | .value as $p | "<tr><td>" + ((($p.number) // .key) | tostring | @html) + "</td><td>" + ((($p.state) // "unknown") | tostring | @html) + "</td><td>" + ((($p.outcome) // "pending") | tostring | @html) + "</td><td>" + ((($p.mergedAt) // ($p.closedAt) // ($p.updatedAt) // "-") | tostring | @html) + "</td><td>" + ((($p.rule_ids) // []) | join(", ") | @html) + "</td></tr>"' "$REGISTRY")"
+            [ -n "$p_rows" ] || p_rows='<tr><td colspan="5">no pipeline PRs for this repo</td></tr>'
             {
+              printf '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+              printf '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+              printf '<title>audit report %s</title>\n' "$repo_html"
+              printf '<style>\n'
+              printf 'body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 2rem auto; max-width: 62rem; padding: 0 1rem; color: #17181c; }\n'
+              printf 'table { border-collapse: collapse; width: 100%%; margin: 0 0 2rem; font-size: 0.95rem; }\n'
+              printf 'th, td { border: 1px solid #d8dae0; padding: 0.35rem 0.6rem; text-align: left; }\n'
+              printf 'th { background: #f2f3f7; }\n'
+              printf 'nav a { margin-right: 1rem; }\n'
+              printf '</style>\n</head>\n<body>\n'
               printf '<!-- vibe-suite auditor per-repo report; self-contained, file:// openable -->\n'
-              printf '<h1>audit report %s</h1>\n' "$1"
+              printf '<h1 id="top">audit report %s</h1>\n' "$repo_html"
               printf '<p>rendered %s from the committed audit and the global logs</p>\n' "$TS"
+              printf '<nav><a href="#summary">summary</a><a href="#rules">rules</a><a href="#findings">findings</a><a href="#prs">pull requests</a><a href="#advisories">advisories</a></nav>\n'
+              printf '<h2 id="summary">summary</h2>\n'
+              printf '<ul>\n'
+              printf '<li>score %s</li>\n' "$score"
+              printf '<li>status %s</li>\n' "$status"
+              printf '<li>findings %s</li>\n' "$n_find"
+              printf '<li>vocab advisories %s</li>\n' "$n_adv"
+              printf '<li><a href="../audits/%s.md">markdown audit</a></li>\n' "$slug"
+              printf '<li><a href="dashboard.html">cross-repo dashboard</a></li>\n'
+              printf '</ul>\n'
+              printf '<h2 id="rules">rules hit</h2>\n'
+              printf '<table>\n<tr><th>rule</th><th>findings</th></tr>\n'
+              printf '%s\n' "$r_rows"
+              printf '</table>\n'
+              printf '<h2 id="findings">findings</h2>\n'
+              printf '<table>\n<tr><th>rule_id</th><th>file</th><th>line</th><th>severity</th><th>confidence</th></tr>\n'
+              printf '%s\n' "$f_rows"
+              printf '</table>\n'
+              printf '<h2 id="prs">pull requests</h2>\n'
+              printf '<table>\n<tr><th>number</th><th>state</th><th>outcome</th><th>last activity</th><th>rules</th></tr>\n'
+              printf '%s\n' "$p_rows"
+              printf '</table>\n'
+              printf '<h2 id="advisories">vocab advisories</h2>\n'
+              printf '<table>\n<tr><th>disposition</th><th>terms</th><th>confidence</th><th>suggested canonical</th><th>files</th></tr>\n'
+              printf '%s\n' "$a_rows"
+              printf '</table>\n'
+              printf '<p><a href="#top">back to top</a></p>\n'
+              printf '</body>\n</html>\n'
             } > "$REPORTS/$slug.html"
           }
           if [ "$REPO" = "all" ]; then
-            for full in $(jq -r '.repos | keys[]' "$REGISTRY"); do
+            for full in $(jq -r '(.repos // {}) | keys[]' "$REGISTRY"); do
               if render_one "$full"; then
                 RENDERED=$((RENDERED+1))
               else
@@ -87,8 +154,10 @@ jobs:
               exit 1
             fi
           fi
-          jq -cn --arg t "$TS" --arg s "$REPO" --argjson r "$RENDERED" --argjson f "$FAILED" \
-            '{event: "repo_report_backfill", timestamp: $t, scope: $s, rendered: $r, failed: $f}' >> "$EVENT_LOG"
+          jq -cn --arg t "$TS" --arg w "auditor-repo-report" --arg i "$RUN_ID" --arg s "$REPO" \
+            --argjson n "$RUN_NUMBER" --argjson r "$RENDERED" --argjson f "$FAILED" \
+            '{timestamp: $t, workflow: $w, event: "repo_report_backfill", run_id: $i, run_number: $n, data:
+              {scope: $s, rendered: $r, failed: $f}}' >> "$EVENT_LOG"
           echo "PASS"
           # /logic
       - run: |

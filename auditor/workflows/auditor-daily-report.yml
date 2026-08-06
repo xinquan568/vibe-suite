@@ -31,11 +31,11 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      -   uses: actions/checkout@v4
-          with:
-            ref: auditor-data
-            path: _data
-            persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: auditor-data
+          path: _data
+          persist-credentials: false
       - name: Generate the daily report
         run: |
           # Any per-label count failure defaults that count to 0; the recent
@@ -90,8 +90,12 @@ jobs:
             printf '\n## Activity\n\n'
             printf 'Issues updated in the last 24 hours: %s\n' "$RECENT"
           } > "$OUT"
-          jq -cn --arg t "$TS" --arg p "reports/daily-$DAY.md" \
-            '{event: "report_generated", timestamp: $t, report: $p}' >> "$EVENT_LOG"
+          # §7 envelope: the record's own fields live under `data`, never at top level
+          RUN_ID="${GITHUB_RUN_ID:-0}"
+          RUN_NUMBER="${GITHUB_RUN_NUMBER:-0}"
+          case "$RUN_NUMBER" in ''|*[!0-9]*) RUN_NUMBER=0 ;; esac
+          jq -cn --arg t "$TS" --arg ri "$RUN_ID" --argjson rn "$RUN_NUMBER" --arg p "reports/daily-$DAY.md" \
+            '{timestamp: $t, workflow: "auditor-daily-report", event: "report_generated", run_id: $ri, run_number: $rn, data: {report: $p}}' >> "$EVENT_LOG"
           echo "PASS"
           # /stage-logic
       - run: |

@@ -84,6 +84,53 @@ class SeededFailures(unittest.TestCase):
         self.assertEqual(seeded.returncode, 1, seeded.stdout + seeded.stderr)
         self.assertIn("Agents", seeded.stdout)
 
+    def test_score_discovery_reaches_past_the_manifest_arrays(self):
+        """The step-8 finding: shared partials, manifests, hooks and CLAUDE.md are scored.
+
+        These classes cannot be demonstrated by degradation — their rubric tables are short
+        enough that a stripped file still clears 80 — so coverage is asserted directly on the
+        discovered record set, which is the claim that actually matters.
+        """
+        report = json.loads(self.run_in(
+            sys.executable, "tools/release-score.py", "--threshold", "80", "--json").stdout)
+        self.assertGreaterEqual(report["artifacts"], 70)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "rs", self.root / "tools" / "release-score.py")
+        rs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rs)
+        discovered = {rel: kind for kind, rel in rs.discover(self.root)}
+        for rel, kind in ((".claude-plugin/plugin.json", "manifest"),
+                          (".claude-plugin/marketplace.json", "manifest"),
+                          ("commands/shared/fallback.md", "shared-partial"),
+                          ("hooks/hooks.json", "settings"),
+                          ("CLAUDE.md", "claude-md")):
+            with self.subTest(artifact=rel):
+                self.assertIn(rel, discovered, f"{rel} is not discovered")
+                self.assertEqual(discovered[rel], kind,
+                                 f"{rel} scored under the wrong rubric")
+
+    def test_score_fails_closed_on_malformed_engine_output(self):
+        """An engine that cannot be parsed must not read as a pass."""
+        engine = self.root / "scripts" / "score_engine.py"
+        engine.write_text("import sys\nsys.stdout.write('not json')\n", encoding="utf-8")
+        seeded = self.run_in(sys.executable, "tools/release-score.py", "--threshold", "80")
+        self.assertNotEqual(seeded.returncode, 0, seeded.stdout + seeded.stderr)
+
+    def test_inventory_fails_on_an_unclassified_new_skill(self):
+        """A skill in neither declared set is a reviewed claim owed, not a silent count."""
+        new = self.root / "skills" / "brand-new-thing"
+        new.mkdir()
+        (new / "SKILL.md").write_text("---\nname: brand-new-thing\ndescription: x\n---\n\n# x\n",
+                                      encoding="utf-8")
+        manifest = self.root / ".claude-plugin" / "plugin.json"
+        data = json.loads(manifest.read_text())
+        data["skills"].append("./skills/brand-new-thing")
+        manifest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        seeded = self.run_in(sys.executable, "tools/inventory-report.py", "--check")
+        self.assertEqual(seeded.returncode, 1, seeded.stdout + seeded.stderr)
+        self.assertIn("Workflow skills", seeded.stdout)
+
     def test_write_discipline_fails_on_a_seeded_mutator(self):
         """The acceptance's named case, planted in a TOP-LEVEL shipped module."""
         victim = self.root / "scripts" / "codex-runner.mjs"
@@ -126,6 +173,13 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn("pull_request:", self.text)
         self.assertIn("workflow_dispatch:", self.text)
         self.assertIn('branches: ["release/**"]', self.text)
+
+    def test_paths_filter_covers_every_judged_input(self):
+        """A PR touching a gate input must not bypass the gate (the step-8 finding)."""
+        for path in ('"auditor/**"', '"docs/disposition.yaml"', '"schemas/**"',
+                     '"templates/**"', '"PRIVACY.md"', '".vibe-suite.md"',
+                     '".mcp.json"', '".lsp.json"', '"settings.json"'):
+            self.assertIn(path, self.text, path)
 
     def test_module_discovery_is_anti_vacuous(self):
         self.assertIn("would pass vacuously", self.text)

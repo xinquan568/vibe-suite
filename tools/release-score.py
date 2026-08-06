@@ -33,20 +33,29 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 ENGINE = REPO_ROOT / "scripts" / "score_engine.py"
 
-#: (glob, engine type, exclude-prefix) per discover.md's Category A + the Category B root file.
+#: `commands/shared/discover.md`'s Category A rows plus Category B's root instructions file,
+#: each mapped to the engine's OWN artifact type (its TYPE_TABLE_ROWS vocabulary) — a shared
+#: partial is `shared-partial`, not `command`, and the root instructions file is `claude-md`,
+#: not `memory`; scoring them under the wrong type applies the wrong rubric table.
 PATTERNS = [
-    ("commands/*.md", "command", None),
-    ("commands/shared/*.md", "command", None),
-    ("agents/*.md", "agent", None),
-    ("skills/*/SKILL.md", "skill", None),
-    ("CLAUDE.md", "memory", None),
+    (".claude-plugin/plugin.json", "manifest"),
+    (".claude-plugin/marketplace.json", "manifest"),
+    ("commands/*.md", "command"),
+    ("commands/shared/*.md", "shared-partial"),
+    ("agents/*.md", "agent"),
+    ("skills/*/SKILL.md", "skill"),
+    ("hooks/*.json", "settings"),
+    (".mcp.json", "mcp-config"),
+    (".lsp.json", "lsp-config"),
+    ("settings.json", "settings"),
+    ("CLAUDE.md", "claude-md"),
 ]
 
 
 def discover(root):
     """Every scored artifact, as (type, relative-path), sorted and deduplicated."""
     found = {}
-    for pattern, kind, _ in PATTERNS:
+    for pattern, kind in PATTERNS:
         for path in sorted(root.glob(pattern)):
             if not path.is_file():
                 continue
@@ -80,13 +89,18 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     root = Path(args.root).resolve()
+    # The repository's own config supplies the engine's non-threshold settings; the Strict
+    # comparison below is still this module's, never inherited.
+    config = args.config
+    if config is None and (root / ".vibe-suite.md").is_file():
+        config = str(root / ".vibe-suite.md")
     records = discover(root)
     if not records:
         print("release-score: no artifacts discovered — the gate would pass vacuously",
               file=sys.stderr)
         return 2
 
-    report = score(root, records, args.config)
+    report = score(root, records, config)
     files = report.get("files")
     if not isinstance(files, list) or not files:
         print("release-score: engine returned no per-file results", file=sys.stderr)

@@ -35,23 +35,22 @@ EXACT, ATLEAST, PENDING_S8, RECONCILED = ("exact", "at-least", "pending-S8", "re
 ROWS = [
     ("Slash commands", 26, ATLEAST,
      lambda r: len([p for p in (r / "commands").glob("*.md")])),
+    # The exact SET, not merely "the three named ones exist": a fourth user-invocable skill
+    # is an inventory change §5.0 does not describe, so it must fail rather than be ignored.
     ("Workflow skills (user-invocable)", 3, EXACT,
-     lambda r: len([n for n in ("issue2pr", "refine-proposal", "runs-stats")
-                    if (r / "skills" / n / "SKILL.md").is_file()])),
+     lambda r: len(_workflow_skills(r)) if _workflow_skills(r) == WORKFLOW_SKILLS else -1),
     ("Agents", 14, EXACT,
      lambda r: len(list((r / "agents").glob("*.md")))),
     ("Knowledge skills", 19, ATLEAST,
-     lambda r: len([d for d in (r / "skills").iterdir()
-                    if d.is_dir() and (d / "SKILL.md").is_file()
-                    and d.name not in ("issue2pr", "refine-proposal", "runs-stats")])),
+     lambda r: len(KNOWLEDGE_SKILLS & {d.name for d in (r / "skills").iterdir()
+                                       if d.is_dir() and (d / "SKILL.md").is_file()})),
     # 8 in §5.0, 6 on disk: `codex-call` was delivered as scripts/codex-runner.mjs and
     # `append-history` as scripts/trend_engine.py (docs/disposition.yaml rows cc-suite:19 and
     # nlpm:16). The row asserts the 6 partials PLUS both reconciliation targets existing, so
     # losing either is still a failure.
     ("Shared partials", 8, RECONCILED,
      lambda r: len(list((r / "commands" / "shared").glob("*.md")))
-     + sum((r / x).is_file() for x in ("scripts/codex-runner.mjs",
-                                       "scripts/trend_engine.py"))),
+     + _reconciled_partials(r)),
     ("Plugin hook registrations", 4, EXACT,
      lambda r: len(json.loads((r / "hooks" / "hooks.json").read_text()).get("hooks", {}))),
     # 8 in §5.0, of which 5 are the site-build tools of F10.3 — stage S8. The 3 shipped ones
@@ -61,11 +60,57 @@ ROWS = [
                     if p.is_file() and p.name != "README.md"])),
     ("Python bin tools (site builders)", 5, PENDING_S8,
      lambda r: len([p for p in (r / "bin").glob("vibe-build-*")])),
+    ("Advisor templates", 6, EXACT,
+     lambda r: len(list((r / "templates" / "advisors").glob("*.md")))),
     ("Auditor-unit workflows", 24, PENDING_S8,
      lambda r: len(list((r / "auditor").rglob("*.yml")))),
     ("Auditor helper scripts", 30, PENDING_S8,
      lambda r: len(list((r / "auditor").rglob("*.py")))),
 ]
+
+
+#: §5.0's two skill kinds. Nothing in a SKILL.md declares which kind it is, so these are
+#: DECLARED sets — reviewed claims, the same discipline KNOWN and MIRROR_EXPECTED use. Their
+#: union must be exactly the registered skills, so a NEW skill of either kind fails until it
+#: is classified here rather than silently joining a count.
+WORKFLOW_SKILLS = {"issue2pr", "refine-proposal", "runs-stats"}
+KNOWLEDGE_SKILLS = {
+    "agent-design", "auditing", "conventions", "conventions-antigravity",
+    "conventions-claude", "conventions-codex", "orchestration", "patterns", "roasting",
+    "rules", "scoring", "security", "testing", "vibe-core", "vocabulary", "writing-agents",
+    "writing-hooks", "writing-plugins", "writing-prompts", "writing-rules", "writing-skills",
+}
+
+
+def _registered_skills(root):
+    manifest = json.loads((root / ".claude-plugin" / "plugin.json").read_text())
+    return {Path(entry).name for entry in manifest.get("skills", [])}
+
+
+def _workflow_skills(root):
+    """The workflow set, but only if the DECLARED partition still covers every skill."""
+    registered = _registered_skills(root)
+    if registered != WORKFLOW_SKILLS | KNOWLEDGE_SKILLS:
+        return {"<unclassified skills: "
+                + ",".join(sorted(registered ^ (WORKFLOW_SKILLS | KNOWLEDGE_SKILLS))) + ">"}
+    return WORKFLOW_SKILLS & {d.name for d in (root / "skills").iterdir()
+                              if d.is_dir() and (d / "SKILL.md").is_file()}
+
+
+def _reconciled_partials(root):
+    """Count the partials §5.0 lists that shipped as scripts — VALIDATED against the ledger.
+
+    A hard-coded pair would be an assumption; docs/disposition.yaml is the ledger of record,
+    so the delivered target is read from it and must exist on disk.
+    """
+    ledger = (root / "docs" / "disposition.yaml").read_text(encoding="utf-8")
+    count = 0
+    for partial, delivered in (("commands/shared/codex-call.md", "scripts/codex-runner.mjs"),
+                               ("commands/shared/append-history.md",
+                                "scripts/trend_engine.py")):
+        if partial in ledger and delivered in ledger and (root / delivered).is_file():
+            count += 1
+    return count
 
 
 def measure(root):

@@ -32,8 +32,17 @@ on:
       - "tests/**"
       - "tools/**"
       - ".vibe-test/**"
+      - "auditor/**"
+      - "docs/disposition.yaml"
+      - "schemas/**"
+      - "templates/**"
       - "README.md"
       - "CLAUDE.md"
+      - "PRIVACY.md"
+      - ".vibe-suite.md"
+      - ".mcp.json"
+      - ".lsp.json"
+      - "settings.json"
       - ".github/workflows/pre-release-quality-gate.yml"
 
 permissions:
@@ -67,6 +76,7 @@ jobs:
 
       # 4/5 — documentation counts match disk, and the §5.0 inventory rules hold.
       - name: doc accuracy and §5.0 inventory
+        shell: bash
         run: |
           set -euo pipefail
           python3 -m unittest tests.test_doc_accuracy
@@ -76,6 +86,7 @@ jobs:
       # runner, not CI's `test` job, so the lint is NOT inherited transitively — hence its own
       # step here. Discovery is null-safe and anti-vacuous: zero modules fails.
       - name: write discipline (Node)
+        shell: bash
         run: |
           set -euo pipefail
           mapfile -d '' -t modules < <(git ls-files -z -- 'scripts/*.mjs' 'scripts/**/*.mjs')

@@ -99,16 +99,25 @@ class SeededFailures(unittest.TestCase):
             "rs", self.root / "tools" / "release-score.py")
         rs = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(rs)
-        discovered = {rel: kind for kind, rel in rs.discover(self.root)}
-        for rel, kind in ((".claude-plugin/plugin.json", "manifest"),
-                          (".claude-plugin/marketplace.json", "manifest"),
-                          ("commands/shared/fallback.md", "shared-partial"),
-                          ("hooks/hooks.json", "settings"),
-                          ("CLAUDE.md", "claude-md")):
+        discovered = {rel: field for field, rel in rs.discover(self.root)}
+        # The record field is a CATEGORY LETTER; the engine resolves it to the artifact type.
+        # Asserting the RESOLVED type is what proves the right rubric table applies — and
+        # asserting it through the engine's own resolver is what stops this module from
+        # re-inventing a type table (the step-8/step-9 defect: hook-config became settings,
+        # marketplace became manifest).
+        engine_spec = importlib.util.spec_from_file_location(
+            "se", self.root / "scripts" / "score_engine.py")
+        engine = importlib.util.module_from_spec(engine_spec)
+        engine_spec.loader.exec_module(engine)
+        for rel, expected in ((".claude-plugin/plugin.json", "manifest"),
+                              (".claude-plugin/marketplace.json", "marketplace"),
+                              ("commands/shared/fallback.md", "shared-partial"),
+                              ("hooks/hooks.json", "hook-config"),
+                              ("CLAUDE.md", "claude-md")):
             with self.subTest(artifact=rel):
                 self.assertIn(rel, discovered, f"{rel} is not discovered")
-                self.assertEqual(discovered[rel], kind,
-                                 f"{rel} scored under the wrong rubric")
+                self.assertEqual(engine.resolve_type(discovered[rel], rel), expected,
+                                 f"{rel} would be scored under the wrong rubric")
 
     def test_score_fails_closed_on_malformed_engine_output(self):
         """An engine that cannot be parsed must not read as a pass."""
@@ -147,11 +156,49 @@ class SeededFailures(unittest.TestCase):
         self.assertIn("scripts/codex-runner.mjs", seeded.stdout)
 
 
+def parse_workflow(text):
+    """A structural read of the workflow — enough YAML for the shapes asserted below.
+
+    The step-8 finding: string containment cannot tell a step's `run:` from the same text in
+    a comment. This walks the `steps:` list and returns [(name, run)], so the contract tests
+    below assert on the actual step bodies. (Stdlib only — no PyYAML in this repo.)
+    """
+    steps, name, run, collecting = [], None, [], False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- name:") or stripped.startswith("- uses:"):
+            if name is not None:
+                steps.append((name, "\n".join(run)))
+            name = stripped.split(":", 1)[1].strip() if stripped.startswith("- name:") else None
+            run, collecting = [], False
+            continue
+        if name is None:
+            continue
+        if stripped.startswith("run:"):
+            collecting = True
+            rest = stripped[4:].strip()
+            if rest and rest != "|":
+                run.append(rest)
+                collecting = False
+            continue
+        if collecting:
+            if stripped.startswith(("- name:", "- uses:")) or (
+                    stripped and not line.startswith(" " * 10) and ":" in stripped
+                    and not stripped.startswith("#")):
+                collecting = False
+                continue
+            run.append(stripped)
+    if name is not None:
+        steps.append((name, "\n".join(run)))
+    return [(n, r) for n, r in steps if n]
+
+
 class WorkflowContract(unittest.TestCase):
     """The workflow must actually run the commands the seeded cases exercised."""
 
     def setUp(self):
         self.text = WORKFLOW.read_text(encoding="utf-8")
+        self.steps = parse_workflow(self.text)
 
     def test_all_five_steps_are_declared(self):
         for name in ("score (Strict 80)", "test — spec-corpus contract",
@@ -160,13 +207,19 @@ class WorkflowContract(unittest.TestCase):
             self.assertIn(f"name: {name}", self.text, name)
 
     def test_each_step_runs_the_checked_command(self):
+        """Asserted on the parsed `run:` bodies, so a comment cannot satisfy this."""
+        bodies = "\n".join(run for _, run in self.steps)
         for command in ("python3 tools/release-score.py --threshold 80",
                         "python3 -m unittest tests.test_vibe_test_specs",
                         "bin/vibe-check . --mirrors",
                         "python3 -m unittest tests.test_doc_accuracy",
                         "python3 tools/inventory-report.py --check",
                         "node tests/node/no-raw-fs-writes.mjs"):
-            self.assertIn(command, self.text, command)
+            self.assertIn(command, bodies, f"no step RUNS: {command}")
+
+    def test_the_parse_sees_five_checking_steps(self):
+        named = [n for n, r in self.steps if r]
+        self.assertEqual(len(named), 5, f"expected 5 running steps, parsed {named}")
 
     def test_the_gate_is_observable_on_pull_requests(self):
         """A release-branch-only trigger could not be demonstrated before merging."""
@@ -176,7 +229,7 @@ class WorkflowContract(unittest.TestCase):
 
     def test_paths_filter_covers_every_judged_input(self):
         """A PR touching a gate input must not bypass the gate (the step-8 finding)."""
-        for path in ('"auditor/**"', '"docs/disposition.yaml"', '"schemas/**"',
+        for path in ('".claude/**"', '"auditor/**"', '"docs/disposition.yaml"', '"schemas/**"',
                      '"templates/**"', '"PRIVACY.md"', '".vibe-suite.md"',
                      '".mcp.json"', '".lsp.json"', '"settings.json"'):
             self.assertIn(path, self.text, path)

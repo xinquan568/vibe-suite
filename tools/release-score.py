@@ -33,22 +33,28 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 ENGINE = REPO_ROOT / "scripts" / "score_engine.py"
 
-#: `commands/shared/discover.md`'s Category A rows plus Category B's root instructions file,
-#: each mapped to the engine's OWN artifact type (its TYPE_TABLE_ROWS vocabulary) — a shared
-#: partial is `shared-partial`, not `command`, and the root instructions file is `claude-md`,
-#: not `memory`; scoring them under the wrong type applies the wrong rubric table.
+#: `commands/shared/discover.md`'s Category A rows plus Category B's project-config rows.
+#:
+#: The record's type field is the CATEGORY LETTER, not an artifact type: the engine's record
+#: contract says a category letter makes it call its own `classify_path`, so classification
+#: stays in the one place that owns it. Duplicating a type table here is how `hook-config`
+#: became `settings` and `marketplace` became `manifest` in the first draft — the engine
+#: knows those types; this module has no business restating them.
 PATTERNS = [
-    (".claude-plugin/plugin.json", "manifest"),
-    (".claude-plugin/marketplace.json", "manifest"),
-    ("commands/*.md", "command"),
-    ("commands/shared/*.md", "shared-partial"),
-    ("agents/*.md", "agent"),
-    ("skills/*/SKILL.md", "skill"),
-    ("hooks/*.json", "settings"),
-    (".mcp.json", "mcp-config"),
-    (".lsp.json", "lsp-config"),
-    ("settings.json", "settings"),
-    ("CLAUDE.md", "claude-md"),
+    (".claude-plugin/plugin.json", "A"),
+    (".claude-plugin/marketplace.json", "A"),
+    ("commands/**/*.md", "A"),
+    ("agents/**/*.md", "A"),
+    ("skills/**/SKILL.md", "A"),
+    ("hooks/**/*.json", "A"),
+    (".mcp.json", "A"),
+    (".lsp.json", "A"),
+    ("settings.json", "A"),
+    ("CLAUDE.md", "B"),
+    (".claude/CLAUDE.md", "B"),
+    (".claude/rules/**/*.md", "B"),
+    (".claude/settings.json", "B"),
+    (".claude/commands/**/*.md", "B"),
 ]
 
 

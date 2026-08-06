@@ -32,6 +32,7 @@ on:
       - "tests/**"
       - "tools/**"
       - ".vibe-test/**"
+      - ".claude/**"
       - "auditor/**"
       - "docs/disposition.yaml"
       - "schemas/**"

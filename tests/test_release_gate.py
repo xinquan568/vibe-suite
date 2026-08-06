@@ -178,7 +178,9 @@ def parse_workflow(text):
             collecting = True
             rest = stripped[4:].strip()
             if rest and rest != "|":
-                run.append(rest)
+                # `run: # cmd` executes nothing — a comment is not a command.
+                if not rest.startswith("#"):
+                    run.append(rest)
                 collecting = False
             continue
         if collecting:
@@ -187,6 +189,8 @@ def parse_workflow(text):
                     and not stripped.startswith("#")):
                 collecting = False
                 continue
+            if stripped.startswith("#"):
+                continue          # a commented line inside a run block executes nothing
             run.append(stripped)
     if name is not None:
         steps.append((name, "\n".join(run)))
@@ -220,6 +224,16 @@ class WorkflowContract(unittest.TestCase):
     def test_the_parse_sees_five_checking_steps(self):
         named = [n for n, r in self.steps if r]
         self.assertEqual(len(named), 5, f"expected 5 running steps, parsed {named}")
+
+    def test_the_parser_does_not_accept_comments_as_commands(self):
+        """A command that only appears in a comment must not satisfy the contract."""
+        fake = ("jobs:\n  j:\n    steps:\n"
+                "      - name: fake inline\n        run: # bin/vibe-check . --mirrors\n"
+                "      - name: fake block\n        run: |\n"
+                "          set -e\n          # python3 tools/inventory-report.py --check\n")
+        bodies = "\n".join(run for _, run in parse_workflow(fake))
+        self.assertNotIn("bin/vibe-check . --mirrors", bodies)
+        self.assertNotIn("python3 tools/inventory-report.py --check", bodies)
 
     def test_the_gate_is_observable_on_pull_requests(self):
         """A release-branch-only trigger could not be demonstrated before merging."""

@@ -92,9 +92,11 @@ branches, or this runbook (anti-pattern rule 6).
 - **Cadence:** rotate every 90 days, and immediately on any suspected exposure or when a holder
   leaves.
 - **Steps:** (1) create the replacement token with the same scope; (2) `gh secret set PAT_TOKEN
-  --repo xinquan568/vibe-suite`; (3) revoke the old token in the issuing account's settings;
-  (4) re-run the E8.7 preflight (or, until it exists, a `track` dry run) to prove the new token
-  works; (5) note the rotation date in the ops log on `auditor-data` (`ledgers/`), not here.
+  --repo xinquan568/vibe-suite`; (3) prove the replacement works — re-run the E8.7 preflight (or,
+  until it exists, a `track` dry run); (4) only after that check succeeds, revoke the old token in
+  the issuing account's settings — until then it remains the rollback credential; (5) note the
+  rotation date in the ops log on `auditor-data` (`ledgers/`), not here. A rotation that revoked
+  first would have no fallback if the replacement turned out invalid or mis-scoped.
 - A wrong-scope token is indistinguishable from a valid one by presence checks; only the preflight
   catches it.
 

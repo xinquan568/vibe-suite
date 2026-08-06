@@ -457,6 +457,55 @@ class SourceConventions(unittest.TestCase):
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_no_raw_fs_writes(self):
+        """vibe-153: the Node write surface routes through scripts/lib/write.mjs.
+
+        The checker is fail-closed by construction — a module is `clean` only if every
+        construct it uses is in the accepted dialect — so a new evasion is a refusal, not a
+        pass. This is the Node counterpart to tests/test_write_discipline.py.
+        """
+        checker = REPO_ROOT / "tests" / "node" / "no-raw-fs-writes.mjs"
+        self.assertTrue(SHIPPED_MJS, "no shipped .mjs found — this check would pass vacuously")
+        result = subprocess.run(["node", str(checker), *[str(p) for p in SHIPPED_MJS]],
+                                capture_output=True, text=True, timeout=120, cwd=REPO_ROOT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        inspected = len([p for p in SHIPPED_MJS
+                         if p.relative_to(REPO_ROOT).as_posix() != "scripts/lib/write.mjs"])
+        self.assertIn(f"{inspected} module(s) clean", result.stdout,
+                      "the checker did not report the full inspected corpus — anti-vacuity")
+        self.assertIn(f"({len(SHIPPED_MJS)} given)", result.stdout)
+
+    def test_no_raw_fs_writes_probe_suite(self):
+        """The checker's own DIRTY/CLEAN probes, run in CI's test job with everything else."""
+        probes = REPO_ROOT / "tests" / "node" / "no-raw-fs-writes.test.mjs"
+        result = subprocess.run(["node", "--test", str(probes)],
+                                capture_output=True, text=True, timeout=180, cwd=REPO_ROOT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_no_raw_fs_writes_catches_a_seeded_violation(self):
+        """The gate must fail on a real import+call, not merely on a bare name.
+
+        A seed of only `writeFile(...)` would be a ReferenceError at runtime and could be
+        caught by a name grep; seeding the STATIC IMPORT as well is what proves the checker
+        is import-aware.
+        """
+        checker = REPO_ROOT / "tests" / "node" / "no-raw-fs-writes.mjs"
+        with tempfile.TemporaryDirectory(prefix="rawfs-seed-") as tmp:
+            seeded = Path(tmp) / "seeded.mjs"
+            seeded.write_text('import { writeFile } from "node:fs/promises";\n'
+                              'await writeFile("p", "x");\n', encoding="utf-8")
+            result = subprocess.run(["node", str(checker), str(seeded)],
+                                    capture_output=True, text=True, timeout=60, cwd=REPO_ROOT)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("raw-fs-write", result.stdout)
+
+    def test_no_raw_fs_writes_known_list_is_empty(self):
+        """KNOWN is a claim surface, not a ratchet: an entry needs a reviewed reason."""
+        source = (REPO_ROOT / "tests" / "node" / "no-raw-fs-writes.mjs").read_text(
+            encoding="utf-8")
+        self.assertIn("export const KNOWN = new Set();", source,
+                      "KNOWN gained an entry — that is a new claim, not a ratchet step")
+
     def test_config_bridge_invokes_python(self):
         """Narrow by design: assert the bridge shells to config.py, not that no parser exists."""
         bridge = REPO_ROOT / "scripts" / "lib" / "config-bridge.mjs"

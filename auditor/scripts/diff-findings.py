@@ -42,6 +42,7 @@ re-running after a transient failure converges instead of accumulating.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -85,6 +86,31 @@ def read_sidecar(path: Path, label: str):
         except json.JSONDecodeError:
             malformed += 1
     return findings, malformed
+
+
+def fingerprint_of(repo, finding):
+    """The finding's fingerprint, computed when the record does not carry one.
+
+    SCHEMAS.md section 4 is explicit: a per-audit sidecar carries NO timestamp, run id, repo,
+    commit sha or fingerprint — the aggregation post-step enriches each line before it reaches
+    `ledgers/findings.jsonl`. This helper is handed those RAW sidecars by
+    auditor-case-study.yml, so requiring a fingerprint meant skipping every row and emitting no
+    events whatsoever on production input, while exiting zero.
+
+    Same digest as compute-fingerprint.sh, trailing newline included.
+    """
+    existing = finding.get("fingerprint")
+    if existing:
+        return str(existing)
+    line = finding.get("line")
+    payload = "|".join((
+        repo,
+        str(finding.get("file") or ""),
+        str(finding.get("rule_id") or ""),
+        str(finding.get("pattern") or ""),
+        "null" if line is None or line is False else str(line),
+    )) + "\n"
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def identity(finding):
@@ -304,8 +330,8 @@ def main(argv=None):
                    "shifted": len(shifted), "introduced": len(introduced),
                    "original_total": len(original), "reaudit_total": len(reaudit)},
         "malformed_lines": {"original": bad_original, "reaudit": bad_reaudit},
-        "fixed": sorted(f.get("fingerprint") for f in fixed if f.get("fingerprint")),
-        "introduced": sorted(f.get("fingerprint") for f in introduced if f.get("fingerprint")),
+        "fixed": sorted(fingerprint_of(args.repo, f) for f in fixed),
+        "introduced": sorted(fingerprint_of(args.repo, f) for f in introduced),
     }
 
     # --- report and summary first; the ledger is append-only and cannot be taken back ----
@@ -336,9 +362,7 @@ def main(argv=None):
 
     pending = []
     for finding in fixed:
-        fingerprint = finding.get("fingerprint")
-        if not fingerprint:
-            continue
+        fingerprint = fingerprint_of(args.repo, finding)
         pr_number = pr_for.get(fingerprint)
         pending.append(("finding_verified", fingerprint, {
             "repo": args.repo,
@@ -351,7 +375,7 @@ def main(argv=None):
             "pr_number": pr_number,
         }))
     for finding in identical:
-        fingerprint = finding.get("fingerprint")
+        fingerprint = fingerprint_of(args.repo, finding)
         if fingerprint:
             pending.append(("finding_verified", fingerprint, {
                 "repo": args.repo, "fingerprint": fingerprint,
@@ -360,7 +384,7 @@ def main(argv=None):
                 "pr_number": pr_for.get(fingerprint),
             }))
     for finding in shifted:
-        fingerprint = finding.get("fingerprint")
+        fingerprint = fingerprint_of(args.repo, finding)
         if fingerprint:
             pending.append(("finding_verified", fingerprint, {
                 "repo": args.repo, "fingerprint": fingerprint,
@@ -369,7 +393,7 @@ def main(argv=None):
                 "pr_number": pr_for.get(fingerprint),
             }))
     for finding in introduced:
-        fingerprint = finding.get("fingerprint")
+        fingerprint = fingerprint_of(args.repo, finding)
         if fingerprint:
             pending.append(("finding_introduced", fingerprint, {
                 "repo": args.repo, "fingerprint": fingerprint,

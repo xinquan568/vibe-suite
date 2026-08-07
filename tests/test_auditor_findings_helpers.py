@@ -27,14 +27,15 @@ class Test_validate_rule_ids(unittest.TestCase):
 
     HELPER = SCRIPTS / "validate-rule-ids.py"
     RUBRIC = REPO / "skills" / "scoring" / "SKILL.md"
-    MEMBERSHIP_ANCHOR = '    section = section_for(finding.get("category"), catalog)'
+    MEMBERSHIP_ANCHOR = "    section = section_for(finding, catalog)"
     MEMBERSHIP_MUTANT = '    return []  # membership-only: the id exists, so accept it'
 
-    #: The real finding from the real incident.
-    INCIDENT = {"rule_id": "R07", "category": "skill", "penalty": -15,
+    #: The real finding from the real incident, in the shape production emits: `category` is
+    #: the DEFECT class per SCHEMAS.md section 2, and the artifact is the file it points at.
+    INCIDENT = {"rule_id": "R07", "category": "nl_quality", "file": "skills/a/SKILL.md", "penalty": -15,
                 "check": "zero <example> blocks", "confidence": "high"}
     #: What that finding should have been.
-    CORRECT = {"rule_id": "R07", "category": "skill", "penalty": -3,
+    CORRECT = {"rule_id": "R07", "category": "nl_quality", "file": "skills/a/SKILL.md", "penalty": -3,
                "check": "no scope note / cross-references", "confidence": "high"}
 
     def _sidecar(self, findings, name="acme-widget.findings.jsonl"):
@@ -73,23 +74,25 @@ class Test_validate_rule_ids(unittest.TestCase):
 
     def test_artifact_type_drift_is_caught(self):
         """The right row number read from the wrong table."""
-        d, _ = self._sidecar([{"rule_id": "R04", "category": "hook", "penalty": -25,
+        d, _ = self._sidecar([{"rule_id": "R04", "category": "nl_quality", "file": "hooks/h.json", "penalty": -25,
                                "check": "description present"}])
         r = self._run(["--data-dir", str(d)])
         self.assertEqual(r.returncode, 1)
         self.assertIn("artifact-type-drift R04", r.stdout)
 
     def test_an_unknown_rule_id_is_caught(self):
-        d, _ = self._sidecar([{"rule_id": "R99", "category": "skill", "penalty": -5}])
+        d, _ = self._sidecar([{"rule_id": "R99", "category": "nl_quality", "file": "skills/a/SKILL.md", "penalty": -5}])
         r = self._run(["--data-dir", str(d)])
         self.assertIn("unknown-rule-id R99", r.stdout)
 
-    def test_an_unmapped_category_is_reported_not_skipped(self):
-        """Otherwise an unrecognised category is a way to bypass the check entirely."""
-        d, _ = self._sidecar([{"rule_id": "R04", "category": "widget", "penalty": -25}])
+    def test_a_path_with_no_rubric_table_is_reported_not_skipped(self):
+        """Silence here is how the artifact-type mix-up hid for nine rounds: `category` was
+        read as the artifact type, so EVERY production finding resolved to unmapped and the
+        validator reported nothing else — indistinguishable from a rulebook with no drift."""
+        d, _ = self._sidecar([{"rule_id": "R04", "category": "nl_quality", "file": "nowhere/x.txt", "penalty": -25}])
         r = self._run(["--data-dir", str(d)])
         self.assertEqual(r.returncode, 1)
-        self.assertIn("unmapped-category", r.stdout)
+        self.assertIn("unmapped-artifact", r.stdout)
 
     def test_false_positives_are_still_checked(self):
         """A false positive with a wrong rule id is evidence ABOUT the rulebook — it is the
@@ -107,7 +110,7 @@ class Test_validate_rule_ids(unittest.TestCase):
         Note the penalty is deliberately -15, which R04 DOES allow (its trigger-quality row).
         A finding can therefore carry a legitimate penalty and still be about the wrong check,
         which is why the check text is compared and not only the number."""
-        d, _ = self._sidecar([{"rule_id": "R04", "category": "skill", "penalty": -15,
+        d, _ = self._sidecar([{"rule_id": "R04", "category": "nl_quality", "file": "skills/a/SKILL.md", "penalty": -15,
                                "check": "name matches parent dir"}])
         r = self._run(["--data-dir", str(d)])
         self.assertEqual(r.returncode, 1)
@@ -970,6 +973,51 @@ class Test_diff_findings(unittest.TestCase):
         self.assertEqual(summary["counts"]["fixed"], 1)
         self.assertEqual(summary["fixed"], ["fp-20"],
                          "the wrong occurrence was reported as fixed")
+
+
+    def test_raw_section_4_sidecars_produce_events(self):
+        """The production shape. SCHEMAS.md section 4 says a per-audit sidecar carries NO
+        fingerprint — the aggregation post-step adds it before the ledger. auditor-case-study.yml
+        hands these RAW sidecars to this helper, so requiring a fingerprint meant skipping every
+        row and emitting no events at all, while exiting zero and writing a summary of nothing.
+
+        My fixtures all carried fingerprints, so they exercised a record the workflow never
+        produces.
+        """
+        d = self._fixture(
+            original=[{"category": "nl_quality", "rule_id": "R04",
+                       "file": "skills/x/SKILL.md", "line": 3, "pattern": "p"},
+                      {"category": "nl_quality", "rule_id": "R06",
+                       "file": "skills/z/SKILL.md", "line": 7, "pattern": "r"}],
+            reaudit=[{"category": "nl_quality", "rule_id": "R04",
+                      "file": "skills/x/SKILL.md", "line": 3, "pattern": "p"},
+                     {"category": "nl_quality", "rule_id": "R05",
+                      "file": "skills/y/SKILL.md", "line": 9, "pattern": "q"}])
+        r = self._run(d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        events = self._events(d)
+        self.assertTrue(events, "no events emitted from canonical sidecars")
+        kinds = {e["event"] for e in events}
+        self.assertIn("finding_verified", kinds)
+        self.assertIn("finding_introduced", kinds)
+        for event in events:
+            with self.subTest(fp=event["data"].get("fingerprint")):
+                self.assertTrue(str(event["data"]["fingerprint"]).startswith("sha256:"))
+
+    def test_the_computed_fingerprint_matches_the_shell_helper(self):
+        """It becomes a join key, so a digest that differs from compute-fingerprint.sh writes
+        records nothing else can join to."""
+        record = {"file": "skills/x/SKILL.md", "rule_id": "R04", "pattern": "p", "line": 3}
+        helper = SCRIPTS / "compute-fingerprint.sh"
+        snippet = (f". '{helper}'\n"
+                   f"printf '%s' '{json.dumps(record)}' | compute_fingerprint 'acme/widget'")
+        shell = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True)
+        self.assertEqual(shell.returncode, 0, shell.stderr)
+
+        d = self._fixture(original=[record], reaudit=[])
+        self._run(d, **{"--repo": "acme/widget"})
+        self.assertIn(shell.stdout.strip(), self._summary(d)["fixed"],
+                      "the computed digest disagrees with compute-fingerprint.sh")
 
     # --- refusals -------------------------------------------------------------------------
     def test_every_one_of_the_nine_arguments_is_required(self):

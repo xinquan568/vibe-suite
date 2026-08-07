@@ -46,19 +46,26 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RUBRIC = ROOT / "skills" / "scoring" / "SKILL.md"
 
-#: Sidecar `category` -> the rubric section heading it must be scored against. Matched on the
-#: heading PREFIX: the real headings carry long parentheticals ("Hooks (Codex CLI, Tier
-#: 2-Codex)") that are editorial and change without the table changing.
-SECTION_FOR = {
-    "skill": "Skills", "skills": "Skills",
-    "agent": "Agents", "agents": "Agents",
-    "command": "Commands", "commands": "Commands",
-    "shared-partial": "Shared Partials", "partial": "Shared Partials",
-    "rule": "Rules", "rules": "Rules",
-    "hook": "Hooks", "hooks": "Hooks",
-    "memory": "Memory files", "claude.md": "CLAUDE.md",
-    "plugin": "plugin.json", "settings": "Settings files",
-}
+#: THE ARTIFACT TYPE COMES FROM THE FILE, NOT FROM `category`. SCHEMAS.md section 2 fixes
+#: `category` to the DEFECT class — nl_quality / security / bug / cross_component — while the
+#: rubric's tables are per ARTIFACT TYPE. Mapping one onto the other meant every production
+#: finding resolved to `unmapped-category` and the whole validator reported nothing but that,
+#: which is indistinguishable from a rulebook with no drift.
+DEFECT_CATEGORIES = ("nl_quality", "security", "bug", "cross_component")
+
+#: path shape -> rubric section, first match wins. The artifact a finding is about is the file
+#: it points at.
+SECTION_FOR_PATH = (
+    (r"(^|/)skills/[^/]+/SKILL\.md$", "Skills"),
+    (r"(^|/)agents/", "Agents"),
+    (r"(^|/)commands/shared/", "Shared Partials"),
+    (r"(^|/)commands/", "Commands"),
+    (r"(^|/)(\.claude/)?rules/", "Rules"),
+    (r"(^|/)hooks/", "Hooks"),
+    (r"(CLAUDE|AGENTS|GEMINI)\.md$", "CLAUDE.md"),
+    (r"plugin\.json$", "plugin.json"),
+    (r"settings(\.local)?\.json$", "Settings files"),
+)
 
 RULE_ID = re.compile(r"^R\d{1,2}$")
 
@@ -99,14 +106,14 @@ def load_rubric(path: Path):
     return catalog
 
 
-def section_for(category, catalog):
-    """The rubric section a finding's category maps to, or None if it names none."""
-    wanted = SECTION_FOR.get(str(category or "").strip().lower())
-    if wanted is None:
-        return None
-    for name in catalog:
-        if name.lower().startswith(wanted.lower()):
-            return name
+def section_for(finding, catalog):
+    """The rubric section this finding's ARTIFACT belongs to, from its file path."""
+    path = str(finding.get("file") or "")
+    for pattern, wanted in SECTION_FOR_PATH:
+        if re.search(pattern, path, re.IGNORECASE):
+            for name in catalog:
+                if name.lower().startswith(wanted.lower()):
+                    return name
     return None
 
 
@@ -118,11 +125,11 @@ def check_finding(finding, catalog, known_ids):
     if rule not in known_ids:
         return [f"unknown-rule-id {rule}"]
 
-    section = section_for(finding.get("category"), catalog)
+    section = section_for(finding, catalog)
     if section is None:
-        # An unmapped category cannot be checked against a table. Say so rather than passing
-        # it silently, which would make an unrecognised category a way to bypass this check.
-        return [f"unmapped-category {finding.get('category')!r} for {rule}"]
+        # A path the rubric has no table for. Reported rather than passed: silence here is
+        # how the artifact-type mix-up hid, since everything resolved to "unmapped".
+        return [f"unmapped-artifact {finding.get('file')!r} for {rule}"]
 
     rows = catalog.get(section, {}).get(rule)
     if not rows:

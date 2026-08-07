@@ -696,9 +696,12 @@ class TestInventory(unittest.TestCase):
         """
         scripts = REPO / "auditor" / "scripts"
         self.assertTrue(scripts.is_dir(), "auditor/scripts/ must exist once E8.3 has started")
-        found = {p.name for p in scripts.iterdir() if p.is_file()}
+        # Every entry, not just files: a stray DIRECTORY (a stale `__pycache__`, a nested
+        # tree) is undeclared content too, and filtering to is_file() would let it through
+        # exactly as the inventory rows once let a directory masquerade as a workflow.
+        found = {p.name for p in scripts.iterdir()}
         self.assertTrue(found <= set(E83_HELPERS),
-                        f"undeclared file(s) under auditor/scripts/: "
+                        f"undeclared entr(y/ies) under auditor/scripts/: "
                         f"{sorted(found - set(E83_HELPERS))}")
 
 

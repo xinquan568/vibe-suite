@@ -351,5 +351,99 @@ class Test_parse_pr_metadata(unittest.TestCase):
         self.assertNotEqual(got, "second", "the oracle must reject first-block behaviour")
 
 
+class Test_parse_suppressions(unittest.TestCase):
+    """`parse-suppressions.py` — emit configured rule overrides as JSONL.
+
+    The reference implementation imports PyYAML and, on ImportError, prints a note and exits 0,
+    silently disabling every suppression. PyYAML is not installed here and this repo ships
+    stdlib only, so that path would be the permanent one. This helper parses the frontmatter
+    subset directly; `test_it_does_not_depend_on_pyyaml` holds it to that.
+    """
+
+    HELPER = SCRIPTS / "parse-suppressions.py"
+    CONFIG = (
+        "---\n"
+        "name: example\n"
+        "rule_overrides:\n"
+        "  nl:R1: false\n"
+        "  nl:R2:\n"
+        "    max_penalty: 5\n"
+        "    threshold: 0.8\n"
+        "  nl:R3: 3\n"
+        "other: keep\n"
+        "---\n"
+        "body\n"
+    )
+
+    def _run(self, config_text=None, script_text=None, path=None):
+        td = tempfile.mkdtemp()
+        cfg = Path(td) / "cfg.md"
+        if config_text is not None:
+            cfg.write_text(config_text, encoding="utf-8")
+        helper = Path(td) / "helper.py"
+        helper.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
+        return subprocess.run([sys.executable, str(helper), str(path or cfg)],
+                              capture_output=True, text=True)
+
+    def _rows(self, r):
+        return {json.loads(ln)["rule_id"]: json.loads(ln)["override"]
+                for ln in r.stdout.splitlines() if ln.strip()}
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_types_are_preserved_not_stringified(self):
+        """`false` must arrive as a JSON boolean and a nested mapping as an object.
+
+        Stringifying either produces well-formed JSONL that every downstream comparison then
+        gets wrong — `"false"` is truthy, and `"{'max_penalty': 5}"` has no fields.
+        """
+        rows = self._rows(self._run(self.CONFIG))
+        self.assertIs(rows["nl:R1"], False, "boolean was stringified")
+        self.assertEqual(rows["nl:R2"], {"max_penalty": 5, "threshold": 0.8})
+        self.assertIsInstance(rows["nl:R2"]["max_penalty"], int)
+        self.assertIsInstance(rows["nl:R2"]["threshold"], float)
+        self.assertEqual(rows["nl:R3"], 3)
+        self.assertNotIn("other", rows, "only rule_overrides is emitted")
+
+    def test_an_absent_config_is_a_silent_success(self):
+        r = self._run(None, path="/nonexistent/cfg.md")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_no_frontmatter_and_no_overrides_are_both_empty(self):
+        for text in ("just a body\n", "---\nname: x\n---\nbody\n"):
+            with self.subTest(config=text[:20]):
+                r = self._run(text)
+                self.assertEqual(r.returncode, 0)
+                self.assertEqual(r.stdout.strip(), "")
+
+    def test_malformed_frontmatter_fails_rather_than_reading_as_empty(self):
+        r = self._run("---\nrule_overrides:\n  @@@bad\n---\n")
+        self.assertEqual(r.returncode, 1, "a broken config must surface")
+        self.assertIn("malformed", r.stderr)
+
+    def test_it_does_not_depend_on_pyyaml(self):
+        self.assertNotIn("import yaml", self.HELPER.read_text(),
+                         "suppressions must not silently disable when PyYAML is absent")
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        rows = self._rows(self._run(self.CONFIG, NOOP[".py"]))
+        self.assertEqual(rows, {}, "sanity: a no-op emits nothing")
+
+    def test_the_stringifying_mutant_fails_the_oracle(self):
+        """The plausible wrong implementation: emit every value as a string.
+
+        It produces valid JSONL with the right rule ids, so a test checking only shape or
+        rule-id coverage would accept it.
+        """
+        mutant = self.HELPER.read_text().replace(
+            '{"rule_id": str(rule), "override": override}',
+            '{"rule_id": str(rule), "override": str(override)}')
+        self.assertIn('"override": str(override)', mutant, "mutation did not apply")
+        rows = self._rows(self._run(self.CONFIG, mutant))
+        self.assertEqual(rows["nl:R1"], "False", "mutation ineffective")
+        self.assertIsNot(rows["nl:R1"], False, "the oracle must reject stringified values")
+
+
 if __name__ == "__main__":
     unittest.main()

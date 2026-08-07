@@ -120,11 +120,15 @@ def _pipeline_count(r):
     # Detect a live copy by CONTENT, not by name. Two name-based attempts failed: known stems
     # only (defeated by `auditor-audit-live.yml`), then an `auditor-` prefix (defeated by
     # `review-live.yml`). A name heuristic can always be renamed around; the bytes cannot.
-    # Only SUBSTANTIAL content is compared. A real workflow needs at least name/on/jobs, so
-    # anything tiny is a stub — and two unrelated stubs being byte-identical is ordinary, not
-    # evidence of copying. Without this, any repo whose workflows share a trivial body would be
-    # reddened, which is the false-positive class that sank the P9 escape decoder.
-    _COPY_MIN_BYTES = 64
+    # No size floor. One was added on the reasoning that "a real workflow needs name/on/jobs",
+    # which was false in this very repo — `name` was made OPTIONAL in an earlier round, and a
+    # complete, Psych-valid, lint-clean workflow fits in 62 bytes. The justification was
+    # falsified by my own earlier change, and the floor it justified was a live blind spot.
+    #
+    # Comparing at any size is also the correct rule on its own terms: if a file under
+    # `.github/workflows/` is byte-identical to a staged workflow, it IS a copy, whatever its
+    # length. The false positives that motivated the floor came from test fixtures writing
+    # identical stub text everywhere — a fixture bug, since fixed, not a property of real repos.
     staged_bodies = set()
     for f in _workflow_entries(r / "auditor"):
         if f.is_file() and not f.is_symlink():
@@ -132,8 +136,7 @@ def _pipeline_count(r):
                 body = f.read_bytes()
             except OSError:
                 return -1
-            if len(body) >= _COPY_MIN_BYTES:
-                staged_bodies.add(body)
+            staged_bodies.add(body)
     for f in _workflow_entries(r / ".github"):
         if f.stem in PIPELINE_WORKFLOWS:
             return -1
@@ -144,7 +147,7 @@ def _pipeline_count(r):
                 body = f.read_bytes()
             except OSError:
                 return -1
-            if len(body) >= _COPY_MIN_BYTES and body in staged_bodies:
+            if body in staged_bodies:
                 return -1            # byte-identical to a staged workflow: a live copy
     home = r / "auditor" / "workflows"
     entries = _workflow_entries(r / "auditor")

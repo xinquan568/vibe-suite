@@ -390,7 +390,8 @@ def lint(text, name="workflow.yml"):
             if nested is None or len(nested) - len(nested.lstrip(" ")) == 0:
                 v.append("top-level 'permissions' declares nothing "
                          "(use `permissions: {}` to grant none)")
-            elif nested.lstrip().startswith("- "):
+            elif re.match(r"^\s*-(\s|$)", nested):
+                # Matched only "- " before, so a BARE dash opened a sequence unnoticed.
                 # `permissions:` / `  - read-all` parses to a LIST, which is not a permissions
                 # mapping; GitHub would reject it and the lint accepted it.
                 v.append("top-level 'permissions' is a sequence, not a mapping")
@@ -423,7 +424,13 @@ def lint(text, name="workflow.yml"):
                 else:
                     nxt = next((x for x in b[n + 1:] if x.strip()
                                 and not x.lstrip().startswith("#")), None)
-                    declared = bool(nxt) and len(nxt) - len(nxt.lstrip(" ")) > 4
+                    # Any deeper line counted as a declaration, so a block-style SEQUENCE
+                    # (`permissions:` / `  - run: read-all`) satisfied the contract while being
+                    # no permissions mapping at all. A declaration is a mapping entry.
+                    declared = (bool(nxt)
+                                and len(nxt) - len(nxt.lstrip(" ")) > 4
+                                and not re.match(r"^\s*-(\s|$)", nxt)
+                                and re.match(r"""^\s*(?:["']?)[\w-]+(?:["']?):""", nxt) is not None)
                 break
             if declared is None:
                 v.append(f"job '{j}': no permissions declared and none at workflow level")
@@ -837,7 +844,15 @@ class TestLintClean(unittest.TestCase):
         extractor skipping dash form: a true-sounding name over a narrower set. The loop now
         matches the name.
         """
-        paths = [WF_DIR / n for n in EXPECTED] + sorted(LIVE_WF_DIR.glob("*.yml"))
+        # BOTH extensions. The inventory accepts `.yaml` as a workflow, so globbing `*.yml`
+        # alone meant a live `rogue.yaml` full of broken shell was simply not looked at, while
+        # the count stayed comfortably above any floor.
+        live = sorted(set(LIVE_WF_DIR.glob("*.yml")) | set(LIVE_WF_DIR.glob("*.yaml")))
+        paths = [WF_DIR / n for n in EXPECTED] + live
+        # Derive the expectation from DISK rather than a magic floor. `checked > 100` left 15
+        # blocks of slack, so a corpus that quietly shrank still passed "loudly".
+        self.assertEqual(len(paths), len(EXPECTED) + len(live),
+                         "the file list must cover every staged and live workflow")
         checked = 0
         for path in paths:
             name = path.name
@@ -851,10 +866,14 @@ class TestLintClean(unittest.TestCase):
                 r = subprocess.run(["bash", "-n", f.name], capture_output=True, text=True)
                 with self.subTest(workflow=name, block=idx):
                     self.assertEqual(r.returncode, 0, r.stderr)
-        # A silently-shrinking corpus is how the previous hole hid; assert the scale too.
-        self.assertGreater(checked, 100,
-                           f"only {checked} run blocks checked — the extractor or the file "
-                           f"list has narrowed; the corpus carries ~116")
+        # A silently-shrinking corpus is how the previous hole hid. Recount independently and
+        # require exact agreement: a floor with slack is not a guard, it is a wider hole.
+        expected = sum(1 for pth in paths for _ in extract_run_blocks(pth.read_text()))
+        self.assertEqual(checked, expected,
+                         f"checked {checked} run blocks but the corpus holds {expected}")
+        self.assertGreater(expected, 100,
+                           f"the corpus should hold ~116 run blocks, found {expected} — the "
+                           f"extractor or the file list has narrowed")
 
 
 class TestContracts(unittest.TestCase):
@@ -1062,6 +1081,30 @@ class TestMutations(unittest.TestCase):
                     self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
                         "    runs-on: ubuntu-latest\n",
                         f"    runs-on: ubuntu-latest\n    permissions: {spelling}\n"))
+
+    def test_block_style_sequence_permissions_declare_nothing(self):
+        """A block-style SEQUENCE is not a permissions mapping, at either level.
+
+        The previous fix covered inline spellings only, and its name said "sequence or block
+        scalar" — broader than its fixtures. A deeper line counted as a declaration whatever
+        its shape, so `permissions:` over `- run: read-all` passed.
+        """
+        for block in ("      - run: read-all\n", "      -\n", "      - read-all\n"):
+            with self.subTest(job_block=block.strip()):
+                self._assert_flagged(
+                    self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                        "    runs-on: ubuntu-latest\n",
+                        f"    runs-on: ubuntu-latest\n    permissions:\n{block}"))
+        for top in ("permissions:\n  -\n", "permissions:\n  - read-all\n"):
+            with self.subTest(top_block=top.strip()):
+                self._assert_flagged(
+                    self.GOOD.replace("permissions:\n  contents: read\n", top))
+
+    def test_a_job_level_mapping_entry_is_still_a_declaration(self):
+        self.assertEqual(lint(
+            self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                "    runs-on: ubuntu-latest\n",
+                "    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n")), [])
 
     def test_job_level_whole_workflow_scalars_are_declarations(self):
         for spelling in ("read-all", "write-all", "'read-all'"):

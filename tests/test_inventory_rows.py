@@ -270,6 +270,23 @@ class AuditorRowSplit(RowBase):
                                  f"a byte-identical live copy named {disguise}.yml must be seen")
                 copy.unlink()
 
+    def test_a_tiny_live_copy_is_caught(self):
+        """A 62-byte workflow is complete and valid, so no size floor can be safe.
+
+        A 64-byte floor was added on the reasoning that "a real workflow needs name/on/jobs" —
+        false in this repo, where `name` was made optional in an earlier round. The
+        justification was falsified by my own earlier change, and the floor it justified was a
+        live blind spot.
+        """
+        tiny = "on: x\npermissions: {}\njobs:\n  a:\n    runs-on: x\n    steps: []\n"
+        self.assertLess(len(tiny.encode()), 64, "the fixture must sit under the removed floor")
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        (self.tmp / "auditor" / "workflows"
+         / f"{PIPELINE_WORKFLOWS[0]}.yml").write_text(tiny, encoding="utf-8")
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        (self.tmp / ".github" / "workflows" / "rogue.yml").write_text(tiny, encoding="utf-8")
+        self.assertFalse(self.ok(PIPELINE_ROW), "a small live copy is still a live copy")
+
     def test_an_unrelated_live_workflow_is_not_a_copy(self):
         """Guards the other direction — content matching must not redden an ordinary repo."""
         self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)

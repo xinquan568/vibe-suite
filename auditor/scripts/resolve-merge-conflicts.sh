@@ -67,7 +67,11 @@ if conflicted | grep -qx "registry/repos.json"; then
 fi
 
 # --- append-only ledgers: union, deduped --------------------------------------------------
-for ledger in ledgers/events.jsonl ledgers/findings.jsonl ledgers/disagreements.jsonl; do
+# All FOUR append-only ledgers SCHEMAS.md declares. vocab-advisories.jsonl was missing, so
+# it fell through to the ours-wins default and every advisory the other side appended was
+# discarded — silently, because the merge succeeded and the file stayed valid JSONL.
+for ledger in ledgers/events.jsonl ledgers/findings.jsonl \
+              ledgers/disagreements.jsonl ledgers/vocab-advisories.jsonl; do
   if conflicted | grep -qx "$ledger"; then
     echo "resolve: $ledger via line union"
     git -C "$CHECKOUT" show ":2:$ledger" > "$TMP/ours.jsonl"

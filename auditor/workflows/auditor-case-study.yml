@@ -268,9 +268,14 @@ jobs:
                       exit 0
                     fi
                     SIDE="$DATA_DIR/audits/$SLUG.reaudit.findings.jsonl"
+                    # A missing sidecar is NOT "perfectly clean". Creating an empty one here
+                    # converts "the re-audit produced no sidecar" into "the re-audit found
+                    # nothing", and those are opposite facts: the first means every original
+                    # finding gets reported as FIXED and the maintainer is credited with work
+                    # nobody verified. The helper refuses a missing sidecar; let it.
                     if [ ! -f "$SIDE" ]; then
-                      # a present report with no sidecar means perfectly clean
-                      : > "$SIDE"
+                      echo "REFUSE:diff-findings:reaudit-sidecar-missing ($SIDE)" >&2
+                      exit 1
                     fi
                     # A present re-audit with no diff helper would publish an article whose
                     # verification claims were never computed and would emit no finding_verified

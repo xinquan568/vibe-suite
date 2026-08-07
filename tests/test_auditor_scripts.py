@@ -637,6 +637,7 @@ class Test_commit_via_pr(unittest.TestCase):
         run("config", "http.proxy", "http://127.0.0.1:1")
         return d
 
+
     def _run(self, checkout, script_text=None, env=None, **kw):
         args = {"--checkout": str(checkout), "--repo": "acme/widget",
                 "--base": "auditor-data", "--branch": "auditor-track-1"}
@@ -737,11 +738,29 @@ class Test_commit_via_pr(unittest.TestCase):
         anchor = 'refs/remotes/origin/$BASE^{commit}'
         self.assertIn(anchor, src, "mutation anchor missing")
         mutant = src.replace(anchor, 'refs/heads/$BASE^{commit}')
-        d = self._repo()
-        subprocess.run(["git", "-C", str(d), "branch", "-M", "auditor-data"], check=True,
-                       capture_output=True)
-        # The real helper reaches the remote checks; the mutant resolves a purely local ref.
-        self.assertNotEqual(mutant, src, "mutation ineffective")
+        self.assertNotEqual(mutant, src, "mutation anchor did not match")
+
+        # THIS IS A STATIC CHECK, AND WEAKER THAN THE REST OF THE SUITE. Saying so plainly
+        # beats a test that looks behavioural and is not.
+        #
+        # The base comparison happens AFTER the fetch. A hermetic fixture has no reachable
+        # remote, so both the real helper and the mutant stop at the same earlier refusal and
+        # the mutation is never reached — a recording `git` on PATH confirms neither version
+        # ever resolves the base ref here. A locally-reachable stand-in does not help either:
+        # `git remote get-url` applies insteadOf, so the rewritten URL fails the repository
+        # identity check before the fetch.
+        #
+        # What is checkable offline is that the source resolves the freshly fetched REMOTE ref
+        # and never the moving local branch. The end-to-end demonstration needs a live remote
+        # and belongs to E8.7's live validator checks.
+        self.assertIn('refs/remotes/origin/$BASE^{commit}', src,
+                      "the base must be the freshly fetched remote ref")
+        base_compare = [ln for ln in src.splitlines()
+                        if "$BASE^{commit}" in ln and not ln.lstrip().startswith("#")]
+        self.assertTrue(base_compare, "no base comparison found")
+        for line in base_compare:
+            self.assertNotIn('refs/heads/$BASE', line,
+                             "the helper must never compare against the moving local branch")
 
 
 

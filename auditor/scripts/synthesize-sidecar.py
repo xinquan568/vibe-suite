@@ -52,7 +52,10 @@ RULE_INFERENCE = (
     (r"<example>|\bexample blocks?\b", "R06", "example-blocks-missing"),
     (r"\bcode examples?\b|\bno examples\b", "R06", "code-examples-missing"),
     (r"\bscope note\b|\bcross-references?\b", "R07", "scope-note-missing"),
-    (r"\bvague\b|\bquantifier", "R18", "vague-quantifier"),
+    # R01, not R18: the shipped rulebook defines vague quantifiers as R01 (-2 each, cap
+    # -20). A wrong id here is a wrong rule id in the FINGERPRINT, so the finding hashes
+    # to a key nothing else joins to.
+    (r"\bvague\b|\bquantifier", "R01", "vague-quantifier"),
     (r"\bvocab\w*\b.*\bdrift\b|\bterminology\b", "R51", "vocabulary-drift"),
     (r"\borphan\b|\bunreferenced\b", None, "orphan-artifact"),
 )

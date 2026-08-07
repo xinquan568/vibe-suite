@@ -39,8 +39,15 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-BEGIN = "<!-- vibe-suite-auditor-citations-begin: {rule} -->"
-END = "<!-- vibe-suite-auditor-citations-end: {rule} -->"
+#: The rulebook already carries one `:site <rule>` anchor per rule — 38 of them, hand-placed.
+#: They are the insertion points, not something this helper invents: looking for begin/end
+#: pairs that exist nowhere in the file meant every apply matched nothing and changed nothing,
+#: while still exiting zero and reporting the rules it had "applied".
+ANCHOR = "<!-- vibe-exemplar-citation:site {rule} -->"
+#: The generated region this helper owns, written directly beneath the anchor. Delimited so a
+#: second run REPLACES it rather than stacking another copy under the same anchor.
+BEGIN = "<!-- vibe-exemplar-citation:begin {rule} -->"
+END = "<!-- vibe-exemplar-citation:end {rule} -->"
 REQUIRED_PATH_SUFFIX = "/blob/auditor-data/exemplars"
 #: One URL path segment. `safe` keeps the unreserved set so ordinary names stay readable.
 SAFE = "-._~"
@@ -133,17 +140,32 @@ def build_block(rule: str, items, prefix: str) -> str:
     return "\n".join(lines)
 
 
-def apply_blocks(text: str, blocks: dict) -> str:
-    """Replace each rule's existing marker pair, or leave the text alone if it has none."""
-    for rule, block in blocks.items():
-        pattern = re.compile(
-            re.escape(BEGIN.format(rule=rule)) + r".*?" + re.escape(END.format(rule=rule)),
+def apply_blocks(text: str, blocks: dict):
+    """`(text, applied, missing)` — citations written beneath each rule's `:site` anchor.
+
+    A rule with no anchor is REPORTED rather than skipped quietly. Silence there is how the
+    original bug hid: the helper found none of its markers, changed nothing, and still exited
+    zero having announced the rules it applied.
+    """
+    applied, missing = [], []
+    for rule, block in sorted(blocks.items()):
+        anchor = ANCHOR.format(rule=rule)
+        if anchor not in text:
+            missing.append(rule)
+            continue
+        existing = re.compile(
+            re.escape(anchor) + r"\n" + re.escape(BEGIN.format(rule=rule))
+            + r".*?" + re.escape(END.format(rule=rule)),
             re.DOTALL)
-        if pattern.search(text):
-            # Replacement, never append: appending stacks a new block under every previous one
-            # on each run, and each block being well-formed keeps the file looking correct.
-            text = pattern.sub(lambda _m, b=block: b, text, count=1)
-    return text
+        replacement = f"{anchor}\n{block}"
+        if existing.search(text):
+            # Replacement, never append: appending stacks a new block under the anchor on every
+            # run, and each block being well-formed keeps the file looking correct as it grows.
+            text = existing.sub(lambda _m, r=replacement: r, text, count=1)
+        else:
+            text = text.replace(anchor, replacement, 1)
+        applied.append(rule)
+    return text, applied, missing
 
 
 def main(argv=None):
@@ -184,13 +206,17 @@ def main(argv=None):
                           "blocks": blocks}, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    updated = apply_blocks(rules_text, blocks)
+    updated, applied, missing = apply_blocks(rules_text, blocks)
+    for rule in missing:
+        print(f"  no `:site {rule}` anchor in {rules_path.name}; citations not written",
+              file=sys.stderr)
     target = Path(args.out) if args.out else rules_path
     if updated == rules_text and target == rules_path:
-        print(f"propose-rule-citations: {len(blocks)} rule(s); {rules_path} already current")
+        print(f"propose-rule-citations: {len(applied)} rule(s); {rules_path} already current")
         return 0
     target.write_text(updated, encoding="utf-8")
-    print(f"propose-rule-citations: applied {len(blocks)} rule(s) to {target}")
+    print(f"propose-rule-citations: applied {len(applied)} rule(s) to {target}"
+          + (f"; {len(missing)} without an anchor" if missing else ""))
     return 0
 
 

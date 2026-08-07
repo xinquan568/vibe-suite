@@ -447,5 +447,334 @@ class Test_backfill_findings(_FingerprintMixin, unittest.TestCase):
                                     "mutation ineffective: the digest should have changed")
 
 
+
+class _GhFake:
+    """A recording `gh` on PATH.
+
+    These helpers are defined by what they do with GitHub's answers, so the answers are canned
+    and the real binary is never reached. A test that hits the network is slow, flaky, and
+    silently passes when the helper asks the wrong question.
+    """
+
+    def gh(self, responses):
+        """A directory holding a `gh` that replays `responses`, keyed by a substring of argv."""
+        d = Path(tempfile.mkdtemp())
+        (d / "responses.json").write_text(json.dumps(responses), encoding="utf-8")
+        script = d / "gh"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys, pathlib\n"
+            "here = pathlib.Path(__file__).resolve().parent\n"
+            "table = json.loads((here / 'responses.json').read_text())\n"
+            "argv = ' '.join(sys.argv[1:])\n"
+            "(here / 'calls.log').open('a').write(argv + '\\n')\n"
+            "for key, value in table.items():\n"
+            "    if key in argv:\n"
+            "        if value is None:\n"
+            "            sys.exit(1)\n"
+            "        sys.stdout.write(json.dumps(value))\n"
+            "        sys.exit(0)\n"
+            "sys.exit(1)\n", encoding="utf-8")
+        script.chmod(0o755)
+        return d
+
+    def calls(self, ghdir):
+        log = ghdir / "calls.log"
+        return log.read_text().splitlines() if log.is_file() else []
+
+    def env(self, ghdir):
+        return dict(os.environ, PATH=f"{ghdir}:{os.environ['PATH']}")
+
+
+class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
+    """`backfill-pr-fingerprints.py` — provenance for PRs older than the metadata block."""
+
+    HELPER = SCRIPTS / "backfill-pr-fingerprints.py"
+    ATTR_ANCHOR = '            attributed = [f for path in paths for f in by_file.get(path, [])]'
+    ATTR_MUTANT = '            attributed = list(findings)'
+
+    FINDINGS = [
+        {"file": "skills/a/SKILL.md", "rule_id": "R04", "fingerprint": "sha256:aaa"},
+        {"file": "skills/b/SKILL.md", "rule_id": "R05", "fingerprint": "sha256:bbb"},
+        {"file": "agents/c.md", "rule_id": "R06", "fingerprint": "sha256:ccc"},
+    ]
+
+    def _data_dir(self, prs=None):
+        d = Path(tempfile.mkdtemp())
+        (d / "registry").mkdir()
+        (d / "audits").mkdir()
+        (d / "registry" / "repos.json").write_text(json.dumps({"repos": {"acme/widget": {
+            "status": "contributed",
+            "prs": prs if prs is not None else {
+                "7": {"number": 7, "outcome": None, "fingerprints": [], "rule_ids": []}},
+        }}}), encoding="utf-8")
+        (d / "audits" / "acme-widget.findings.jsonl").write_text(
+            "".join(json.dumps(f) + "\n" for f in self.FINDINGS), encoding="utf-8")
+        return d
+
+    def _run(self, d, ghdir, apply=True, script_text=None):
+        helper = self.HELPER
+        if script_text is not None:
+            helper = Path(tempfile.mkdtemp()) / "backfill-pr-fingerprints.py"
+            helper.write_text(script_text, encoding="utf-8")
+        argv = [sys.executable, str(helper), "--data-dir", str(d)]
+        if apply:
+            argv.append("--apply")
+        return subprocess.run(argv, capture_output=True, text=True, env=self.env(ghdir))
+
+    def _prs(self, d):
+        return json.loads((d / "registry" / "repos.json").read_text())["repos"]["acme/widget"]["prs"]
+
+    # --- oracle ---------------------------------------------------------------------------
+    def test_only_findings_in_the_prs_own_files_are_attributed(self):
+        """The whole point. Attributing every finding to every PR runs clean and produces a
+        registry in which a one-typo PR is credited with validating every rule — and rule
+        health is computed from exactly these fields."""
+        d = self._data_dir()
+        gh = self.gh({"pr view 7": {"files": [{"path": "skills/a/SKILL.md"}]}})
+        r = self._run(d, gh)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._prs(d)["7"]["fingerprints"], ["sha256:aaa"])
+        self.assertEqual(self._prs(d)["7"]["rule_ids"], ["R04"])
+
+    def test_existing_provenance_is_unioned_not_replaced(self):
+        """A PR may already carry first-hand provenance from its metadata block; overwriting it
+        with a reconstruction discards the auditor's own record."""
+        d = self._data_dir(prs={"7": {"number": 7, "fingerprints": ["sha256:zzz"],
+                                      "rule_ids": ["R99"]}})
+        gh = self.gh({"pr view 7": {"files": [{"path": "skills/a/SKILL.md"}]}})
+        self._run(d, gh)
+        self.assertEqual(self._prs(d)["7"]["fingerprints"], ["sha256:aaa", "sha256:zzz"])
+        self.assertEqual(self._prs(d)["7"]["rule_ids"], ["R04", "R99"])
+
+    def test_a_rerun_changes_nothing(self):
+        d = self._data_dir()
+        gh = self.gh({"pr view 7": {"files": [{"path": "skills/a/SKILL.md"}]}})
+        self._run(d, gh)
+        after = (d / "registry" / "repos.json").read_text()
+        r = self._run(d, gh)
+        self.assertIn("updated 0 PR(s)", r.stdout)
+        self.assertEqual((d / "registry" / "repos.json").read_text(), after)
+
+    def test_an_unreadable_pr_is_skipped_not_treated_as_touching_nothing(self):
+        """A fetch failure and a PR that changed nothing are different. Collapsing them makes a
+        network error read as 'no findings apply', recorded as though it had been checked."""
+        d = self._data_dir()
+        gh = self.gh({"pr view 7": None})
+        r = self._run(d, gh)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("1 unreadable", r.stdout)
+        self.assertEqual(self._prs(d)["7"]["fingerprints"], [])
+
+    def test_the_default_is_a_dry_run(self):
+        d = self._data_dir()
+        gh = self.gh({"pr view 7": {"files": [{"path": "skills/a/SKILL.md"}]}})
+        before = (d / "registry" / "repos.json").read_text()
+        r = self._run(d, gh, apply=False)
+        self.assertIn("dry run", r.stdout)
+        self.assertEqual((d / "registry" / "repos.json").read_text(), before)
+
+    def test_a_missing_registry_is_refused(self):
+        d = Path(tempfile.mkdtemp())
+        r = self._run(d, self.gh({}))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:backfill-pr-fingerprints:registry-missing", r.stderr)
+
+    # --- mutants --------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        d = self._data_dir()
+        gh = self.gh({"pr view 7": {"files": [{"path": "skills/a/SKILL.md"}]}})
+        self._run(d, gh, script_text=NOOP[".py"])
+        self.assertEqual(self._prs(d)["7"]["fingerprints"], [], "sanity: a no-op writes nothing")
+
+    def test_the_attribute_everything_mutant_credits_a_pr_with_every_rule(self):
+        """The plausible wrong implementation: skip the file match. It fills every empty field,
+        exits zero, and silently claims a PR validated rules it never touched."""
+        src = self.HELPER.read_text(encoding="utf-8")
+        self.assertIn(self.ATTR_ANCHOR, src, "mutation anchor missing")
+        d = self._data_dir()
+        gh = self.gh({"pr view 7": {"files": [{"path": "skills/a/SKILL.md"}]}})
+        r = self._run(d, gh, script_text=src.replace(self.ATTR_ANCHOR, self.ATTR_MUTANT, 1))
+        self.assertEqual(r.returncode, 0, "the mutant runs clean — that is the danger")
+        self.assertEqual(len(self._prs(d)["7"]["fingerprints"]), 3,
+                         "mutation ineffective: the mutant should attribute all three")
+
+
+class Test_scan_suppressions(_GhFake, unittest.TestCase):
+    """`scan-suppressions.py` — what maintainers turned off, and why that is evidence."""
+
+    HELPER = SCRIPTS / "scan-suppressions.py"
+    DEDUPE_ANCHOR = '            seen.add((record["repo"], record["sha"], record["path"]))'
+    DEDUPE_MUTANT = '            seen.add((record["repo"], record["path"]))'
+    HOST = "xinquan568/vibe-suite"
+    CONFIG = "---\nrule_overrides:\n  nl:R1: false\n  nl:R2:\n    max_penalty: 5\n---\n"
+
+    def _b64(self, text):
+        import base64
+        return {"encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
+
+    def _responses(self, items, contents=None):
+        table = {"search/code": {"items": items} if items is not None else None}
+        # `gh api search/code --jq .items` — the fake ignores --jq, so hand back the list.
+        table["search/code"] = items
+        for repo_path, text in (contents or {}).items():
+            table[f"repos/{repo_path}"] = self._b64(text)
+        return table
+
+    def _data_dir(self, ledger=None):
+        d = Path(tempfile.mkdtemp())
+        (d / "ledgers").mkdir()
+        if ledger is not None:
+            (d / "ledgers" / "suppressions.jsonl").write_text(
+                "".join(json.dumps(r, sort_keys=True) + "\n" for r in ledger), encoding="utf-8")
+        return d
+
+    def _run(self, d, ghdir, apply=True, script_text=None, host=None):
+        helper = self.HELPER
+        if script_text is not None:
+            root = Path(tempfile.mkdtemp()) / "scripts"
+            root.mkdir(parents=True)
+            (root / "scan-suppressions.py").write_text(script_text, encoding="utf-8")
+            (root / "parse-suppressions.py").write_text(
+                (SCRIPTS / "parse-suppressions.py").read_text(), encoding="utf-8")
+            helper = root / "scan-suppressions.py"
+        argv = [sys.executable, str(helper), "--data-dir", str(d),
+                "--host-repo", host or self.HOST, "--observed-at", "2026-08-08T00:00:00Z"]
+        if apply:
+            argv.append("--apply")
+        return subprocess.run(argv, capture_output=True, text=True, env=self.env(ghdir))
+
+    def _ledger(self, d):
+        path = d / "ledgers" / "suppressions.jsonl"
+        return [json.loads(x) for x in path.read_text().splitlines() if x.strip()] \
+            if path.is_file() else []
+
+    # --- oracle ---------------------------------------------------------------------------
+    def test_self_duplicate_and_new_are_separated(self):
+        """Three kinds of hit in one scan: our own fixtures, a config already recorded, and a
+        genuinely new one. Only the last may append."""
+        d = self._data_dir(ledger=[{"repo": "acme/old", "path": ".vibe-suppressions.yml",
+                                    "sha": "dup", "overrides": []}])
+        gh = self.gh(self._responses(
+            [{"repository": {"full_name": self.HOST}, "path": "tests/fixture.yml", "sha": "s1"},
+             {"repository": {"full_name": "acme/old"}, "path": ".vibe-suppressions.yml",
+              "sha": "dup"},
+             {"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
+              "sha": "n1"}],
+            {"acme/new/contents/.vibe-suppressions.yml": self.CONFIG}))
+        r = self._run(d, gh)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("1 self", r.stdout)
+        self.assertIn("1 already recorded", r.stdout)
+        self.assertIn("1 new", r.stdout)
+        self.assertEqual([x["repo"] for x in self._ledger(d)], ["acme/old", "acme/new"])
+
+    def test_the_host_repositorys_own_fixtures_are_never_ingested(self):
+        """This repository's tests and templates CONTAIN suppression configs. Ingesting them
+        records overrides nobody set, into the dataset used to decide which rules to retire —
+        our own fixtures arguing for changing our own rules."""
+        d = self._data_dir()
+        gh = self.gh(self._responses(
+            [{"repository": {"full_name": self.HOST}, "path": "tests/fixture.yml", "sha": "s1"}],
+            {f"{self.HOST}/contents/tests/fixture.yml": self.CONFIG}))
+        self._run(d, gh)
+        self.assertEqual(self._ledger(d), [])
+
+    def test_override_types_survive_the_round_trip(self):
+        d = self._data_dir()
+        gh = self.gh(self._responses(
+            [{"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
+              "sha": "n1"}],
+            {"acme/new/contents/.vibe-suppressions.yml": self.CONFIG}))
+        self._run(d, gh)
+        record = self._ledger(d)[0]
+        by_rule = {o["rule_id"]: o["override"] for o in record["overrides"]}
+        self.assertIs(by_rule["nl:R1"], False, "a bool must not arrive as a string")
+        self.assertEqual(by_rule["nl:R2"], {"max_penalty": 5})
+        self.assertEqual(record["rule_ids"], ["nl:R1", "nl:R2"])
+
+    def test_an_edited_config_appends_a_new_record(self):
+        """repo+path without sha means an edit never registers: the ledger keeps the first
+        version forever and a maintainer who later suppressed six more rules reads as having
+        suppressed none of them."""
+        d = self._data_dir(ledger=[{"repo": "acme/new", "path": ".vibe-suppressions.yml",
+                                    "sha": "old", "overrides": []}])
+        gh = self.gh(self._responses(
+            [{"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
+              "sha": "new"}],
+            {"acme/new/contents/.vibe-suppressions.yml": self.CONFIG}))
+        self._run(d, gh)
+        self.assertEqual([x["sha"] for x in self._ledger(d)], ["old", "new"])
+
+    def test_two_configs_in_one_repository_are_both_kept(self):
+        d = self._data_dir()
+        gh = self.gh(self._responses(
+            [{"repository": {"full_name": "acme/new"}, "path": "a/.vibe-suppressions.yml",
+              "sha": "s1"},
+             {"repository": {"full_name": "acme/new"}, "path": "b/.vibe-suppressions.yml",
+              "sha": "s2"}],
+            {"acme/new/contents/a/.vibe-suppressions.yml": self.CONFIG,
+             "acme/new/contents/b/.vibe-suppressions.yml": self.CONFIG}))
+        self._run(d, gh)
+        self.assertEqual(len(self._ledger(d)), 2, "dedupe on repo alone loses one")
+
+    def test_a_malformed_remote_config_is_recorded_not_dropped(self):
+        """One repository's broken config must not stop the other hundred, and must not read as
+        'this maintainer suppressed nothing'."""
+        d = self._data_dir()
+        gh = self.gh(self._responses(
+            [{"repository": {"full_name": "acme/bad"}, "path": ".vibe-suppressions.yml",
+              "sha": "b1"}],
+            {"acme/bad/contents/.vibe-suppressions.yml": "---\nrule_overrides:\n\tbad\n---\n"}))
+        r = self._run(d, gh)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        record = self._ledger(d)[0]
+        self.assertIn("parse_error", record)
+
+    def test_a_missing_host_repo_is_refused(self):
+        d = self._data_dir()
+        r = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
+                           capture_output=True, text=True,
+                           env={k: v for k, v in self.env(self.gh({})).items()
+                                if k != "GITHUB_REPOSITORY"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("host-repo-required", r.stderr)
+
+    def test_a_failed_search_is_refused_not_read_as_no_results(self):
+        d = self._data_dir()
+        r = self._run(d, self.gh({}))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:scan-suppressions:search-failed", r.stderr)
+
+    # --- mutants --------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        d = self._data_dir()
+        gh = self.gh(self._responses(
+            [{"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
+              "sha": "n1"}], {"acme/new/contents/.vibe-suppressions.yml": self.CONFIG}))
+        self._run(d, gh, script_text=NOOP[".py"])
+        self.assertEqual(self._ledger(d), [], "sanity: a no-op appends nothing")
+
+    def test_the_sha_less_dedupe_mutant_never_notices_an_edit(self):
+        """The plausible wrong implementation: dedupe on (repo, path). Every rescan of an
+        edited config is a no-op, so the ledger keeps the stale version indefinitely."""
+        src = self.HELPER.read_text(encoding="utf-8")
+        self.assertIn(self.DEDUPE_ANCHOR, src, "mutation anchor missing")
+        mutant = src.replace(self.DEDUPE_ANCHOR, self.DEDUPE_MUTANT, 1).replace(
+            'seen.add((item["repo"], item["sha"], item["path"]))',
+            'seen.add((item["repo"], item["path"]))', 1).replace(
+            'key = (item["repo"], item["sha"], item["path"])',
+            'key = (item["repo"], item["path"])', 1)
+        d = self._data_dir(ledger=[{"repo": "acme/new", "path": ".vibe-suppressions.yml",
+                                    "sha": "old", "overrides": []}])
+        gh = self.gh(self._responses(
+            [{"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
+              "sha": "new"}],
+            {"acme/new/contents/.vibe-suppressions.yml": self.CONFIG}))
+        self._run(d, gh, script_text=mutant)
+        self.assertEqual([x["sha"] for x in self._ledger(d)], ["old"],
+                         "mutation ineffective: the mutant should miss the edit")
+
+
 if __name__ == "__main__":
     unittest.main()

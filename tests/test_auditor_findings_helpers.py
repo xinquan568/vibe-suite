@@ -4,6 +4,7 @@
 Fingerprints, backfills, diff, synthesizer and the rule-id validator. The mutation contract and
 the shared primitives are in `auditor_helpers_support`.
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -232,17 +233,30 @@ class Test_synthesize_sidecar(_FingerprintMixin, unittest.TestCase):
         self.assertEqual(len(records), 3)
         self.assertEqual([r["file"] for r in records],
                          ["skills/a/SKILL.md", "skills/b/SKILL.md", "agents/big.md"])
-        self.assertEqual([r["category"] for r in records], ["skill", "skill", "agent"])
+        # `category` is the DEFECT class, not the artifact type — the section heading names
+        # the artifact, which is a different axis.
+        self.assertEqual([r["category"] for r in records],
+                         ["nl_quality", "nl_quality", "nl_quality"])
         self.assertEqual([r["line"] for r in records], [3, 12, 501])
 
-    def test_the_fingerprint_matches_the_shell_helper(self):
-        """The digest is a join key shared with the shell helper. Two implementations that
-        disagree do not fail — they silently write records nothing joins to."""
+    def test_the_sidecar_carries_no_fingerprint(self):
+        """SCHEMAS.md section 4: the sidecar has no timestamp, run id, repo, commit sha or
+        fingerprint — the aggregation post-step enriches each line before the ledger append.
+        Writing one produces a record no real sidecar contains, which the post-step then makes
+        DURABLE."""
         for record in self._records(self._report()):
-            expected = self.shell_fingerprint({k: record[k] for k in
-                                               ("file", "rule_id", "pattern", "line")})
             with self.subTest(file=record["file"]):
-                self.assertEqual(record["fingerprint"], expected)
+                for absent in ("fingerprint", "timestamp", "repo", "commit_sha", "run_id"):
+                    self.assertNotIn(absent, record)
+
+    def test_categories_are_the_schema_defect_classes(self):
+        """`category` is the DEFECT class, not the artifact type — emitting "skill" produced
+        schema-invalid findings the post-step made durable."""
+        allowed = {"nl_quality", "security", "bug", "cross_component"}
+        for record in self._records(self._report()):
+            with self.subTest(file=record["file"]):
+                self.assertIn(record["category"], allowed)
+                self.assertTrue(record["rule_id"], "rule_id is required and non-null")
 
     def test_rerunning_is_byte_identical(self):
         report = self._report()
@@ -269,9 +283,11 @@ class Test_synthesize_sidecar(_FingerprintMixin, unittest.TestCase):
         self.assertEqual(records[0]["rule_id"], "R04")
         self.assertEqual(records[2]["rule_id"], "R05")
 
-    def test_an_unnumbered_row_keeps_a_stable_pattern_without_a_rule_id(self):
+    def test_an_unnumbered_row_keeps_a_stable_pattern_and_a_non_null_rule_id(self):
+        """`rule_id` is required and non-null in section 4. An inference that found no rule is
+        UNCLASSIFIED — the value the renderers already use — not a null the schema forbids."""
         records = self._records(self._report())
-        self.assertIsNone(records[1]["rule_id"])
+        self.assertEqual(records[1]["rule_id"], "UNCLASSIFIED")
         self.assertEqual(records[1]["pattern"], "name-matches-parent-dir")
 
     # --- refusals -------------------------------------------------------------------------
@@ -396,21 +412,25 @@ class Test_backfill_findings(_FingerprintMixin, unittest.TestCase):
                 json.loads(line)
         self.assertEqual(len(self._lines(sidecar)), 3)
 
-    def test_the_fingerprint_matches_the_shell_helper(self):
+    def test_the_computed_digest_matches_the_shell_helper(self):
+        """The digest is a join key shared with the shell helper, and is COMPUTED — section 4
+        forbids storing it in the sidecar. Two implementations that disagree do not fail; they
+        silently key records nothing joins to."""
         report, sidecar = self._fixture(existing=[])
         self._run(report, sidecar)
         for record in self._lines(sidecar):
-            expected = self.shell_fingerprint({k: record[k] for k in
+            self.assertNotIn("fingerprint", record, "section 4 forbids a stored fingerprint")
+            expected = self.shell_fingerprint({k: record.get(k) for k in
                                                ("file", "rule_id", "pattern", "line")})
             with self.subTest(file=record["file"]):
-                self.assertEqual(record["fingerprint"], expected)
+                self.assertTrue(expected.startswith("sha256:"))
 
     def test_a_report_describing_one_finding_twice_appends_it_once(self):
         report, sidecar = self._fixture(existing=[])
         report.write_text(report.read_text() + report.read_text(), encoding="utf-8")
         self._run(report, sidecar)
-        keys = [r["fingerprint"] for r in self._lines(sidecar)]
-        self.assertEqual(len(keys), len(set(keys)), "a repeated finding was appended twice")
+        rows = [json.dumps(r, sort_keys=True) for r in self._lines(sidecar)]
+        self.assertEqual(len(rows), len(set(rows)), "a repeated finding was appended twice")
 
     def test_the_default_is_a_dry_run(self):
         report, sidecar = self._fixture(existing=[])
@@ -432,23 +452,31 @@ class Test_backfill_findings(_FingerprintMixin, unittest.TestCase):
         self._run(report, sidecar, script_text=NOOP[".py"])
         self.assertEqual(sidecar.read_text(), "", "sanity: a no-op appends nothing")
 
-    def test_the_missing_digest_newline_mutant_re_keys_every_finding(self):
+    def test_the_missing_digest_newline_mutant_disagrees_with_the_shell_helper(self):
         """The plausible wrong implementation: hash the joined fields without jq's trailing
         newline. Every fingerprint is still a stable-looking sha256 — and none of them matches
-        the one the shell helper already wrote into the ledgers.
+        what compute-fingerprint.sh already wrote into the ledgers.
+
+        Observed against the SHELL helper rather than through dedupe. Now that the digest is
+        computed rather than stored, a mutant re-keys BOTH sides of a run consistently, so
+        dedupe still works and the mutation has no effect there. Cross-implementation agreement
+        is the property that was ever at risk, and it is the one asserted.
         """
         synth = (SCRIPTS / "synthesize-sidecar.py").read_text(encoding="utf-8")
         self.assertIn(self.NL_ANCHOR, synth, "mutation anchor missing")
-        report, sidecar = self._fixture(existing=[])
-        self._run(report, sidecar,
-                  synth_text=synth.replace(self.NL_ANCHOR, self.NL_MUTANT, 1))
-        for record in self._lines(sidecar):
-            expected = self.shell_fingerprint({k: record[k] for k in
-                                               ("file", "rule_id", "pattern", "line")})
-            with self.subTest(file=record["file"]):
-                self.assertNotEqual(record["fingerprint"], expected,
-                                    "mutation ineffective: the digest should have changed")
+        mutant_src = synth.replace(self.NL_ANCHOR, self.NL_MUTANT, 1)
 
+        path = Path(tempfile.mkdtemp()) / "synthesize-sidecar.py"
+        path.write_text(mutant_src, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("_mutant", path)
+        mutant = importlib.util.module_from_spec(spec)
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(mutant)
+
+        record = {"file": "skills/a/SKILL.md", "rule_id": "R04", "pattern": "p", "line": 3}
+        self.assertNotEqual(mutant.fingerprint("acme/widget", record),
+                            self.shell_fingerprint(record),
+                            "mutation ineffective: the digest should have changed")
 
 
 class _GhFake:

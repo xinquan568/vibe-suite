@@ -63,16 +63,17 @@ RULE_INFERENCE = (
 STOPWORDS = frozenset("""a an and are as at be but by for from has have in into is it its not
 of on or that the their this to with without missing should must than then when which""".split())
 
-SECTION_CATEGORY = (
-    (r"\bskills?\b", "skill"),
-    (r"\bagents?\b", "agent"),
-    (r"\bcommands?\b", "command"),
-    (r"\bshared partials?\b|\bpartials?\b", "shared-partial"),
-    (r"\brules?\b", "rule"),
-    (r"\bhooks?\b", "hook"),
-    (r"\bmemory\b|claude\.md", "claude.md"),
-    (r"\bplugin\b", "plugin"),
+#: SCHEMAS.md section 2 fixes `category` to the DEFECT class. A section heading names the
+#: ARTIFACT type, which is a different axis entirely — emitting "skill" as a category produced
+#: schema-invalid findings that the aggregation post-step then made DURABLE in the ledger.
+#: Legacy reports carry no defect class, so everything synthesized from prose is nl_quality
+#: unless the text says otherwise.
+CATEGORY_FOR = (
+    (r"\bsecurit|\bvulnerab|\binjection\b|\bsecret\b", "security"),
+    (r"\bcrash\b|\bbug\b|\bincorrect\b|\bbroken\b", "bug"),
+    (r"\bcross-?component\b|\borphan\b|\bunreferenced\b", "cross_component"),
 )
+DEFAULT_CATEGORY = "nl_quality"
 
 SEVERITY_BY_PENALTY = ((-20, "high"), (-10, "medium"))
 
@@ -117,12 +118,12 @@ def infer_rule_and_pattern(text: str, declared_rule=None):
     return declared_rule, slugify(text)
 
 
-def classify_section(heading: str):
-    lowered = heading.lower()
-    for regex, category in SECTION_CATEGORY:
-        if re.search(regex, lowered):
+def classify_category(text: str) -> str:
+    """The DEFECT class, from the finding's own words."""
+    for regex, category in CATEGORY_FOR:
+        if re.search(regex, text, re.IGNORECASE):
             return category
-    return None
+    return DEFAULT_CATEGORY
 
 
 def parse_penalty(text: str):
@@ -150,17 +151,15 @@ def parse_report(text: str):
     per-finding `###` subsection. Document order is preserved so the output is stable.
     """
     findings = []
-    category = None
     lines = text.splitlines()
     i = 0
     while i < len(lines):
         line = lines[i]
         if line.startswith("## "):
-            category = classify_section(line[3:]) or category
             i += 1
             continue
         if line.startswith("### "):
-            findings.append(parse_subsection(lines, i, category))
+            findings.append(parse_subsection(lines, i))
             i += 1
             continue
         if line.startswith("|") and i + 1 < len(lines) and re.match(r"^\|[-:\s|]+\|$",
@@ -169,7 +168,7 @@ def parse_report(text: str):
             i += 2
             while i < len(lines) and lines[i].strip().startswith("|"):
                 row = dict(zip(header, split_cells(lines[i])))
-                parsed = parse_row(row, category)
+                parsed = parse_row(row)
                 if parsed:
                     findings.append(parsed)
                 i += 1
@@ -186,7 +185,7 @@ def first_of(row: dict, *names):
     return None
 
 
-def parse_row(row: dict, category):
+def parse_row(row: dict):
     description = first_of(row, "issue", "description", "check", "finding", "detail")
     path = first_of(row, "file", "path", "artifact")
     if not description and not path:
@@ -197,8 +196,10 @@ def parse_row(row: dict, category):
     rule_id, pattern = infer_rule_and_pattern(description or path or "", declared)
     line_value = first_of(row, "line", "lineno")
     return {
-        "category": category,
-        "rule_id": rule_id,
+        "category": classify_category(f"{description or ''} {path or ''}"),
+        # `rule_id` is required and non-null in section 4. An inference that found no rule is
+        # UNCLASSIFIED — the value the renderers already use — not a null the schema forbids.
+        "rule_id": rule_id or "UNCLASSIFIED",
         "file": path,
         "line": int(line_value) if line_value and str(line_value).isdigit() else None,
         "pattern": pattern,
@@ -212,7 +213,7 @@ def parse_row(row: dict, category):
     }
 
 
-def parse_subsection(lines, start, category):
+def parse_subsection(lines, start):
     heading = lines[start][4:].strip()
     body = []
     for line in lines[start + 1:]:
@@ -228,8 +229,10 @@ def parse_subsection(lines, start, category):
     rule_id, pattern = infer_rule_and_pattern(f"{title} {blob}",
                                               declared.group(1) if declared else None)
     return {
-        "category": category,
-        "rule_id": rule_id,
+        "category": classify_category(f"{title} {blob}"),
+        # `rule_id` is required and non-null in section 4. An inference that found no rule is
+        # UNCLASSIFIED — the value the renderers already use — not a null the schema forbids.
+        "rule_id": rule_id or "UNCLASSIFIED",
         "file": path.group(1).strip() if path else None,
         "line": int(line_no.group(1)) if line_no else None,
         "pattern": pattern,
@@ -261,8 +264,10 @@ def main(argv=None):
         refuse("report-missing")
 
     findings = parse_report(report.read_text(encoding="utf-8"))
-    for finding in findings:
-        finding["fingerprint"] = fingerprint(args.repo, finding)
+    # NO FINGERPRINT. Section 4 is explicit that the sidecar carries no timestamp, run id,
+    # repo, commit sha or fingerprint — the aggregation post-step enriches each line before the
+    # ledger append. Writing one here produces a record no real sidecar contains, and the
+    # post-step then makes it durable.
 
     payload = "".join(json.dumps(f, ensure_ascii=False, sort_keys=True) + "\n"
                       for f in findings)

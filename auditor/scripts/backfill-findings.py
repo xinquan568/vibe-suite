@@ -64,7 +64,7 @@ def synthesizer():
     return module
 
 
-def read_existing(path: Path):
+def read_existing(path: Path, synth, repo):
     """`(fingerprints, ends_with_newline)`; a missing sidecar is empty rather than an error."""
     if not path.is_file():
         return set(), True
@@ -83,8 +83,10 @@ def read_existing(path: Path):
             # Rewriting the file to drop it would be a silent repair of data this helper was
             # not asked to touch.
             continue
-        if record.get("fingerprint"):
-            seen.add(record["fingerprint"])
+        # COMPUTED, not read. Section 4 sidecars carry no fingerprint — the aggregation
+        # post-step adds it. Deduping on a field the file never contains means nothing ever
+        # matches, so every rerun appends the whole report again.
+        seen.add(synth.fingerprint(repo, record))
     return seen, raw.endswith("\n")
 
 
@@ -110,15 +112,15 @@ def main(argv=None):
 
     synth = synthesizer()
     findings = synth.parse_report(report.read_text(encoding="utf-8"))
-    for finding in findings:
-        finding["fingerprint"] = synth.fingerprint(args.repo, finding)
 
     sidecar = Path(args.sidecar)
-    seen, ends_with_newline = read_existing(sidecar)
+    seen, ends_with_newline = read_existing(sidecar, synth, args.repo)
 
     missing, added = [], set()
     for finding in findings:
-        key = finding["fingerprint"]
+        # The digest identifies the finding for dedupe; it is NOT written into the sidecar,
+        # which section 4 says carries none.
+        key = synth.fingerprint(args.repo, finding)
         # `added` as well as `seen`: one report can describe the same finding twice, and
         # without this the first run would append the duplicate that every later run refuses.
         if key not in seen and key not in added:
@@ -133,7 +135,8 @@ def main(argv=None):
         print(f"backfill-findings: would append {len(missing)} finding(s) "
               f"of {len(findings)} (dry run; pass --apply)")
         for finding in missing:
-            print(f"  {finding['fingerprint']} {finding.get('file')} {finding.get('rule_id')}")
+            print(f"  {synth.fingerprint(args.repo, finding)} {finding.get('file')} "
+                  f"{finding.get('rule_id')}")
         return 0
 
     sidecar.parent.mkdir(parents=True, exist_ok=True)

@@ -939,6 +939,38 @@ class Test_diff_findings(unittest.TestCase):
         self.assertIn("They are not fixes.", report)
         self.assertIn("| fixed | 1 |", report)
 
+
+    def test_the_new_occurrence_is_the_one_reported_as_introduced(self):
+        """Counts alone do not catch this. Three occurrences of one (file, rule, pattern) where
+        the MIDDLE one is new: taking the last N re-audit rows as introduced keeps every count
+        right and attributes both the introduction and the still-open status to the wrong
+        lines. A summary review passes it; a maintainer following the line numbers does not.
+        """
+        original = [{"file": "a.md", "rule_id": "R04", "pattern": "p", "line": n,
+                     "fingerprint": f"fp-old-{n}"} for n in (10, 30)]
+        reaudit = [{"file": "a.md", "rule_id": "R04", "pattern": "p", "line": n,
+                    "fingerprint": f"fp-new-{n}"} for n in (10, 20, 30)]
+        d = self._fixture(original=original, reaudit=reaudit)
+        self._run(d)
+        summary = self._summary(d)
+        self.assertEqual(summary["counts"]["introduced"], 1)
+        self.assertEqual(summary["counts"]["fixed"], 0)
+        self.assertEqual(summary["introduced"], ["fp-new-20"],
+                         "the wrong occurrence was reported as introduced")
+
+    def test_a_removed_middle_occurrence_is_the_one_reported_fixed(self):
+        """The mirror case: three become two, and the fix must name the line that went."""
+        original = [{"file": "a.md", "rule_id": "R04", "pattern": "p", "line": n,
+                     "fingerprint": f"fp-{n}"} for n in (10, 20, 30)]
+        reaudit = [{"file": "a.md", "rule_id": "R04", "pattern": "p", "line": n,
+                    "fingerprint": f"fp-{n}"} for n in (10, 30)]
+        d = self._fixture(original=original, reaudit=reaudit)
+        self._run(d)
+        summary = self._summary(d)
+        self.assertEqual(summary["counts"]["fixed"], 1)
+        self.assertEqual(summary["fixed"], ["fp-20"],
+                         "the wrong occurrence was reported as fixed")
+
     # --- refusals -------------------------------------------------------------------------
     def test_every_one_of_the_nine_arguments_is_required(self):
         d = self._fixture()

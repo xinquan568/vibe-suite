@@ -115,25 +115,39 @@ def classify(original, reaudit):
         after.setdefault(identity(finding), []).append(finding)
 
     identical, shifted, fixed, introduced = [], [], [], []
+    leftover = {}
     for key, originals in before.items():
         matches = list(after.get(key, []))
-        # Same line first, so an unmoved finding is never reported as a shift merely because a
-        # sibling occurrence sorted ahead of it.
+
+        # TWO PASSES, and the order matters. Assign every exact-line match FIRST, across all
+        # occurrences, before pairing anything as a shift. Processing originals in one pass
+        # lets an earlier occurrence claim a later one's exact match: with lines 10, 20, 30
+        # becoming 10 and 30, original-20 takes line 30 as a "shift" and original-30 is then
+        # reported FIXED — while line 30 is still sitting there and line 20 is the one that
+        # went. Every count is right and both attributions are wrong.
+        unmatched = []
         for finding in originals:
             exact = next((m for m in matches if line_of(m) == line_of(finding)), None)
             if exact is not None:
                 matches.remove(exact)
                 identical.append(finding)
-            elif matches:
+            else:
+                unmatched.append(finding)
+
+        for finding in unmatched:
+            if matches:
                 moved = matches.pop(0)
                 shifted.append({**moved, "line_before": line_of(finding),
                                 "line_after": line_of(moved)})
             else:
                 fixed.append(finding)
+
+        # Whatever no original claimed is genuinely new. Recomputing this by COUNT instead
+        # picks occurrences by position rather than by what actually went unmatched.
+        leftover[key] = matches
+
     for key, remaining in after.items():
-        surplus = len(remaining) - len(before.get(key, []))
-        if surplus > 0:
-            introduced.extend(remaining[-surplus:])
+        introduced.extend(leftover.get(key, []) if key in before else remaining)
     return identical, shifted, fixed, introduced
 
 

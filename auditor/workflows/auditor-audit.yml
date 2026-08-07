@@ -333,12 +333,7 @@ jobs:
           # never be true for one — the branch would take the else forever and report a
           # deferral that had already been delivered, with the helper silently switched off.
           set -euo pipefail
-          # deferred:E8.3 — sidecar rule-id drift helper lands with the scripts item
-          if [ -f "$CODE_DIR/auditor/scripts/validate-rule-ids.py" ]; then
-            python3 "$CODE_DIR/auditor/scripts/validate-rule-ids.py" "$DATA_DIR/audits/$SLUG.findings.jsonl" || echo "rule-id drift check failed (warn-only)"
-          else
-            echo "REFUSE:drift-helper-missing-until-E8.3 (warn-only, continuing)"
-          fi
+          python3 "$CODE_DIR/auditor/scripts/validate-rule-ids.py" "$DATA_DIR/audits/$SLUG.findings.jsonl" || echo "rule-id drift check failed (warn-only)"
       - run: |
           # The per-repo report render is FAIL-CLOSED. It was previously guarded and its failure
           # swallowed by `|| echo ... (warn-only)`, which meant an audit could be published,
@@ -357,13 +352,7 @@ jobs:
           # commit cycle 1: report, sidecar, ledgers and registry to auditor-data
           set -euo pipefail
           cd "$DATA_DIR"
-          # deferred:E8.3 — protected-path guard lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
-          else
-            echo "REFUSE:guard-helper-missing-until-E8.3"
-            exit 1
-          fi
+          bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
           git add audits ledgers registry
           if git diff --cached --quiet; then
             echo "nothing to commit"
@@ -372,13 +361,7 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-audit $SLUG score=$SCORE security=$SECURITY strategy=${STRATEGY:-single} artifacts=${ARTIFACT_COUNT:-0}"
-          # deferred:E8.3 — retrying push helper lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
-          else
-            echo "REFUSE:push-helper-missing-until-E8.3"
-            exit 1
-          fi
+          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
       - run: |
           # security-blocked side path: attempt a private disclosure issue on
           # the target; when filing fails (the default token cannot write
@@ -415,10 +398,4 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-audit queue disclosure state for $SLUG"
-          # deferred:E8.3 — retrying push helper lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
-          else
-            echo "REFUSE:push-helper-missing-until-E8.3"
-            exit 1
-          fi
+          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5

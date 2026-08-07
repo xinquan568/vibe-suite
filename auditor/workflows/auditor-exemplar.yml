@@ -246,19 +246,8 @@ jobs:
       - run: |
           set -euo pipefail
           cd "$DATA_DIR"
-          # deferred:E8.3 — gallery builder lands with the scripts item
-          if [ -f "$CODE_DIR/auditor/scripts/build-exemplar-gallery.py" ]; then
-            python3 "$CODE_DIR/auditor/scripts/build-exemplar-gallery.py"
-          else
-            echo "gallery regeneration deferred until E8.3; tolerated"
-          fi
-          # deferred:E8.3 — protected-path guard lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
-          else
-            echo "REFUSE:guard-helper-missing-until-E8.3"
-            exit 1
-          fi
+          python3 "$CODE_DIR/auditor/scripts/build-exemplar-gallery.py"
+          bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
           git add exemplars registry/repos.json ledgers/events.jsonl
           if git diff --cached --quiet; then
             echo "nothing to commit"
@@ -267,10 +256,4 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-exemplar publish exemplar"
-          # deferred:E8.3 — retrying push helper lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
-          else
-            echo "REFUSE:push-helper-missing-until-E8.3"
-            exit 1
-          fi
+          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"

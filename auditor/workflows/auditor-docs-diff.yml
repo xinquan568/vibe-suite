@@ -125,11 +125,4 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-docs-diff refresh the docs hash store"
-          # deferred:E8.3 — retrying push helper (5 attempts with conflict
-          # resolution, hard fail on the 5th) lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
-          else
-            echo "REFUSE:push-helper-missing-until-E8.3"
-            exit 1
-          fi
+          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"

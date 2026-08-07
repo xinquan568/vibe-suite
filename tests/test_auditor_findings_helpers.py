@@ -889,17 +889,41 @@ class Test_diff_findings(unittest.TestCase):
         counts = self._summary(d)["counts"]
         self.assertEqual((counts["fixed"], counts["introduced"], counts["shifted"]), (0, 0, 20))
 
-    def test_events_go_to_the_events_ledger_with_the_right_names(self):
+    def test_verified_records_both_results_with_the_outcome_saying_which(self):
+        """SCHEMAS.md puts fixes AND persistence under one event name, distinguished by
+        `outcome`. Emitting it only for fixes loses half the evidence: a rule whose findings
+        persist then looks merely unreported rather than unheeded."""
         d = self._fixture()
         self._run(d)
-        events = self._events(d)
-        self.assertEqual({e["event"] for e in events},
+        by_fp = {e["data"]["fingerprint"]: e["data"] for e in self._events(d)}
+        self.assertEqual(by_fp["fp-fixed"]["outcome"], "fixed_upstream_not_merged")
+        self.assertEqual(by_fp["fp-same"]["outcome"], "persists_identically")
+        self.assertEqual(by_fp["fp-new"]["outcome"], "persists_line_shifted")
+        self.assertEqual({e["event"] for e in self._events(d)},
                          {"finding_verified", "finding_introduced"})
-        self.assertEqual([e["data"]["fingerprint"] for e in events
-                          if e["event"] == "finding_verified"], ["fp-fixed"])
-        for event in events:
-            self.assertEqual(event["data"]["commit_sha_before"], self.SHA_BEFORE)
-            self.assertEqual(event["data"]["commit_sha_after"], self.SHA_AFTER)
+
+    def test_every_verified_event_carries_the_schemas_fields(self):
+        d = self._fixture()
+        self._run(d)
+        for event in self._events(d):
+            if event["event"] != "finding_verified":
+                continue
+            with self.subTest(fp=event["data"]["fingerprint"]):
+                for field in ("repo", "fingerprint", "rule_id", "file", "pattern", "outcome",
+                              "commit_sha_before", "commit_sha_after", "pr_number"):
+                    self.assertIn(field, event["data"])
+                self.assertEqual(event["data"]["commit_sha_before"], self.SHA_BEFORE)
+                self.assertEqual(event["data"]["commit_sha_after"], self.SHA_AFTER)
+
+    def test_introduced_carries_one_commit_sha_not_the_pair(self):
+        """Its schema has no slot for the pair, and schema drift in an append-only ledger is
+        not retractable."""
+        d = self._fixture()
+        self._run(d)
+        intro = next(e for e in self._events(d) if e["event"] == "finding_introduced")
+        self.assertEqual(intro["data"]["commit_sha"], self.SHA_AFTER)
+        self.assertNotIn("commit_sha_before", intro["data"])
+        self.assertIn("severity", intro["data"])
 
     def test_a_rerun_keeps_event_multiplicity_at_one_to_one(self):
         d = self._fixture()

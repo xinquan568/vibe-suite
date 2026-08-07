@@ -29,8 +29,8 @@ class Test_rule_health(unittest.TestCase):
     HITS_ANCHOR = '    for fingerprint, rule in rule_of.items():'
     HITS_MUTANT = '    for fingerprint, rule in [((e.get("data") or {}).get("fingerprint"),\n                              str((e.get("data") or {}).get("rule_id")))\n                             for e in events\n                             if (e.get("data") or {}).get("fingerprint")\n                             and (e.get("data") or {}).get("rule_id")]:'
 
-    #: One finding, reported three times — audit, re-audit, backfill — which is ordinary for an
-    #: append-only ledger. And one outcome that CHANGED as the maintainer responded.
+    #: One finding, reported three times — audit, re-audit, backfill — which is ordinary for
+    #: an append-only ledger.
     EVENTS = [
         envelope("finding_recorded", {"fingerprint": "fp-a", "rule_id": "R04"},
                  "2026-01-01T00:00:00Z"),
@@ -42,28 +42,45 @@ class Test_rule_health(unittest.TestCase):
                  "2026-01-05T00:00:00Z"),
         envelope("finding_recorded", {"fingerprint": "fp-c", "rule_id": "R05"},
                  "2026-01-06T00:00:00Z"),
-        # fp-a: submitted, rejected, then the maintainer fixed it their own way.
-        envelope("pr_outcome", {"fingerprint": "fp-a", "outcome": "submitted"},
-                 "2026-04-01T00:00:00Z"),
-        envelope("pr_outcome", {"fingerprint": "fp-a", "outcome": "rejected"},
-                 "2026-05-01T00:00:00Z"),
-        envelope("pr_outcome", {"fingerprint": "fp-a", "outcome": "applied_separately"},
-                 "2026-06-01T00:00:00Z"),
-        envelope("pr_outcome", {"fingerprint": "fp-b", "outcome": "merged"},
-                 "2026-04-02T00:00:00Z"),
-        envelope("pr_outcome", {"fingerprint": "fp-c", "outcome": "rejected"},
-                 "2026-04-03T00:00:00Z"),
-        envelope("finding_verified", {"fingerprint": "fp-b", "rule_id": "R04"},
-                 "2026-07-01T00:00:00Z"),
-        envelope("exemplar_published", {"rule_ids": ["R04"]}, "2026-07-02T00:00:00Z"),
+        # SCHEMAS.md: singular fingerprint, and an `outcome` from the fixed_*/persists_* enum.
+        envelope("finding_verified",
+                 {"repo": "acme/w", "fingerprint": "fp-b", "rule_id": "R04",
+                  "outcome": "fixed_and_merged"}, "2026-07-01T00:00:00Z"),
+        # A finding that still persists is recorded through the SAME event and must not count.
+        envelope("finding_verified",
+                 {"repo": "acme/w", "fingerprint": "fp-c", "rule_id": "R05",
+                  "outcome": "persists_line_shifted"}, "2026-07-01T00:00:00Z"),
     ]
 
-    def _data_dir(self, events=None):
+    #: The registry is where adjudications live. fp-a was attempted twice: an earlier PR closed
+    #: unmerged, then a later one the maintainer fixed their own way.
+    REGISTRY = {"repos": {"acme/w": {"prs": {
+        "1": {"number": 1, "updatedAt": "2026-04-01T00:00:00Z", "outcome": "rejected",
+              "fingerprints": ["fp-a"], "rule_ids": ["R04"]},
+        "2": {"number": 2, "updatedAt": "2026-06-01T00:00:00Z",
+              "outcome": "applied_separately", "fingerprints": ["fp-a"], "rule_ids": ["R04"]},
+        "3": {"number": 3, "updatedAt": "2026-04-02T00:00:00Z", "outcome": "merged",
+              "fingerprints": ["fp-b"], "rule_ids": ["R04"]},
+        "4": {"number": 4, "updatedAt": "2026-04-03T00:00:00Z", "outcome": "rejected",
+              "fingerprints": ["fp-c"], "rule_ids": ["R05"]},
+    }}}}
+
+    #: `exemplifies` is the join key, read from the exemplar files themselves.
+    EXEMPLARS = {"acme-w.md": "---\nslug: acme-w\nrepo: acme/w\naudited: 2026-07-02\n"
+                              "commit_sha: x\nscore: 95\nexemplifies: [R04]\n---\nbody\n"}
+
+    def _data_dir(self, events=None, registry=None, exemplars=None):
         d = Path(tempfile.mkdtemp())
         (d / "ledgers").mkdir()
+        (d / "registry").mkdir()
+        (d / "exemplars").mkdir()
         (d / "ledgers" / "events.jsonl").write_text(
             "".join(json.dumps(e) + "\n" for e in (self.EVENTS if events is None else events)),
             encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(
+            json.dumps(self.REGISTRY if registry is None else registry), encoding="utf-8")
+        for name, text in (self.EXEMPLARS if exemplars is None else exemplars).items():
+            (d / "exemplars" / name).write_text(text, encoding="utf-8")
         return d
 
     def _run(self, d, script_text=None):
@@ -93,27 +110,12 @@ class Test_rule_health(unittest.TestCase):
         self.assertEqual(self._rules(d)["R04"]["hits"], 2, "fp-a was logged three times")
         self.assertEqual(self._rules(d)["R05"]["hits"], 1)
 
-    def test_only_the_latest_outcome_for_a_finding_counts(self):
-        """fp-a went submitted -> rejected -> applied_separately. Summing them counts one
-        finding three times and lets it be both rejected and accepted."""
-        rules = self._rules_after()
-        self.assertEqual(rules["R04"]["rejected"], 0, "a superseded rejection still counted")
-        self.assertEqual(rules["R04"]["applied_separately"], 1)
-        self.assertEqual(rules["R04"]["merged"], 1)
-        self.assertEqual(rules["R04"]["resolved"], 2)
-
     def test_applied_separately_is_acceptance(self):
         """The maintainer fixed the problem and closed our PR. The finding was right."""
         rules = self._rules_after()
         self.assertEqual(rules["R04"]["acceptance_rate"], 1.0,
                          "merged + applied_separately of 2 resolved is 100%")
         self.assertEqual(rules["R05"]["acceptance_rate"], 0.0)
-
-    def test_verified_and_exemplar_counts_are_carried(self):
-        rules = self._rules_after()
-        self.assertEqual(rules["R04"]["verified"], 1)
-        self.assertEqual(rules["R04"]["exemplars"], 1)
-        self.assertEqual(rules["R05"]["exemplars"], 0)
 
     def test_the_log_is_written_atomically(self):
         """Every consumer reads this file whole, so a partial write would be parsed as a
@@ -122,8 +124,9 @@ class Test_rule_health(unittest.TestCase):
         self.assertIn("os.replace", src)
         self.assertIn("dir=str(path.parent)", src, "a /tmp temp file makes rename non-atomic")
 
-    def test_an_empty_ledger_produces_an_empty_but_valid_log(self):
-        d = self._data_dir(events=[])
+    def test_an_empty_corpus_produces_an_empty_but_valid_log(self):
+        """A registry with no PRs and no findings is a fresh install, not a failure."""
+        d = self._data_dir(events=[], registry={"repos": {}}, exemplars={})
         r = self._run(d)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self._rules(d), {})
@@ -138,6 +141,63 @@ class Test_rule_health(unittest.TestCase):
         d = self._data_dir()
         self._run(d)
         return self._rules(d)
+
+
+    def test_outcomes_come_from_the_registry_not_the_event_stream(self):
+        """SCHEMAS.md puts the pipeline outcome enum on the REGISTRY's PR record.
+        `finding_outcome` events carry `pr_state` — a different enum — and `fingerprints[]` /
+        `rule_ids[]` as parallel ARRAYS. Reading a singular `outcome` off those events matches
+        nothing, so every rule reports zero resolutions, which reads as "no maintainer has
+        responded yet" rather than as a broken join.
+        """
+        d = self._data_dir(events=[
+            envelope("finding_recorded", {"fingerprint": "fp-a", "rule_id": "R04"},
+                     "2026-01-01T00:00:00Z"),
+            # The real event shape. A helper keying on a singular `outcome` sees nothing here.
+            envelope("finding_outcome",
+                     {"pr": 2, "pr_state": "merged", "fingerprints": ["fp-a"],
+                      "rule_ids": ["R04"]}, "2026-06-01T00:00:00Z"),
+        ])
+        self._run(d)
+        self.assertEqual(self._rules(d)["R04"]["applied_separately"], 1,
+                         "the registry's adjudication was not used")
+
+    def test_the_latest_pr_wins_when_a_finding_was_attempted_twice(self):
+        """fp-a was rejected on PR 1 and applied separately on PR 2. The maintainer's latest
+        word is the answer; summing both counts one finding twice."""
+        rules = self._rules_after()
+        self.assertEqual(rules["R04"]["rejected"], 0)
+        self.assertEqual(rules["R04"]["applied_separately"], 1)
+
+    def test_parallel_rule_ids_join_by_position(self):
+        """`rule_ids` is parallel to `fingerprints`. Keying a dict on the rule id instead would
+        drop a PR that fixed two findings under one rule."""
+        d = self._data_dir(events=[], registry={"repos": {"acme/w": {"prs": {
+            "9": {"number": 9, "updatedAt": "2026-06-01T00:00:00Z", "outcome": "merged",
+                  "fingerprints": ["fp-x", "fp-y"], "rule_ids": ["R07", "R07"]}}}}})
+        self._run(d)
+        self.assertEqual(self._rules(d)["R07"]["hits"], 2,
+                         "two findings under one rule collapsed to one")
+
+    def test_only_fixed_outcomes_count_as_verified(self):
+        """`finding_verified` records persistence too, through the same event name. Counting
+        every one of them would report a still-open finding as confirmation the rule works."""
+        rules = self._rules_after()
+        self.assertEqual(rules["R04"]["verified"], 1, "fp-b was fixed_and_merged")
+        self.assertEqual(rules["R05"]["verified"], 0, "fp-c persists_line_shifted")
+
+    def test_exemplar_counts_come_from_exemplifies(self):
+        rules = self._rules_after()
+        self.assertEqual(rules["R04"]["exemplars"], 1)
+        self.assertEqual(rules["R05"]["exemplars"], 0)
+
+    def test_a_missing_registry_is_refused(self):
+        """Without it every finding looks unresolved — the most reassuring way to be wrong."""
+        d = self._data_dir()
+        (d / "registry" / "repos.json").unlink()
+        r = self._run(d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:rule-health:registry-missing", r.stderr)
 
     # --- mutants --------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):

@@ -105,26 +105,35 @@ def line_of(finding):
 
 def classify(original, reaudit):
     """`(identical, shifted, fixed, introduced)`, each a list of records."""
-    before = {}
+    # Lists, not single entries: one file can carry the same rule and pattern at several
+    # lines, and collapsing them loses every occurrence but one — so a maintainer who fixed
+    # four of five is recorded as having fixed all five.
+    before, after = {}, {}
     for finding in original:
-        before.setdefault(identity(finding), finding)
-    after = {}
+        before.setdefault(identity(finding), []).append(finding)
     for finding in reaudit:
-        after.setdefault(identity(finding), finding)
+        after.setdefault(identity(finding), []).append(finding)
 
     identical, shifted, fixed, introduced = [], [], [], []
-    for key, finding in before.items():
-        match = after.get(key)
-        if match is None:
-            fixed.append(finding)
-        elif line_of(match) == line_of(finding):
-            identical.append(finding)
-        else:
-            shifted.append({**match, "line_before": line_of(finding),
-                            "line_after": line_of(match)})
-    for key, finding in after.items():
-        if key not in before:
-            introduced.append(finding)
+    for key, originals in before.items():
+        matches = list(after.get(key, []))
+        # Same line first, so an unmoved finding is never reported as a shift merely because a
+        # sibling occurrence sorted ahead of it.
+        for finding in originals:
+            exact = next((m for m in matches if line_of(m) == line_of(finding)), None)
+            if exact is not None:
+                matches.remove(exact)
+                identical.append(finding)
+            elif matches:
+                moved = matches.pop(0)
+                shifted.append({**moved, "line_before": line_of(finding),
+                                "line_after": line_of(moved)})
+            else:
+                fixed.append(finding)
+    for key, remaining in after.items():
+        surplus = len(remaining) - len(before.get(key, []))
+        if surplus > 0:
+            introduced.extend(remaining[-surplus:])
     return identical, shifted, fixed, introduced
 
 
@@ -135,8 +144,27 @@ def envelope(event, data, sha_before, sha_after):
         "event": event,
         "run_id": os.environ.get("GITHUB_RUN_ID", "local"),
         "run_number": int(os.environ.get("GITHUB_RUN_NUMBER") or 0),
-        "data": {**data, "commit_sha_before": sha_before, "commit_sha_after": sha_after},
+        # `finding_introduced` names a single commit; only the verified events carry the
+        # pair. Adding both to everything would put a field on an event whose schema has no
+        # slot for it, and schema drift in an append-only ledger is not retractable.
+        "data": ({**data} if "commit_sha" in data
+                 else {**data, "commit_sha_before": sha_before,
+                       "commit_sha_after": sha_after}),
     }
+
+
+def dedupe_key(event, data):
+    """The identity of an already-recorded outcome.
+
+    Derived from the data in ONE place because the two event shapes differ: the verified events
+    carry `commit_sha_before`/`commit_sha_after`, `finding_introduced` carries a single
+    `commit_sha`. Building the key differently when writing and when re-reading makes every
+    rerun append a second copy of an event it just decided it already had.
+    """
+    single = data.get("commit_sha")
+    return (event, data.get("fingerprint"),
+            data.get("commit_sha_before") or single,
+            data.get("commit_sha_after") or single)
 
 
 def already_recorded(path: Path):
@@ -158,9 +186,39 @@ def already_recorded(path: Path):
             continue
         data = record.get("data") or {}
         if record.get("event") and data.get("fingerprint"):
-            seen.add((record["event"], data["fingerprint"],
-                      data.get("commit_sha_before"), data.get("commit_sha_after")))
+            seen.add(dedupe_key(record["event"], data))
     return seen
+
+
+#: Registry PR outcome -> the `finding_verified` outcome for a finding that PR fixed.
+FIXED_OUTCOME = {
+    "merged": "fixed_and_merged",
+    "applied_separately": "fixed_applied_separately",
+}
+
+
+def pr_attribution(entry):
+    """`(fingerprint -> pr number, fingerprint -> registry outcome)`.
+
+    The most recently updated PR wins, so a finding attempted twice is attributed to the
+    maintainer's latest word rather than to whichever record happened to be read first.
+    """
+    pr_for, outcome_for = {}, {}
+    prs = entry.get("prs") if isinstance(entry, dict) else None
+    ranked = []
+    for key, record in (prs or {}).items():
+        if not isinstance(record, dict):
+            continue
+        try:
+            number = int(record.get("number", key))
+        except (TypeError, ValueError):
+            continue
+        ranked.append((str(record.get("updatedAt") or ""), number, record))
+    for _, number, record in sorted(ranked, key=lambda r: (r[0], r[1])):
+        for fingerprint in record.get("fingerprints") or []:
+            pr_for[str(fingerprint)] = number
+            outcome_for[str(fingerprint)] = record.get("outcome")
+    return pr_for, outcome_for
 
 
 def render_report(repo, sha_before, sha_after, identical, shifted, fixed, introduced):
@@ -253,23 +311,74 @@ def main(argv=None):
     events_path.parent.mkdir(parents=True, exist_ok=True)
     seen = already_recorded(events_path)
 
+    # SCHEMAS.md: `finding_verified` records BOTH results through one event name, with the
+    # outcome saying which. Emitting it only for fixes loses the other half of the evidence —
+    # a rule whose findings persist looks merely unreported rather than unheeded.
+    #
+    # A fix is attributed to the PR that carried it, and the PR's registry outcome decides
+    # which `fixed_*` value applies. Without that attribution every fix reads the same, and a
+    # fix the maintainer made themselves is indistinguishable from one we merged.
+    pr_for, outcome_for = pr_attribution(repos.get(args.repo))
+
     pending = []
     for finding in fixed:
-        key = ("finding_verified", finding.get("fingerprint"), sha_before, sha_after)
-        if finding.get("fingerprint") and key not in seen:
-            seen.add(key)
-            pending.append(envelope("finding_verified", {
-                "repo": args.repo, "fingerprint": finding["fingerprint"],
+        fingerprint = finding.get("fingerprint")
+        if not fingerprint:
+            continue
+        pr_number = pr_for.get(fingerprint)
+        pending.append(("finding_verified", fingerprint, {
+            "repo": args.repo,
+            "fingerprint": fingerprint,
+            "rule_id": finding.get("rule_id"),
+            "file": finding.get("file"),
+            "pattern": finding.get("pattern"),
+            "outcome": FIXED_OUTCOME.get(outcome_for.get(fingerprint),
+                                         "fixed_upstream_not_merged"),
+            "pr_number": pr_number,
+        }))
+    for finding in identical:
+        fingerprint = finding.get("fingerprint")
+        if fingerprint:
+            pending.append(("finding_verified", fingerprint, {
+                "repo": args.repo, "fingerprint": fingerprint,
                 "rule_id": finding.get("rule_id"), "file": finding.get("file"),
-            }, sha_before, sha_after))
+                "pattern": finding.get("pattern"), "outcome": "persists_identically",
+                "pr_number": pr_for.get(fingerprint),
+            }))
+    for finding in shifted:
+        fingerprint = finding.get("fingerprint")
+        if fingerprint:
+            pending.append(("finding_verified", fingerprint, {
+                "repo": args.repo, "fingerprint": fingerprint,
+                "rule_id": finding.get("rule_id"), "file": finding.get("file"),
+                "pattern": finding.get("pattern"), "outcome": "persists_line_shifted",
+                "pr_number": pr_for.get(fingerprint),
+            }))
     for finding in introduced:
-        key = ("finding_introduced", finding.get("fingerprint"), sha_before, sha_after)
-        if finding.get("fingerprint") and key not in seen:
-            seen.add(key)
-            pending.append(envelope("finding_introduced", {
-                "repo": args.repo, "fingerprint": finding["fingerprint"],
+        fingerprint = finding.get("fingerprint")
+        if fingerprint:
+            pending.append(("finding_introduced", fingerprint, {
+                "repo": args.repo, "fingerprint": fingerprint,
                 "rule_id": finding.get("rule_id"), "file": finding.get("file"),
-            }, sha_before, sha_after))
+                "pattern": finding.get("pattern"), "severity": finding.get("severity"),
+                # `finding_introduced` takes a single `commit_sha` — the commit it appeared in.
+                "commit_sha": sha_after,
+            }))
+
+    envelopes = []
+    for event, _fingerprint, data in pending:
+        # Key off the envelope's data, i.e. the record as it will be STORED. Keying off `data`
+        # first is subtly wrong: envelope() is what adds the sha pair to the verified events,
+        # so the key computed here would carry no shas while the key computed when re-reading
+        # carries both — and every rerun appends a second copy of an event it had just decided
+        # it already held.
+        wrapped = envelope(event, data, sha_before, sha_after)
+        key = dedupe_key(event, wrapped["data"])
+        if key in seen:
+            continue
+        seen.add(key)
+        envelopes.append(wrapped)
+    pending = envelopes
 
     if pending:
         existing = events_path.read_text(encoding="utf-8") if events_path.is_file() else ""

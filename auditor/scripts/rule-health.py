@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -40,7 +41,13 @@ REJECTED = ("rejected",)
 #: Terminal outcomes. `open`/`submitted` are deliberately excluded from the denominator.
 RESOLVED = ACCEPTED + REJECTED
 
-OUTCOME_EVENTS = ("pr_outcome", "finding_outcome")
+#: SCHEMAS.md section 1, PR record: the pipeline outcome enum. This lives in the REGISTRY, not
+#: in the event stream. `finding_outcome` events carry `pr_state`, a different enum
+#: ({merged, closed_unmerged, open, stale_90d, cla_blocked}) describing the PR rather than the
+#: adjudication, and they carry `fingerprints[]`/`rule_ids[]` as parallel ARRAYS. Reading a
+#: singular `outcome` off those events matches nothing at all — every rule then reports zero
+#: resolutions, which reads as "no maintainer has responded yet" rather than as a broken join.
+PIPELINE_OUTCOMES = ("merged", "applied_separately", "rejected", "open", "cla_blocked")
 
 
 def refuse(reason: str) -> None:
@@ -83,24 +90,70 @@ def atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def latest_outcomes(events):
-    """`{fingerprint: outcome}` keeping only the LAST outcome recorded for each finding.
+def outcomes_from_registry(registry):
+    """`{fingerprint: outcome}` from the registry's PR records.
 
-    Ordered by the event's own timestamp with the ledger position as tie-break, so two events
-    sharing a second still resolve in append order rather than arbitrarily.
+    A finding can appear in several PRs — a first attempt closed, a second merged. The most
+    recently updated PR wins, because that is the maintainer's latest word on it. Ties break on
+    the PR number so two PRs updated in the same second still resolve deterministically rather
+    than by dict order.
     """
-    outcomes = {}
-    ordered = sorted(enumerate(events),
-                     key=lambda pair: (str(pair[1].get("timestamp") or ""), pair[0]))
-    for _, event in ordered:
-        if event.get("event") not in OUTCOME_EVENTS:
+    ranked = []
+    repos = registry.get("repos") if isinstance(registry, dict) else {}
+    for repo, entry in (repos or {}).items():
+        prs = entry.get("prs") if isinstance(entry, dict) else None
+        for key, record in (prs or {}).items():
+            if not isinstance(record, dict):
+                continue
+            outcome = record.get("outcome")
+            if outcome not in PIPELINE_OUTCOMES:
+                continue
+            try:
+                number = int(record.get("number", key))
+            except (TypeError, ValueError):
+                number = 0
+            ranked.append((str(record.get("updatedAt") or ""), number, record, outcome))
+
+    outcomes, rules = {}, {}
+    for _, _, record, outcome in sorted(ranked, key=lambda r: (r[0], r[1])):
+        fingerprints = record.get("fingerprints") or []
+        rule_ids = record.get("rule_ids") or []
+        if not isinstance(fingerprints, list):
             continue
-        data = event.get("data") or {}
-        fingerprint = data.get("fingerprint")
-        outcome = data.get("outcome")
-        if fingerprint and outcome:
-            outcomes[fingerprint] = str(outcome)
-    return outcomes
+        for index, fingerprint in enumerate(fingerprints):
+            outcomes[str(fingerprint)] = outcome
+            # `rule_ids` is a PARALLEL array, so position is the join. A dict keyed on rule id
+            # would silently drop a PR that fixed two findings under the same rule.
+            if index < len(rule_ids) and rule_ids[index]:
+                rules[str(fingerprint)] = str(rule_ids[index])
+    return outcomes, rules
+
+
+def exemplar_counts(directory: Path):
+    """Per-rule exemplar counts from `exemplifies`, the join key SCHEMAS.md names.
+
+    Read from the exemplar FILES, not from events: the files are the record, and an event
+    stream would be a second copy free to disagree with them.
+    """
+    counts = {}
+    if not directory.is_dir():
+        return counts
+    for path in sorted(directory.glob("*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        front = re.match(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", text, re.DOTALL)
+        if not front:
+            continue
+        block = front.group(1)
+        inline = re.search(r"^exemplifies:[ \t]*\[(.*?)\][ \t]*$", block, re.MULTILINE)
+        if inline:
+            rules = re.findall(r"[A-Za-z0-9:_-]+", inline.group(1))
+        else:
+            listed = re.search(r"^exemplifies:[ \t]*\n((?:[ \t]*-[ \t]*\S+\n?)+)",
+                               block, re.MULTILINE)
+            rules = re.findall(r"-[ \t]*(\S+)", listed.group(1)) if listed else []
+        for rule in rules:
+            counts[rule] = counts.get(rule, 0) + 1
+    return counts
 
 
 def main(argv=None):
@@ -117,48 +170,57 @@ def main(argv=None):
         refuse("data-dir-missing")
 
     events = read_jsonl(data_dir / "ledgers" / "events.jsonl")
-    outcomes = latest_outcomes(events)
 
-    # fingerprint -> rule_id, learned from whichever event carries both. Built first so a
-    # fingerprint seen only in an outcome event still attributes to its rule.
-    rule_of = {}
-    for event in events:
-        data = event.get("data") or {}
-        if data.get("fingerprint") and data.get("rule_id"):
-            rule_of.setdefault(data["fingerprint"], str(data["rule_id"]))
+    # The registry is REQUIRED, not optional. Without it every finding looks unresolved, which
+    # reads as "no maintainer has responded yet" rather than as a missing input — the most
+    # reassuring possible way for this dataset to be wrong.
+    registry_path = data_dir / "registry" / "repos.json"
+    if not registry_path.is_file():
+        refuse("registry-missing")
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        refuse("registry-unreadable")
+    if not isinstance(registry, dict) or not isinstance(registry.get("repos"), dict):
+        refuse("registry-malformed")
+
+    outcomes, rule_of = outcomes_from_registry(registry)
 
     findings = {}
-    for path in sorted((data_dir / "audits").glob("*.findings.jsonl")) \
-            if (data_dir / "audits").is_dir() else []:
+    audits = data_dir / "audits"
+    for path in sorted(audits.glob("*.findings.jsonl")) if audits.is_dir() else []:
         for finding in read_jsonl(path):
             if finding.get("fingerprint"):
                 findings.setdefault(finding["fingerprint"], finding)
                 if finding.get("rule_id"):
                     rule_of.setdefault(finding["fingerprint"], str(finding["rule_id"]))
+    for finding in read_jsonl(data_dir / "ledgers" / "findings.jsonl"):
+        if finding.get("fingerprint"):
+            findings.setdefault(finding["fingerprint"], finding)
+            if finding.get("rule_id"):
+                rule_of.setdefault(finding["fingerprint"], str(finding["rule_id"]))
 
-    verified = {event.get("data", {}).get("fingerprint")
-                for event in events if event.get("event") == "finding_verified"}
+    # `finding_verified` is singular per SCHEMAS.md, unlike finding_outcome. Only the outcomes
+    # that mean the finding was actually fixed count as verified; the two `persists_*` values
+    # are the opposite result recorded through the same event.
+    verified = {(event.get("data") or {}).get("fingerprint")
+                for event in events
+                if event.get("event") == "finding_verified"
+                and str((event.get("data") or {}).get("outcome", "")).startswith("fixed_")}
     verified.discard(None)
 
-    exemplars = {}
-    for event in events:
-        if event.get("event") == "exemplar_published":
-            rule_ids = (event.get("data") or {}).get("rule_ids") or []
-            for rule in rule_ids:
-                exemplars[str(rule)] = exemplars.get(str(rule), 0) + 1
+    exemplars = exemplar_counts(data_dir / "exemplars")
 
     rules = {}
     for fingerprint, rule in rule_of.items():
         row = rules.setdefault(rule, {"rule_id": rule, "hits": 0, "merged": 0,
                                       "applied_separately": 0, "rejected": 0, "open": 0,
-                                      "verified": 0, "exemplars": 0,
+                                      "cla_blocked": 0, "verified": 0, "exemplars": 0,
                                       "false_positives": 0})
         row["hits"] += 1                      # one per UNIQUE fingerprint, never per event
         outcome = outcomes.get(fingerprint)
-        if outcome in ACCEPTED or outcome in REJECTED:
-            row[outcome] = row.get(outcome, 0) + 1
-        elif outcome:
-            row["open"] += 1
+        if outcome in PIPELINE_OUTCOMES:
+            row[outcome] += 1
         if fingerprint in verified:
             row["verified"] += 1
         if (findings.get(fingerprint) or {}).get("false_positive"):

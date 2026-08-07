@@ -1708,16 +1708,27 @@ class TestPushCredentials(unittest.TestCase):
         return joined
 
     def _push_sites_in(self, name, text):
-        """Push commands in one workflow's text — the same filter the real scan uses, so a
-        mutant is measured the way production is."""
+        """Every line that could reach `git push`, regardless of how it is spelled.
+
+        FAIL-CLOSED, and this is the third approach because the first two were fail-open by
+        construction. Requiring a line to LOOK like a git command means enumerating the ways a
+        command can begin — `if`, `!`, `VAR=`, and then `command`, `env`, `exec`, `nohup`,
+        `sh -c`, backticks, `$( )`. That list has no end, and every omission is a push that
+        sails past unexamined; `command git push origin "$BRANCH"` was the one that proved it.
+
+        So the question is inverted. Any line mentioning both `git` and `push` is a candidate
+        and must carry the helper; nothing has to be recognised first. Prose is excluded by the
+        `- ` bullet skip, and a helper-script invocation by its `.sh`. Both of those are
+        NARROWING rules, so each is a hole by construction — but they are two named holes
+        rather than an open-ended allowlist of prefixes, and a new spelling of `push` fails
+        rather than passing silently.
+        """
         sites = []
         for line in self._logical_lines(text):
             stripped = line.strip()
             if stripped.startswith(("#", "- ")) or ".sh" in stripped:
                 continue
-            if not re.match(
-                    r"^(?:if\s+|!\s+|then\s+|&&\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
-                    r"git\s+.*\bpush\b", stripped):
+            if not (re.search(r"\bgit\b", stripped) and re.search(r"\bpush\b", stripped)):
                 continue
             sites.append((name, stripped))
         return sites
@@ -1735,6 +1746,22 @@ class TestPushCredentials(unittest.TestCase):
     #: The workflows this item repaired. Naming them is the point: a count alone was satisfied
     #: by the EXEMPTED file's sites while covering neither repair.
     REPAIRED = {"auditor-cite-exemplars.yml", "auditor-refine-rules.yml"}
+
+
+    #: Spellings of an unauthenticated push that a prefix-enumerating scanner missed. Kept as
+    #: data because the point is not these four — it is that the list has no end, which is why
+    #: the scan stopped trying to recognise commands and now flags anything mentioning both.
+    EVASIONS = ("command git push origin x", "env git push origin x",
+                "exec git push origin x", "nohup git push origin x",
+                "$(git push origin x)", "sh -c 'git push origin x'")
+
+    def test_every_known_evasion_is_still_seen(self):
+        for spelling in self.EVASIONS:
+            with self.subTest(spelling=spelling):
+                found = self._push_sites_in("t", f"  {spelling}\n")
+                self.assertTrue(found, f"{spelling!r} is invisible to the scan")
+                self.assertFalse(self._has_effective_helper(found[0][1]),
+                                 "an unauthenticated push was treated as authenticated")
 
     def test_the_scan_covers_the_commands_it_was_written_to_protect(self):
         """The guard on the guard, and it took three attempts to make honest.

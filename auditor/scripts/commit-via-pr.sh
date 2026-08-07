@@ -81,6 +81,26 @@ printf '%s' "$NORMALISED" | grep -Eq '^[^/[:space:]]+/[^/[:space:]]+$' || die or
 [ "$(printf '%s' "$NORMALISED" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" ] \
   || die repository-mismatch
 
+
+# THE TOKEN MUST REACH GIT, NOT ONLY gh. It was exported as GH_TOKEN and nothing else, so the
+# fetch and the push ran unauthenticated — and the workflows check out with
+# `persist-credentials: false`, so there is no ambient credential to fall back on. The push
+# fails, the branch never appears, and the PR that would have carried the data is never opened.
+#
+# Passed through a credential helper reading the value from the ENVIRONMENT, so the token
+# never appears in argv (visible in `ps`), in .git/config, or in a remote URL — S-1 requires it
+# to be ephemeral. `-c` is command-line config: it applies to this invocation only and is not
+# written to the repository.
+# shellcheck disable=SC2016  # single quotes are REQUIRED: ${GIT_AUTH_TOKEN} must survive
+# into git's credential helper and be expanded THERE, from the environment. Double quotes
+# would substitute it here, baking the secret into the config value git records for the
+# invocation — which is exactly what this construction exists to avoid.
+GIT_ASKPASS_HELPER='!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f'
+git_auth() {
+  GIT_AUTH_TOKEN="$TOKEN" git -C "$CHECKOUT" -c "credential.helper=" \
+    -c "credential.helper=$GIT_ASKPASS_HELPER" "$@"
+}
+
 HEAD_SHA="$(git -C "$CHECKOUT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" || die head-missing
 
 # The tree must be settled. Staged or unstaged leftovers mean the caller's commit did not
@@ -89,10 +109,10 @@ git -C "$CHECKOUT" diff --cached --quiet 2>/dev/null || die staged-changes
 git -C "$CHECKOUT" diff --quiet 2>/dev/null         || die unstaged-changes
 [ -z "$(git -C "$CHECKOUT" ls-files --others --exclude-standard 2>/dev/null)" ] || die untracked-files
 
-git -C "$CHECKOUT" ls-remote --heads origin >/dev/null 2>&1 || die remote-unreachable
-[ -n "$(git -C "$CHECKOUT" ls-remote --heads origin "$BASE" 2>/dev/null)" ] || die base-not-found
+git_auth ls-remote --heads origin >/dev/null 2>&1 || die remote-unreachable
+[ -n "$(git_auth ls-remote --heads origin "$BASE" 2>/dev/null)" ] || die base-not-found
 
-git -C "$CHECKOUT" fetch --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" \
+git_auth fetch --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" \
   >/dev/null 2>&1 || die base-fetch-failed
 BASE_SHA="$(git -C "$CHECKOUT" rev-parse --verify "refs/remotes/origin/$BASE^{commit}" 2>/dev/null)" \
   || die base-ref-missing
@@ -102,14 +122,14 @@ git -C "$CHECKOUT" merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA" 2>/dev/null 
   || die head-not-descendant-of-base
 
 remote_branch_sha() {
-  git -C "$CHECKOUT" ls-remote --heads origin "$BRANCH" 2>/dev/null | awk '{print $1}' | head -1
+  git_auth ls-remote --heads origin "$BRANCH" 2>/dev/null | awk '{print $1}' | head -1
 }
 EXISTING="$(remote_branch_sha)" || die branch-query-failed
 
 if [ -z "$EXISTING" ]; then
   # No force, ever. If the push loses a race the remote is re-queried and the outcome decided
   # from what is actually there.
-  if ! git -C "$CHECKOUT" push origin "$HEAD_SHA:refs/heads/$BRANCH" >/dev/null 2>&1; then
+  if ! git_auth push origin "$HEAD_SHA:refs/heads/$BRANCH" >/dev/null 2>&1; then
     AFTER="$(remote_branch_sha)"
     if [ -z "$AFTER" ]; then die push-failed
     elif [ "$AFTER" != "$HEAD_SHA" ]; then die branch-collision

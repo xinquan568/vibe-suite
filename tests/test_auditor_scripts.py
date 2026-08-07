@@ -721,6 +721,31 @@ class Test_commit_via_pr(unittest.TestCase):
         r = self._run(Path(tempfile.mkdtemp()))
         self.assertEqual(self._reason(r), "not-a-git-worktree")
 
+
+    def test_the_token_reaches_git_and_not_only_gh(self):
+        """It was exported as GH_TOKEN alone, so fetch and push ran unauthenticated — and the
+        workflows check out with `persist-credentials: false`, so nothing ambient covers for
+        it. The push fails, the branch never appears, and the PR carrying the data is never
+        opened."""
+        src = self.HELPER.read_text()
+        for op in ("fetch --no-tags origin", "push origin", "ls-remote --heads origin"):
+            with self.subTest(op=op):
+                self.assertIn(f"git_auth {op}", src,
+                              f"`{op}` bypasses the authenticated wrapper")
+
+    def test_the_token_never_reaches_argv_or_config(self):
+        """S-1: ephemeral only. In argv it is visible in `ps`; written to config or a remote
+        URL it outlives the run in a checkout the auditor commits from."""
+        src = self.HELPER.read_text()
+        self.assertIn('GIT_AUTH_TOKEN="$TOKEN" git', src,
+                      "the token must be passed through the environment")
+        self.assertIn("${GIT_AUTH_TOKEN}", src,
+                      "the helper must expand the token itself, not the shell")
+        self.assertNotIn('extraheader', src, "no header form: it puts the secret in argv")
+        for forbidden in ('config credential', 'remote set-url', '@github.com'):
+            with self.subTest(pattern=forbidden):
+                self.assertNotIn(forbidden, src)
+
     # --- mutants ------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):
         r = self._run(self._repo(), NOOP[".sh"])

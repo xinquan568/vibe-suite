@@ -1,24 +1,10 @@
 # SPDX-License-Identifier: ISC
-"""Behavioural tests for the E8.3 helpers under `auditor/scripts/`.
+"""Behavioural tests for the E8.3 registry, findings and contribution helpers.
 
-The issue's acceptance is "all smoke tests green", so these tests ARE the evidence. A test that
-passes when its helper is replaced by a no-op establishes nothing, and existence checks,
-`--help`, `bash -n`, import success and unasserted invocation all survive that substitution.
-
-Every helper therefore carries, per the E8.3 specification:
-
-  * a **behavioural oracle** — a postcondition of the contract, not a banner or incidental
-    output;
-  * a **no-op mutant** — the interpreter-correct do-nothing replacement, which the oracle must
-    reject. (`exit 0` is a SyntaxError in Python, so a shell no-op would make every Python
-    helper's oracle "fail" for the wrong reason and prove nothing. The replacement is chosen
-    per helper class.)
-  * a **wrong-behaviour mutant** — a plausible mis-implementation, which the oracle must also
-    reject. This is what proves the oracle is attached to the contract's meaning rather than to
-    some accident of the real helper's output.
-
-One class per helper, named `Test_<helper stem>`, so the mutation harness can address a single
-helper's oracle.
+The mutation contract every class here satisfies -- behavioural oracle, interpreter-correct
+no-op mutant, plausible wrong-behaviour mutant -- is stated in `auditor_helpers_support`, which
+also supplies the shared primitives. Reporting helpers live in
+`test_auditor_reporting_helpers.py`.
 """
 import json
 import os
@@ -29,28 +15,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO / "auditor" / "scripts"
-
-#: Interpreter-correct no-ops. A shell `exit 0` does not parse as Python.
-NOOP = {
-    ".sh": "#!/usr/bin/env bash\n# SPDX-License-Identifier: ISC\nexit 0\n",
-    ".py": "#!/usr/bin/env python3\n# SPDX-License-Identifier: ISC\nraise SystemExit(0)\n",
-}
-
-
-def source_and_call(script_text, snippet):
-    """Run `snippet` in a bash shell that has sourced `script_text`.
-
-    Sourceable helpers have no CLI, so mutation must go through the same caller shell the real
-    oracle uses — otherwise the mutant is exercised differently from the original and the
-    comparison proves nothing.
-    """
-    with tempfile.TemporaryDirectory() as td:
-        path = Path(td) / "helper.sh"
-        path.write_text(script_text, encoding="utf-8")
-        return subprocess.run(["bash", "-c", f". '{path}'\n{snippet}"],
-                              capture_output=True, text=True)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from auditor_helpers_support import NOOP, REPO, SCRIPTS, source_and_call  # noqa: E402
 
 
 class Test_compute_fingerprint(unittest.TestCase):
@@ -1516,173 +1482,6 @@ class Test_git_push_with_retry(unittest.TestCase):
         r = self._push(t, src.replace(self.GITDIR_ANCHOR, self.GITDIR_MUTANT, 1))
         self.assertNotEqual(r.returncode, 0,
                             "mutation ineffective: the mutant should fail to complete the rebase")
-
-
-
-class Test_generate_daily_report(unittest.TestCase):
-    """`generate-daily-report.py` — the status page, and the two rates on it."""
-
-    HELPER = SCRIPTS / "generate-daily-report.py"
-    ACCEPT_ANCHOR = 'ACCEPTED = ("merged", "applied_separately")'
-    ACCEPT_MUTANT = 'ACCEPTED = ("merged",)'
-    DATE = "2026-08-07"
-
-    def _run(self, script_text=None, outcomes=None, empty=False):
-        d = Path(tempfile.mkdtemp())
-        if not empty:
-            (d / "report-cache").mkdir()
-            (d / "report-cache" / "registry-stats.json").write_text(
-                json.dumps({"total": 9, "by_status": {"discovered": 4, "audited": 3,
-                                                        "contributed": 2}}), encoding="utf-8")
-            (d / "report-cache" / "pr-outcomes.json").write_text(
-                json.dumps(outcomes if outcomes is not None else
-                           {"merged": 3, "applied_separately": 2, "rejected": 5, "open": 7}),
-                encoding="utf-8")
-            (d / "report-cache" / "rule-health.json").write_text(
-                json.dumps({"R01": {"findings": 10, "accepted": 4}}), encoding="utf-8")
-            (d / "report-cache" / "recent-activity.json").write_text(
-                json.dumps(["audited acme/widget"]), encoding="utf-8")
-        helper = Path(tempfile.mkdtemp()) / "helper.py"
-        helper.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
-        r = subprocess.run([sys.executable, str(helper), "--data-dir", str(d),
-                            "--date", self.DATE], capture_output=True, text=True)
-        report = d / "reports" / f"{self.DATE}.md"
-        return r, (report.read_text() if report.exists() else "")
-
-    # --- oracle -------------------------------------------------------------------------
-    def test_acceptance_counts_applied_separately_not_only_merges(self):
-        """A maintainer who applies the fix themselves and closes the PR HAS accepted the
-        finding. Counting only merges undercounts the pipeline and pushes readers to optimise
-        for merges rather than for fixes."""
-        _, text = self._run()
-        self.assertIn("| **acceptance rate** (merged + applied separately) | **50%** |", text,
-                      "3 merged + 2 applied of 10 resolved is 50%")
-        self.assertIn("| merge-only rate | 30% |", text, "3 merged of 10 resolved is 30%")
-
-    def test_open_prs_are_not_counted_as_resolved(self):
-        """Dividing by open PRs makes the rate drift downward as new PRs appear, which says
-        nothing about whether findings are accepted."""
-        _, text = self._run()
-        self.assertIn("| resolved | 10 |", text, "open PRs leaked into the denominator")
-
-    def test_stage_counts_are_exact(self):
-        _, text = self._run()
-        for stage, count in (("discovered", 4), ("audited", 3), ("contributed", 2),
-                             ("tracked", 0), ("complete", 0)):
-            self.assertIn(f"| {stage} | {count} |", text, f"{stage} count wrong")
-        self.assertIn("| **total** | **9** |", text)
-
-    def test_missing_inputs_still_render(self):
-        """A missing section is information; it is not a reason to fail the run."""
-        r, text = self._run(empty=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("N/A", text)
-        self.assertIn("_No notable events._", text)
-
-    def test_no_resolved_prs_gives_na_not_a_division_error(self):
-        r, text = self._run(outcomes={"open": 4})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("**N/A**", text)
-
-    def test_the_same_date_and_inputs_render_identically(self):
-        _, first = self._run()
-        _, second = self._run()
-        self.assertEqual(first, second)
-
-    # --- mutants ------------------------------------------------------------------------
-    def test_a_no_op_helper_fails_the_oracle(self):
-        _, text = self._run(NOOP[".py"])
-        self.assertEqual(text, "", "sanity: a no-op writes no report")
-
-    def test_the_merges_only_mutant_understates_acceptance(self):
-        """The plausible wrong implementation: acceptance = merged / resolved.
-
-        It produces a perfectly well-formed report with a plausible percentage — nothing looks
-        wrong — while systematically understating the pipeline's effect.
-        """
-        src = self.HELPER.read_text()
-        self.assertIn(self.ACCEPT_ANCHOR, src, "mutation anchor missing")
-        _, text = self._run(src.replace(self.ACCEPT_ANCHOR, self.ACCEPT_MUTANT, 1))
-        # RESOLVED is derived from ACCEPTED, so this mutation shrinks the DENOMINATOR too:
-        # 3 merged of (3 merged + 5 rejected) = 38%, not 3 of 10. Asserting "not 50%" states
-        # the property — acceptance is understated — without depending on that coupling.
-        self.assertNotIn("| **acceptance rate** (merged + applied separately) | **50%** |", text,
-                         "mutation ineffective: the mutant still reports the true rate")
-        self.assertIn("| **acceptance rate** (merged + applied separately) | **38%** |", text,
-                      "the mutant should understate acceptance")
-
-
-
-class Test_report_resources(unittest.TestCase):
-    """I4.1 — the report templates and assets the renderers consume.
-
-    These are RESOURCES rather than helpers, so they have no no-op mutant. What they need is a
-    contract test: the placeholder set each template carries must be exactly what its renderer
-    substitutes. A template with a stale set substitutes nothing and renders literal braces —
-    which is precisely the state `single.html` was in before this.
-    """
-
-    TEMPLATES = REPO / "templates" / "report"
-    #: template -> the placeholders its renderer supplies. Anything else is drift.
-    CONTRACT = {
-        "single.html": {"PROJECT", "GENERATED_AT", "DATA_JSON"},
-        "dashboard.html": {"GENERATED_AT", "DATA_JSON"},
-        "docs/index.html": {"GENERATED_AT", "PRINCIPLES", "RULES", "SCORING", "VOCAB",
-                            "ARTIFACT_TYPES", "DRIFT", "WARRANT"},
-    }
-    ASSETS = ("vibe-report.css", "vibe-report.js", "vibe-dashboard.css",
-              "vibe-dashboard.js", "vibe-docs.css")
-
-    @staticmethod
-    def _placeholders(text):
-        return set(re.findall(r"\{\{([A-Z_0-9]+)\}\}", text))
-
-    def test_each_template_carries_exactly_its_renderers_placeholders(self):
-        for name, expected in self.CONTRACT.items():
-            with self.subTest(template=name):
-                path = self.TEMPLATES / name
-                self.assertTrue(path.is_file(), f"{name} missing")
-                found = self._placeholders(path.read_text(encoding="utf-8"))
-                self.assertEqual(found, expected,
-                                 f"{name} placeholder set drifted from the renderer contract")
-
-    def test_every_referenced_asset_exists(self):
-        """A missing stylesheet renders an unstyled page rather than an error, so the reference
-        is checked here instead of being noticed by eye."""
-        for name in self.CONTRACT:
-            path = self.TEMPLATES / name
-            for ref in re.findall(r'(?:href|src)="([^"]+)"', path.read_text(encoding="utf-8")):
-                if ref.startswith(("http:", "https:", "#")):
-                    continue
-                with self.subTest(template=name, asset=ref):
-                    self.assertTrue((path.parent / ref).resolve().is_file(),
-                                    f"{name} references missing {ref}")
-
-    def test_assets_carry_an_spdx_header(self):
-        for name in self.ASSETS:
-            with self.subTest(asset=name):
-                head = (self.TEMPLATES / "assets" / name).read_text(encoding="utf-8")[:200]
-                self.assertIn("SPDX-License-Identifier: ISC", head)
-
-    def test_no_external_hosts_are_referenced(self):
-        """These pages are opened offline and from artifact downloads. A CDN reference renders
-        a blank panel with no indication why, so the graph bundle is vendored instead."""
-        for name in self.CONTRACT:
-            text = (self.TEMPLATES / name).read_text(encoding="utf-8")
-            for ref in re.findall(r'(?:href|src)="(https?://[^"]+)"', text):
-                self.fail(f"{name} references an external host: {ref}")
-
-    def test_the_retired_placeholder_names_are_not_substitutable(self):
-        """The old names are documented in a comment; they must not look like placeholders.
-
-        A tool scanning for braces would otherwise find them and try to substitute tokens the
-        renderer does not supply.
-        """
-        text = (self.TEMPLATES / "single.html").read_text(encoding="utf-8")
-        for retired in ("G6_BUNDLE", "SCORE_SECTION", "RENDER_JS"):
-            with self.subTest(retired=retired):
-                self.assertNotIn("{{" + retired + "}}", text)
-
 
 if __name__ == "__main__":
     unittest.main()

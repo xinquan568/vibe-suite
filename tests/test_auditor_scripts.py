@@ -830,6 +830,39 @@ class Test_atomic_registry_write(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("nothing-staged", r.stderr)
 
+
+    def test_source_pointing_at_the_destination_is_refused(self):
+        """Round-2 regression, introduced by the fix for round 1's registry-missing finding.
+
+        The helper consumes the source once the rename lands, so `--source <the registry>`
+        deleted the registry it had just "written" — exit 0, no diagnostic, file gone. Reported
+        as a successful atomic write, which is the worst possible way to lose the file every
+        other stage reads.
+        """
+        d = Path(tempfile.mkdtemp())
+        (d / "registry").mkdir()
+        registry = d / "registry" / "repos.json"
+        registry.write_text('{"repos": {"a/b": {"status": "audited"}}}\n', encoding="utf-8")
+        r = subprocess.run(["bash", str(self.HELPER), "--data-dir", str(d),
+                            "--source", str(registry)], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:atomic-registry-write:source-is-destination", r.stderr)
+        self.assertTrue(registry.is_file(), "the registry was deleted")
+
+    def test_the_same_file_reached_by_a_relative_path_is_also_refused(self):
+        """Compared by resolved path: a string comparison misses `--source repos.json` run from
+        inside the registry directory, which is the same inode."""
+        d = Path(tempfile.mkdtemp())
+        (d / "registry").mkdir()
+        registry = d / "registry" / "repos.json"
+        registry.write_text('{"repos": {}}\n', encoding="utf-8")
+        r = subprocess.run(["bash", str(self.HELPER), "--data-dir", str(d),
+                            "--source", "repos.json"], capture_output=True, text=True,
+                           cwd=str(d / "registry"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("source-is-destination", r.stderr)
+        self.assertTrue(registry.is_file(), "the registry was deleted")
+
     # --- mutants ------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):
         d = self._tree()

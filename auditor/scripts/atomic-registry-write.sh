@@ -61,6 +61,17 @@ if [ ! -f "$REG_TMP" ]; then
   exit 1
 fi
 
+# SOURCE AND DESTINATION MUST BE DIFFERENT FILES. This helper consumes the source once the
+# rename lands, so pointing --source at the registry itself makes it delete the registry it
+# just "wrote" — exit 0, no diagnostic, and the file gone. Compared by resolved path, because
+# `--source registry/repos.json` and an absolute path to the same file are the same inode and
+# a string comparison would miss it.
+resolve() { (cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")"); }
+if [ "$(resolve "$REG_TMP")" = "$(resolve "$REG_DEST")" ]; then
+  echo "REFUSE:atomic-registry-write:source-is-destination ($REG_TMP)" >&2
+  exit 1
+fi
+
 # Validate BEFORE the destination is touched in any way.
 if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$REG_TMP" >/dev/null 2>&1; then
   echo "REFUSE:atomic-registry-write:staged-not-json ($REG_TMP)" >&2

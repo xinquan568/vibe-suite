@@ -1,0 +1,10 @@
+{
+  "corpus_version": 1,
+  "repos": [
+    {"name": "repo-alpha", "audit": "audits/repo-alpha.json"}
+  ],
+  "articles": ["articles/2026-01-repo-alpha.md"],
+  "vocabulary": "registry.yaml",
+  "rules": ["rules/testing.md"],
+  "docs": ["framework/reference.md"]
+}

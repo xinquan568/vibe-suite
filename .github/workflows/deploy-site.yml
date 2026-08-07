@@ -1,0 +1,116 @@
+# vibe-suite site deployment (E8.4 / vibe-61).
+#
+# Publishes the site to GitHub Pages from main, and on demand. Two jobs, split on privilege:
+#
+#   build   holds `contents: read` and nothing else. It runs the single build entry point
+#           `site/build.sh` (I2b) — never VitePress directly, because a clean checkout has no
+#           `site/data/` or `site/reports/` (D-D) and a path that skips the orchestrator would
+#           publish a hollow site. The result leaves this job as an ordinary run artifact.
+#   deploy  is the only job holding the publishing scopes. It authenticates with the OIDC
+#           id-token (`id-token: write` + `pages: write`); no stored credential is configured,
+#           referenced, or needed anywhere in this file (anti-pattern rule 6).
+#
+# The two jobs exist so the build steps — which run repository code and third-party toolchains —
+# never hold a scope that can publish. That is also why the build hands over a plain artifact
+# rather than a Pages artifact: preparing one would pull the publishing surface into the job
+# that runs untrusted-by-construction build code.
+#
+# Verification is fail-closed: `site/build.sh` exiting 0 is not proof it produced a site, so the
+# build asserts the output directory and its entry page before anything is uploaded. An empty
+# corpus is a legitimate state (D-C) — an empty *build* is not.
+#
+# No model identifiers appear in this workflow (principle P9); every tool uses its own default.
+
+name: deploy-site
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Denied by default at the top level, granted per job below. A job that forgets its own block
+# therefore gets nothing, rather than inheriting the repository default token scope.
+permissions: {}
+
+# Pages accepts one deployment at a time; queue rather than cancel, so a merge train does not
+# discard the deployment of the commit that is already publishing.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  SITE_CORPUS: auditor-data
+  SITE_OUT: site
+  SITE_DIST: site/.vitepress/dist
+
+jobs:
+  build:
+    name: build the site
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Install the site toolchain
+        run: npm ci
+        working-directory: site
+
+      - name: Build through the single entry point (I2b)
+        # The corpus is absent until E8.5. That is a state, not an error: the builders emit
+        # schema-valid empty output and the site renders its "no audit data yet" notice.
+        run: |
+          set -euo pipefail
+          bash site/build.sh --corpus "$SITE_CORPUS" --out "$SITE_OUT"
+
+      - name: The build actually produced a site
+        run: |
+          set -euo pipefail
+          if [ ! -d "$SITE_DIST" ]; then
+            echo "no build output at $SITE_DIST"; exit 1
+          fi
+          if [ ! -f "$SITE_DIST/index.html" ]; then
+            echo "$SITE_DIST has no index.html; refusing to publish it"; exit 1
+          fi
+          printf 'built %d file(s)\n' "$(find "$SITE_DIST" -type f | wc -l)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-dist
+          path: site/.vitepress/dist
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    name: publish to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-dist
+          path: dist
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

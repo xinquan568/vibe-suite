@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: ISC
+"""Render the vocabulary registry into the site's noun-verb map (E8.4 / vibe-61).
+
+Reads `<corpus>/manifest.json`, follows its `vocabulary` pointer, and emits
+`<out>/data/vocab.json` plus `<out>/vocab/index.md`. Per D-C an absent corpus is the honest
+pre-migration state: exit 0 with zero entries and a "no audit data yet" notice. Only a corpus
+whose manifest cannot be parsed is an error, and it renders nothing at all.
+
+The registry is read by a deliberately small block-YAML reader rather than a dependency: the
+suite ships stdlib-only, and the registry shape is a fixed two-section list of canonical terms
+with their deprecated synonyms. Anything outside that shape is ignored rather than guessed at.
+
+    bin/vibe-build-vocab-data --corpus <dir> --out <dir>
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+BUILDER = "vibe-build-vocab-data"
+SLUG = "vocab"
+PAGE = "vocab/index.md"
+NOTICE = "no audit data yet"
+
+#: registry section → the singular kind stamped on each entry.
+SECTIONS = {"nouns": "noun", "verbs": "verb"}
+
+
+def fail(message):
+    """Report a named input defect on stderr and exit non-zero without rendering."""
+    sys.stderr.write(f"{BUILDER}: {message}\n")
+    raise SystemExit(2)
+
+
+def load_manifest(corpus):
+    """Parse the corpus manifest, or return None when the corpus does not exist yet."""
+    manifest = corpus / "manifest.json"
+    if not corpus.is_dir() or not manifest.is_file():
+        return None
+    try:
+        parsed = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        fail(f"unparseable manifest at {manifest}: {exc}")
+    if not isinstance(parsed, dict):
+        fail(f"manifest at {manifest} is not a JSON object")
+    return parsed
+
+
+def scalar(text):
+    """Unwrap one registry value: an inline `[a, b]` list, a quoted scalar, or nothing."""
+    text = text.strip()
+    if not text:
+        return None
+    if text.startswith("[") and text.endswith("]"):
+        return [item.strip().strip("'\"") for item in text[1:-1].split(",") if item.strip()]
+    return text.strip("'\"")
+
+
+def read_registry(path):
+    """Parse the registry into {section: [mapping, ...]} with a small block-YAML reader."""
+    sections, section, item, pending, bullet_indent = {}, None, None, None, None
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].rstrip() if not raw.strip().startswith("#") else ""
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        body = line.strip()
+        if indent == 0 and body.endswith(":"):
+            section, item, pending, bullet_indent = body[:-1].strip(), None, None, None
+            sections.setdefault(section, [])
+            continue
+        if section is None:
+            continue
+        if body.startswith("- "):
+            if bullet_indent is not None and indent > bullet_indent and pending and item is not None:
+                item.setdefault(pending, []).append(scalar(body[2:]))
+                continue
+            bullet_indent = indent if bullet_indent is None else bullet_indent
+            item, pending = {}, None
+            sections[section].append(item)
+            body = body[2:].strip()
+        if item is None or ":" not in body:
+            continue
+        key, _, value = body.partition(":")
+        parsed = scalar(value)
+        item[key.strip()] = [] if parsed is None else parsed
+        pending = key.strip() if parsed is None else None
+    return sections
+
+
+def as_terms(value):
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    return [str(value)] if value else []
+
+
+def collect(corpus, manifest):
+    rel = manifest.get("vocabulary")
+    if not isinstance(rel, str):
+        sys.stderr.write(f"{BUILDER}: the manifest names no vocabulary registry\n")
+        return []
+    path = corpus / rel
+    if not path.is_file():
+        sys.stderr.write(f"{BUILDER}: registry named by the manifest but absent: {rel}\n")
+        return []
+    registry = read_registry(path)
+    entries = []
+    for name, kind in SECTIONS.items():
+        for item in registry.get(name, []):
+            canonical = item.get("canonical")
+            if not isinstance(canonical, str) or not canonical:
+                continue
+            entries.append({"kind": kind, "canonical": canonical, "source": rel,
+                            "deprecated": sorted(as_terms(item.get("deprecated")))})
+    return sorted(entries, key=lambda entry: (entry["kind"], entry["canonical"]))
+
+
+def render(entries):
+    if not entries:
+        return ("# Vocabulary\n\n"
+                f"_{NOTICE}._ The vocabulary registry has not been migrated here yet; the "
+                "noun-verb map fills in as soon as it lands.\n")
+    lines = ["# Vocabulary", "",
+             f"{len(entries)} canonical term(s) and the synonyms they retire.", ""]
+    for name, kind in SECTIONS.items():
+        rows = [entry for entry in entries if entry["kind"] == kind]
+        if not rows:
+            continue
+        lines += [f"## {name.capitalize()}", "", "| Canonical | Deprecated |", "| --- | --- |"]
+        lines += [f"| `{r['canonical']}` | {', '.join(f'`{t}`' for t in r['deprecated']) or '—'} |"
+                  for r in rows]
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog=BUILDER, description=__doc__.splitlines()[0])
+    parser.add_argument("--corpus", required=True, type=Path, help="corpus root directory")
+    parser.add_argument("--out", required=True, type=Path, help="site output directory")
+    args = parser.parse_args(argv)
+
+    manifest = load_manifest(args.corpus)
+    entries = [] if manifest is None else collect(args.corpus, manifest)
+
+    retires = {term: entry["canonical"] for entry in entries for term in entry["deprecated"]}
+    payload = {"builder": BUILDER, "count": len(entries), "retires": retires, "entries": entries}
+    write(args.out / "data" / f"{SLUG}.json", json.dumps(payload, indent=2) + "\n")
+    write(args.out / PAGE, render(entries))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

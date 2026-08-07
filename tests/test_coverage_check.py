@@ -1054,11 +1054,14 @@ class TestTargetEnforcement(TargetCase):
     def test_graduation_is_data_only_when_the_anchors_land(self):
         # A scheduled row flips to delivered with no checker edit (subset semantics) — but only
         # into its promise: the delivered paths must cover the frozen anchors.
+        # Uses nlpm:21 (anchor auditor/scripts, owned by E8.3) because E8.4 landed site/, so
+        # nlpm:23 is delivered now and can no longer stand in for a scheduled row.
         root = self.tree_sandbox()
-        (root / "site").mkdir()
-        (root / "site" / "index.md").write_text("landed\n", encoding="utf-8")
-        self.mutate_in_tree(root, "nlpm:23", lambda b: self.drop_field(
-            self.drop_field(b, "scheduled"), "expected") + "    delivered: [site/index.md]\n")
+        (root / "auditor" / "scripts").mkdir(parents=True, exist_ok=True)
+        (root / "auditor" / "scripts" / "log-event.sh").write_text("landed\n", encoding="utf-8")
+        self.mutate_in_tree(root, "nlpm:21", lambda b: self.drop_field(
+            self.drop_field(b, "scheduled"), "expected")
+            + "    delivered: [auditor/scripts/log-event.sh]\n")
         result = self.run_on_tree(root)
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -1069,9 +1072,9 @@ class TestTargetEnforcement(TargetCase):
             block = self.drop_field(block, "scheduled")
             block = self.drop_field(block, "expected")
             return block + "    delivered: [README.md]\n"
-        result = self.mutated("nlpm:23", graduate)
+        result = self.mutated("nlpm:21", graduate)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("nlpm:23", result.stderr)
+        self.assertIn("nlpm:21", result.stderr)
         self.assertIn("graduated, but no delivered path covers", result.stderr)
 
     def test_renamed_scheduled_row_fails(self):
@@ -1084,18 +1087,22 @@ class TestTargetEnforcement(TargetCase):
 
     def test_landed_anchor_demands_the_flip(self):
         root = self.tree_sandbox()
-        (root / "site").mkdir()
-        (root / "site" / "index.md").write_text("landed\n", encoding="utf-8")
+        (root / "auditor" / "scripts").mkdir(parents=True, exist_ok=True)
+        (root / "auditor" / "scripts" / "log-event.sh").write_text("landed\n", encoding="utf-8")
         result = self.run_on_tree(root)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("nlpm:23", result.stderr)
+        self.assertIn("nlpm:21", result.stderr)
         self.assertIn("flip the row to delivered", result.stderr)
 
 
 class TestScheduledListing(TargetCase):
     """D2's visibility promise: every run with a parseable disposition prints the scheduled rows."""
 
-    ROWS = ("cc-suite:27", "nlpm:12", "nlpm:13", "nlpm:21", "nlpm:23")  # nlpm:20 graduated (vibe-59)
+    # Both sides of this merge graduated rows, so the surviving scheduled set is their
+    # intersection: E8.2a's branch graduated nlpm:20 (auditor/SCHEMAS.md, workflows, prompts) and
+    # E8.4 on main graduated nlpm:12, nlpm:13 and nlpm:23 (the builders and site/). What remains
+    # scheduled is cc-suite:27 (awaits codex/AGENTS.md) and nlpm:21 (awaits auditor/scripts, E8.3).
+    ROWS = ("cc-suite:27", "nlpm:21")
 
     def test_listing_appears_on_a_passing_run(self):
         result = self.run_check()

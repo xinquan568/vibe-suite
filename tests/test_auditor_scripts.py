@@ -638,6 +638,70 @@ class Test_commit_via_pr(unittest.TestCase):
         return d
 
 
+    def _remote_sandbox(self):
+        """A checkout whose network operations reach a local bare repo, with `origin` still
+        recorded as the canonical GitHub URL.
+
+        The reviewer's construction, and it is better than the two I abandoned. insteadOf fails
+        because `git remote get-url` APPLIES it, so the identity check sees a file:// URL and
+        refuses. Here `origin` is never rewritten in config — a shim replaces the literal
+        `origin` OPERAND of ls-remote, fetch and push only, so identity verification passes
+        unchanged and the base comparison is actually reached.
+        """
+        base = Path(tempfile.mkdtemp())
+        bare = base / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(bare), "symbolic-ref", "HEAD",
+                        "refs/heads/auditor-data"], check=True, capture_output=True)
+        d = base / "work"
+        d.mkdir()
+        run = lambda *a: subprocess.run(["git", "-C", str(d), *a], check=True,
+                                        capture_output=True)
+        run("init", "-q", ".")
+        run("config", "user.email", "t@e")
+        run("config", "user.name", "t")
+        run("checkout", "-q", "-B", "auditor-data")
+        (d / "registry").mkdir()
+        (d / "registry" / "repos.json").write_text("{}\n", encoding="utf-8")
+        run("add", "-A")
+        run("commit", "-qm", "base")
+        run("remote", "add", "origin", "https://github.com/acme/widget")
+
+        real_git = subprocess.run(["which", "git"], capture_output=True,
+                                  text=True).stdout.strip()
+        shims = base / "bin"
+        shims.mkdir()
+        (shims / "git").write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            f"BARE = {str(bare)!r}\n"
+            f"REAL = {real_git!r}\n"
+            "argv = sys.argv[1:]\n"
+            "net = {'ls-remote', 'fetch', 'push'}\n"
+            "if any(a in net for a in argv):\n"
+            "    argv = [BARE if a == 'origin' else a for a in argv]\n"
+            "os.execv(REAL, [REAL] + argv)\n", encoding="utf-8")
+        (shims / "git").chmod(0o755)
+        (shims / "gh").write_text(
+            "#!/usr/bin/env bash\n"
+            "case \"$*\" in\n"
+            "  *'pr list'*) echo 'https://github.com/acme/widget/pull/1' ;;\n"
+            "  *'pr merge'*) : ;;\n"
+            "  *) : ;;\n"
+            "esac\n"
+            "exit 0\n", encoding="utf-8")
+        (shims / "gh").chmod(0o755)
+
+        # publish the base, then commit ahead of it — the normal state this helper publishes
+        subprocess.run(["git", "-C", str(d), "push", "-q", str(bare), "auditor-data"],
+                       check=True, capture_output=True)
+        (d / "registry" / "repos.json").write_text('{"repos": {}}\n', encoding="utf-8")
+        run("add", "-A")
+        run("commit", "-qm", "update")
+        return d, {"PATH": f"{shims}:{os.environ['PATH']}",
+                   "HOME": os.environ.get("HOME", "/tmp"), "PAT_TOKEN": "t"}
+
     def _run(self, checkout, script_text=None, env=None, **kw):
         args = {"--checkout": str(checkout), "--repo": "acme/widget",
                 "--base": "auditor-data", "--branch": "auditor-track-1"}
@@ -765,28 +829,20 @@ class Test_commit_via_pr(unittest.TestCase):
         mutant = src.replace(anchor, 'refs/heads/$BASE^{commit}')
         self.assertNotEqual(mutant, src, "mutation anchor did not match")
 
-        # THIS IS A STATIC CHECK, AND WEAKER THAN THE REST OF THE SUITE. Saying so plainly
-        # beats a test that looks behavioural and is not.
+        # THE MUTANT IS RUN AND KILLED. Two earlier attempts failed and I concluded no
+        # hermetic demonstration existed; the reviewer showed one, and they were right.
         #
-        # The base comparison happens AFTER the fetch. A hermetic fixture has no reachable
-        # remote, so both the real helper and the mutant stop at the same earlier refusal and
-        # the mutation is never reached — a recording `git` on PATH confirms neither version
-        # ever resolves the base ref here. A locally-reachable stand-in does not help either:
-        # `git remote get-url` applies insteadOf, so the rewritten URL fails the repository
-        # identity check before the fetch.
-        #
-        # What is checkable offline is that the source resolves the freshly fetched REMOTE ref
-        # and never the moving local branch. The end-to-end demonstration needs a live remote
-        # and belongs to E8.7's live validator checks.
-        self.assertIn('refs/remotes/origin/$BASE^{commit}', src,
-                      "the base must be the freshly fetched remote ref")
-        base_compare = [ln for ln in src.splitlines()
-                        if "$BASE^{commit}" in ln and not ln.lstrip().startswith("#")]
-        self.assertTrue(base_compare, "no base comparison found")
-        for line in base_compare:
-            self.assertNotIn('refs/heads/$BASE', line,
-                             "the helper must never compare against the moving local branch")
+        # The real helper publishes: HEAD is ahead of the fetched remote base. The mutant
+        # compares against the LOCAL branch, which after a commit on a checked-out
+        # auditor-data IS HEAD — so it refuses a perfectly normal call as nothing-to-publish.
+        d, env = self._remote_sandbox()
+        real = self._run(d, env=env)
+        mutated = self._run(d, mutant, env=env)
 
+        self.assertEqual(self._reason(mutated), "nothing-to-publish",
+                         "mutation ineffective: the mutant should reject a normal call")
+        self.assertNotEqual(self._reason(real), "nothing-to-publish",
+                            "the real helper must publish a commit ahead of the remote base")
 
 
 class Test_atomic_registry_write(unittest.TestCase):

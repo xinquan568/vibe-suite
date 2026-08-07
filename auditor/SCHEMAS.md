@@ -92,7 +92,20 @@ predate a given record.
 
 ## 2. Finding record — `ledgers/findings.jsonl`
 
-Append-only JSONL; one finding per line.
+Append-only JSONL; one finding per line, **inside the section 7 event envelope**. The producer
+writes `{timestamp, workflow, event: "finding", run_id, run_number, data: {...}}` and the
+fields below are the contents of `data`.
+
+This paragraph previously described the fields as top-level, which contradicted every emitter:
+`auditor-audit.yml` has always appended through its `envelope` helper. The envelope is
+canonical because the E8.2 contract tests require homogeneous enveloped ledgers and the
+existing history is enveloped — correcting the emitters instead would mix flat rows into a
+durable enveloped record. Reading the wrong shape does not fail: it yields rows with no `repo`,
+no `rule_id` and no `fingerprint`, which aggregate to zero of everything and render as a
+confident report that the corpus is clean.
+
+Consumers accept both, so legacy or transitional flat rows still read. New writers must
+envelope.
 
 | Field | Meaning | Required |
 |---|---|---|

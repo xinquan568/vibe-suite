@@ -1154,6 +1154,19 @@ class Test_log_event(unittest.TestCase):
 
 
 class Test_repair_stale_statuses(unittest.TestCase):
+    @classmethod
+    def score_re(cls):
+        """The helper's OWN pattern, read from it rather than restated here.
+
+        A restated regex can agree with the test and disagree with production — which is how a
+        parser that matched only `**NL Score**` passed its tests while never once matching a
+        real report.
+        """
+        src = (SCRIPTS / "repair-stale-statuses.py").read_text(encoding="utf-8")
+        found = re.search(r'^SCORE = re\.compile\(r"(.+)"\)\s*$', src, re.M)
+        assert found, "SCORE pattern not found in the helper"
+        return re.compile(found.group(1))
+
     """`repair-stale-statuses.py` — restore statuses a two-way merge race reverted."""
 
     HELPER = SCRIPTS / "repair-stale-statuses.py"
@@ -1231,6 +1244,18 @@ class Test_repair_stale_statuses(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("registry-unreadable", r.stderr)
+
+
+    def test_the_production_score_label_is_recognised(self):
+        """The scoring prompt mandates `Score: N/100` — auditor-audit.yml says so and
+        prompts/score-artifacts.md says the machine parser anchors on it. Matching only
+        `**NL Score**` meant a normal audit report could never supply a missing score, so
+        repair silently did nothing on every real report."""
+        for label in ("Score: 87/100", "**NL Score**: 87/100", "**Score**: 87/100"):
+            with self.subTest(label=label):
+                found = self.score_re().search(f"# Report\n\n{label}\n")
+                self.assertIsNotNone(found, f"{label!r} not recognised")
+                self.assertEqual(found.group(1), "87")
 
     # --- mutants ------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):

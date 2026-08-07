@@ -70,7 +70,13 @@ def eligible(repos, required_status):
             continue
         if str(entry.get("status") or "") != required_status:
             continue
-        issue = entry.get("issue_number") or entry.get("issue")
+        # `audit_issue` is the canonical field — SCHEMAS.md section 1 and what
+        # auditor-discover.yml writes. Reading `issue_number`/`issue` matched nothing in a real
+        # registry, so every discovered repository was skipped as ineligible and the run exited
+        # zero having dispatched nothing: a successful no-op over a full queue. The older names
+        # are still accepted so a transitional registry is not stranded.
+        issue = (entry.get("audit_issue") or entry.get("issue_number")
+                 or entry.get("issue"))
         if issue is None:
             continue
         out.append((repo, str(issue)))

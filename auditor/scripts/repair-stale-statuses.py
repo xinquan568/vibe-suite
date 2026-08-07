@@ -37,7 +37,7 @@ import re
 import sys
 from pathlib import Path
 
-SCORE = re.compile(r"\*\*NL Score\*\*:\s*(\d+)\s*/\s*100")
+SCORE = re.compile(r"(?:\*\*)?(?:NL )?Score(?:\*\*)?:\s*(\d+)\s*/\s*100")
 
 #: Statuses the track workflow owns. Never repaired here, in either direction.
 DOWNSTREAM = ("tracked", "complete")

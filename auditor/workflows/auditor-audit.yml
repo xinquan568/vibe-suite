@@ -353,7 +353,12 @@ jobs:
           set -euo pipefail
           cd "$DATA_DIR"
           bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
-          git add audits ledgers registry
+          # `reports` too: render-repo-report.py writes into $DATA_DIR/reports and this is
+          # the commit that publishes it. Omitting it meant every audit pushed cleanly
+          # with no report on the branch — and the unstaged file could make a later
+          # `git pull --rebase` refuse, exhausting the retry loop for a file nobody
+          # intended to leave behind.
+          git add audits ledgers registry reports
           if git diff --cached --quiet; then
             echo "nothing to commit"
             exit 0

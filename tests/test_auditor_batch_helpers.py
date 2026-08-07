@@ -108,6 +108,29 @@ class Test_batch_process(unittest.TestCase):
         self.assertIn("workflow run auditor-audit.yml", calls[1])
         self.assertIn("repo=acme/r0", calls[1])
 
+
+    #: The CANONICAL registry shape — `audit_issue`, per SCHEMAS.md section 1 and what
+    #: auditor-discover.yml writes. The old fixtures used `issue_number`, so they exercised the
+    #: helper through a record no production registry contains: green tests over a queue the
+    #: helper would have skipped entirely.
+    CANONICAL = {f"acme/r{i}": {"status": "discovered", "audit_issue": 100 + i}
+                 for i in range(8)}
+
+    def test_the_canonical_audit_issue_field_is_read(self):
+        """Reading only `issue_number` skipped every discovered repository as ineligible, and
+        the run exited zero having dispatched nothing — a successful no-op over a full queue."""
+        gh = self._gh()
+        r = self._run(self._data_dir(self.CANONICAL), gh, extra=("--apply", "--batch-size", "3"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        labelled = [c for c in self._calls(gh) if "issue edit" in c]
+        self.assertEqual(len(labelled), 3, "canonical records were treated as ineligible")
+        self.assertIn("issue edit 100", " ".join(self._calls(gh)))
+
+    def test_an_entry_with_no_issue_at_all_is_skipped(self):
+        gh = self._gh()
+        self._run(self._data_dir({"acme/x": {"status": "discovered"}}), gh, extra=("--apply",))
+        self.assertEqual(self._calls(gh), [])
+
     # --- refusals -------------------------------------------------------------------------
     def test_a_missing_registry_refuses_before_any_call(self):
         gh = self._gh()

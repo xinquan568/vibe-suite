@@ -1463,6 +1463,85 @@ class Test_resolve_merge_conflicts(unittest.TestCase):
                                     "--diff-filter=U"], capture_output=True, text=True).stdout
         self.assertEqual(remaining.strip(), "", f"unresolved paths remain: {remaining}")
 
+
+    def test_a_same_field_conflict_during_a_REBASE_keeps_this_runs_update(self):
+        """The production shape, and the one the other fixtures could not expose.
+
+        git-push-with-retry.sh resolves after `git pull --rebase`, where the stage roles are
+        INVERTED: git replays our commit onto upstream, so :2 is UPSTREAM and :3 is ours.
+        Treating :2 as ours makes the resolver prefer the remote value on any real conflict —
+        the retrying run's update is dropped, and the rebase and the push both still succeed.
+        Nothing fails; the write simply never lands.
+
+        Every earlier test created a MERGE conflict (correct roles) or a rebase over DISJOINT
+        changes (no field ever contested), so the inversion stayed invisible.
+        """
+        t = Path(tempfile.mkdtemp())
+        run = lambda *a, **k: subprocess.run(a, capture_output=True, text=True, **k)
+        run("git", "init", "-q", "--bare", str(t / "remote.git"))
+        run("git", "-C", str(t / "remote.git"), "symbolic-ref", "HEAD", "refs/heads/main")
+        run("git", "clone", "-q", str(t / "remote.git"), str(t / "a"))
+        for cfg in (("user.email", "t@e"), ("user.name", "t")):
+            run("git", "-C", str(t / "a"), "config", *cfg)
+        run("git", "-C", str(t / "a"), "checkout", "-q", "-B", "main")
+        (t / "a" / "registry").mkdir()
+        (t / "a" / "registry" / "repos.json").write_text(
+            '{"repos": {"acme/x": {"status": "discovered"}}}\n', encoding="utf-8")
+        run("git", "-C", str(t / "a"), "add", "-A")
+        run("git", "-C", str(t / "a"), "commit", "-qm", "base")
+        run("git", "-C", str(t / "a"), "push", "-q", "-u", "origin", "main")
+
+        # Upstream sets the SAME field to a different value.
+        run("git", "clone", "-q", str(t / "remote.git"), str(t / "b"))
+        for cfg in (("user.email", "t@e"), ("user.name", "t")):
+            run("git", "-C", str(t / "b"), "config", *cfg)
+        (t / "b" / "registry" / "repos.json").write_text(
+            '{"repos": {"acme/x": {"status": "REMOTE_WINS"}}}\n', encoding="utf-8")
+        run("git", "-C", str(t / "b"), "add", "-A")
+        run("git", "-C", str(t / "b"), "commit", "-qm", "remote")
+        run("git", "-C", str(t / "b"), "push", "-q")
+
+        # This run sets it to its own value, then loses the race.
+        (t / "a" / "registry" / "repos.json").write_text(
+            '{"repos": {"acme/x": {"status": "OURS_WINS"}}}\n', encoding="utf-8")
+        run("git", "-C", str(t / "a"), "add", "-A")
+        run("git", "-C", str(t / "a"), "commit", "-qm", "ours")
+
+        run("git", "-C", str(t / "a"), "fetch", "-q", "origin")
+        rebase = run("git", "-C", str(t / "a"), "rebase", "origin/main")
+        self.assertNotEqual(rebase.returncode, 0, "fixture must produce a rebase CONFLICT")
+
+        r = subprocess.run(["bash", str(SCRIPTS / "resolve-merge-conflicts.sh"),
+                            "--checkout", str(t / "a")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        merged = json.loads((t / "a" / "registry" / "repos.json").read_text())
+        self.assertEqual(merged["repos"]["acme/x"]["status"], "OURS_WINS",
+                         "the retrying run's update was discarded in favour of the remote")
+
+    def test_an_ordinary_file_conflict_during_a_REBASE_keeps_this_runs_content(self):
+        """The generic fallback has the same inversion: `--ours` during a rebase is upstream."""
+        t = Path(tempfile.mkdtemp())
+        run = lambda *a, **k: subprocess.run(a, capture_output=True, text=True, **k)
+        run("git", "init", "-q", str(t / "a"))
+        for cfg in (("user.email", "t@e"), ("user.name", "t")):
+            run("git", "-C", str(t / "a"), "config", *cfg)
+        (t / "a" / "notes.md").write_text("BASE\n", encoding="utf-8")
+        run("git", "-C", str(t / "a"), "add", "-A")
+        run("git", "-C", str(t / "a"), "commit", "-qm", "base")
+        run("git", "-C", str(t / "a"), "checkout", "-q", "-b", "upstream")
+        (t / "a" / "notes.md").write_text("REMOTE\n", encoding="utf-8")
+        run("git", "-C", str(t / "a"), "commit", "-qam", "remote")
+        run("git", "-C", str(t / "a"), "checkout", "-q", "-b", "work", "HEAD~1")
+        (t / "a" / "notes.md").write_text("OURS\n", encoding="utf-8")
+        run("git", "-C", str(t / "a"), "commit", "-qam", "ours")
+        self.assertNotEqual(run("git", "-C", str(t / "a"), "rebase", "upstream").returncode, 0)
+
+        r = subprocess.run(["bash", str(SCRIPTS / "resolve-merge-conflicts.sh"),
+                            "--checkout", str(t / "a")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((t / "a" / "notes.md").read_text().strip(), "OURS",
+                         "the fallback kept upstream and discarded this run's content")
+
     # --- mutants ------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):
         d = self._conflicted_repo()

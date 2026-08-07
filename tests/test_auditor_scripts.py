@@ -1389,5 +1389,134 @@ class Test_resolve_merge_conflicts(unittest.TestCase):
                          "mutation ineffective: the mutant should drop the remote's line")
 
 
+
+class Test_git_push_with_retry(unittest.TestCase):
+    """`git-push-with-retry.sh` — the issue's named acceptance, against a REAL push race.
+
+    Two clones of one bare remote. B commits and pushes first; A commits a DISJOINT change and
+    pushes into the race. The traversal is retry -> rebase -> resolver -> three-way merger ->
+    atomic writer, and the remote must end with both sides' work intact.
+    """
+
+    HELPER = SCRIPTS / "git-push-with-retry.sh"
+    GITDIR_ANCHOR = 'if [ -d "$GIT_DIR_PATH/rebase-merge" ] || [ -d "$GIT_DIR_PATH/rebase-apply" ]; then'
+    GITDIR_MUTANT = 'if [ -d ".git/rebase-merge" ] || [ -d ".git/rebase-apply" ]; then'
+
+    def _race(self):
+        """A bare remote, a losing clone `a` mid-race, and B's change already pushed."""
+        t = Path(tempfile.mkdtemp())
+        run = lambda *a, **k: subprocess.run(a, capture_output=True, text=True, **k)
+        run("git", "init", "-q", "--bare", str(t / "remote.git"))
+        run("git", "-C", str(t / "remote.git"), "symbolic-ref", "HEAD", "refs/heads/main")
+        for name in ("a", "b"):
+            run("git", "clone", "-q", str(t / "remote.git"), str(t / name))
+            run("git", "-C", str(t / name), "config", "user.email", "t@e")
+            run("git", "-C", str(t / name), "config", "user.name", "t")
+            run("git", "-C", str(t / name), "checkout", "-q", "-B", "main")
+
+        (t / "a" / "registry").mkdir(parents=True)
+        (t / "a" / "ledgers").mkdir(parents=True)
+        (t / "a" / "registry" / "repos.json").write_text(
+            '{"repos":{"a/x":{"state":"discovered"},"b/y":{"state":"discovered"}}}',
+            encoding="utf-8")
+        (t / "a" / "ledgers" / "events.jsonl").write_text('{"e":1}\n', encoding="utf-8")
+        run("git", "-C", str(t / "a"), "add", "-A")
+        run("git", "-C", str(t / "a"), "commit", "-qm", "base")
+        run("git", "-C", str(t / "a"), "push", "-q", "-u", "origin", "main")
+
+        run("git", "-C", str(t / "b"), "pull", "-q", "origin", "main")
+        run("git", "-C", str(t / "b"), "branch", "-q", "--set-upstream-to=origin/main", "main")
+        (t / "b" / "registry" / "repos.json").write_text(
+            '{"repos":{"a/x":{"state":"discovered"},"b/y":{"state":"contributed"}}}',
+            encoding="utf-8")
+        (t / "b" / "ledgers" / "events.jsonl").write_text('{"e":1}\n{"e":"theirs"}\n',
+                                                      encoding="utf-8")
+        run("git", "-C", str(t / "b"), "add", "-A")
+        run("git", "-C", str(t / "b"), "commit", "-qm", "theirs")
+        run("git", "-C", str(t / "b"), "push", "-q")
+
+        (t / "a" / "registry" / "repos.json").write_text(
+            '{"repos":{"a/x":{"state":"audited"},"b/y":{"state":"discovered"}}}',
+            encoding="utf-8")
+        (t / "a" / "ledgers" / "events.jsonl").write_text('{"e":1}\n{"e":"ours"}\n',
+                                                      encoding="utf-8")
+        run("git", "-C", str(t / "a"), "add", "-A")
+        run("git", "-C", str(t / "a"), "commit", "-qm", "ours")
+        return t
+
+    def _push(self, t, script_text=None, attempts="3"):
+        if script_text is None:
+            path = self.HELPER
+        else:
+            path = Path(tempfile.mkdtemp()) / "push.sh"
+            path.write_text(script_text, encoding="utf-8")
+            for sib in ("resolve-merge-conflicts.sh", "three-way-merge-registry.py",
+                        "atomic-registry-write.sh", "build-exemplar-gallery.py"):
+                (path.parent / sib).write_text((SCRIPTS / sib).read_text(), encoding="utf-8")
+        return subprocess.run(["bash", str(path), "--checkout", str(t / "a"),
+                               "--attempts", attempts], capture_output=True, text=True)
+
+    def _remote_state(self, t):
+        verify = t / f"verify{tempfile.mkdtemp()[-6:]}"
+        subprocess.run(["git", "clone", "-q", str(t / "remote.git"), str(verify)],
+                       capture_output=True)
+        repos = json.loads((verify / "registry" / "repos.json").read_text())["repos"]
+        lines = [x for x in (verify / "ledgers" / "events.jsonl").read_text().splitlines()
+                 if x.strip()]
+        return repos, lines
+
+    # --- oracle: the named acceptance ---------------------------------------------------
+    def test_both_sides_work_reaches_the_remote(self):
+        t = self._race()
+        r = self._push(t)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        repos, lines = self._remote_state(t)
+        self.assertEqual(repos["a/x"]["state"], "audited", "our registry change was lost")
+        self.assertEqual(repos["b/y"]["state"], "contributed", "the remote's change was reverted")
+        self.assertIn('{"e":"ours"}', lines, "our appended line was lost")
+        self.assertIn('{"e":"theirs"}', lines, "the remote's appended line was lost")
+
+    def test_append_only_lines_are_not_duplicated(self):
+        t = self._race()
+        self._push(t)
+        _, lines = self._remote_state(t)
+        self.assertEqual(len(lines), len(set(lines)), f"duplicated lines: {lines}")
+
+    def test_exhaustion_is_a_hard_failure(self):
+        """A push that never landed must not look like success."""
+        r = subprocess.run(["bash", str(self.HELPER), "--checkout", "/nonexistent",
+                            "--attempts", "1"], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:git-push-with-retry:", r.stderr)
+
+    def test_a_non_worktree_checkout_is_refused(self):
+        r = subprocess.run(["bash", str(self.HELPER), "--checkout", tempfile.mkdtemp()],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not-a-git-worktree", r.stderr)
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        t = self._race()
+        self._push(t, NOOP[".sh"])
+        repos, _ = self._remote_state(t)
+        self.assertEqual(repos["a/x"]["state"], "discovered",
+                         "sanity: a no-op pushes nothing")
+
+    def test_the_relative_git_dir_mutant_strands_the_rebase(self):
+        """The CI-only failure: probe `.git/rebase-merge` relative to the PROCESS cwd.
+
+        It finds nothing whenever the helper runs from anywhere but the checkout, so the rebase
+        is never continued, the loop spins to exhaustion, and the work is stranded mid-rebase —
+        after the conflicts were already resolved correctly.
+        """
+        src = self.HELPER.read_text()
+        self.assertIn(self.GITDIR_ANCHOR, src, "mutation anchor missing")
+        t = self._race()
+        r = self._push(t, src.replace(self.GITDIR_ANCHOR, self.GITDIR_MUTANT, 1))
+        self.assertNotEqual(r.returncode, 0,
+                            "mutation ineffective: the mutant should fail to complete the rebase")
+
+
 if __name__ == "__main__":
     unittest.main()

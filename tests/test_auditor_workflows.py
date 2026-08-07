@@ -397,6 +397,8 @@ def lint(text, name="workflow.yml"):
                 v.append("top-level 'permissions' is a sequence, not a mapping")
     # Least privilege must be DECLARED, at the workflow or at every job — an undeclared workflow
     # inherits the repository default, which is exactly the authority the split exists to remove.
+    # This catches absence, null, and the sequence spellings it is tested against; it does NOT
+    # enforce declaration for every Psych-valid spelling (#165).
     if "permissions" not in top_keys:
         for j, b in _jobs(lines).items():
             declared = None
@@ -426,7 +428,12 @@ def lint(text, name="workflow.yml"):
                                 and not x.lstrip().startswith("#")), None)
                     # Any deeper line counted as a declaration, so a block-style SEQUENCE
                     # (`permissions:` / `  - run: read-all`) satisfied the contract while being
-                    # no permissions mapping at all. A declaration is a mapping entry.
+                    # no permissions mapping at all.
+                    #
+                    # LIMIT (#165): this recognises a mapping ENTRY by line shape, not by the
+                    # parsed value. A quoted scalar containing a colon — `"not: a mapping"` —
+                    # still passes, because the colon inside the quotes reads as a key/value
+                    # separator. Enforcing this against the parsed document is #165's.
                     declared = (bool(nxt)
                                 and len(nxt) - len(nxt.lstrip(" ")) > 4
                                 and not re.match(r"^\s*-(\s|$)", nxt)
@@ -467,7 +474,11 @@ def lint(text, name="workflow.yml"):
         step_txt = "\n".join(body)
         for sm in re.finditer(r"^      - (?:name:.*)?$", step_txt, re.M):
             pass
-    # every step item has uses: or run:
+    # Every step item _steps() RECOGNISES has uses: or run:.
+    #
+    # LIMIT (#165): `_steps()` splits on `- ` and does not see a BARE dash, so a step written
+    # `-` on its own line with `name:`/`id:` beneath it is not enumerated and cannot be
+    # checked. Enumerating steps from the parsed document is #165's.
     for jname, body in jobs.items():
         for step in _steps(body):
             if not any(re.match(r"\s*(uses|run):", ln) for ln in step):
@@ -837,12 +848,16 @@ class TestLintClean(unittest.TestCase):
             total, dash, f"extractor returned {total} blocks but {dash} dash-form steps exist")
 
     def test_every_run_block_passes_bash_n(self):
-        """Every run block in the CORPUS — staged AND live — not just the staged 18.
+        """Every run block in the corpus that the extractor RECOGNISES — staged and live.
 
         The name said "every run block" while the loop ran over EXPECTED alone, so 35 of the
         116 blocks were unprotected by this regression. That is the same defect as the
-        extractor skipping dash form: a true-sounding name over a narrower set. The loop now
-        matches the name.
+        extractor skipping dash form: a true-sounding name over a narrower set.
+
+        The loop now covers both directories and both extensions. It does NOT cover quoted
+        `"run":` keys, which the extractor does not recognise — see #165. All 116 run entries
+        Psych finds in the corpus today use the unquoted spelling, so coverage is complete in
+        fact, not by construction.
         """
         # BOTH extensions. The inventory accepts `.yaml` as a workflow, so globbing `*.yml`
         # alone meant a live `rogue.yaml` full of broken shell was simply not looked at, while
@@ -866,8 +881,13 @@ class TestLintClean(unittest.TestCase):
                 r = subprocess.run(["bash", "-n", f.name], capture_output=True, text=True)
                 with self.subTest(workflow=name, block=idx):
                     self.assertEqual(r.returncode, 0, r.stderr)
-        # A silently-shrinking corpus is how the previous hole hid. Recount independently and
-        # require exact agreement: a floor with slack is not a guard, it is a wider hole.
+        # A silently-shrinking corpus is how the previous hole hid, so the count must agree
+        # exactly rather than clear a floor with slack.
+        #
+        # LIMIT (#165): this recount uses the SAME extractor, so it detects a shrinking FILE
+        # LIST but cannot reveal a spelling the extractor never recognised — a quoted `"run":`
+        # key yields zero blocks in both counts. A genuinely independent enumerator (Psych)
+        # is #165's; it finds 116 run entries today, matching this count exactly.
         expected = sum(1 for pth in paths for _ in extract_run_blocks(pth.read_text()))
         self.assertEqual(checked, expected,
                          f"checked {checked} run blocks but the corpus holds {expected}")

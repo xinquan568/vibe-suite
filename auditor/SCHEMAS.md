@@ -18,6 +18,14 @@ never beside the code on `main`:
 | Rule-health feedback log | `feedback/log.json` |
 | Published suppressions observed | `feedback/suppressions.jsonl` |
 
+`feedback/log.json` is REBUILT wholesale by `rule-health.py` on every run — it is derived
+state, not a log, so it carries no history and is safe to delete and regenerate.
+`feedback/suppressions.jsonl` is APPEND-ONLY like the ledgers: each record is one
+observation of a published config at a given blob sha, deduplicated on
+`(repo, sha, path)`. A config that disappears from a repository is never deleted here —
+that it once existed is the fact worth keeping, and an edit appends a new record rather
+than replacing the old one.
+
 Workflows use a dual checkout: code from `main` at the job workspace root, the data branch
 into `_data/`.
 

@@ -31,6 +31,12 @@ REPO_ROOT = HERE.parent
 
 EXACT, ATLEAST, PENDING_S8, RECONCILED = ("exact", "at-least", "pending-S8", "reconciled")
 
+#: The six site/release workflow names (E8.4 + E7.4's early release gate). Named here once so the
+#: two auditor rows are a strict partition: the pipeline row EXCLUDES these, the site row counts
+#: only these, and their union is SS5.0's 24.
+SITE_RELEASE_WORKFLOWS = ("deploy-site", "self-check", "site-preview", "site-preview-cleanup",
+                          "site-validate", "pre-release-quality-gate")
+
 #: The five site builders E8.4 delivers, by exact filename. Counting alone would accept five
 #: wrongly-named files, so the row asserts membership of this frozen set.
 SITE_BUILDERS = frozenset((
@@ -89,15 +95,18 @@ ROWS = [
     # (the reference keeps site workflows under .github/workflows/); pre-release-quality-gate is
     # excluded because E7.4 delivered it before S8. Targets sum to 24 -- asserted by
     # tests/test_inventory_rows.py, which also proves 17/19 fail and the self-expiry fires.
+    # The pipeline row counts auditor/**/*.yml MINUS the site/release names, and the site row
+    # counts only those names. Without the exclusion the two sets overlap: deleting one pipeline
+    # workflow while moving a site workflow into auditor/workflows/ left both rows green with 23
+    # unique files. The sets are now disjoint and their union is the 24 SS5.0 names.
     ("Auditor pipeline workflows (E8.2)", 18, EXACT,
-     lambda r: len(list((r / "auditor").rglob("*.yml")))),
+     lambda r: len([f for f in (r / "auditor").rglob("*.yml")
+                    if f.stem not in SITE_RELEASE_WORKFLOWS])),
     # E8.4 (vibe-61) delivered its five; the sixth, pre-release-quality-gate, arrived early with
     # E7.4. All six now exist, so the row graduates from pending to EXACT and the two auditor rows
     # again sum to SS5.0's 24. Counting by NAME (not a glob) keeps a stray workflow from passing.
     ("Auditor site/release workflows (E8.4)", 6, EXACT,
-     lambda r: len([n for n in ("deploy-site", "self-check", "site-preview",
-                                "site-preview-cleanup", "site-validate",
-                                "pre-release-quality-gate")
+     lambda r: len([n for n in SITE_RELEASE_WORKFLOWS
                     if (r / ".github" / "workflows" / (n + ".yml")).is_file()
                     or (r / "auditor" / "workflows" / (n + ".yml")).is_file()])),
     ("Auditor helper scripts", 30, PENDING_S8,

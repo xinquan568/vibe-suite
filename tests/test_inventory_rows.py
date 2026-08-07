@@ -211,3 +211,25 @@ class AuditorRowSplit(RowBase):
     def test_all_six_site_workflow_names_pass(self):
         self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
         self.assertTrue(self.ok(SITE_ROW), "all six named site/release workflows must satisfy the row")
+
+    def test_delete_and_move_cannot_hide_a_missing_workflow(self):
+        """The two auditor rows must be a strict PARTITION, not merely sum to 24.
+
+        Before this, the pipeline row counted every `auditor/**/*.yml` while the site row also
+        permitted its names there — so deleting one pipeline workflow and moving one site workflow
+        into `auditor/workflows/` left both rows green with only 23 unique files. The site name is
+        now excluded from the pipeline count, so the shortfall surfaces.
+        """
+        wf = self.tmp / "auditor" / "workflows"
+        wf.mkdir(parents=True, exist_ok=True)
+        for i in range(17):                                  # one pipeline workflow deleted
+            (wf / f"auditor-wf-{i}.yml").write_text("x", encoding="utf-8")
+        (wf / "deploy-site.yml").write_text("x", encoding="utf-8")   # a site workflow moved in
+        gh = self.tmp / ".github" / "workflows"
+        gh.mkdir(parents=True, exist_ok=True)
+        for n in SITE_WORKFLOWS:
+            if n != "deploy-site":
+                (gh / f"{n}.yml").write_text("x", encoding="utf-8")
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "a site workflow moved into auditor/workflows/ must not substitute for a "
+                         "deleted pipeline workflow")

@@ -98,6 +98,16 @@ def lint(text, name="workflow.yml"):
                 continue
         m = re.match(r"^ *([A-Za-z_][A-Za-z0-9_./ -]*):(\s|$)", body)
         if not m:
+            # FAIL CLOSED. This used to `continue`, which silently accepted anything the grammar
+            # did not recognise — junk top-level text passed, and so did every malformed
+            # construct that simply failed to look like a key. Block-scalar bodies are consumed
+            # wholesale further down, so a line arriving here is structural and unrecognised.
+            # A dash-introduced item whose body is a plain scalar is valid YAML — `options:` lists
+            # `- unit` / `- smoke` exactly this way. `body` has already had the dash stripped, so
+            # the original line is what must be tested; checking `body` here flagged every scalar
+            # list entry in the suite.
+            if not dash:
+                v.append(f"line {i}: unrecognised construct: {body.strip()[:60]!r}")
             continue
         if not dash and indent % 2:
             v.append(f"line {i}: off-grid indentation ({indent})")
@@ -117,6 +127,22 @@ def lint(text, name="workflow.yml"):
                     not lines[idx].strip()
                     or len(lines[idx]) - len(lines[idx].lstrip(" ")) > indent):
                 idx += 1
+    # Required top-level structure. The mutation suite previously only ever changed a value; it
+    # never REMOVED a required section, so a workflow with no `on:` trigger and no declared
+    # permissions linted clean. Absence is now a violation in its own right.
+    top_keys = {mm.group(1) for mm in
+                (re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", ln) for ln in lines) if mm}
+    for required in ("name", "on", "jobs"):
+        if required not in top_keys:
+            v.append(f"missing required top-level key '{required}'")
+    # Least privilege must be DECLARED, at the workflow or at every job — an undeclared workflow
+    # inherits the repository default, which is exactly the authority the split exists to remove.
+    if "permissions" not in top_keys:
+        jobs_missing = [j for j, b in _jobs(lines).items()
+                        if not any(re.match(r"^    permissions:", ln) for ln in b)]
+        for j in jobs_missing:
+            v.append(f"job '{j}': no permissions declared and none at workflow level")
+
     # duplicate top-level keys (simpler, reliable pass)
     tops = [re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", ln).group(1)
             for ln in lines if re.match(r"^[A-Za-z_][A-Za-z0-9_-]*:", ln)]
@@ -434,6 +460,31 @@ class TestMutations(unittest.TestCase):
             "            bash auditor/scripts/log-event.sh x\n"
             "          else\n            echo 'REFUSE:helper-missing-until-E8.3' >&2\n          fi")
         self.assertEqual([x for x in lint(guarded) if "unguarded" in x], [])
+
+    # --- absence-of-required-structure. The suite previously only mutated VALUES, so a lint that
+    # --- silently skipped anything it did not recognise passed all 26 cases while accepting a
+    # --- workflow with no trigger and no declared permissions. These test absence directly.
+    def test_unrecognised_top_level_text(self):
+        self._assert_flagged(self.GOOD + "this is not yaml at all\n")
+
+    def test_missing_on_block(self):
+        self._assert_flagged(self.GOOD.replace("on:\n  workflow_dispatch:\n", ""))
+
+    def test_missing_name(self):
+        self._assert_flagged(self.GOOD.replace("name: t\n", "", 1))
+
+    def test_missing_jobs(self):
+        self._assert_flagged("name: t\non:\n  workflow_dispatch:\npermissions:\n  contents: read\n")
+
+    def test_no_permissions_anywhere(self):
+        self._assert_flagged(self.GOOD.replace("permissions:\n  contents: read\n", ""))
+
+    def test_job_level_permissions_satisfy_the_requirement(self):
+        # Declaring per job is equally least-privilege; only silence is a violation.
+        per_job = self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+            "    runs-on: ubuntu-latest\n",
+            "    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n")
+        self.assertEqual(lint(per_job), [], "per-job permissions must satisfy the requirement")
 
     def test_unknown_secret(self):
         self._assert_flagged(self.GOOD.replace(

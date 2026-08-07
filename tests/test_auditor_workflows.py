@@ -1707,6 +1707,21 @@ class TestPushCredentials(unittest.TestCase):
             joined.append(buf)
         return joined
 
+    def _push_sites_in(self, name, text):
+        """Push commands in one workflow's text — the same filter the real scan uses, so a
+        mutant is measured the way production is."""
+        sites = []
+        for line in self._logical_lines(text):
+            stripped = line.strip()
+            if stripped.startswith(("#", "- ")) or ".sh" in stripped:
+                continue
+            if not re.match(
+                    r"^(?:if\s+|!\s+|then\s+|&&\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+                    r"git\s+.*\bpush\b", stripped):
+                continue
+            sites.append((name, stripped))
+        return sites
+
     def _push_sites(self):
         """Every `git push` in a credentials-disabled workflow, as (workflow, command)."""
         sites = []
@@ -1714,30 +1729,11 @@ class TestPushCredentials(unittest.TestCase):
             text = wf.read_text(encoding="utf-8")
             if "persist-credentials: false" not in text:
                 continue
-            for line in self._logical_lines(text):
-                stripped = line.strip()
-                # A call to a helper whose NAME contains "push" is not a push command; the
-                # helper owns its own authentication and has its own tests.
-                # Prose, not shell. Prompt blocks contain instructions like "Never run git,
-                # never push" — which a loose search reads as a push command and reports as an
-                # unauthenticated one. A command line starts WITH git (optionally behind `if`,
-                # `!`, or `&&`), and `push` follows its flags with no sentence punctuation in
-                # between.
-                if stripped.startswith(("#", "- ")) or ".sh" in stripped:
-                    continue
-                # Leading VAR=value assignments are part of the command, and BOTH repaired
-                # sites start with one (`GIT_AUTH_TOKEN="$GH_TOKEN" git ... push`). Omitting
-                # them from this pattern skipped exactly the two commands this check exists to
-                # protect — the third time this guard was vacuous, and each time it was green.
-                if not re.match(
-                        r"^(?:if\s+|!\s+|then\s+|&&\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
-                        r"git\s+.*\bpush\b", stripped):
-                    continue
-                sites.append((wf.name, stripped))
+            sites.extend(self._push_sites_in(wf.name, text))
         return sites
 
     #: The workflows this item repaired. Naming them is the point: a count alone was satisfied
-    #: three times over by the EXEMPTED file's sites while covering neither repair.
+    #: by the EXEMPTED file's sites while covering neither repair.
     REPAIRED = {"auditor-cite-exemplars.yml", "auditor-refine-rules.yml"}
 
     def test_the_scan_covers_the_commands_it_was_written_to_protect(self):
@@ -1769,15 +1765,27 @@ class TestPushCredentials(unittest.TestCase):
     #: — an empty reset that discards inherited helpers, then the real one — so a substring
     #: test for "credential.helper" is satisfied by the reset alone. Delete only the effective
     #: line and the push is unauthenticated while the check stays green.
-    #: `\S` alone is not enough: the value is quoted, so `credential.helper='` — the EMPTY
-    #: reset — satisfies it via the closing quote. The character after the optional opening
-    #: quote must be a real one.
-    EFFECTIVE_HELPER = re.compile(r"""credential\.helper=(?!\s|$)['"]?[^'"\s]""")
+    #: THE EXACT HELPER, not a pattern. Five successive regexes were evaded — by continuation
+    #: lines, a leading env assignment, punctuation in `credential.helper`, the empty reset,
+    #: and finally `credential.helper=${UNSET-}`, which looks like a value and expands to
+    #: nothing. That last one is the proof the approach was wrong: a regex over shell SOURCE
+    #: cannot decide what a shell EXPRESSION evaluates to at runtime, and any expression can
+    #: expand to empty.
+    #:
+    #: So this is an allowlist of the one construction the repaired workflows use. A different
+    #: form is not "probably fine" — it fails, and someone reads it. That is the correct
+    #: default for a credential on a push to a third party's repository.
+    HELPER_LITERAL = ('credential.helper=!f() { echo "username=x-access-token"; '
+                      'echo "password=${GIT_AUTH_TOKEN}"; }; f')
+
+    @classmethod
+    def _has_effective_helper(cls, command):
+        return cls.HELPER_LITERAL in command
 
     def test_no_workflow_pushes_without_supplying_a_credential(self):
         offenders = [f"{name}: {cmd[:70]}" for name, cmd in self._push_sites()
                      if name not in self.OUT_OF_SCOPE
-                     and not self.EFFECTIVE_HELPER.search(cmd)
+                     and not self._has_effective_helper(cmd)
                      and not cmd.startswith("git_auth")]
         self.assertEqual(offenders, [],
                          "a bare `git push` in a credentials-disabled checkout")
@@ -1798,11 +1806,18 @@ class TestPushCredentials(unittest.TestCase):
             text = wf.read_text(encoding="utf-8")
             if "persist-credentials: false" not in text or "credential.helper" not in text:
                 continue
-            mutated = re.sub(r"-c '?credential\.helper=[^\n]*", "", text)
+            # Remove the EFFECTIVE helper's whole line, newline included. Stripping from `-c`
+            # to end-of-line instead leaves a whitespace-only line that breaks the `\`
+            # continuation, so the push command stops being recognised at all and the mutant
+            # "changes nothing" for a reason that has nothing to do with credentials.
+            mutated = re.sub(r"\n[^\n]*credential\.helper=!f\(\)[^\n]*", "", text)
             with self.subTest(workflow=wf.name):
-                bare = [ln for ln in self._logical_lines(mutated)
-                        if re.search(r"\bgit\b.*\bpush\b", ln)
-                        and not self.EFFECTIVE_HELPER.search(ln)]
+                # Only the PUSH COMMANDS of this workflow, found the same way the real scan
+                # finds them. The previous version searched every line for git-and-push, so
+                # prose and helper-script filenames satisfied it before anything was removed —
+                # the mutation test was itself vacuous.
+                bare = [cmd for name, cmd in self._push_sites_in(wf.name, mutated)
+                        if not self._has_effective_helper(cmd)]
                 self.assertTrue(bare, f"{wf.name}: stripping the helper changed nothing")
 
     def test_the_token_is_never_written_into_a_url_or_config(self):

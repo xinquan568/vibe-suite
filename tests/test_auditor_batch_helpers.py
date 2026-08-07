@@ -257,6 +257,35 @@ class Test_propose_rule_citations(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(rules.read_text(), before)
 
+
+    def test_a_rule_that_lost_its_last_exemplar_loses_its_citations(self):
+        """Otherwise the rulebook goes on citing exemplars that are no longer published —
+        citing evidence that does not exist is worse than citing none, because a reader has no
+        way to tell the difference until they follow the link."""
+        d, rules = self._fixture()
+        self._run(d, rules)
+        self.assertIn("begin R02", rules.read_text())
+
+        # R02's only exemplar drops it; R01 keeps its own.
+        (d / "exemplars" / "acme-widget.md").write_text(
+            "---\nslug: acme-widget\nrepo: acme/widget\naudited: 2026-08-01\n"
+            "commit_sha: abc\nscore: 95\nexemplifies: [R01]\n---\nbody\n", encoding="utf-8")
+        r = self._run(d, rules)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = rules.read_text()
+        self.assertNotIn("begin R02", text, "the stale citation region survived")
+        self.assertIn("<!-- vibe-exemplar-citation:site R02 -->", text,
+                      "the rulebook's own anchor must NOT be removed with it")
+        self.assertIn("begin R01", text, "an unrelated rule lost its citations")
+
+    def test_removing_a_stale_region_is_reported(self):
+        d, rules = self._fixture()
+        self._run(d, rules)
+        (d / "exemplars" / "acme-widget.md").write_text(
+            "---\nrepo: acme/widget\nexemplifies: [R01]\n---\n", encoding="utf-8")
+        r = self._run(d, rules)
+        self.assertIn("stale region", r.stdout)
+
     # --- refusals -------------------------------------------------------------------------
     def test_a_missing_rules_file_is_refused(self):
         d, _ = self._fixture()

@@ -147,7 +147,21 @@ def apply_blocks(text: str, blocks: dict):
     original bug hid: the helper found none of its markers, changed nothing, and still exited
     zero having announced the rules it applied.
     """
-    applied, missing = [], []
+    applied, missing, removed = [], [], []
+
+    # A rule that lost its last exemplar keeps its generated region otherwise, still linking to
+    # exemplars that are no longer published — the rulebook then cites evidence that does not
+    # exist, which is worse than citing none. Regions are keyed by rule, so a region with no
+    # corresponding block is stale by construction.
+    for found in set(re.findall(re.escape(BEGIN.split("{")[0]) + r"([A-Za-z0-9:_-]+) -->", text)):
+        if found in blocks:
+            continue
+        stale = re.compile(re.escape(BEGIN.format(rule=found)) + r".*?"
+                           + re.escape(END.format(rule=found)) + r"\n?", re.DOTALL)
+        if stale.search(text):
+            text = stale.sub("", text, count=1)
+            removed.append(found)
+
     for rule, block in sorted(blocks.items()):
         anchor = ANCHOR.format(rule=rule)
         if anchor not in text:
@@ -165,7 +179,7 @@ def apply_blocks(text: str, blocks: dict):
         else:
             text = text.replace(anchor, replacement, 1)
         applied.append(rule)
-    return text, applied, missing
+    return text, applied, missing, sorted(removed)
 
 
 def main(argv=None):
@@ -206,7 +220,7 @@ def main(argv=None):
                           "blocks": blocks}, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    updated, applied, missing = apply_blocks(rules_text, blocks)
+    updated, applied, missing, removed = apply_blocks(rules_text, blocks)
     for rule in missing:
         print(f"  no `:site {rule}` anchor in {rules_path.name}; citations not written",
               file=sys.stderr)
@@ -216,6 +230,7 @@ def main(argv=None):
         return 0
     target.write_text(updated, encoding="utf-8")
     print(f"propose-rule-citations: applied {len(applied)} rule(s) to {target}"
+          + (f"; {len(removed)} stale region(s) removed" if removed else "")
           + (f"; {len(missing)} without an anchor" if missing else ""))
     return 0
 

@@ -199,6 +199,29 @@ class Test_rule_health(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("REFUSE:rule-health:registry-missing", r.stderr)
 
+
+    def test_enveloped_finding_rows_are_read(self):
+        """auditor-audit.yml appends findings through its `envelope` helper, so what is on disk
+        is `{timestamp, workflow, event, run_id, run_number, data: {...}}` — while SCHEMAS.md
+        section 2 documents a flat record. Reading only the flat shape sees no repo, no rule_id
+        and no false_positive flag, so every rule reports a 0% false-positive rate: the most
+        flattering possible answer, and the one that argues for changing nothing.
+        """
+        d = self._data_dir(events=[], registry={"repos": {"acme/w": {"prs": {
+            "1": {"number": 1, "updatedAt": "2026-06-01T00:00:00Z", "outcome": "merged",
+                  "fingerprints": ["fp-env"], "rule_ids": ["R42"]}}}}}, exemplars={})
+        (d / "ledgers" / "findings.jsonl").write_text(json.dumps({
+            "timestamp": "2026-01-01T00:00:00Z", "workflow": "auditor-audit",
+            "event": "finding", "run_id": "1", "run_number": 1,
+            "data": {"repo": "acme/w", "fingerprint": "fp-env", "rule_id": "R42",
+                     "false_positive": True}}) + "\n", encoding="utf-8")
+        r = self._run(d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = self._rules(d)["R42"]
+        self.assertEqual(row["false_positives"], 1, "the enveloped payload was not unwrapped")
+        self.assertEqual(row["merged"], 1)
+        self.assertEqual(row["false_positive_rate"], 1.0)
+
     # --- mutants --------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):
         d = self._data_dir()

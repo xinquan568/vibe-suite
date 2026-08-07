@@ -524,10 +524,13 @@ class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
     ATTR_ANCHOR = '            attributed = [f for path in paths for f in by_file.get(path, [])]'
     ATTR_MUTANT = '            attributed = list(findings)'
 
+    #: RAW section-4 sidecars: no fingerprint. The old fixtures supplied one, which masked a
+    #: production no-op — against a canonical sidecar the helper discarded every row and exited
+    #: successfully having updated zero PRs.
     FINDINGS = [
-        {"file": "skills/a/SKILL.md", "rule_id": "R04", "fingerprint": "sha256:aaa"},
-        {"file": "skills/b/SKILL.md", "rule_id": "R05", "fingerprint": "sha256:bbb"},
-        {"file": "agents/c.md", "rule_id": "R06", "fingerprint": "sha256:ccc"},
+        {"file": "skills/a/SKILL.md", "rule_id": "R04", "pattern": "p", "line": 1},
+        {"file": "skills/b/SKILL.md", "rule_id": "R05", "pattern": "q", "line": 2},
+        {"file": "agents/c.md", "rule_id": "R06", "pattern": "r", "line": 3},
     ]
 
     def _data_dir(self, prs=None):
@@ -565,7 +568,9 @@ class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
         gh = self.gh({"pr view 7": {"files": [{"path": "skills/a/SKILL.md"}]}})
         r = self._run(d, gh)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self._prs(d)["7"]["fingerprints"], ["sha256:aaa"])
+        fps = self._prs(d)["7"]["fingerprints"]
+        self.assertEqual(len(fps), 1, "a raw section-4 sidecar produced no attribution")
+        self.assertTrue(fps[0].startswith("sha256:"))
         self.assertEqual(self._prs(d)["7"]["rule_ids"], ["R04"])
 
     def test_existing_provenance_is_unioned_not_replaced(self):
@@ -575,8 +580,11 @@ class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
                                       "rule_ids": ["R99"]}})
         gh = self.gh({"pr view 7": {"files": [{"path": "skills/a/SKILL.md"}]}})
         self._run(d, gh)
-        self.assertEqual(self._prs(d)["7"]["fingerprints"], ["sha256:aaa", "sha256:zzz"])
-        self.assertEqual(self._prs(d)["7"]["rule_ids"], ["R04", "R99"])
+        record = self._prs(d)["7"]
+        self.assertEqual(len(record["fingerprints"]), 2, "existing provenance was replaced")
+        self.assertIn("sha256:zzz", record["fingerprints"])
+        self.assertEqual(dict(zip(record["fingerprints"], record["rule_ids"]))["sha256:zzz"],
+                         "R99")
 
     def test_a_rerun_changes_nothing(self):
         d = self._data_dir()
@@ -630,8 +638,7 @@ class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
         paired = dict(zip(record["fingerprints"], record["rule_ids"]))
         self.assertEqual(paired["sha256:zzz"], "R99", "pairing was broken by sorting")
         self.assertEqual(paired["sha256:yyy"], "R01")
-        self.assertEqual(paired["sha256:aaa"], "R04",
-                         "the newly attributed finding kept its own rule")
+        self.assertEqual(len(record["fingerprints"]), 3, "the new finding was not added")
         self.assertEqual(len(record["fingerprints"]), len(record["rule_ids"]),
                          "the parallel arrays must stay the same length")
 

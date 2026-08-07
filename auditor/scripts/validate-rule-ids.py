@@ -139,20 +139,26 @@ def check_finding(finding, catalog, known_ids):
             return []
         return [f"unknown-rule-id {rule}"]
 
-    section = section_for(finding, catalog)
-    if section is None:
-        # A path the rubric has no table for. Reported rather than passed: silence here is
-        # how the artifact-type mix-up hid, since everything resolved to "unmapped".
-        return [f"unmapped-artifact {finding.get('file')!r} for {rule}"]
-
-    # The artifact's own table OR a universal one. A rule that applies to every artifact is
-    # not drift when it appears on this one.
-    rows = list(catalog.get(section, {}).get(rule) or [])
+    # UNIVERSAL TABLES FIRST, and independently of the artifact. R01/R51 apply to everything,
+    # so an artifact the rubric has no table for — `.agents/plugins/marketplace.json`, say —
+    # must not turn a valid universal finding into drift. Returning "unmapped" before looking
+    # here is the same mistake as the original category mix-up, one branch earlier.
+    universal = []
     for name, table in catalog.items():
         if name.startswith(UNIVERSAL_PREFIX):
-            rows.extend(table.get(rule) or [])
-    if not rows:
-        return [f"artifact-type-drift {rule} is not a '{section}' or universal rule"]
+            universal.extend(table.get(rule) or [])
+
+    section = section_for(finding, catalog)
+    if section is None:
+        if universal:
+            rows, section = universal, UNIVERSAL_PREFIX
+        else:
+            # A path the rubric has no table for, and not a universal rule.
+            return [f"unmapped-artifact {finding.get('file')!r} for {rule}"]
+    else:
+        rows = list(catalog.get(section, {}).get(rule) or []) + universal
+        if not rows:
+            return [f"artifact-type-drift {rule} is not a '{section}' or universal rule"]
 
     problems = []
     penalty = finding.get("penalty")

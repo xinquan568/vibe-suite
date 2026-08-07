@@ -60,6 +60,12 @@ RULE_INFERENCE = (
     (r"\borphan\b|\bunreferenced\b", None, "orphan-artifact"),
 )
 
+#: Every id shape SCHEMAS.md allows — `rule_id` is "a namespaced rule identifier". Matching
+#: only R## rewrote a legacy row declaring SEC-001 as UNCLASSIFIED, which CHANGES the
+#: fingerprint: the digest is taken over the rule id, so the synthesized record would never
+#: join the one the original audit recorded.
+DECLARED_ID = re.compile(r"^(?:[a-z][a-z0-9]*:)?(?:R\d{1,2}|(?:SEC|BUG|CC)-[A-Za-z0-9_-]+)$")
+
 STOPWORDS = frozenset("""a an and are as at be but by for from has have in into is it its not
 of on or that the their this to with without missing should must than then when which""".split())
 
@@ -191,7 +197,7 @@ def parse_row(row: dict):
     if not description and not path:
         return None
     declared = first_of(row, "rule", "rule_id")
-    declared = declared if declared and re.match(r"^R\d{1,2}$", declared) else None
+    declared = declared if declared and DECLARED_ID.match(declared) else None
     penalty = parse_penalty(first_of(row, "penalty", "score") or "")
     rule_id, pattern = infer_rule_and_pattern(description or path or "", declared)
     line_value = first_of(row, "line", "lineno")
@@ -204,10 +210,14 @@ def parse_row(row: dict):
         "line": int(line_value) if line_value and str(line_value).isdigit() else None,
         "pattern": pattern,
         "description": description,
-        "penalty": penalty,
+        # section 2: penalty is a negative int for nl_quality and NULL otherwise; and
+        # `confidence: high` requires actively reproduced breakage, which synthesis from prose
+        # never did — so these stay medium and carry no evidence, which is the reproduction
+        # record a medium finding has not earned.
+        "penalty": penalty if classify_category(f"{description or ''}") == "nl_quality" else None,
         "severity": severity_for(penalty),
         "confidence": "medium",
-        "evidence": description,
+        "evidence": None,
         "false_positive": False,
         "suggested_fix": None,
     }
@@ -221,13 +231,13 @@ def parse_subsection(lines, start):
             break
         body.append(line)
     blob = "\n".join(body)
-    declared = re.match(r"^(R\d{1,2})\b", heading)
+    declared = DECLARED_ID.match(heading.split()[0]) if heading.split() else None
     path = re.search(r"\*\*(?:File|Path)\*\*:?\s*`?([^`\n]+?)`?\s*$", blob, re.MULTILINE)
     line_no = re.search(r"\*\*Line\*\*:?\s*(\d+)", blob)
     penalty = parse_penalty(blob)
     title = re.sub(r"^R\d{1,2}\s*[—:-]\s*", "", heading)
     rule_id, pattern = infer_rule_and_pattern(f"{title} {blob}",
-                                              declared.group(1) if declared else None)
+                                              declared.group(0) if declared else None)
     return {
         "category": classify_category(f"{title} {blob}"),
         # `rule_id` is required and non-null in section 4. An inference that found no rule is
@@ -237,10 +247,10 @@ def parse_subsection(lines, start):
         "line": int(line_no.group(1)) if line_no else None,
         "pattern": pattern,
         "description": title,
-        "penalty": penalty,
+        "penalty": penalty if classify_category(f"{title} {blob}") == "nl_quality" else None,
         "severity": severity_for(penalty),
         "confidence": "medium",
-        "evidence": title,
+        "evidence": None,
         "false_positive": False,
         "suggested_fix": None,
     }

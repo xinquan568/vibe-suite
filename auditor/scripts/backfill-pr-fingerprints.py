@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -72,6 +73,24 @@ def pr_files(repo: str, number) -> list[str] | None:
         return None
     return [str(entry.get("path")) for entry in files
             if isinstance(entry, dict) and entry.get("path")]
+
+
+def fingerprint_of(repo: str, finding: dict) -> str:
+    """The finding's digest, computed — section 4 sidecars store none.
+
+    This helper read `finding["fingerprint"]` and skipped anything without one, so against a
+    canonical sidecar it discarded every row and exited successfully having updated zero PRs.
+    Same formula as compute-fingerprint.sh, trailing newline included.
+    """
+    line = finding.get("line")
+    payload = "|".join((
+        repo,
+        str(finding.get("file") or ""),
+        str(finding.get("rule_id") or ""),
+        str(finding.get("pattern") or ""),
+        "null" if line is None or line is False else str(line),
+    )) + "\n"
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def read_findings(path: Path) -> list[dict]:
@@ -145,7 +164,7 @@ def main(argv=None):
             continue
         by_file: dict[str, list[dict]] = {}
         for finding in findings:
-            if finding.get("file") and finding.get("fingerprint"):
+            if finding.get("file"):
                 by_file.setdefault(str(finding["file"]), []).append(finding)
 
         for number in sorted(entry["prs"], key=lambda n: str(n)):
@@ -178,7 +197,7 @@ def main(argv=None):
                 pairs = [(fp, existing_rules[i] if i < len(existing_rules) else None)
                          for i, fp in enumerate(existing_fp)]
             for finding in attributed:
-                pairs.append((finding["fingerprint"], finding.get("rule_id")))
+                pairs.append((fingerprint_of(repo, finding), finding.get("rule_id")))
 
             # Deduped by FINGERPRINT, not by pair. A fingerprint is a digest OVER the rule id,
             # so one fingerprint cannot legitimately carry two rules — allowing the pair as the

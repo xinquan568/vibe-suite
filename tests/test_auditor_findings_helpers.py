@@ -776,5 +776,256 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
                          "mutation ineffective: the mutant should miss the edit")
 
 
+
+class Test_diff_findings(unittest.TestCase):
+    """`diff-findings.py` — did the maintainer actually fix it?
+
+    This helper decides whether a rule was VALIDATED, so its output feeds rule health. A wrong
+    answer argues for keeping bad rules or retiring good ones.
+    """
+
+    HELPER = SCRIPTS / "diff-findings.py"
+    SHIFT_ANCHOR = '    return (str(finding.get("file") or ""),\n            str(finding.get("rule_id") or ""),\n            str(finding.get("pattern") or ""))'
+    SHIFT_MUTANT = '    return (str(finding.get("file") or ""),\n            str(finding.get("rule_id") or ""),\n            str(finding.get("pattern") or ""),\n            finding.get("line"))'
+    SHA_BEFORE = "a" * 40
+    SHA_AFTER = "b" * 40
+
+    #: One of each outcome, which is what the specification's fixture calls for.
+    ORIGINAL = [
+        {"file": "a.md", "rule_id": "R04", "pattern": "p1", "line": 3, "fingerprint": "fp-same"},
+        {"file": "b.md", "rule_id": "R05", "pattern": "p2", "line": 10, "fingerprint": "fp-old"},
+        {"file": "c.md", "rule_id": "R06", "pattern": "p3", "line": 7, "fingerprint": "fp-fixed"},
+    ]
+    REAUDIT = [
+        {"file": "a.md", "rule_id": "R04", "pattern": "p1", "line": 3, "fingerprint": "fp-same"},
+        # same finding, file grew above it — NOT a fix
+        {"file": "b.md", "rule_id": "R05", "pattern": "p2", "line": 42, "fingerprint": "fp-new"},
+        {"file": "d.md", "rule_id": "R07", "pattern": "p4", "line": 1, "fingerprint": "fp-intro"},
+    ]
+
+    def _fixture(self, original=None, reaudit=None, events=None):
+        d = Path(tempfile.mkdtemp())
+        (d / "registry").mkdir()
+        (d / "audits").mkdir()
+        (d / "ledgers").mkdir()
+        (d / "registry" / "repos.json").write_text(
+            json.dumps({"repos": {"acme/widget": {"commit_sha_at_audit": self.SHA_BEFORE}}}),
+            encoding="utf-8")
+        (d / "audits" / "orig.jsonl").write_text(
+            "".join(json.dumps(f) + "\n" for f in
+                    (self.ORIGINAL if original is None else original)), encoding="utf-8")
+        (d / "audits" / "re.jsonl").write_text(
+            "".join(json.dumps(f) + "\n" for f in
+                    (self.REAUDIT if reaudit is None else reaudit)), encoding="utf-8")
+        if events is not None:
+            (d / "ledgers" / "events.jsonl").write_text(events, encoding="utf-8")
+        return d
+
+    def _argv(self, d, **over):
+        values = {
+            "--repo": "acme/widget",
+            "--original-sidecar": str(d / "audits" / "orig.jsonl"),
+            "--reaudit-sidecar": str(d / "audits" / "re.jsonl"),
+            "--registry": str(d / "registry" / "repos.json"),
+            "--commit-sha-before": self.SHA_BEFORE,
+            "--commit-sha-after": self.SHA_AFTER,
+            "--events-out": str(d / "ledgers" / "events.jsonl"),
+            "--diff-report-out": str(d / "audits" / "diff.md"),
+            "--summary-out": str(d / "audits" / "summary.json"),
+        }
+        values.update(over)
+        argv = []
+        for flag, value in values.items():
+            if value is not None:
+                argv += [flag, value]
+        return argv
+
+    def _run(self, d, script_text=None, **over):
+        helper = self.HELPER
+        if script_text is not None:
+            helper = Path(tempfile.mkdtemp()) / "diff-findings.py"
+            helper.write_text(script_text, encoding="utf-8")
+        return subprocess.run([sys.executable, str(helper), *self._argv(d, **over)],
+                              capture_output=True, text=True)
+
+    def _summary(self, d):
+        return json.loads((d / "audits" / "summary.json").read_text())
+
+    def _events(self, d):
+        path = d / "ledgers" / "events.jsonl"
+        return [json.loads(x) for x in path.read_text().splitlines() if x.strip()] \
+            if path.is_file() else []
+
+    # --- oracle ---------------------------------------------------------------------------
+    def test_the_four_outcomes_are_each_counted_once(self):
+        d = self._fixture()
+        r = self._run(d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        counts = self._summary(d)["counts"]
+        self.assertEqual(counts["identical"], 1)
+        self.assertEqual(counts["shifted"], 1)
+        self.assertEqual(counts["fixed"], 1)
+        self.assertEqual(counts["introduced"], 1)
+
+    def test_a_line_shift_is_not_a_fix(self):
+        """The line is IN the fingerprint, so a fingerprint comparison reports every finding
+        below an inserted paragraph as fixed and an equal number as introduced. Add one line to
+        the top of a file and the maintainer is credited with fixing forty findings and blamed
+        for introducing forty more."""
+        d = self._fixture()
+        self._run(d)
+        summary = self._summary(d)
+        self.assertEqual(summary["fixed"], ["fp-fixed"], "the shifted finding was called fixed")
+        self.assertEqual(summary["introduced"], ["fp-intro"])
+
+    def test_a_whole_file_shifting_produces_no_fixes(self):
+        """The realistic case: a paragraph added at the top moves everything down."""
+        original = [{"file": "a.md", "rule_id": f"R{i:02d}", "pattern": f"p{i}", "line": i,
+                     "fingerprint": f"fp-{i}"} for i in range(1, 21)]
+        reaudit = [dict(f, line=f["line"] + 1, fingerprint=f"fp-shift-{i}")
+                   for i, f in enumerate(original, 1)]
+        d = self._fixture(original=original, reaudit=reaudit)
+        self._run(d)
+        counts = self._summary(d)["counts"]
+        self.assertEqual((counts["fixed"], counts["introduced"], counts["shifted"]), (0, 0, 20))
+
+    def test_events_go_to_the_events_ledger_with_the_right_names(self):
+        d = self._fixture()
+        self._run(d)
+        events = self._events(d)
+        self.assertEqual({e["event"] for e in events},
+                         {"finding_verified", "finding_introduced"})
+        self.assertEqual([e["data"]["fingerprint"] for e in events
+                          if e["event"] == "finding_verified"], ["fp-fixed"])
+        for event in events:
+            self.assertEqual(event["data"]["commit_sha_before"], self.SHA_BEFORE)
+            self.assertEqual(event["data"]["commit_sha_after"], self.SHA_AFTER)
+
+    def test_a_rerun_keeps_event_multiplicity_at_one_to_one(self):
+        d = self._fixture()
+        self._run(d)
+        first = len(self._events(d))
+        self._run(d)
+        self.assertEqual(len(self._events(d)), first, "the rerun duplicated events")
+
+    def test_the_report_names_shifted_findings_as_still_open(self):
+        d = self._fixture()
+        self._run(d)
+        report = (d / "audits" / "diff.md").read_text()
+        self.assertIn("They are not fixes.", report)
+        self.assertIn("| fixed | 1 |", report)
+
+    # --- refusals -------------------------------------------------------------------------
+    def test_every_one_of_the_nine_arguments_is_required(self):
+        d = self._fixture()
+        for flag in ("--repo", "--original-sidecar", "--reaudit-sidecar", "--registry",
+                     "--commit-sha-before", "--commit-sha-after", "--events-out",
+                     "--diff-report-out", "--summary-out"):
+            with self.subTest(missing=flag):
+                r = self._run(d, **{flag: None})
+                self.assertNotEqual(r.returncode, 0, f"{flag} was not required")
+                self.assertIn("REFUSE:diff-findings:", r.stderr)
+
+    def test_placeholder_shas_are_refused(self):
+        """A diff between two commits nobody can name is not evidence, and once it is in the
+        ledger it is indistinguishable from a real one."""
+        d = self._fixture()
+        for bad in ("unknown", "", "HEAD", "none", "null", "latest", "abc123", "z" * 40):
+            for side in ("--commit-sha-before", "--commit-sha-after"):
+                with self.subTest(value=bad, side=side):
+                    r = self._run(d, **{side: bad})
+                    self.assertNotEqual(r.returncode, 0, f"{bad!r} accepted for {side}")
+                    self.assertRegex(r.stderr, r"REFUSE:diff-findings:commit-sha-\w+-(missing|invalid)")
+
+    def test_an_uppercase_sha_is_normalised_rather_than_refused(self):
+        d = self._fixture()
+        r = self._run(d, **{"--commit-sha-after": self.SHA_AFTER.upper()})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._summary(d)["commit_sha_after"], self.SHA_AFTER)
+
+    def test_a_sha256_length_sha_is_accepted(self):
+        d = self._fixture()
+        r = self._run(d, **{"--commit-sha-after": "c" * 64})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_nothing_is_written_when_validation_fails(self):
+        """Validation happens before anything is created, truncated or appended, so a refusal
+        leaves the previous state exactly as it was."""
+        d = self._fixture(events='{"event":"pre-existing"}\n')
+        r = self._run(d, **{"--commit-sha-after": "unknown"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse((d / "audits" / "diff.md").exists(), "a report was written anyway")
+        self.assertFalse((d / "audits" / "summary.json").exists())
+        self.assertEqual((d / "ledgers" / "events.jsonl").read_text(),
+                         '{"event":"pre-existing"}\n', "the ledger was touched")
+
+    def test_a_missing_sidecar_is_refused(self):
+        d = self._fixture()
+        (d / "audits" / "re.jsonl").unlink()
+        r = self._run(d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("reaudit-sidecar-missing", r.stderr)
+
+    def test_a_repo_absent_from_the_registry_is_refused(self):
+        d = self._fixture()
+        r = self._run(d, **{"--repo": "ghost/repo"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("repo-not-in-registry", r.stderr)
+
+
+    def test_the_call_site_supplies_all_nine_arguments(self):
+        """S-2's invocation, read from the workflow. The call site previously passed two
+        positional paths to a helper that requires nine named flags."""
+        text = (REPO / "auditor" / "workflows" / "auditor-case-study.yml").read_text()
+        start = text.index("diff-findings.py")
+        block = text[start:start + 900]
+        for flag in ("--repo", "--original-sidecar", "--reaudit-sidecar", "--registry",
+                     "--commit-sha-before", "--commit-sha-after", "--events-out",
+                     "--diff-report-out", "--summary-out"):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, block)
+        self.assertNotIn("$SLUG\" \\\n", block.split("--repo")[1][:40])
+
+    def test_the_call_site_derives_each_sha_from_exactly_one_source(self):
+        """The before sha only from the registry's commit_sha_at_audit, the after sha only from
+        the re-audit clone's HEAD. No fallback and no `|| echo unknown`."""
+        text = (REPO / "auditor" / "workflows" / "auditor-case-study.yml").read_text()
+        i = text.index("COMMIT_SHA_BEFORE=")
+        block = text[i:text.index("diff-findings.py", i)]
+        self.assertIn("commit_sha_at_audit", block)
+        self.assertIn("rev-parse --verify HEAD^{commit}", block)
+        self.assertNotIn("unknown", block)
+        self.assertIn("REFUSE:diff-findings:commit-sha-before-missing", block)
+
+    def test_events_go_to_the_events_ledger_not_findings(self):
+        """The specification is explicit: finding_verified and finding_introduced belong in
+        ledgers/events.jsonl."""
+        text = (REPO / "auditor" / "workflows" / "auditor-case-study.yml").read_text()
+        i = text.index("diff-findings.py")
+        block = text[i:i + 900]
+        self.assertIn('--events-out "$DATA_DIR/ledgers/events.jsonl"', block)
+        self.assertNotIn("ledgers/findings.jsonl", block)
+
+    # --- mutants --------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        d = self._fixture()
+        self._run(d, script_text=NOOP[".py"])
+        self.assertFalse((d / "audits" / "summary.json").exists(),
+                         "sanity: a no-op writes no summary")
+
+    def test_the_line_sensitive_mutant_calls_every_shift_a_fix(self):
+        """The plausible wrong implementation: include the line in the identity, which is what
+        comparing fingerprints does. It runs clean and inverts the meaning of the output."""
+        src = self.HELPER.read_text(encoding="utf-8")
+        self.assertIn(self.SHIFT_ANCHOR, src, "mutation anchor missing")
+        d = self._fixture()
+        r = self._run(d, script_text=src.replace(self.SHIFT_ANCHOR, self.SHIFT_MUTANT, 1))
+        self.assertEqual(r.returncode, 0, "the mutant runs clean — that is the danger")
+        counts = self._summary(d)["counts"]
+        self.assertEqual(counts["fixed"], 2,
+                         "mutation ineffective: the mutant should count the shift as a fix")
+        self.assertEqual(counts["shifted"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -577,7 +577,7 @@ def lint(text, name="workflow.yml"):
         elif not (SCRIPTS_DIR / name).is_file() and "deferred:E8.3" not in window:
             v.append(f"line {i}: unguarded auditor/scripts/ reference")
         if name.endswith(".py"):
-            if re.search(r"\[\s+-x\s+\"[^\"]*" + re.escape(name), ln):
+            if re.search(r"\[\s+(?:!\s+)?-x\s+\"?[^\"]*" + re.escape(name), ln):
                 v.append(f"line {i}: -x guard on '{name}' — Python helpers ship mode 100644, "
                          f"so this is false forever; use -f")
             if re.search(r"(?<![-\w])bash\s+\"[^\"]*" + re.escape(name), ln):

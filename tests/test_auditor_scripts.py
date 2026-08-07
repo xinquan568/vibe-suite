@@ -445,5 +445,82 @@ class Test_parse_suppressions(unittest.TestCase):
         self.assertIsNot(rows["nl:R1"], False, "the oracle must reject stringified values")
 
 
+class Test_vendor_default_filter(unittest.TestCase):
+    """`vendor_default_filter.py` — drop candidates no PR can ever land against."""
+
+    HELPER = SCRIPTS / "vendor_default_filter.py"
+    RECORDS = [
+        '{"fullName":"Anthropics/claude-code"}',   # mixed case, deny owner
+        '{"fullName":"OpenAI/Codex"}',             # mixed case, deny repo
+        '{"repo_name":"GOOGLE/some-repo"}',        # upper case, CLA owner, other key
+        '{"fullName":"acme/widget"}',              # ordinary
+        '{"weird":"shape"}',                       # unrecognised shape
+        '{"fullName":"beta/gadget"}',              # ordinary, order matters
+    ]
+
+    def _run(self, script_text=None, records=None):
+        with tempfile.TemporaryDirectory() as td:
+            helper = Path(td) / "helper.py"
+            helper.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
+            return subprocess.run([sys.executable, str(helper)],
+                                  input="\n".join(records or self.RECORDS) + "\n",
+                                  capture_output=True, text=True)
+
+    def _kept(self, r):
+        return [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip()]
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_mixed_case_denies_are_dropped_with_reasons(self):
+        """GitHub owners are case-insensitive, so `Anthropics/x` IS `anthropics/x`."""
+        r = self._run()
+        kept = self._kept(r)
+        names = [k.get("fullName") or k.get("repo_name") for k in kept]
+        self.assertNotIn("Anthropics/claude-code", names, "deny owner not dropped")
+        self.assertNotIn("OpenAI/Codex", names, "deny repo not dropped")
+        self.assertNotIn("GOOGLE/some-repo", names, "CLA owner not dropped")
+        self.assertIn("deny:anthropics", r.stderr)
+        self.assertIn("deny-repo:openai/codex", r.stderr)
+        self.assertIn("cla-required:google", r.stderr)
+
+    def test_ordinary_records_pass_through_in_order(self):
+        kept = self._kept(self._run())
+        names = [k.get("fullName") for k in kept if k.get("fullName")]
+        self.assertEqual(names, ["acme/widget", "beta/gadget"], "order must be preserved")
+
+    def test_an_unrecognised_shape_passes_through(self):
+        """Dropping unknown shapes would make a schema change look like an empty run —
+        the pipeline going quiet rather than failing."""
+        kept = self._kept(self._run())
+        self.assertIn({"weird": "shape"}, kept)
+
+    def test_a_bare_name_without_a_slash_is_kept(self):
+        kept = self._kept(self._run(records=['{"fullName":"anthropics"}']))
+        self.assertEqual(len(kept), 1, "a name with no owner/ is not a repo reference")
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        self.assertEqual(self._kept(self._run(NOOP[".py"])), [], "sanity: a no-op emits nothing")
+
+    def test_the_case_sensitive_mutant_fails_the_oracle(self):
+        """The plausible wrong implementation: compare owners as written.
+
+        It still drops every lowercase fixture, so a test using only lowercase names would
+        accept it — while the identical repo spelled `Anthropics/` sails through.
+        """
+        mutant = self.HELPER.read_text().replace("lowered = repo.lower()", "lowered = repo")
+        self.assertIn("lowered = repo\n", mutant, "mutation did not apply")
+        names = [k.get("fullName") or k.get("repo_name") for k in self._kept(self._run(mutant))]
+        self.assertIn("Anthropics/claude-code", names, "mutation ineffective")
+
+    def test_the_drop_unknown_shape_mutant_fails_the_oracle(self):
+        """The other plausible error: drop records whose repo key is unrecognised."""
+        mutant = self.HELPER.read_text().replace(
+            "            kept.append(record)          # unknown shape: pass through, never silently drop\n            continue",
+            "            continue")
+        self.assertNotIn("unknown shape: pass through", mutant, "mutation did not apply")
+        kept = self._kept(self._run(mutant))
+        self.assertNotIn({"weird": "shape"}, kept, "mutation ineffective")
+
+
 if __name__ == "__main__":
     unittest.main()

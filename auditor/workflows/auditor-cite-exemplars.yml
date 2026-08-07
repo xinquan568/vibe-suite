@@ -105,11 +105,16 @@ jobs:
           BRANCH="exemplar-citations/$DATE"
           cd "$CODE_DIR"
           git checkout -b "$BRANCH"
-          # deferred:E8.3 — the citation applier lands with the scripts item
-          if [ -x auditor/scripts/apply-rule-citations.sh ]; then
+          # E8.3 delivers a CLOSED inventory of thirty names and an applier is not among them.
+          # It holds propose-rule-citations.py, which proposes citations rather than writing
+          # them into the rulebook; mutating the rulebook belongs to the feedback loop. Left
+          # marked E8.3, this seam would go on refusing after E8.3 completed — and since this
+          # branch exits 1, that breaks the workflow permanently rather than degrading it.
+          # deferred:E8.6 — the citation applier is not an E8.3 helper
+          if [ -f auditor/scripts/apply-rule-citations.sh ]; then
             bash auditor/scripts/apply-rule-citations.sh "$PROPOSALS"
           else
-            echo "REFUSE:citation-helper-missing-until-E8.3"
+            echo "REFUSE:citation-helper-missing-until-E8.6"
             exit 1
           fi
           git config user.name "vibe-suite-auditor"

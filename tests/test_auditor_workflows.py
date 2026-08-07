@@ -84,6 +84,8 @@ DATA_WRITERS = [
 #: The 30 E8.3 helpers, by exact name (F10.4). Declared here so the tree can be guarded while
 #: the item lands incrementally: anything under auditor/scripts/ that is not on this list is a
 #: stray, and a stray is how an inventory row passes for the wrong reason.
+SCRIPTS_DIR = REPO / "auditor" / "scripts"
+
 E83_HELPERS = (
     "atomic-registry-write.sh", "backfill-findings.py", "backfill-pr-fingerprints.py",
     "batch-process.py", "build-exemplar-gallery.py", "commit-via-pr.sh",
@@ -543,12 +545,45 @@ def lint(text, name="workflow.yml"):
             continue
         if MODEL_ID.search(ln):
             v.append(f"line {i}: model id / model key: {ln.strip()[:60]}")
-    # deferred scripts guard
+    # Helper references. Three properties, each of which has already failed silently once.
+    #
+    # A reference to a helper that has NOT landed must carry a deferral marker, or the run
+    # breaks on a missing file. A reference to one that HAS landed may be called directly —
+    # that is how a seam retires.
+    #
+    # The NAME must be one of the declared thirty. `build-exemplar-gallery.sh` was guarded and
+    # invoked for months; the helper is `.py`, so the guard was never true and the gallery
+    # never built. Nothing failed — the else branch printed a deferral notice.
+    #
+    # The PREDICATE must be one the helper's contract mode permits. Python helpers ship
+    # 100644, so `[ -x helper.py ]` is false forever: the branch reports "missing until E8.3"
+    # for a helper sitting right there on disk. Shell helpers ship 100755, where -x is fine.
     for i, ln in enumerate(lines, 1):
-        if "auditor/scripts/" in ln:
-            window = "\n".join(lines[max(0, i - 4):i + 1])
-            if "deferred:E8.3" not in window:
-                v.append(f"line {i}: unguarded auditor/scripts/ reference")
+        m = re.search(r"auditor/scripts/([A-Za-z0-9._-]+)", ln)
+        if not m:
+            continue
+        name = m.group(1)
+        window = "\n".join(lines[max(0, i - 6):i + 1])
+        if name not in E83_HELPERS:
+            # E8.3's inventory is CLOSED at thirty names, so a reference to anything else can
+            # never be satisfied by E8.3 and must name the epic that does deliver it. Marked
+            # `deferred:E8.3`, such a seam keeps refusing after E8.3 completes — and where the
+            # else-branch exits non-zero, that is a workflow broken forever rather than one
+            # degrading gracefully.
+            other = re.search(r"deferred:(E8\.\d+)", window)
+            if not other or other.group(1) == "E8.3":
+                v.append(f"line {i}: '{name}' is not one of the declared E8.3 helpers; mark it "
+                         f"deferred to the epic that delivers it")
+        elif not (SCRIPTS_DIR / name).is_file() and "deferred:E8.3" not in window:
+            v.append(f"line {i}: unguarded auditor/scripts/ reference")
+        if name.endswith(".py"):
+            if re.search(r"\[\s+-x\s+\"[^\"]*" + re.escape(name), ln):
+                v.append(f"line {i}: -x guard on '{name}' — Python helpers ship mode 100644, "
+                         f"so this is false forever; use -f")
+            if re.search(r"(?<![-\w])bash\s+\"[^\"]*" + re.escape(name), ln):
+                v.append(f"line {i}: '{name}' invoked with bash")
+        if name.endswith(".sh") and re.search(r"python3?\s+\"[^\"]*" + re.escape(name), ln):
+            v.append(f"line {i}: '{name}' invoked with python")
     return v
 
 
@@ -1077,18 +1112,58 @@ class TestMutations(unittest.TestCase):
         self._assert_flagged(self.GOOD.replace(
             "run: echo ok", f"run: echo {self.dated_model_id()}"))
 
-    def test_unguarded_scripts_reference(self):
+    def test_unguarded_reference_to_an_undelivered_helper(self):
+        """A helper that has NOT landed must be marked, or the run breaks on a missing file."""
+        missing = next(h for h in E83_HELPERS if not (SCRIPTS_DIR / h).is_file())
         self._assert_flagged(self.GOOD.replace(
-            "run: echo ok", "run: bash auditor/scripts/log-event.sh x"))
+            "run: echo ok", f"run: bash auditor/scripts/{missing} x"))
+
+    def test_a_delivered_helper_may_be_called_without_a_marker(self):
+        """This is how a seam retires: once the helper is on disk the deferral is a lie."""
+        landed = next(h for h in E83_HELPERS if (SCRIPTS_DIR / h).is_file() and h.endswith(".sh"))
+        self.assertEqual([x for x in lint(self.GOOD.replace(
+            "run: echo ok", f"run: bash auditor/scripts/{landed} x")) if "unguarded" in x], [])
 
     def test_guarded_scripts_reference_is_allowed(self):
+        missing = next(h for h in E83_HELPERS
+                       if not (SCRIPTS_DIR / h).is_file() and h.endswith(".sh"))
         guarded = self.GOOD.replace(
             "run: echo ok",
             "run: |\n          # deferred:E8.3 — helper lands with the scripts item\n"
-            "          if [ -x auditor/scripts/log-event.sh ]; then\n"
-            "            bash auditor/scripts/log-event.sh x\n"
+            f"          if [ -x auditor/scripts/{missing} ]; then\n"
+            f"            bash auditor/scripts/{missing} x\n"
             "          else\n            echo 'REFUSE:helper-missing-until-E8.3' >&2\n          fi")
         self.assertEqual([x for x in lint(guarded) if "unguarded" in x], [])
+
+    def test_a_helper_outside_the_closed_thirty_must_name_another_epic(self):
+        """`apply-rule-citations.sh` was marked deferred:E8.3 and is not one of the thirty, so
+        it would have gone on refusing after E8.3 completed — and its else-branch exits 1, so
+        the workflow breaks permanently rather than degrading."""
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok",
+            "run: |\n          # deferred:E8.3 — lands with the scripts item\n"
+            "          bash auditor/scripts/apply-rule-citations.sh x"))
+        self.assertEqual([x for x in lint(self.GOOD.replace(
+            "run: echo ok",
+            "run: |\n          # deferred:E8.6 — not an E8.3 helper\n"
+            "          bash auditor/scripts/apply-rule-citations.sh x")) if "declared" in x], [])
+
+    def test_an_x_guard_on_a_python_helper_is_flagged(self):
+        """Python helpers ship mode 100644, so `[ -x helper.py ]` is false forever: the branch
+        reports a deferral for a helper sitting right there and never runs it."""
+        py = next(h for h in E83_HELPERS if h.endswith(".py"))
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok",
+            "run: |\n          # deferred:E8.3 — helper lands with the scripts item\n"
+            f'          if [ -x "auditor/scripts/{py}" ]; then\n'
+            f'            python3 "auditor/scripts/{py}"\n          fi'))
+
+    def test_a_python_helper_invoked_with_bash_is_flagged(self):
+        py = next(h for h in E83_HELPERS if h.endswith(".py"))
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok",
+            "run: |\n          # deferred:E8.3 — helper lands with the scripts item\n"
+            f'          bash "auditor/scripts/{py}"'))
 
     # --- absence-of-required-structure. The suite previously only mutated VALUES, so a lint that
     # --- silently skipped anything it did not recognise passed all 26 cases while accepting a

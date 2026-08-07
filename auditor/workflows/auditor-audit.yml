@@ -326,20 +326,33 @@ jobs:
           echo "PASS"
           # /stage-logic
       - run: |
-          # warn-only telemetry seams; neither ever fails the run
+          # Rule-id drift is warn-only BY DESIGN and stays that way: a drifted id is telemetry
+          # about the rulebook, not a defect in the audit that just ran.
+          #
+          # The guard is -f, not -x. Python helpers ship mode 100644 by contract, so `-x` can
+          # never be true for one — the branch would take the else forever and report a
+          # deferral that had already been delivered, with the helper silently switched off.
           set -euo pipefail
           # deferred:E8.3 — sidecar rule-id drift helper lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/validate-rule-ids.py" ]; then
+          if [ -f "$CODE_DIR/auditor/scripts/validate-rule-ids.py" ]; then
             python3 "$CODE_DIR/auditor/scripts/validate-rule-ids.py" "$DATA_DIR/audits/$SLUG.findings.jsonl" || echo "rule-id drift check failed (warn-only)"
           else
             echo "REFUSE:drift-helper-missing-until-E8.3 (warn-only, continuing)"
           fi
-          # deferred:E8.3 — per-repo HTML report helper lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/render-repo-report.py" ]; then
-            python3 "$CODE_DIR/auditor/scripts/render-repo-report.py" "$SLUG" || echo "report render failed (warn-only)"
-          else
-            echo "REFUSE:render-helper-missing-until-E8.3 (warn-only, continuing)"
-          fi
+      - run: |
+          # The per-repo report render is FAIL-CLOSED. It was previously guarded and its failure
+          # swallowed by `|| echo ... (warn-only)`, which meant an audit could be published,
+          # committed and announced while its report silently never rendered — the finding made,
+          # recorded as delivered, and never actually shown to anyone.
+          #
+          # TARGET_REPO, not SLUG. The slug is a lossy filename: owner/name -> owner-name cannot
+          # be reversed once either half contains a hyphen, so passing it here would render some
+          # other repository's audit under a plausible title. The helper refuses a slug outright.
+          set -euo pipefail
+          python3 "$CODE_DIR/auditor/scripts/render-repo-report.py" \
+            --repo "$TARGET_REPO" \
+            --data-dir "$DATA_DIR" \
+            --out "$DATA_DIR/reports"
       - run: |
           # commit cycle 1: report, sidecar, ledgers and registry to auditor-data
           set -euo pipefail

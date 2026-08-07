@@ -7,6 +7,7 @@ primitives are in `auditor_helpers_support`.
 """
 import ast
 import json
+import os
 import re
 import subprocess
 import sys
@@ -565,6 +566,86 @@ class Test_render_repo_report(unittest.TestCase):
         self.assertEqual(r.returncode, 0, "the mutant renders cleanly -- that is the danger")
         self.assertEqual(data["summary"]["total_findings"], 3,
                          "mutation ineffective: the mutant should leak all three findings")
+
+
+
+class Test_renderer_workflow_composition(unittest.TestCase):
+    """I4.4 — the invocation in auditor-audit.yml, extracted and actually run.
+
+    Every other test here calls the helper the way the TEST thinks the workflow calls it. That
+    proves the helper and proves nothing about the workflow: the previous invocation passed
+    `$SLUG` positionally to a helper that takes `--repo`, and no test noticed because no test
+    ran the workflow's own command line. This extracts the real `run:` block and executes it.
+    """
+
+    WORKFLOW = REPO / "auditor" / "workflows" / "auditor-audit.yml"
+
+    def _render_block(self):
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        marker = "render-repo-report.py"
+        self.assertIn(marker, text, "the renderer invocation vanished from the workflow")
+        start = text.rindex("      - run: |", 0, text.index(marker))
+        end = text.index("\n      - ", start + 20)
+        block = text[start:end]
+        body = "\n".join(ln[10:] if ln.startswith(" " * 10) else ln
+                         for ln in block.splitlines()[1:])
+        return body
+
+    def _render_code(self):
+        """The block with comments stripped.
+
+        Asserted against code rather than raw text: this step's comments explain the warn-only
+        swallow that was REMOVED and name the SLUG that must not be passed, so a substring
+        search over the whole block matches the explanation and fails on the documentation.
+        """
+        return "\n".join(ln for ln in self._render_block().splitlines()
+                          if not ln.lstrip().startswith("#"))
+
+    def test_the_workflows_own_command_line_renders_a_report(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "registry").mkdir()
+        (d / "registry" / "repos.json").write_text(
+            json.dumps({"repos": {"acme/widget": {"status": "audited", "score": 71}}}),
+            encoding="utf-8")
+        (d / "findings.jsonl").write_text(json.dumps(
+            {"repo": "acme/widget", "rule_id": "R01", "confidence": "high",
+             "file": "a.md", "line": 1}) + "\n", encoding="utf-8")
+        env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp"),
+               "CODE_DIR": str(REPO), "DATA_DIR": str(d), "TARGET_REPO": "acme/widget"}
+        r = subprocess.run(["bash", "-c", self._render_block()],
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((d / "reports" / "acme-widget.html").is_file(),
+                        "the workflow's own invocation produced no report")
+
+    def test_the_render_step_is_fail_closed(self):
+        """It was `|| echo "report render failed (warn-only)"`. An audit could be published,
+        committed and announced while its report silently never rendered."""
+        block = self._render_code()
+        self.assertNotIn("warn-only", block)
+        self.assertNotIn("||", block, "the render failure must propagate")
+
+    def test_the_step_passes_owner_name_not_the_slug(self):
+        block = self._render_code()
+        self.assertIn('--repo "$TARGET_REPO"', block)
+        self.assertNotIn("$SLUG", block, "the slug is lossy and cannot be reversed")
+
+    def test_a_render_failure_fails_the_step(self):
+        """The property the removed `|| echo` destroyed: a broken render stops the run."""
+        d = Path(tempfile.mkdtemp())
+        env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp"),
+               "CODE_DIR": str(REPO), "DATA_DIR": str(d), "TARGET_REPO": "acme/widget"}
+        r = subprocess.run(["bash", "-c", self._render_block()],
+                           capture_output=True, text=True, env=env)
+        self.assertNotEqual(r.returncode, 0, "a missing registry must fail the step")
+        self.assertIn("REFUSE:render-repo-report:", r.stderr)
+
+    def test_rule_id_drift_stays_warn_only(self):
+        """Deliberately unchanged: a drifted rule id is telemetry about the rulebook, not a
+        defect in the audit that just ran."""
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        i = text.index("validate-rule-ids.py")
+        self.assertIn("warn-only", text[i:i + 200])
 
 
 if __name__ == "__main__":

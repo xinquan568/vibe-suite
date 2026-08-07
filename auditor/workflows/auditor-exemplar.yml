@@ -247,8 +247,8 @@ jobs:
           set -euo pipefail
           cd "$DATA_DIR"
           # deferred:E8.3 — gallery builder lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/build-exemplar-gallery.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/build-exemplar-gallery.sh"
+          if [ -f "$CODE_DIR/auditor/scripts/build-exemplar-gallery.py" ]; then
+            python3 "$CODE_DIR/auditor/scripts/build-exemplar-gallery.py"
           else
             echo "gallery regeneration deferred until E8.3; tolerated"
           fi

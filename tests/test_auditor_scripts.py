@@ -20,7 +20,10 @@ Every helper therefore carries, per the E8.3 specification:
 One class per helper, named `Test_<helper stem>`, so the mutation harness can address a single
 helper's oracle.
 """
+import json
+import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -262,6 +265,90 @@ class Test_guard_protected_paths(unittest.TestCase):
                          "mutation ineffective: the diff-only guard should miss this")
         # and the real helper must catch what the mutant misses
         self.assertEqual(self._run(root).returncode, 1)
+
+
+class Test_parse_pr_metadata(unittest.TestCase):
+    """`parse-pr-metadata.py` — carry findings' fingerprints from a PR body to the registry."""
+
+    HELPER = SCRIPTS / "parse-pr-metadata.py"
+    BLOCK = ('<!-- vibe-suite-auditor-meta-begin {{"findings":[{{"fingerprint":"{fp}"}}]}} '
+             'vibe-suite-auditor-meta-end -->')
+
+    def _run(self, body, script_text=None):
+        if script_text is None:
+            argv = [sys.executable, str(self.HELPER)]
+            return subprocess.run(argv, input=body, capture_output=True, text=True)
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "helper.py"
+            path.write_text(script_text, encoding="utf-8")
+            return subprocess.run([sys.executable, str(path)], input=body,
+                                  capture_output=True, text=True)
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_no_block_is_empty_and_succeeds(self):
+        r = self._run("a PR body with no metadata at all\n")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(json.loads(r.stdout), {})
+
+    def test_the_tail_most_block_wins(self):
+        """A PR body is editable, so the LAST block is the current one.
+
+        Taking the first is what a non-greedy regex does by default and would pin attribution
+        to a superseded edit forever.
+        """
+        body = f"intro\n{self.BLOCK.format(fp='first')}\nmid\n{self.BLOCK.format(fp='second')}\n"
+        r = self._run(body)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(json.loads(r.stdout)["findings"][0]["fingerprint"], "second")
+
+    def test_a_malformed_payload_warns_and_fails_but_still_prints_empty(self):
+        r = self._run("<!-- vibe-suite-auditor-meta-begin {nope} vibe-suite-auditor-meta-end -->")
+        self.assertEqual(r.returncode, 1, "a corrupted block must surface, not vanish")
+        self.assertIn("WARN", r.stderr)
+        self.assertEqual(json.loads(r.stdout), {}, "stdout stays {} so callers need no case")
+
+    def test_it_agrees_with_the_workflow_jq_that_reads_the_same_block(self):
+        """auditor-track.yml parses this block with jq `"g"` + `| last`.
+
+        Two implementations of one contract must agree; a divergence would split finding
+        attribution between the workflow and the helper, silently.
+        """
+        body = f"a\n{self.BLOCK.format(fp='first')}\nb\n{self.BLOCK.format(fp='second')}\nc\n"
+        mine = json.loads(self._run(body).stdout)["findings"][0]["fingerprint"]
+
+        # Extract the regex FROM auditor-track.yml rather than restating it. A copy here could
+        # drift from the workflow and the test would then be comparing the helper against a
+        # regex nobody runs — which is precisely the failure this test exists to prevent.
+        track = (REPO / "auditor" / "workflows" / "auditor-track.yml").read_text()
+        m = re.search(r'match\("(<!--.*?vibe-suite-auditor-meta-end[^"]*)"; "g"\)', track)
+        self.assertIsNotNone(m, "auditor-track.yml no longer contains the metadata regex")
+        pattern = m.group(1)
+
+        jq = subprocess.run(
+            ["jq", "-R", "-s", "-r",
+             f'[match("{pattern}"; "g")] | last | .captures[0].string '
+             f'| fromjson | .findings[0].fingerprint'],
+            input=body, capture_output=True, text=True)
+        self.assertEqual(jq.returncode, 0, jq.stderr)
+        self.assertEqual(mine, jq.stdout.strip(), "helper and workflow jq disagree")
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        r = self._run("x", NOOP[".py"])
+        self.assertNotEqual(r.stdout.strip(), "{}", "sanity: a no-op prints nothing")
+
+    def test_the_first_block_mutant_fails_the_oracle(self):
+        """The plausible wrong implementation: return the FIRST match.
+
+        It produces well-formed JSON from a real block, so any test with a single block in its
+        fixture would accept it.
+        """
+        mutant = self.HELPER.read_text().replace("raw = matches[-1]", "raw = matches[0]")
+        self.assertIn("matches[0]", mutant, "mutation did not apply")
+        body = f"a\n{self.BLOCK.format(fp='first')}\nb\n{self.BLOCK.format(fp='second')}\n"
+        got = json.loads(self._run(body, mutant).stdout)["findings"][0]["fingerprint"]
+        self.assertEqual(got, "first", "mutation ineffective")
+        self.assertNotEqual(got, "second", "the oracle must reject first-block behaviour")
 
 
 if __name__ == "__main__":

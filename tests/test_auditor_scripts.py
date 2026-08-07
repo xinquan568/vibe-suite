@@ -522,5 +522,117 @@ class Test_vendor_default_filter(unittest.TestCase):
         self.assertNotIn({"weird": "shape"}, kept, "mutation ineffective")
 
 
+
+class Test_docs_diff(unittest.TestCase):
+    """`docs-diff.py` — detect when a cited external doc has drifted."""
+
+    HELPER = SCRIPTS / "docs-diff.py"
+    FAIL_ANCHOR = 'counts["fetch_failed"] += 1\n            continue'
+    FAIL_MUTANT = 'counts["fetch_failed"] += 1\n            body = ""'
+
+    def _module(self, script_text=None):
+        import importlib.util
+        path = Path(tempfile.mkdtemp()) / "docs_diff.py"
+        path.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("docs_diff_under_test", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    @staticmethod
+    def _opener(bodies, fail):
+        class Resp:
+            def __init__(self, b):
+                self.b = b.encode()
+
+            def read(self):
+                return self.b
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def opener(request, timeout=None):
+            url = request.full_url
+            if url in fail:
+                raise OSError("network down")
+            return Resp(bodies[url])
+
+        return opener
+
+    def _fixture(self, mod):
+        import hashlib
+        steady = hashlib.sha256(b"steady").hexdigest()
+        d = Path(tempfile.mkdtemp())
+        (d / "ledgers").mkdir()
+        (d / "ledgers" / "docs-citations.json").write_text(json.dumps(
+            {"_meta": "skipped", "http://new": {}, "http://drift": {},
+              "http://same": {}, "http://down": {}}), encoding="utf-8")
+        (d / "ledgers" / "docs-hashes.json").write_text(json.dumps({
+            "http://drift": {"hash": "stale-digest", "last_seen": "x"},
+            "http://same": {"hash": steady, "last_seen": "x"},
+            "http://down": {"hash": "must-survive", "last_seen": "x"}}), encoding="utf-8")
+        opener = self._opener(
+            {"http://new": "fresh", "http://drift": "moved", "http://same": "steady"},
+            fail={"http://down"})
+        counts = mod.run(d / "ledgers" / "docs-citations.json",
+                         d / "ledgers" / "docs-hashes.json",
+                         d / "ledgers" / "changed.txt", opener)
+        return d, counts
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_the_four_states_are_distinguished(self):
+        d, counts = self._fixture(self._module())
+        self.assertEqual(counts, {"bootstrapped": 1, "changed": 1,
+                                   "unchanged": 1, "fetch_failed": 1})
+        self.assertEqual((d / "ledgers" / "changed.txt").read_text().split(), ["http://drift"],
+                         "only the drifted URL is listed")
+
+    def test_a_failed_fetch_leaves_its_stored_hash_untouched(self):
+        """Recording a failure as drift raises a false alarm on every network blip; recording
+        it as a NEW hash is worse — it adopts unreachable as the baseline, so the real change
+        is never detected afterwards."""
+        d, _ = self._fixture(self._module())
+        after = json.loads((d / "ledgers" / "docs-hashes.json").read_text())
+        self.assertEqual(after["http://down"]["hash"], "must-survive")
+        self.assertNotIn("http://down", (d / "ledgers" / "changed.txt").read_text())
+
+    def test_metadata_keys_are_not_fetched(self):
+        _, counts = self._fixture(self._module())
+        self.assertEqual(sum(counts.values()), 4, "the _meta key must not be treated as a URL")
+
+    def test_the_hash_store_is_written_atomically(self):
+        d, _ = self._fixture(self._module())
+        leftovers = [x.name for x in (d / "ledgers").iterdir() if x.name.startswith(".")]
+        self.assertEqual(leftovers, [], f"temp files left behind: {leftovers}")
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        """The Python no-op raises SystemExit at import, so it can never provide `run`.
+
+        Asserted rather than assumed: if a future no-op form imported cleanly, the mutation
+        would silently stop proving anything for every Python helper.
+        """
+        with self.assertRaises(SystemExit):
+            self._module(NOOP[".py"])
+
+    def test_the_overwrite_on_failure_mutant_fails_the_oracle(self):
+        """The plausible wrong implementation: treat a failed fetch as an empty body.
+
+        It yields a valid-looking summary and a well-formed hash store, so a test checking only
+        counts or file shape would accept it — while every unreachable doc silently re-baselines
+        to the hash of nothing.
+        """
+        src = self.HELPER.read_text()
+        self.assertIn(self.FAIL_ANCHOR, src, "mutation anchor missing")
+        mod = self._module(src.replace(self.FAIL_ANCHOR, self.FAIL_MUTANT))
+        d, _ = self._fixture(mod)
+        after = json.loads((d / "ledgers" / "docs-hashes.json").read_text())
+        self.assertNotEqual(after["http://down"]["hash"], "must-survive",
+                            "mutation ineffective")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1112,9 +1112,21 @@ class TestMutations(unittest.TestCase):
         self._assert_flagged(self.GOOD.replace(
             "run: echo ok", f"run: echo {self.dated_model_id()}"))
 
+    def _undelivered(self):
+        """A declared helper not yet on disk, or skip.
+
+        When the inventory is complete this scenario cannot be constructed from a real name,
+        and inventing one would test the "not a declared helper" rule instead. Skipping says
+        so; the T7 seam retirement removes these guards outright.
+        """
+        for name in E83_HELPERS:
+            if not (SCRIPTS_DIR / name).is_file():
+                return name
+        self.skipTest("every declared helper has landed; no undelivered reference to guard")
+
     def test_unguarded_reference_to_an_undelivered_helper(self):
         """A helper that has NOT landed must be marked, or the run breaks on a missing file."""
-        missing = next(h for h in E83_HELPERS if not (SCRIPTS_DIR / h).is_file())
+        missing = self._undelivered()
         self._assert_flagged(self.GOOD.replace(
             "run: echo ok", f"run: bash auditor/scripts/{missing} x"))
 
@@ -1125,8 +1137,10 @@ class TestMutations(unittest.TestCase):
             "run: echo ok", f"run: bash auditor/scripts/{landed} x")) if "unguarded" in x], [])
 
     def test_guarded_scripts_reference_is_allowed(self):
-        missing = next(h for h in E83_HELPERS
-                       if not (SCRIPTS_DIR / h).is_file() and h.endswith(".sh"))
+        # Any declared helper that has not landed. NOT restricted to `.sh`: every shell helper
+        # is now delivered, and a test that assumes an undelivered one still exists breaks on
+        # the commit that completes the set — failing loudest exactly when the work succeeds.
+        missing = self._undelivered()
         guarded = self.GOOD.replace(
             "run: echo ok",
             "run: |\n          # deferred:E8.3 — helper lands with the scripts item\n"

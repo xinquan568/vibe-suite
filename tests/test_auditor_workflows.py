@@ -68,6 +68,35 @@ _ALLOWED_FUNCS = {"contains", "startsWith", "endsWith", "format", "join", "toJSO
                   "hashFiles", "always", "failure", "success", "cancelled"}
 
 
+#: A top-level key, with the optional quoting YAML permits. `on` MUST be quotable: bare `on`
+#: is a YAML 1.1 boolean, so linters actively push authors to write `"on":`. Rejecting that
+#: would reject a correct workflow, so every top-level scan shares this one pattern.
+_TOP_KEY = re.compile(r"""^(?:["']?)([A-Za-z_][A-Za-z0-9_-]*)(?:["']?):""")
+
+
+def _has_value(lines, key):
+    """True when top-level `key` carries a real value: an inline scalar/flow collection that
+    is not empty-or-null, or at least one more-indented line beneath it.
+
+    `on:` alone, `on: null` and `on: {}` are all "present but empty" — the presence check
+    cannot tell them from a real trigger block, which is why this exists separately.
+    """
+    pat = re.compile(r"""^(?:["']?)%s(?:["']?):[ \t]*(.*)$""" % re.escape(key))
+    for n, ln in enumerate(lines):
+        m = pat.match(ln)
+        if not m:
+            continue
+        inline = m.group(1).split("#")[0].strip()
+        if inline and inline not in ("null", "~", "{}", "[]"):
+            return True
+        for nxt in lines[n + 1:]:
+            if not nxt.strip() or nxt.lstrip().startswith("#"):
+                continue
+            return len(nxt) - len(nxt.lstrip(" ")) > 0
+        return False
+    return False
+
+
 def lint(text, name="workflow.yml"):
     """Return a list of violation strings for one workflow file's raw text."""
     v = []
@@ -88,6 +117,12 @@ def lint(text, name="workflow.yml"):
         indent = len(raw) - len(raw.lstrip(" "))
         body, dash = raw, re.match(r"^( *)-(\s+|$)", raw)
         if dash:
+            if dash.group(1) == "":
+                # A dash at column 0 makes the document a SEQUENCE. A workflow must be a
+                # mapping, so this is structural junk however valid the YAML is. Checked HERE
+                # rather than after the key parse, because `- k: v` parses as a key and would
+                # otherwise take the mapping path and pass.
+                v.append(f"line {i}: top-level sequence item: {raw.strip()[:60]!r}")
             if indent % 2:
                 v.append(f"line {i}: off-grid indentation ({indent})")
             while stack and stack[-1][0] >= indent:
@@ -96,7 +131,7 @@ def lint(text, name="workflow.yml"):
             body, indent = " " * (indent + 2) + raw[dash.end():], indent + 2
             if not body.strip():
                 continue
-        m = re.match(r"^ *([A-Za-z_][A-Za-z0-9_./ -]*):(\s|$)", body)
+        m = re.match(r"""^ *(?:["']?)([A-Za-z_][A-Za-z0-9_./ -]*)(?:["']?):(\s|$)""", body)
         if not m:
             # FAIL CLOSED. This used to `continue`, which silently accepted anything the grammar
             # did not recognise — junk top-level text passed, and so did every malformed
@@ -131,10 +166,45 @@ def lint(text, name="workflow.yml"):
     # never REMOVED a required section, so a workflow with no `on:` trigger and no declared
     # permissions linted clean. Absence is now a violation in its own right.
     top_keys = {mm.group(1) for mm in
-                (re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", ln) for ln in lines) if mm}
-    for required in ("name", "on", "jobs"):
+                (_TOP_KEY.match(ln) for ln in lines) if mm}
+    # `on` and `jobs` are required by GitHub. `name` is NOT — GitHub defaults it to the file
+    # path — but it is required by THIS project's contract: the STAGES table above maps each
+    # workflow to the pipeline stage it serves, and the reviewer's crosswalk cites the display
+    # name. Keeping it is deliberate; the message says whose rule it is so the lint never
+    # passes off a house convention as a platform requirement.
+    for required in ("on", "jobs"):
         if required not in top_keys:
             v.append(f"missing required top-level key '{required}'")
+    if "name" not in top_keys:
+        v.append("missing top-level key 'name' (project contract: STAGES keys on it; "
+                 "GitHub itself treats name as optional)")
+    # A required key being PRESENT does not make it meaningful. `on:` with nothing under it,
+    # `on: null` and `on: {}` all satisfied the presence check above while describing a
+    # workflow that can never trigger — the staged set's whole contract is which event fires
+    # which stage, so an empty trigger is a silent contract hole, not a stylistic nit.
+    if "on" in top_keys and not _has_value(lines, "on"):
+        v.append("top-level key 'on' declares no trigger")
+    # `permissions:` accepts exactly two scalars. Anything else is a typo that silently falls
+    # back to the repository default — the authority the staged split exists to remove.
+    # An EMPTY mapping is deliberate and correct (grant nothing), so it is not flagged.
+    for n, ln in enumerate(lines):
+        pm = re.match(r"""^(?:["']?)permissions(?:["']?):[ \t]*(.*)$""", ln)
+        if not pm:
+            continue
+        val = pm.group(1).split("#")[0].strip()
+        if val and val not in ("{}", "null", "~", "read-all", "write-all"):
+            v.append(f"top-level 'permissions' has invalid scalar {val[:40]!r}")
+        elif val in ("", "null", "~"):
+            # `permissions: {}` is a real declaration — grant nothing — and five shipped
+            # workflows rely on it, so it must keep passing. A BARE or null `permissions:` is
+            # not a declaration at all: it satisfied the presence check above, which then
+            # stopped requiring per-job permissions, so every job silently inherited the
+            # repository default. That is precisely the authority this lint exists to remove.
+            nested = next((x for x in lines[n + 1:] if x.strip()
+                           and not x.lstrip().startswith("#")), None)
+            if nested is None or len(nested) - len(nested.lstrip(" ")) == 0:
+                v.append("top-level 'permissions' declares nothing "
+                         "(use `permissions: {}` to grant none)")
     # Least privilege must be DECLARED, at the workflow or at every job — an undeclared workflow
     # inherits the repository default, which is exactly the authority the split exists to remove.
     if "permissions" not in top_keys:
@@ -144,8 +214,7 @@ def lint(text, name="workflow.yml"):
             v.append(f"job '{j}': no permissions declared and none at workflow level")
 
     # duplicate top-level keys (simpler, reliable pass)
-    tops = [re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", ln).group(1)
-            for ln in lines if re.match(r"^[A-Za-z_][A-Za-z0-9_-]*:", ln)]
+    tops = [mm.group(1) for mm in (_TOP_KEY.match(ln) for ln in lines) if mm]
     for k in set(tops):
         if tops.count(k) > 1:
             v.append(f"duplicate top-level key '{k}'")
@@ -209,7 +278,14 @@ def _jobs(lines):
     jobs, cur, body = {}, None, []
     in_jobs = False
     for ln in lines:
-        if re.match(r"^jobs:", ln):
+        jm = re.match(r"""^(?:["']?)jobs(?:["']?):[ \t]*(.*)$""", ln)
+        if jm:
+            # `jobs: |` is a BLOCK SCALAR, not a mapping. The structural scanner skips a block
+            # scalar's body wholesale (it is shell/prose), so job-shaped text inside one was
+            # invisible there — and this function used to reparse that same text as real jobs.
+            # The two passes disagreed, and the disagreement read as a valid workflow.
+            if jm.group(1).split("#")[0].strip():
+                return {}
             in_jobs = True
             continue
         if in_jobs and re.match(r"^[A-Za-z_]", ln):
@@ -485,6 +561,83 @@ class TestMutations(unittest.TestCase):
             "    runs-on: ubuntu-latest\n",
             "    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n")
         self.assertEqual(lint(per_job), [], "per-job permissions must satisfy the requirement")
+
+    # --- Round 3: the "present but empty" family. -------------------------------------------
+    # The round-2 hardening required each key to EXIST. A reviewer sweep then showed presence is
+    # not meaning: `on:` with nothing under it, `on: null` and `on: {}` all satisfied the check
+    # while describing a workflow that can never fire. The staged set's entire contract is which
+    # event drives which stage, so an empty trigger is a silent contract hole.
+
+    def test_empty_on_block_declares_no_trigger(self):
+        self._assert_flagged(self.GOOD.replace("on:\n  workflow_dispatch:\n", "on:\n"))
+
+    def test_null_on_declares_no_trigger(self):
+        self._assert_flagged(self.GOOD.replace("on:\n  workflow_dispatch:\n", "on: null\n"))
+
+    def test_flow_empty_on_declares_no_trigger(self):
+        self._assert_flagged(self.GOOD.replace("on:\n  workflow_dispatch:\n", "on: {}\n"))
+
+    def test_on_as_a_list_is_valid(self):
+        # `on: [push]` is legal GitHub syntax — the emptiness rule must not swallow it.
+        self.assertEqual(lint(self.GOOD.replace(
+            "on:\n  workflow_dispatch:\n", "on: [push, pull_request]\n")), [])
+
+    def test_bare_permissions_is_not_a_declaration(self):
+        # It satisfied the presence check, which then stopped requiring per-job permissions —
+        # so every job silently inherited the repository default.
+        self._assert_flagged(self.GOOD.replace("permissions:\n  contents: read\n",
+                                               "permissions:\n"))
+
+    def test_null_permissions_is_not_a_declaration(self):
+        self._assert_flagged(self.GOOD.replace("permissions:\n  contents: read\n",
+                                               "permissions: null\n"))
+
+    def test_empty_map_permissions_IS_a_declaration(self):
+        """`permissions: {}` grants nothing — the most restrictive setting there is.
+
+        Five shipped workflows use it deliberately. Flagging it would push authors toward
+        granting MORE privilege, so this asserts the lint keeps accepting it.
+        """
+        self.assertEqual(lint(self.GOOD.replace("permissions:\n  contents: read\n",
+                                                "permissions: {}\n")), [])
+
+    def test_invalid_permissions_scalar(self):
+        # Only read-all/write-all are legal scalars; a typo silently inherits the repo default.
+        self._assert_flagged(self.GOOD.replace("permissions:\n  contents: read\n",
+                                               "permissions: bogus\n"))
+
+    def test_read_all_permissions_scalar_is_valid(self):
+        self.assertEqual(lint(self.GOOD.replace("permissions:\n  contents: read\n",
+                                                "permissions: read-all\n")), [])
+
+    def test_top_level_sequence_item(self):
+        # A dash at column 0 makes the document a sequence; a workflow must be a mapping.
+        self._assert_flagged(self.GOOD + "- garbage\n")
+
+    def test_top_level_sequence_item_shaped_like_a_key(self):
+        # `- k: v` parses as a key once the dash is stripped, so it took the mapping path.
+        self._assert_flagged(self.GOOD + "- k: v\n")
+
+    def test_jobs_as_a_block_scalar_is_not_a_job_map(self):
+        """Two passes disagreed, and the disagreement read as a valid workflow.
+
+        The structural scanner skips a block scalar's body wholesale (it is shell/prose), so
+        job-shaped text inside `jobs: |` was invisible to it — while `_jobs()` happily reparsed
+        that same text as real jobs.
+        """
+        head = self.GOOD.split("jobs:")[0]
+        self._assert_flagged(head + "jobs:  |\n  a:\n    runs-on: ubuntu-latest\n"
+                                    "    steps:\n      - run: echo ok\n")
+
+    def test_quoted_top_level_keys_are_valid(self):
+        """Guards the OTHER direction: an over-rejecting lint is equally broken.
+
+        Bare `on` is a YAML 1.1 boolean, so linters actively push authors to write `"on":`.
+        The round-2 hardening rejected it as an unrecognised construct.
+        """
+        for quoted in ('\n"on":', "\n'on':"):
+            with self.subTest(quoted=quoted):
+                self.assertEqual(lint(self.GOOD.replace("\non:", quoted, 1)), [])
 
     def test_unknown_secret(self):
         self._assert_flagged(self.GOOD.replace(

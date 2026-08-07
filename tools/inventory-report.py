@@ -31,11 +31,58 @@ REPO_ROOT = HERE.parent
 
 EXACT, ATLEAST, PENDING_S8, RECONCILED = ("exact", "at-least", "pending-S8", "reconciled")
 
-#: The six site/release workflow names (E8.4 + E7.4's early release gate). Named here once so the
-#: two auditor rows are a strict partition: the pipeline row EXCLUDES these, the site row counts
-#: only these, and their union is SS5.0's 24.
+#: SS5.0's 24 auditor-unit workflows as two EXPLICIT, DISJOINT name sets.
+#:
+#: Counting was not enough. Targets that merely SUM to 24 let a required workflow vanish and be
+#: replaced: an unrelated `auditor/**/*.yml` kept the pipeline count at 18, and a site workflow
+#: present in both accepted homes collapsed to one under an existential name test. Both rows now
+#: assert membership of a named set, so identity — not arithmetic — is what is enforced.
+#:
+#: Cross-pinned to tests/test_auditor_workflows.py:EXPECTED (the lint's own required set), the
+#: way MIRROR and RETIRED are pinned; tests/test_inventory_rows.py holds the two identical.
+PIPELINE_WORKFLOWS = (
+    "auditor-audit", "auditor-batch-processor", "auditor-case-study", "auditor-cite-exemplars",
+    "auditor-classify", "auditor-contribute", "auditor-daily-report", "auditor-discover",
+    "auditor-docs-diff", "auditor-exemplar", "auditor-integration-test", "auditor-refine-rules",
+    "auditor-render-dashboard", "auditor-repo-report", "auditor-rule-review",
+    "auditor-suppressions", "auditor-track", "auditor-vocab-drift",
+)
+#: The six site/release names (E8.4's five + E7.4's early release gate).
 SITE_RELEASE_WORKFLOWS = ("deploy-site", "self-check", "site-preview", "site-preview-cleanup",
                           "site-validate", "pre-release-quality-gate")
+
+# The partition claim, asserted at import rather than asserted in prose.
+assert not set(PIPELINE_WORKFLOWS) & set(SITE_RELEASE_WORKFLOWS), "auditor row sets overlap"
+assert len(set(PIPELINE_WORKFLOWS) | set(SITE_RELEASE_WORKFLOWS)) == 24, "union is not SS5.0's 24"
+
+
+def _pipeline_count(r):
+    """Required pipeline workflows present, or -1 if `auditor/` holds anything unaccounted for.
+
+    Returning -1 (never a legal target) is how a structural anomaly reddens the row instead of
+    being averaged away: a stray or renamed file cannot substitute for a deleted required one.
+    """
+    found = {f.stem for f in (r / "auditor").rglob("*.yml")}
+    if found - set(PIPELINE_WORKFLOWS) - set(SITE_RELEASE_WORKFLOWS):
+        return -1
+    return len(found & set(PIPELINE_WORKFLOWS))
+
+
+def _site_count(r):
+    """Site/release workflows present in exactly one accepted home, or -1 on a duplicate.
+
+    The reference keeps these under .github/workflows/ and this repo may stage them under
+    auditor/workflows/, so both are accepted — but a name present in BOTH is a real duplicate
+    that an existential test silently collapsed into a single satisfied name.
+    """
+    homes = ((r / ".github" / "workflows"), (r / "auditor" / "workflows"))
+    n = 0
+    for name in SITE_RELEASE_WORKFLOWS:
+        hits = sum(1 for h in homes if (h / (name + ".yml")).is_file())
+        if hits > 1:
+            return -1
+        n += hits
+    return n
 
 #: The five site builders E8.4 delivers, by exact filename. Counting alone would accept five
 #: wrongly-named files, so the row asserts membership of this frozen set.
@@ -99,16 +146,11 @@ ROWS = [
     # counts only those names. Without the exclusion the two sets overlap: deleting one pipeline
     # workflow while moving a site workflow into auditor/workflows/ left both rows green with 23
     # unique files. The sets are now disjoint and their union is the 24 SS5.0 names.
-    ("Auditor pipeline workflows (E8.2)", 18, EXACT,
-     lambda r: len([f for f in (r / "auditor").rglob("*.yml")
-                    if f.stem not in SITE_RELEASE_WORKFLOWS])),
+    ("Auditor pipeline workflows (E8.2)", 18, EXACT, _pipeline_count),
     # E8.4 (vibe-61) delivered its five; the sixth, pre-release-quality-gate, arrived early with
     # E7.4. All six now exist, so the row graduates from pending to EXACT and the two auditor rows
     # again sum to SS5.0's 24. Counting by NAME (not a glob) keeps a stray workflow from passing.
-    ("Auditor site/release workflows (E8.4)", 6, EXACT,
-     lambda r: len([n for n in SITE_RELEASE_WORKFLOWS
-                    if (r / ".github" / "workflows" / (n + ".yml")).is_file()
-                    or (r / "auditor" / "workflows" / (n + ".yml")).is_file()])),
+    ("Auditor site/release workflows (E8.4)", 6, EXACT, _site_count),
     ("Auditor helper scripts", 30, PENDING_S8,
      lambda r: len(list((r / "auditor").rglob("*.py")))),
 ]

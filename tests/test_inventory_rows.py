@@ -176,6 +176,7 @@ PIPELINE_ROW = "Auditor pipeline workflows (E8.2)"
 SITE_ROW = "Auditor site/release workflows (E8.4)"
 SITE_WORKFLOWS = ("deploy-site", "self-check", "site-preview", "site-preview-cleanup",
                   "site-validate", "pre-release-quality-gate")
+PIPELINE_WORKFLOWS = MOD.PIPELINE_WORKFLOWS
 
 
 class AuditorRowSplit(RowBase):
@@ -191,26 +192,59 @@ class AuditorRowSplit(RowBase):
         self.assertEqual(row(PIPELINE_ROW)[1] + row(SITE_ROW)[1], 24,
                          "the split must preserve §5.0's total, or the inventory silently shrinks")
 
-    def test_eighteen_pipeline_workflows_pass_and_seventeen_or_nineteen_fail(self):
-        for n, expect_ok in ((18, True), (17, False), (19, False)):
-            with self.subTest(count=n):
-                d = self.tmp / "auditor" / "workflows"
-                if d.exists():
-                    shutil.rmtree(d)
-                self.seed_workflows("auditor/workflows",
-                                    *[f"auditor-wf-{i}" for i in range(n)])
-                self.assertEqual(self.ok(PIPELINE_ROW), expect_ok,
-                                 f"{n} auditor workflows: expected ok={expect_ok}")
+    def test_the_declared_set_is_a_strict_partition_of_24(self):
+        """Disjoint AND exhaustive — the property the row targets alone cannot express.
 
-    def test_every_site_workflow_name_is_required(self):
-        # Counting by NAME, not by glob: a stray workflow must not stand in for a missing one.
-        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS[:-1], "an-unrelated-workflow")
-        self.assertFalse(self.ok(SITE_ROW),
-                         "a stray workflow must not substitute for a named site/release one")
+        Summing to 24 was never the claim worth enforcing: two rows can sum to 24 while
+        describing 23 files. Intersection-empty plus union-of-24 is the real invariant, and it
+        is asserted at import in the tool as well as here.
+        """
+        pipeline, site = set(PIPELINE_WORKFLOWS), set(SITE_WORKFLOWS)
+        self.assertEqual(pipeline & site, set(), "the two auditor name sets overlap")
+        self.assertEqual(len(pipeline | site), 24, "the union is not §5.0's 24")
 
-    def test_all_six_site_workflow_names_pass(self):
+    def test_the_name_set_is_cross_pinned_to_the_lint(self):
+        """The tool and the lint must require the SAME 18 workflows.
+
+        Two independent hand-maintained lists of the same thing drift; the repo's convention
+        (MIRROR, RETIRED) is to pin such pairs with a test rather than trust discipline.
+        """
+        from tests import test_auditor_workflows as lint_mod
+        self.assertEqual(sorted(PIPELINE_WORKFLOWS),
+                         sorted(n[:-4] for n in lint_mod.EXPECTED),
+                         "tools/inventory-report.py:PIPELINE_WORKFLOWS and "
+                         "tests/test_auditor_workflows.py:EXPECTED disagree")
+
+    def test_the_eighteen_named_workflows_pass_and_a_missing_one_fails(self):
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.assertTrue(self.ok(PIPELINE_ROW), "the declared 18 must satisfy the row")
+        (self.tmp / "auditor" / "workflows" / f"{PIPELINE_WORKFLOWS[0]}.yml").unlink()
+        self.assertFalse(self.ok(PIPELINE_ROW), "a deleted required workflow must redden the row")
+
+    def test_an_unrelated_auditor_yaml_cannot_replace_a_required_one(self):
+        """Attack B: delete a required workflow, add an unrelated one — count stays 18.
+
+        The old counter measured how MANY auditor YAML files existed, so any file could stand in
+        for any other. Membership of a named set is what makes substitution visible.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS[:-1],
+                            "auditor-totally-unrelated")
+        self.assertEqual(len(list((self.tmp / "auditor").rglob("*.yml"))), 18,
+                         "the attack must keep the physical file count at 18")
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "an unrelated auditor YAML must not substitute for a required workflow")
+
+    def test_a_site_workflow_in_both_homes_is_a_duplicate_not_a_pass(self):
+        """Attack C: the same site workflow in BOTH accepted homes.
+
+        Both locations are legitimate, so the row accepted either — but it tested EXISTENCE per
+        name, which silently collapsed a genuine duplicate into one satisfied name and let the
+        unit carry 25 files while reporting 24.
+        """
         self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
-        self.assertTrue(self.ok(SITE_ROW), "all six named site/release workflows must satisfy the row")
+        self.seed_workflows("auditor/workflows", SITE_WORKFLOWS[0])
+        self.assertFalse(self.ok(SITE_ROW),
+                         "a site workflow present in both homes is a duplicate, not a pass")
 
     def test_delete_and_move_cannot_hide_a_missing_workflow(self):
         """The two auditor rows must be a strict PARTITION, not merely sum to 24.
@@ -220,11 +254,8 @@ class AuditorRowSplit(RowBase):
         into `auditor/workflows/` left both rows green with only 23 unique files. The site name is
         now excluded from the pipeline count, so the shortfall surfaces.
         """
-        wf = self.tmp / "auditor" / "workflows"
-        wf.mkdir(parents=True, exist_ok=True)
-        for i in range(17):                                  # one pipeline workflow deleted
-            (wf / f"auditor-wf-{i}.yml").write_text("x", encoding="utf-8")
-        (wf / "deploy-site.yml").write_text("x", encoding="utf-8")   # a site workflow moved in
+        # one required pipeline workflow deleted, one site workflow moved in to replace it
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS[:-1], "deploy-site")
         gh = self.tmp / ".github" / "workflows"
         gh.mkdir(parents=True, exist_ok=True)
         for n in SITE_WORKFLOWS:

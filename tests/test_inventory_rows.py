@@ -256,6 +256,28 @@ class AuditorRowSplit(RowBase):
         self.assertFalse(self.ok(PIPELINE_ROW),
                          "workflows outside the workflow home are not the unit")
 
+    def test_a_symlinked_workflow_is_not_a_real_workflow(self):
+        """`is_file()` and `stat()` FOLLOW symlinks, so a link counted as a real workflow.
+
+        A required name could therefore be satisfied by a link to any file at all — including
+        one pointing outside the repository. The link itself is what has to be tested.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS[1:])
+        target = self.tmp / "elsewhere.yml"
+        target.write_text("name: x\n", encoding="utf-8")
+        (self.tmp / "auditor" / "workflows"
+         / f"{PIPELINE_WORKFLOWS[0]}.yml").symlink_to(target)
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "a symlink must not satisfy a required workflow")
+
+    def test_a_symlinked_site_workflow_is_rejected_too(self):
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS[1:])
+        target = self.tmp / "elsewhere-site.yml"
+        target.write_text("name: x\n", encoding="utf-8")
+        (self.tmp / ".github" / "workflows"
+         / f"{SITE_WORKFLOWS[0]}.yml").symlink_to(target)
+        self.assertFalse(self.ok(SITE_ROW), "a symlink must not satisfy a site workflow")
+
     def test_an_extra_empty_file_in_the_home_reddens_the_row(self):
         """Junk has to be SEEN to be rejected.
 

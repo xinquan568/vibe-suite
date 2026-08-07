@@ -456,5 +456,56 @@ class TestCIWiring(unittest.TestCase):
         self.assertNotIn("gemini-[0-9]", self.workflow)
 
 
+
+class EscapedPins(unittest.TestCase):
+    """A pinned id spelled with string escapes must not slip past the raw-text scan.
+
+    In YAML, JSON and most languages `"claude-opus-4-2025051\\u0034"` IS the dated id, but the
+    pattern only ever saw the literal backslash-u text, so the P9 gate could be bypassed by
+    spelling one digit as an escape. The scan now considers the decoded form as well.
+    """
+
+    def test_a_unicode_escaped_dated_id_is_found(self):
+        line = 'model: "claude-opus-4-2025051\\u0034"'
+        self.assertEqual(lint.find_pins(line), [], "raw text alone cannot see it")
+        self.assertTrue(lint.find_pins(lint._decode_escapes(line)),
+                        "the decoded form must expose the pin")
+
+    def test_hex_and_braced_escapes_are_decoded(self):
+        for line in ('a: "gpt-\\x35.6-sol"', 'a: "gpt-\\u{35}.6-sol"'):
+            with self.subTest(line=line):
+                self.assertTrue(lint.find_pins(lint._decode_escapes(line)))
+
+    def test_an_escaped_backslash_is_not_an_escape(self):
+        # An EVEN number of backslashes is a literal backslash, not a live escape sequence.
+        original = 'note: "C:\\\\umbrella"'
+        self.assertEqual(lint._decode_escapes(original), original)
+
+    def test_plain_text_is_unchanged(self):
+        for line in ("nothing here", "model: sonnet", "a: b"):
+            with self.subTest(line=line):
+                self.assertEqual(lint._decode_escapes(line), line)
+
+    def test_decoding_never_raises_on_hostile_input(self):
+        for line in ("\\uZZZZ", "\\u{FFFFFFFF}", "\\x", "\\u", "\\\\\\u0035", "\\u{}"):
+            with self.subTest(line=line):
+                lint._decode_escapes(line)   # must not raise
+
+    def test_a_scan_reports_the_escaped_pin_with_its_original_line(self):
+        """The reported line must be the SOURCE text, so the violation is findable in the file."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "scripts").mkdir()
+            (root / "scripts" / "x.py").write_text(
+                'MODEL = "claude-opus-4-2025051\\u0034"\n', encoding="utf-8")
+            found = lint.scan(root, lister=lambda r: ["scripts/x.py"], notice=lambda m: None)
+            self.assertEqual(len(found), 1, f"expected one violation, got {found}")
+            self.assertIn("\\u0034", found[0].text, "the original spelling must be reported")
+            # Assembled, not written whole: TestNoCommittedModelIds forbids a complete dated
+            # id literal anywhere in the tree, and this test is not exempt from the rule it
+            # exists to defend.
+            self.assertEqual(found[0].token, "claude-opus-4-" + "2025" + "0514")
+
+
 if __name__ == "__main__":
     unittest.main()

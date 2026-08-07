@@ -196,6 +196,35 @@ def in_scope(relpath):
     )
 
 
+_ESCAPE = re.compile(r"\\+(?:u\{([0-9A-Fa-f]{1,6})\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2}))")
+
+
+def _decode_escapes(line):
+    """`line` with `\\uXXXX`, `\\u{XXXX}` and `\\xNN` escapes resolved to their characters.
+
+    Scanning raw source text alone was bypassable by spelling the digit as an escape: in YAML,
+    JSON and most languages `"gpt-\\u0035.6-sol"` IS the string `gpt-5.6-sol`, and the pattern
+    never saw a `5`. The scan now looks at both the literal text and its decoded form, so a
+    pinned id has to survive being written either way.
+
+    An ODD number of leading backslashes means the escape is live; an even number is a literal
+    backslash followed by a `u`, which decodes to nothing. Decoding is best-effort — this is a
+    normalisation for matching, not a parser, and it must never raise on hostile input.
+    """
+    def sub(m):
+        if (len(m.group(0)) - len(m.group(0).lstrip("\\"))) % 2 == 0:
+            return m.group(0)          # escaped backslash, not an escape sequence
+        digits = m.group(1) or m.group(2) or m.group(3)
+        try:
+            return chr(int(digits, 16))
+        except (ValueError, OverflowError):
+            return m.group(0)
+    try:
+        return _ESCAPE.sub(sub, line)
+    except Exception:
+        return line
+
+
 def scan(root, lister=git_lister, notice=None):
     """Return every violation under `root`, in sorted path order.
 
@@ -220,8 +249,13 @@ def scan(root, lister=git_lister, notice=None):
         except OSError as exc:
             raise ReadError(f"could not read {relpath}: {exc}") from exc
         for number, line in enumerate(text.splitlines(), start=1):
-            for token in find_pins(line):
-                violations.append(Violation(relpath, number, token, line))
+            seen = set()
+            for candidate in (line, _decode_escapes(line)):
+                for token in find_pins(candidate):
+                    if token in seen:
+                        continue
+                    seen.add(token)
+                    violations.append(Violation(relpath, number, token, line))
     return violations
 
 

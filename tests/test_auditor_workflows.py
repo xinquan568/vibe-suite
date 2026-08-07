@@ -56,6 +56,9 @@ MODEL_WORKFLOWS = [
     "auditor-classify.yml", "auditor-integration-test.yml", "auditor-vocab-drift.yml",
     "auditor-exemplar.yml", "auditor-refine-rules.yml",
 ]
+#: Stage workflows that CREATE the labelled issue rather than react to it. Everything else in
+#: STAGES is a consumer and must gate on `github.event.label.name`.
+LABEL_PRODUCERS = {"auditor-discover.yml"}
 DATA_WRITERS = [
     "auditor-discover.yml", "auditor-audit.yml", "auditor-contribute.yml", "auditor-track.yml",
     "auditor-case-study.yml", "auditor-daily-report.yml", "auditor-classify.yml",
@@ -66,6 +69,14 @@ DATA_WRITERS = [
 
 TOP_KEYS = {"name", "on", "permissions", "concurrency", "env", "jobs"}
 KNOWN_SECRETS = {"CLAUDE_CODE_OAUTH_TOKEN", "PAT_TOKEN", "OPENAI_API_KEY", "GITHUB_TOKEN"}
+#: GitHub's closed set of permission scopes. Values are read/write/none. A mapping that merely
+#: PARSES is not a permissions declaration — `banana: read` and `contents: admin` are both valid
+#: YAML and both meaningless to Actions.
+PERMISSION_SCOPES = {
+    "actions", "attestations", "checks", "contents", "deployments", "discussions",
+    "id-token", "issues", "models", "packages", "pages", "pull-requests",
+    "repository-projects", "security-events", "statuses",
+}
 BLOCKED_CMDS = ["curl", "wget", "nc", "ncat", "socat", "telnet", "ssh", "scp", "sftp", "rsync"]
 
 MODEL_ID = re.compile(
@@ -82,7 +93,10 @@ _EXPR_TOKEN = re.compile(
 _ALLOWED_ROOTS = {"github", "secrets", "inputs", "needs", "env", "matrix", "steps", "vars",
                   "runner"}
 _ALLOWED_FUNCS = {"contains", "startsWith", "endsWith", "format", "join", "toJSON", "fromJSON",
-                  "hashFiles", "always", "failure", "success", "cancelled"}
+                  "hashFiles", "always", "failure", "success", "cancelled",
+                  # `case` joined the documented function list; rejecting it was an
+                  # over-rejection of valid Actions syntax.
+                  "case"}
 
 
 #: A top-level key, with the optional quoting YAML permits. `on` MUST be quotable: bare `on`
@@ -99,6 +113,11 @@ _JOB_KEY = re.compile(r"""^  (?:"([A-Za-z_][A-Za-z0-9_-]*)"|'([A-Za-z_][A-Za-z0-
                       r"""|([A-Za-z_][A-Za-z0-9_-]*)):[ \t]*(.*)$""")
 #: YAML nulls, in every spelling. Comparing against the literal "null" missed `NULL`/`Null`/`~`.
 _NULLS = {"", "null", "~"}
+
+
+#: Printed by the ruby adapter on a completed run. Its ABSENCE means the child did not finish,
+#: whatever its stdout looked like — the difference between "parsed cleanly" and "never ran".
+_OK_MARKER = "__PSYCH_OK__"
 
 
 def _ruby():
@@ -124,12 +143,55 @@ def psych_error(text):
     rb = _ruby()
     if rb is None:
         return None
-    script = ("require 'yaml'\n"
-              "begin; YAML.load(STDIN.read); print ''\n"
-              "rescue => e; print e.class.to_s + ': ' + e.message.to_s[0, 200]; end")
-    r = subprocess.run([rb, "-e", script], input=text, capture_output=True,
-                       text=True, timeout=60)
-    return r.stdout.strip()
+    # Version-tolerant on purpose. Ruby 2.6's YAML.load resolves aliases; Ruby 3.1+ defaults to
+    # safe_load with aliases DISABLED and raises Psych::AliasesNotEnabled — so a workflow using
+    # a perfectly legal anchor failed only on the newer runtime. CI found that; a gate that
+    # skipped instead of failing would have hidden it.
+    #
+    # Psych.parse answers well-formedness on every version without resolving anything. The
+    # second pass resolves aliases where the API allows, to catch an alias to a missing anchor.
+    script = (
+        "require 'yaml'\n"
+        "text = STDIN.read\n"
+        "def fail_with(e)\n"
+        "  print e.class.to_s + ': ' + e.message.to_s[0, 200]\n"
+        "  exit 0\n"
+        "end\n"
+        "begin\n"
+        "  Psych.parse(text)\n"
+        "rescue => e\n"
+        "  fail_with(e)\n"
+        "end\n"
+        "begin\n"
+        "  begin\n"
+        "    YAML.load(text, aliases: true)\n"
+        "  rescue ArgumentError, NoMethodError\n"
+        "    YAML.load(text)\n"
+        "  end\n"
+        "rescue => e\n"
+        "  fail_with(e) unless e.class.to_s == 'Psych::AliasesNotEnabled'\n"
+        "end\n"
+        "print '" + _OK_MARKER + "'\n")
+    try:
+        r = subprocess.run([rb, "-e", script], input=text, capture_output=True,
+                           text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"ruby adapter did not run: {type(exc).__name__}: {exc}"
+    out = r.stdout.strip()
+    # An empty stdout used to read as "well-formed". A child that segfaults, is killed, or dies
+    # before printing anything produces exactly that — so the gate reported success for a parse
+    # that never happened. Completion is now proven by the marker, not assumed from silence.
+    if r.returncode != 0:
+        return (f"ruby adapter exited {r.returncode}: "
+                f"{(r.stderr or '').strip()[:200] or out[:200]}")
+    if out == _OK_MARKER:
+        return ""
+    if out.endswith(_OK_MARKER):          # parser complaint plus completion marker
+        return out[:-len(_OK_MARKER)].strip()
+    if not out:
+        return ("ruby adapter produced no output and no completion marker "
+                f"(stderr: {(r.stderr or '').strip()[:200]!r})")
+    return out
 
 
 def _key_of(m):
@@ -382,11 +444,40 @@ def lint(text, name="workflow.yml"):
         inner = m.group(1).strip()
         if not _expr_ok(inner):
             v.append(f"expression outside grammar: {inner[:60]}")
-    # secrets by name
+    # Secrets by name, in BOTH notations. `secrets['X']` is GitHub's documented index operator
+    # and reaches exactly the same value as `secrets.X`, so checking only property access left
+    # the allowlist trivially bypassable by changing punctuation.
     for sm in re.finditer(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)", text):
         if sm.group(1) not in KNOWN_SECRETS:
             v.append(f"unknown secret '{sm.group(1)}'")
-    # model pins
+    for sm in re.finditer(r"""secrets\[\s*(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\s*\]""", text):
+        if sm.group(2) not in KNOWN_SECRETS:
+            v.append(f"unknown secret '{sm.group(2)}' (index notation)")
+    # Permission SCOPES and VALUES, not merely "a mapping exists". GitHub defines a closed set
+    # of both; `contents: admin` and `banana: read` are valid YAML and invalid Actions, so the
+    # least-privilege contract this lint exists to enforce was only being checked for shape.
+    in_perms, perms_indent = False, 0
+    for i, ln in enumerate(lines, 1):
+        if ln.lstrip().startswith("#") or not ln.strip():
+            continue
+        pm = re.match(r"""^(\s*)(?:"permissions"|'permissions'|permissions):\s*$""", ln)
+        if pm:
+            in_perms, perms_indent = True, len(pm.group(1))
+            continue
+        if in_perms:
+            ind = len(ln) - len(ln.lstrip(" "))
+            if ind <= perms_indent:
+                in_perms = False
+            else:
+                em = re.match(r"""^\s*(?:"([\w-]+)"|'([\w-]+)'|([\w-]+)):\s*(\S*)""", ln)
+                if em:
+                    scope = em.group(1) or em.group(2) or em.group(3)
+                    value = _unquote(em.group(4).split("#")[0].strip())
+                    if scope not in PERMISSION_SCOPES:
+                        v.append(f"line {i}: unknown permission scope '{scope}'")
+                    elif value and value not in ("read", "write", "none"):
+                        v.append(f"line {i}: invalid permission value '{value}' for '{scope}'")
+        # model pins
     for i, ln in enumerate(lines, 1):
         if ln.lstrip().startswith("#"):
             continue
@@ -467,6 +558,14 @@ def _steps(job_body):
 
 
 def _expr_ok(inner):
+    # Actions string literals are SINGLE-quoted; a double-quoted literal is an error at
+    # evaluation time. The token pattern accepted both, so `${{ "x" }}` linted clean.
+    if re.search(r'"[^"]*"', inner):
+        return False
+    # `github..ref` is not a path — an empty path segment never resolves. The scanner walked
+    # token by token and never looked at what sat between them.
+    if ".." in inner:
+        return False
     pos, saw_root = 0, False
     while pos < len(inner):
         m = _EXPR_TOKEN.match(inner, pos)
@@ -573,6 +672,59 @@ class TestYamlWellFormed(unittest.TestCase):
                 self.assertNotEqual(psych_error(text), "",
                                     f"{label}: Psych must reject this")
 
+    def test_a_broken_ruby_child_is_not_reported_as_valid_yaml(self):
+        """The gate built to be fail-closed had a fail-open at its own boundary.
+
+        `psych_error()` returned `stdout.strip()`, so a child that crashed (rc=127), was killed,
+        or died before printing produced `""` — indistinguishable from "parsed cleanly". Success
+        is now proven by an explicit completion marker plus a zero return code.
+        """
+        class Fake:
+            def __init__(self, rc, out, err):
+                self.returncode, self.stdout, self.stderr = rc, out, err
+        real_run, real_ruby = subprocess.run, globals()["_ruby"]
+        globals()["_ruby"] = lambda: "/usr/bin/ruby"
+        try:
+            for rc, out, err, must_reject in (
+                    (127, "", "fatal Psych failure", True),
+                    (-9, "", "", True),
+                    (0, "", "", True),
+                    (0, "partial outp", "", True),
+                    (0, _OK_MARKER, "", False),
+            ):
+                with self.subTest(rc=rc, stdout=out):
+                    subprocess.run = lambda *a, **k: Fake(rc, out, err)
+                    got = psych_error("name: t\n")
+                    if must_reject:
+                        self.assertNotEqual(got, "", "a child that did not complete is not a pass")
+                    else:
+                        self.assertEqual(got, "")
+        finally:
+            subprocess.run, globals()["_ruby"] = real_run, real_ruby
+
+    def test_the_oracle_behaves_the_same_across_ruby_versions(self):
+        """Pins the behaviour CI caught and a local run could not.
+
+        Ruby 2.6's `YAML.load` resolves aliases; 3.1+ defaults to safe_load with aliases
+        DISABLED and raises Psych::AliasesNotEnabled, so an anchored workflow — valid YAML,
+        and valid GitHub Actions since 2025-09-18 — failed only on the newer runtime. Local
+        verification could never have found that; the gate failing rather than skipping did.
+
+        `Psych::AliasesNotEnabled` does not exist on 2.6, so it is matched by class NAME
+        rather than by constant: naming a missing constant in a rescue clause breaks
+        resolution on the older runtime.
+        """
+        if _ruby() is None:
+            self.skipTest("ruby unavailable")
+        anchored = ("name: t\non:\n  workflow_dispatch:\npermissions:\n  contents: read\n"
+                    "jobs:\n  a: &base\n    runs-on: ubuntu-latest\n    steps:\n"
+                    "      - name: x\n        run: echo ok\n  b: *base\n")
+        self.assertEqual(psych_error(anchored), "",
+                         "an anchored workflow is well-formed on every supported ruby")
+        # and the oracle must still reject what it is there to reject
+        self.assertNotEqual(psych_error("a: *missing\n"), "", "undefined alias must be caught")
+        self.assertNotEqual(psych_error("a: [1\n"), "", "unclosed flow must be caught")
+
     def test_fuzzed_corruption_never_slips_past_both_layers(self):
         """The property I claimed in round 4 and could not support: nothing malformed passes.
 
@@ -662,10 +814,38 @@ class TestContracts(unittest.TestCase):
                 self.assertIn("auditor-data", self._text(name))
 
     def test_stage_workflows_carry_their_entry_labels(self):
+        """The label must be LOAD-BEARING, not merely present somewhere in the file.
+
+        This used to be `assertIn(label, raw_text)`, which a mention in a comment satisfied.
+        Changing `auditor-audit.yml`'s operative condition from `audit-ready` to `banana` left
+        the assertion green because the label still appeared in the header comment — so the
+        check could not see the one thing it exists to protect.
+
+        A label is load-bearing in exactly two shapes here: a CONSUMER gates on
+        `github.event.label.name == '<label>'`, and a PRODUCER passes it to `gh issue` as
+        `--label` / `--add-label`. Comments are stripped before either is looked for.
+        """
         for name, label in STAGES.items():
-            if label:
-                with self.subTest(workflow=name):
-                    self.assertIn(label, self._text(name))
+            if not label:
+                continue
+            with self.subTest(workflow=name):
+                code = "\n".join(ln for ln in self._text(name).splitlines()
+                                 if not ln.lstrip().startswith("#"))
+                gated = re.search(
+                    r"github\.event\.label\.name\s*==\s*['\"]%s['\"]" % re.escape(label),
+                    code)
+                produced = re.search(
+                    r"--label\s+['\"]?%s\b" % re.escape(label), code)
+                # Accepting EITHER shape was too loose: mutating auditor-audit's `if:` gate to a
+                # wrong label still passed, because `--remove-label audit-ready` elsewhere in the
+                # file satisfied the producer branch. Each workflow owes the shape it actually
+                # uses — consumers gate on the event, the discovery producer labels what it makes.
+                required = produced if name in LABEL_PRODUCERS else gated
+                self.assertTrue(
+                    required,
+                    f"{name}: '{label}' appears in no operative position — a consumer must gate "
+                    f"an `if:` on github.event.label.name; the producer must pass it to "
+                    f"`gh issue create --label`. A comment mentioning it is not the contract.")
 
     def test_contribute_separates_model_from_pat(self):
         t = self._text("auditor-contribute.yml")
@@ -894,6 +1074,46 @@ class TestMutations(unittest.TestCase):
         for key in ("on", "jobs"):
             with self.subTest(key=key):
                 self._assert_flagged(self.GOOD.replace(f"\n{key}:", f'\n"{key}\':', 1))
+
+    # --- Round 6: contract properties that fell BETWEEN the two layers. --------------------
+    # Psych validates YAML; it knows nothing about Actions semantics. These are the gaps that
+    # opened when YAML validity moved out of lint()'s scope — the exact risk the split created.
+
+    def test_a_secret_reached_by_index_notation_is_still_checked(self):
+        """`secrets['X']` is GitHub's documented index operator and reaches the same value.
+
+        Checking only property access left the allowlist bypassable by changing punctuation.
+        """
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", "run: echo ${{ secrets['SNEAKY_TOKEN'] }}"))
+
+    def test_a_known_secret_by_index_notation_is_allowed(self):
+        # SINGLE quotes: Actions string literals are single-quoted, so `secrets["X"]` is itself
+        # an error. This assertion originally used double quotes and was simply wrong.
+        self.assertEqual(lint(self.GOOD.replace(
+            "run: echo ok", "run: echo ${{ secrets['PAT_TOKEN'] }}")), [])
+
+    def test_a_double_quoted_index_key_is_rejected_like_any_literal(self):
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", 'run: echo ${{ secrets["PAT_TOKEN"] }}'))
+
+    def test_an_invalid_permission_value_is_caught(self):
+        # `contents: admin` is valid YAML and invalid Actions.
+        self._assert_flagged(self.GOOD.replace(
+            "permissions:\n  contents: read\n", "permissions:\n  contents: admin\n"))
+
+    def test_an_unknown_permission_scope_is_caught(self):
+        self._assert_flagged(self.GOOD.replace(
+            "permissions:\n  contents: read\n", "permissions:\n  banana: read\n"))
+
+    def test_every_real_permission_scope_is_accepted(self):
+        """Guards the other direction — a closed set that is too small is an over-rejection."""
+        for scope in ("contents", "id-token", "issues", "pull-requests", "packages",
+                      "pages", "actions", "checks", "statuses", "security-events"):
+            with self.subTest(scope=scope):
+                self.assertEqual(lint(self.GOOD.replace(
+                    "permissions:\n  contents: read\n",
+                    f"permissions:\n  {scope}: write\n")), [])
 
     def test_an_anchor_on_the_jobs_key_still_declares_jobs(self):
         head = self.GOOD.split("jobs:")[0]

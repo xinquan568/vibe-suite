@@ -82,7 +82,11 @@ def _bad_entry(f, homes):
     GitHub runs workflows only from a workflow directory, so a file parked in
     `auditor/not-workflows/` is not part of the unit however correctly it is named.
     """
-    return (f.parent not in homes or not f.is_file() or f.stat().st_size == 0)
+    # is_file() and stat() FOLLOW symlinks, so a symlink to any real file counted as a
+    # workflow — including a link pointing outside the repo entirely. The unit must be made
+    # of real files, so the link itself is the thing to test.
+    return (f.parent not in homes or f.is_symlink()
+            or not f.is_file() or f.stat().st_size == 0)
 
 
 def _pipeline_count(r):

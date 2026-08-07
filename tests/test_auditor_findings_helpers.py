@@ -583,6 +583,26 @@ class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("REFUSE:backfill-pr-fingerprints:registry-missing", r.stderr)
 
+
+    def test_the_fingerprint_rule_pairing_survives(self):
+        """`rule_ids` is PARALLEL to `fingerprints` — SCHEMAS.md pairs them by position.
+        Sorting and de-duplicating each list independently breaks that: entry i of one stops
+        describing entry i of the other, so every finding is credited to some other finding's
+        rule. The registry stays well-formed and rule health silently attributes outcomes to
+        the wrong rules."""
+        d = self._data_dir(prs={"7": {"number": 7,
+                                      "fingerprints": ["sha256:zzz", "sha256:aaa"],
+                                      "rule_ids": ["R99", "R01"]}})
+        gh = self.gh({"pr view 7": {"files": [{"path": "skills/a/SKILL.md"}]}})
+        self._run(d, gh)
+        record = self._prs(d)["7"]
+        paired = dict(zip(record["fingerprints"], record["rule_ids"]))
+        self.assertEqual(paired["sha256:zzz"], "R99", "pairing was broken by sorting")
+        self.assertEqual(paired["sha256:aaa"], "R01")
+        self.assertEqual(paired["sha256:aaa"], "R01")
+        self.assertEqual(len(record["fingerprints"]), len(record["rule_ids"]),
+                         "the parallel arrays must stay the same length")
+
     # --- mutants --------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):
         d = self._data_dir()

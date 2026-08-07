@@ -69,6 +69,17 @@ SECTION_FOR_PATH = (
 
 RULE_ID = re.compile(r"^R\d{1,2}$")
 
+#: Tables that apply to EVERY artifact, not to one type. R01 (vague quantifiers) and R51
+#: (vocabulary drift) live here, so checking only the artifact's own table reported every
+#: universal finding as artifact-type drift — the validator calling correct work wrong, which
+#: is worse than missing drift because someone acts on it.
+UNIVERSAL_PREFIX = "All types"
+
+#: Namespaced and non-R identifiers the schema allows (`rule_id` is "a namespaced rule
+#: identifier"). They are not in this rubric's tables, so they cannot be checked against it —
+#: but reporting them as UNKNOWN says the id is wrong, which is a different and false claim.
+FOREIGN_ID = re.compile(r"^(?:[a-z][a-z0-9]*:)?(?:SEC|BUG|CC)-[A-Za-z0-9_-]+$|^[a-z][a-z0-9]*:R\d{1,2}$")
+
 
 def refuse(reason: str) -> None:
     print(f"REFUSE:validate-rule-ids:{reason}", file=sys.stderr)
@@ -123,6 +134,9 @@ def check_finding(finding, catalog, known_ids):
     if not rule or rule == "--":
         return []
     if rule not in known_ids:
+        if FOREIGN_ID.match(rule):
+            # Schema-valid but outside this rubric. Not checkable here, and not wrong.
+            return []
         return [f"unknown-rule-id {rule}"]
 
     section = section_for(finding, catalog)
@@ -131,9 +145,14 @@ def check_finding(finding, catalog, known_ids):
         # how the artifact-type mix-up hid, since everything resolved to "unmapped".
         return [f"unmapped-artifact {finding.get('file')!r} for {rule}"]
 
-    rows = catalog.get(section, {}).get(rule)
+    # The artifact's own table OR a universal one. A rule that applies to every artifact is
+    # not drift when it appears on this one.
+    rows = list(catalog.get(section, {}).get(rule) or [])
+    for name, table in catalog.items():
+        if name.startswith(UNIVERSAL_PREFIX):
+            rows.extend(table.get(rule) or [])
     if not rows:
-        return [f"artifact-type-drift {rule} is not a '{section}' rule"]
+        return [f"artifact-type-drift {rule} is not a '{section}' or universal rule"]
 
     problems = []
     penalty = finding.get("penalty")

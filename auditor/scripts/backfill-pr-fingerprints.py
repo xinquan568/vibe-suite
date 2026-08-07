@@ -162,13 +162,33 @@ def main(argv=None):
             if not attributed:
                 continue
 
-            existing_fp = record.get("fingerprints") or []
-            existing_rules = record.get("rule_ids") or []
-            # Sorted so the registry diff is stable; union so first-hand provenance survives.
-            merged_fp = sorted({*existing_fp, *(f["fingerprint"] for f in attributed)})
-            merged_rules = sorted({*existing_rules,
-                                   *(f["rule_id"] for f in attributed if f.get("rule_id"))})
-            if merged_fp == sorted(existing_fp) and merged_rules == sorted(existing_rules):
+            existing_fp = list(record.get("fingerprints") or [])
+            existing_rules = list(record.get("rule_ids") or [])
+
+            # `rule_ids` is PARALLEL to `fingerprints` — SCHEMAS.md pairs them by position.
+            # Sorting and de-duplicating each independently destroys that pairing: sort two
+            # lists separately and entry i of one no longer describes entry i of the other, so
+            # every finding is attributed to some other finding's rule. The registry still
+            # looks well-formed, and rule health silently credits the wrong rules.
+            #
+            # So the PAIR is the unit: dedupe on it, and order by it.
+            pairs = list(zip(existing_fp, existing_rules))
+            if len(existing_fp) != len(existing_rules):
+                # Already unpaired — pad rather than zip-truncate, which would drop provenance.
+                pairs = [(fp, existing_rules[i] if i < len(existing_rules) else None)
+                         for i, fp in enumerate(existing_fp)]
+            for finding in attributed:
+                pairs.append((finding["fingerprint"], finding.get("rule_id")))
+
+            seen_pairs, ordered = set(), []
+            for pair in pairs:
+                if pair[0] and pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    ordered.append(pair)
+            ordered.sort(key=lambda pair: (str(pair[0]), str(pair[1] or "")))
+            merged_fp = [fp for fp, _ in ordered]
+            merged_rules = [rule for _, rule in ordered]
+            if merged_fp == existing_fp and merged_rules == existing_rules:
                 continue
             record["fingerprints"] = merged_fp
             record["rule_ids"] = merged_rules

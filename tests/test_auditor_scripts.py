@@ -778,5 +778,99 @@ class Test_commit_via_pr(unittest.TestCase):
         self.assertNotEqual(mutant, src, "mutation ineffective")
 
 
+
+class Test_atomic_registry_write(unittest.TestCase):
+    """`atomic-registry-write.sh` — validate a staged registry write, then land it atomically.
+
+    The registry is the join key for every finding, PR outcome and disagreement the pipeline
+    has recorded, so the ordering is the contract: VALIDATE FIRST, THEN WRITE. A helper that
+    copies to the destination and validates afterwards has already destroyed the good registry
+    by the time it notices.
+    """
+
+    HELPER = SCRIPTS / "atomic-registry-write.sh"
+    ORIGINAL = '{"repos":{"acme/widget":{"state":"audited"}}}'
+    VALIDATE_ANCHOR = 'if ! python3 -c \'import json,sys; json.load(open(sys.argv[1]))\' "$REG_TMP" >/dev/null 2>&1; then'
+
+    def _tree(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "registry").mkdir()
+        (d / "registry" / "repos.json").write_text(self.ORIGINAL, encoding="utf-8")
+        return d
+
+    def _run(self, d, staged, script_text=None):
+        stage = d / "stage.json"
+        if staged is not None:
+            stage.write_text(staged, encoding="utf-8")
+        path = Path(tempfile.mkdtemp()) / "helper.sh"
+        path.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
+        env = dict(os.environ)
+        env["REG_TMP"] = str(stage)
+        return subprocess.run(["bash", str(path), "--data-dir", str(d)],
+                              capture_output=True, text=True, env=env)
+
+    @staticmethod
+    def _digest(path):
+        import hashlib
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_a_valid_staged_write_lands_and_consumes_the_source(self):
+        d = self._tree()
+        nxt = '{"repos":{"acme/widget":{"state":"contributed"}}}'
+        r = self._run(d, nxt)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads((d / "registry" / "repos.json").read_text()),
+                         json.loads(nxt))
+        self.assertFalse((d / "stage.json").exists(),
+                         "the staging file must be consumed so a stale one cannot be re-landed")
+
+    def test_invalid_staged_json_preserves_the_original_BYTES(self):
+        d = self._tree()
+        before = self._digest(d / "registry" / "repos.json")
+        r = self._run(d, '{"repos": broken')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("staged-not-json", r.stderr)
+        self.assertEqual(self._digest(d / "registry" / "repos.json"), before,
+                         "the registry must be byte-identical after a refused write")
+
+    def test_a_refused_write_leaves_no_temp_files_behind(self):
+        d = self._tree()
+        self._run(d, '{"repos": broken')
+        strays = [p.name for p in (d / "registry").iterdir() if p.name.startswith(".")]
+        self.assertEqual(strays, [], f"temp files left behind: {strays}")
+
+    def test_nothing_staged_is_refused(self):
+        r = self._run(self._tree(), None)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("nothing-staged", r.stderr)
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        d = self._tree()
+        nxt = '{"repos":{"acme/widget":{"state":"contributed"}}}'
+        self._run(d, nxt, NOOP[".sh"])
+        self.assertEqual(json.loads((d / "registry" / "repos.json").read_text()),
+                         json.loads(self.ORIGINAL), "sanity: a no-op writes nothing")
+
+    def test_the_validate_after_write_mutant_fails_the_oracle(self):
+        """The plausible wrong implementation: copy first, validate afterwards.
+
+        It behaves identically on every VALID input — which is most inputs — so a test that
+        only exercises the happy path would accept it. On malformed input it has already
+        destroyed the registry before it notices.
+        """
+        src = self.HELPER.read_text()
+        self.assertIn(self.VALIDATE_ANCHOR, src, "mutation anchor missing")
+        mutant = src.replace(
+            self.VALIDATE_ANCHOR,
+            'cp "$REG_TMP" "$REG_DEST"\n' + self.VALIDATE_ANCHOR, 1)
+        d = self._tree()
+        before = self._digest(d / "registry" / "repos.json")
+        self._run(d, '{"repos": broken', mutant)
+        self.assertNotEqual(self._digest(d / "registry" / "repos.json"), before,
+                            "mutation ineffective: the mutant should have clobbered the registry")
+
+
 if __name__ == "__main__":
     unittest.main()

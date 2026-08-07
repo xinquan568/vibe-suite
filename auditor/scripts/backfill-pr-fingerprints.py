@@ -180,11 +180,16 @@ def main(argv=None):
             for finding in attributed:
                 pairs.append((finding["fingerprint"], finding.get("rule_id")))
 
-            seen_pairs, ordered = set(), []
-            for pair in pairs:
-                if pair[0] and pair not in seen_pairs:
-                    seen_pairs.add(pair)
-                    ordered.append(pair)
+            # Deduped by FINGERPRINT, not by pair. A fingerprint is a digest OVER the rule id,
+            # so one fingerprint cannot legitimately carry two rules — allowing the pair as the
+            # key would admit `(fp, R01)` and `(fp, R04)` side by side, silently double-counting
+            # the finding and leaving whichever sorted last as its rule. First occurrence wins,
+            # so the record's own first-hand provenance outranks anything inferred here.
+            seen_fp, ordered = set(), []
+            for fingerprint, rule in pairs:
+                if fingerprint and fingerprint not in seen_fp:
+                    seen_fp.add(fingerprint)
+                    ordered.append((fingerprint, rule))
             ordered.sort(key=lambda pair: (str(pair[0]), str(pair[1] or "")))
             merged_fp = [fp for fp, _ in ordered]
             merged_rules = [rule for _, rule in ordered]

@@ -590,16 +590,20 @@ class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
         describing entry i of the other, so every finding is credited to some other finding's
         rule. The registry stays well-formed and rule health silently attributes outcomes to
         the wrong rules."""
+        # Distinct fingerprints: a fingerprint is a digest OVER the rule id, so the same one
+        # cannot carry two different rules. The earlier version of this fixture reused
+        # sha256:aaa for both R01 and R04, which is a record production cannot produce.
         d = self._data_dir(prs={"7": {"number": 7,
-                                      "fingerprints": ["sha256:zzz", "sha256:aaa"],
+                                      "fingerprints": ["sha256:zzz", "sha256:yyy"],
                                       "rule_ids": ["R99", "R01"]}})
         gh = self.gh({"pr view 7": {"files": [{"path": "skills/a/SKILL.md"}]}})
         self._run(d, gh)
         record = self._prs(d)["7"]
         paired = dict(zip(record["fingerprints"], record["rule_ids"]))
         self.assertEqual(paired["sha256:zzz"], "R99", "pairing was broken by sorting")
-        self.assertEqual(paired["sha256:aaa"], "R01")
-        self.assertEqual(paired["sha256:aaa"], "R01")
+        self.assertEqual(paired["sha256:yyy"], "R01")
+        self.assertEqual(paired["sha256:aaa"], "R04",
+                         "the newly attributed finding kept its own rule")
         self.assertEqual(len(record["fingerprints"]), len(record["rule_ids"]),
                          "the parallel arrays must stay the same length")
 

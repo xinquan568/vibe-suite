@@ -1765,10 +1765,20 @@ class TestPushCredentials(unittest.TestCase):
     #: what it is not covering.
     OUT_OF_SCOPE = {"auditor-contribute.yml"}
 
+    #: An EFFECTIVE helper: `credential.helper=` with a non-empty value. The commands pass two
+    #: — an empty reset that discards inherited helpers, then the real one — so a substring
+    #: test for "credential.helper" is satisfied by the reset alone. Delete only the effective
+    #: line and the push is unauthenticated while the check stays green.
+    #: `\S` alone is not enough: the value is quoted, so `credential.helper='` — the EMPTY
+    #: reset — satisfies it via the closing quote. The character after the optional opening
+    #: quote must be a real one.
+    EFFECTIVE_HELPER = re.compile(r"""credential\.helper=(?!\s|$)['"]?[^'"\s]""")
+
     def test_no_workflow_pushes_without_supplying_a_credential(self):
         offenders = [f"{name}: {cmd[:70]}" for name, cmd in self._push_sites()
                      if name not in self.OUT_OF_SCOPE
-                     and "credential.helper" not in cmd and not cmd.startswith("git_auth")]
+                     and not self.EFFECTIVE_HELPER.search(cmd)
+                     and not cmd.startswith("git_auth")]
         self.assertEqual(offenders, [],
                          "a bare `git push` in a credentials-disabled checkout")
 
@@ -1792,7 +1802,7 @@ class TestPushCredentials(unittest.TestCase):
             with self.subTest(workflow=wf.name):
                 bare = [ln for ln in self._logical_lines(mutated)
                         if re.search(r"\bgit\b.*\bpush\b", ln)
-                        and "credential.helper" not in ln]
+                        and not self.EFFECTIVE_HELPER.search(ln)]
                 self.assertTrue(bare, f"{wf.name}: stripping the helper changed nothing")
 
     def test_the_token_is_never_written_into_a_url_or_config(self):

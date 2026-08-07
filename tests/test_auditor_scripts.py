@@ -1269,5 +1269,125 @@ class Test_build_exemplar_gallery(unittest.TestCase):
                             "mutation ineffective: the mutant should emit unsorted output")
 
 
+
+class Test_resolve_merge_conflicts(unittest.TestCase):
+    """`resolve-merge-conflicts.sh` — per-file conflict strategy, against a REAL git conflict.
+
+    Each strategy exists because a naive default lost data: two-way merges reverted disjoint
+    remote registry updates, and `--ours` on append-only ledgers dropped the remote's appended
+    lines entirely, making every metric derived from them wrong.
+    """
+
+    HELPER = SCRIPTS / "resolve-merge-conflicts.sh"
+    REG_ANCHOR = '  if ! python3 "$HERE/three-way-merge-registry.py" \\\n        "$TMP/base.json" "$TMP/ours.json" "$TMP/theirs.json" > "$TMP/merged.json"; then\n    echo "REFUSE:resolve-merge-conflicts:registry-merge-failed" >&2\n    exit 1\n  fi'
+    REG_MUTANT = '  cp "$TMP/ours.json" "$TMP/merged.json"'
+    LEDGER_ANCHOR = '    cat "$TMP/theirs.jsonl" "$TMP/ours.jsonl" | awk \'!seen[$0]++\' > "$CHECKOUT/$ledger"'
+    LEDGER_MUTANT = '    cp "$TMP/ours.jsonl" "$CHECKOUT/$ledger"'
+
+    def _conflicted_repo(self):
+        """A data checkout mid-conflict: ours changed a/x, theirs changed b/y, both appended."""
+        d = Path(tempfile.mkdtemp()) / "data"
+        d.mkdir()
+        g = lambda *a: subprocess.run(["git", "-C", str(d), *a], capture_output=True, check=False)
+        g("init", "-q", ".")
+        g("config", "user.email", "t@e")
+        g("config", "user.name", "t")
+        (d / "registry").mkdir()
+        (d / "ledgers").mkdir()
+        (d / "registry" / "repos.json").write_text(
+            '{"repos":{"a/x":{"state":"discovered"},"b/y":{"state":"discovered"}}}',
+            encoding="utf-8")
+        (d / "ledgers" / "events.jsonl").write_text('{"e":1}\n', encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "base")
+        g("branch", "-q", "remote-side")
+
+        (d / "registry" / "repos.json").write_text(
+            '{"repos":{"a/x":{"state":"audited"},"b/y":{"state":"discovered"}}}',
+            encoding="utf-8")
+        (d / "ledgers" / "events.jsonl").write_text('{"e":1}\n{"e":"ours"}\n', encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "ours")
+        ours_branch = subprocess.run(["git", "-C", str(d), "rev-parse", "--abbrev-ref", "HEAD"],
+                                     capture_output=True, text=True).stdout.strip()
+
+        g("checkout", "-q", "remote-side")
+        (d / "registry" / "repos.json").write_text(
+            '{"repos":{"a/x":{"state":"discovered"},"b/y":{"state":"contributed"}}}',
+            encoding="utf-8")
+        (d / "ledgers" / "events.jsonl").write_text('{"e":1}\n{"e":"theirs"}\n', encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "theirs")
+
+        g("checkout", "-q", ours_branch)
+        g("merge", "remote-side")          # conflicts
+        return d
+
+    def _resolve(self, d, script_text=None):
+        helper = SCRIPTS / "resolve-merge-conflicts.sh"
+        if script_text is None:
+            path = helper
+        else:
+            path = Path(tempfile.mkdtemp()) / "resolve.sh"
+            path.write_text(script_text, encoding="utf-8")
+            # siblings resolve relative to the script, so link them next to the mutant
+            for sib in ("three-way-merge-registry.py", "atomic-registry-write.sh",
+                        "build-exemplar-gallery.py"):
+                (path.parent / sib).write_text((SCRIPTS / sib).read_text(), encoding="utf-8")
+        return subprocess.run(["bash", str(path), "--checkout", str(d)],
+                              capture_output=True, text=True)
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_both_sides_registry_changes_survive(self):
+        """The acceptance property, against a real conflict."""
+        d = self._conflicted_repo()
+        r = self._resolve(d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        repos = json.loads((d / "registry" / "repos.json").read_text())["repos"]
+        self.assertEqual(repos["a/x"]["state"], "audited", "our change was lost")
+        self.assertEqual(repos["b/y"]["state"], "contributed", "the remote's change was reverted")
+
+    def test_append_only_lines_are_neither_lost_nor_duplicated(self):
+        d = self._conflicted_repo()
+        self._resolve(d)
+        lines = [x for x in (d / "ledgers" / "events.jsonl").read_text().splitlines() if x.strip()]
+        self.assertIn('{"e":"ours"}', lines, "our appended line was lost")
+        self.assertIn('{"e":"theirs"}', lines, "the remote's appended line was lost")
+        self.assertEqual(len(lines), len(set(lines)), "a line was duplicated")
+        self.assertEqual(lines.count('{"e":1}'), 1, "the shared base line was duplicated")
+
+    def test_the_conflict_is_fully_staged_afterwards(self):
+        d = self._conflicted_repo()
+        self._resolve(d)
+        remaining = subprocess.run(["git", "-C", str(d), "diff", "--name-only",
+                                    "--diff-filter=U"], capture_output=True, text=True).stdout
+        self.assertEqual(remaining.strip(), "", f"unresolved paths remain: {remaining}")
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        d = self._conflicted_repo()
+        self._resolve(d, NOOP[".sh"])
+        remaining = subprocess.run(["git", "-C", str(d), "diff", "--name-only",
+                                    "--diff-filter=U"], capture_output=True, text=True).stdout
+        self.assertNotEqual(remaining.strip(), "", "sanity: a no-op resolves nothing")
+
+    def test_the_two_way_registry_mutant_reverts_the_remote(self):
+        """The strategy this replaces: take ours wholesale."""
+        src = self.HELPER.read_text()
+        self.assertIn(self.REG_ANCHOR, src, "registry mutation anchor missing")
+        d = self._conflicted_repo()
+        self._resolve(d, src.replace(self.REG_ANCHOR, self.REG_MUTANT, 1))
+        repos = json.loads((d / "registry" / "repos.json").read_text())["repos"]
+        self.assertEqual(repos["b/y"]["state"], "discovered",
+                         "mutation ineffective: the mutant should revert the remote's change")
+
+    def test_the_ours_ledger_mutant_drops_the_remotes_lines(self):
+        """The `--ours` default that made per-rule metrics undercount by several times."""
+        src = self.HELPER.read_text()
+        self.assertIn(self.LEDGER_ANCHOR, src, "ledger mutation anchor missing")
+        d = self._conflicted_repo()
+        self._resolve(d, src.replace(self.LEDGER_ANCHOR, self.LEDGER_MUTANT, 1))
+        lines = (d / "ledgers" / "events.jsonl").read_text()
+        self.assertNotIn('{"e":"theirs"}', lines,
+                         "mutation ineffective: the mutant should drop the remote's line")
+
+
 if __name__ == "__main__":
     unittest.main()

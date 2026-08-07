@@ -389,5 +389,183 @@ class Test_render_dashboard(unittest.TestCase):
                          "mutation ineffective: the mutant should report no malformed lines")
 
 
+
+class Test_render_repo_report(unittest.TestCase):
+    """`render-repo-report.py` — one repository's page, and the identifier it is keyed on."""
+
+    HELPER = SCRIPTS / "render-repo-report.py"
+    FILTER_ANCHOR = '    findings = [f for f in all_findings if f.get("repo") == args.repo]'
+    FILTER_MUTANT = '    findings = list(all_findings)'
+    STAMP = "2026-08-07T00:00:00Z"
+
+    def _data_dir(self, repos=None):
+        d = Path(tempfile.mkdtemp())
+        (d / "registry").mkdir()
+        (d / "registry" / "repos.json").write_text(json.dumps({"repos": repos if repos is not None
+            else {"acme/widget": {"status": "audited", "score": 71, "security": "OK"},
+                  "acme/other": {"status": "audited", "score": 90, "security": "OK"}}}),
+            encoding="utf-8")
+        (d / "findings.jsonl").write_text("\n".join(json.dumps(f) for f in [
+            {"repo": "acme/widget", "rule_id": "R01", "confidence": "high",
+             "file": "b.md", "line": 3},
+            {"repo": "acme/widget", "rule_id": "R02", "confidence": "medium",
+             "file": "a.md", "line": 9},
+            {"repo": "acme/other", "rule_id": "R01", "confidence": "high",
+             "file": "z.md", "line": 1},
+        ]) + "\n", encoding="utf-8")
+        (d / "vocab-advisories.jsonl").write_text(json.dumps(
+            {"repo": "acme/widget", "terms": ["agent", "subagent"], "confidence": "high"}
+        ) + "\n", encoding="utf-8")
+        return d
+
+    def _run(self, d, repo="acme/widget", script_text=None, extra=()):
+        helper = self.HELPER
+        if script_text is not None:
+            # parents[1] of the helper locates templates/, and the sibling dashboard helper is
+            # imported by name. A mutant in a bare temp directory would refuse for want of
+            # those regardless of the mutation, making every mutant fail identically.
+            root = Path(tempfile.mkdtemp())
+            (root / "auditor" / "scripts").mkdir(parents=True)
+            for name in ("templates", "skills"):
+                (root / name).symlink_to(REPO / name)
+            (root / "auditor" / "scripts" / "render-dashboard.py").symlink_to(
+                SCRIPTS / "render-dashboard.py")
+            helper = root / "auditor" / "scripts" / "render-repo-report.py"
+            helper.write_text(script_text, encoding="utf-8")
+        argv = [sys.executable, str(helper), "--data-dir", str(d), "--generated-at", self.STAMP]
+        if repo is not None:
+            argv += ["--repo", repo]
+        r = subprocess.run(argv + list(extra), capture_output=True, text=True)
+        sidecar = d / "reports" / "acme-widget.json"
+        return r, (json.loads(sidecar.read_text()) if sidecar.exists() else None)
+
+    # --- oracle ---------------------------------------------------------------------------
+    def test_only_the_named_repositorys_records_appear(self):
+        r, data = self._run(self._data_dir())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(data["project"], "acme/widget")
+        self.assertEqual(data["summary"]["total_findings"], 2)
+        self.assertEqual({f["repo"] for f in data["findings"]}, {"acme/widget"})
+        self.assertEqual(data["summary"]["total_advisories"], 1)
+
+    def test_registry_facts_are_carried_onto_the_page(self):
+        _, data = self._run(self._data_dir())
+        self.assertEqual(data["registry"]["score"], 71)
+        self.assertEqual(data["registry"]["status"], "audited")
+
+    def test_the_page_and_its_shared_resources_are_written(self):
+        d = self._data_dir()
+        self._run(d)
+        for rel in ("acme-widget.html", "acme-widget.json", "docs/index.html",
+                    "assets/vibe-report.css", "assets/vibe-report.js", "vendor/g6.min.js"):
+            with self.subTest(path=rel):
+                self.assertTrue((d / "reports" / rel).is_file(), f"{rel} not written")
+
+    def test_the_docs_link_on_the_page_resolves(self):
+        """Every rule badge links into docs/index.html. Rendering a repo report alone -- a
+        single-repo re-audit -- must not leave that link dangling."""
+        d = self._data_dir()
+        self._run(d)
+        html = (d / "reports" / "acme-widget.html").read_text(encoding="utf-8")
+        self.assertIn('href="docs/index.html"', html)
+        self.assertTrue((d / "reports" / "docs" / "index.html").is_file())
+
+    def test_no_placeholder_survives(self):
+        d = self._data_dir()
+        self._run(d)
+        html = (d / "reports" / "acme-widget.html").read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r"\{\{[A-Z_0-9]+\}\}", html), [])
+        self.assertIn("acme/widget", html)
+
+    def test_it_uses_its_own_template_not_bin_vibe_reports(self):
+        """single.html belongs to bin/vibe-report and inlines its own bundle. Rendering this
+        page from it would substitute nothing -- the placeholder sets do not overlap."""
+        src = self.HELPER.read_text(encoding="utf-8")
+        self.assertIn("repo-audit.html", src)
+        self.assertNotIn('"single.html"', src)
+
+    def test_output_is_reproducible(self):
+        d = self._data_dir()
+        self._run(d)
+        first = (d / "reports" / "acme-widget.json").read_text()
+        self._run(d)
+        self.assertEqual(first, (d / "reports" / "acme-widget.json").read_text())
+
+
+    def test_rendering_leaves_no_bytecode_beside_the_helpers(self):
+        """auditor/scripts/ is a closed, asserted inventory of thirty names. Importing the
+        sibling dashboard helper writes a __pycache__ there unless suppressed, which fails the
+        inventory check on any machine that has run this helper once -- and puts writable state
+        in a checkout the auditor commits from."""
+        before = {p.name for p in SCRIPTS.iterdir()}
+        self._run(self._data_dir())
+        self.assertEqual({p.name for p in SCRIPTS.iterdir()} - before, set())
+
+    # --- refusals -------------------------------------------------------------------------
+    def test_a_missing_registry_is_refused(self):
+        d = self._data_dir()
+        (d / "registry" / "repos.json").unlink()
+        r, _ = self._run(d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:render-repo-report:registry-missing", r.stderr)
+
+    def test_a_slug_passed_as_the_repo_is_refused(self):
+        """The specification's rule: $TARGET_REPO, never $SLUG. A slug cannot be reversed, so
+        accepting one would publish some other repository's audit under a plausible title."""
+        r, _ = self._run(self._data_dir(), repo="acme-widget")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("repo-not-owner-name", r.stderr)
+
+    def test_a_repo_absent_from_the_registry_is_refused(self):
+        r, _ = self._run(self._data_dir(), repo="ghost/repo")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("repo-not-in-registry", r.stderr)
+
+    def test_a_slug_collision_is_refused_rather_than_overwritten(self):
+        """`a/b-c` and `a-b/c` both slug to `a-b-c`. Whichever renders second would silently
+        overwrite the first, publishing one repository's audit under another's name -- and the
+        file would exist, parse, and read plausibly."""
+        d = self._data_dir(repos={"acme/w-x": {"status": "audited"},
+                                  "acme-w/x": {"status": "audited"}})
+        r, _ = self._run(d, repo="acme/w-x")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:render-repo-report:slug-collision", r.stderr)
+
+    def test_a_missing_repo_argument_is_refused(self):
+        r, _ = self._run(self._data_dir(), repo=None)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("repo-required", r.stderr)
+
+    def test_a_repo_with_no_findings_still_renders(self):
+        """A clean repository is a result, not an error."""
+        d = self._data_dir()
+        (d / "findings.jsonl").write_text("", encoding="utf-8")
+        (d / "vocab-advisories.jsonl").write_text("", encoding="utf-8")
+        r, data = self._run(d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(data["summary"]["total_findings"], 0)
+        self.assertTrue((d / "reports" / "acme-widget.html").is_file())
+
+    # --- mutants --------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        _, data = self._run(self._data_dir(), script_text=NOOP[".py"])
+        self.assertIsNone(data, "sanity: a no-op writes no report")
+
+    def test_the_unfiltered_mutant_publishes_other_repositories_findings(self):
+        """The plausible wrong implementation: render every finding in the corpus.
+
+        The page renders, the title is right, the counts look reasonable, and the report
+        attributes other repositories' findings to this one -- which is exactly the kind of
+        error that reaches a maintainer as a wrong claim about their code.
+        """
+        src = self.HELPER.read_text(encoding="utf-8")
+        self.assertIn(self.FILTER_ANCHOR, src, "mutation anchor missing")
+        r, data = self._run(self._data_dir(),
+                            script_text=src.replace(self.FILTER_ANCHOR, self.FILTER_MUTANT, 1))
+        self.assertEqual(r.returncode, 0, "the mutant renders cleanly -- that is the danger")
+        self.assertEqual(data["summary"]["total_findings"], 3,
+                         "mutation ineffective: the mutant should leak all three findings")
+
+
 if __name__ == "__main__":
     unittest.main()

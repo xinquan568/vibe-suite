@@ -246,6 +246,68 @@ class AuditorRowSplit(RowBase):
         self.assertFalse(self.ok(SITE_ROW),
                          "a site workflow present in both homes is a duplicate, not a pass")
 
+    def test_a_nested_duplicate_pipeline_workflow_is_caught(self):
+        """Reducing paths to a SET of stems lost multiplicity.
+
+        The same workflow in `auditor/workflows/` and `auditor/workflows/nested/` collapsed to
+        one name, so the unit carried 25 files while both rows reported 24.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows("auditor/workflows/nested", PIPELINE_WORKFLOWS[0])
+        self.assertFalse(self.ok(PIPELINE_ROW), "a nested duplicate must redden the row")
+
+    def test_a_nested_duplicate_site_workflow_is_caught(self):
+        # The site row checked two DIRECT paths, so a nested copy was simply unseen.
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        self.seed_workflows("auditor/workflows/nested", SITE_WORKFLOWS[0])
+        self.assertFalse(self.ok(SITE_ROW), "a nested duplicate site workflow must redden the row")
+
+    def test_a_yaml_extension_duplicate_is_caught(self):
+        # GitHub runs .yaml as readily as .yml, so a .yaml twin is a live duplicate.
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        (self.tmp / "auditor" / "workflows"
+         / f"{PIPELINE_WORKFLOWS[0]}.yaml").write_text("name: x\n", encoding="utf-8")
+        self.assertFalse(self.ok(PIPELINE_ROW), "a .yaml twin of a .yml workflow is a duplicate")
+
+    def test_a_workflow_may_legitimately_use_the_yaml_extension(self):
+        """Guards the other direction: .yaml alone is valid and must not be counted missing."""
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS[1:])
+        (self.tmp / "auditor" / "workflows"
+         / f"{PIPELINE_WORKFLOWS[0]}.yaml").write_text("name: x\n", encoding="utf-8")
+        self.assertTrue(self.ok(PIPELINE_ROW), "a .yaml workflow is a workflow")
+
+    def test_a_directory_named_like_a_workflow_does_not_count(self):
+        """`rglob("*.yml")` matches DIRECTORIES, so `auditor-audit.yml/` read as present.
+
+        The bin rows already guarded this (test_a_directory_named_like_a_builder_does_not_count);
+        the auditor rows did not, so the same trick worked one directory over.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        target = self.tmp / "auditor" / "workflows" / f"{PIPELINE_WORKFLOWS[0]}.yml"
+        target.unlink()
+        target.mkdir()
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "a directory named like a workflow is not a workflow")
+
+    def test_an_empty_file_is_not_a_workflow(self):
+        # Presence is not content: a zero-byte file satisfied the row while being no workflow.
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        (self.tmp / "auditor" / "workflows" / f"{PIPELINE_WORKFLOWS[0]}.yml").write_text(
+            "", encoding="utf-8")
+        self.assertFalse(self.ok(PIPELINE_ROW), "an empty file must not satisfy the row")
+
+    def test_an_empty_site_workflow_is_not_a_workflow(self):
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        (self.tmp / ".github" / "workflows" / f"{SITE_WORKFLOWS[0]}.yml").write_text(
+            "", encoding="utf-8")
+        self.assertFalse(self.ok(SITE_ROW), "an empty file must not satisfy the site row")
+
+    def test_a_stray_yaml_in_a_nested_auditor_dir_is_caught(self):
+        # The pipeline scan is recursive, so a nested stray must not hide from it.
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows("auditor/workflows/nested", "sneaky")
+        self.assertFalse(self.ok(PIPELINE_ROW), "a nested stray auditor YAML must redden the row")
+
     def test_delete_and_move_cannot_hide_a_missing_workflow(self):
         """The two auditor rows must be a strict PARTITION, not merely sum to 24.
 

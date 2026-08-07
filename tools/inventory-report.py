@@ -56,16 +56,36 @@ assert not set(PIPELINE_WORKFLOWS) & set(SITE_RELEASE_WORKFLOWS), "auditor row s
 assert len(set(PIPELINE_WORKFLOWS) | set(SITE_RELEASE_WORKFLOWS)) == 24, "union is not SS5.0's 24"
 
 
+def _workflow_files(d):
+    """Every real, non-empty workflow file under `d`, in BOTH extensions GitHub accepts.
+
+    Three separate ways this used to under-count:
+      * `rglob` matches DIRECTORIES, so `auditor-audit.yml/` read as a present workflow;
+      * a zero-byte file satisfied presence while being no workflow at all;
+      * only `.yml` was scanned, though GitHub accepts `.yaml` equally — so a `.yaml` copy was
+        invisible to the inventory while being live to Actions.
+    """
+    if not d.is_dir():
+        return []
+    return [f for ext in ("*.yml", "*.yaml") for f in d.rglob(ext)
+            if f.is_file() and f.stat().st_size > 0]
+
+
 def _pipeline_count(r):
     """Required pipeline workflows present, or -1 if `auditor/` holds anything unaccounted for.
 
     Returning -1 (never a legal target) is how a structural anomaly reddens the row instead of
     being averaged away: a stray or renamed file cannot substitute for a deleted required one.
     """
-    found = {f.stem for f in (r / "auditor").rglob("*.yml")}
-    if found - set(PIPELINE_WORKFLOWS) - set(SITE_RELEASE_WORKFLOWS):
+    files = _workflow_files(r / "auditor")
+    stems = [f.stem for f in files]
+    if set(stems) - set(PIPELINE_WORKFLOWS) - set(SITE_RELEASE_WORKFLOWS):
         return -1
-    return len(found & set(PIPELINE_WORKFLOWS))
+    # Reducing to a SET lost multiplicity, so the same workflow in a nested subdirectory (or
+    # under both extensions) collapsed into one and the unit carried more files than it claimed.
+    if len(stems) != len(set(stems)):
+        return -1
+    return len(set(stems) & set(PIPELINE_WORKFLOWS))
 
 
 def _site_count(r):
@@ -75,14 +95,14 @@ def _site_count(r):
     auditor/workflows/, so both are accepted — but a name present in BOTH is a real duplicate
     that an existential test silently collapsed into a single satisfied name.
     """
-    homes = ((r / ".github" / "workflows"), (r / "auditor" / "workflows"))
-    n = 0
-    for name in SITE_RELEASE_WORKFLOWS:
-        hits = sum(1 for h in homes if (h / (name + ".yml")).is_file())
-        if hits > 1:
-            return -1
-        n += hits
-    return n
+    # Scanned RECURSIVELY across both homes: checking two direct paths meant a nested copy was
+    # simply unseen, so a duplicate that Actions would happily run did not redden the row.
+    seen = [f.stem for f in
+            _workflow_files(r / ".github") + _workflow_files(r / "auditor")
+            if f.stem in SITE_RELEASE_WORKFLOWS]
+    if len(seen) != len(set(seen)):
+        return -1
+    return len(set(seen))
 
 #: The five site builders E8.4 delivers, by exact filename. Counting alone would accept five
 #: wrongly-named files, so the row asserts membership of this frozen set.

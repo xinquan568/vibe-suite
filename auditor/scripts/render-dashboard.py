@@ -362,9 +362,13 @@ def main(argv=None):
     if not data_dir.is_dir():
         refuse("data-dir-missing")
 
-    findings, bad_findings = read_jsonl(data_dir / "findings.jsonl")
-    advisories, bad_advisories = read_jsonl(data_dir / "vocab-advisories.jsonl")
-    events, bad_events = read_jsonl(data_dir / "logs" / "events.jsonl")
+    # SCHEMAS.md section 1: the canonical ledgers live under `ledgers/`, and every workflow
+    # writes them there. Reading root-level or `logs/` finds nothing, and "nothing" renders as
+    # a complete, well-formed dashboard reporting zero of everything — the failure this whole
+    # helper is supposed to make visible.
+    findings, bad_findings = read_jsonl(data_dir / "ledgers" / "findings.jsonl")
+    advisories, bad_advisories = read_jsonl(data_dir / "ledgers" / "vocab-advisories.jsonl")
+    events, bad_events = read_jsonl(data_dir / "ledgers" / "events.jsonl")
     registry = read_json(data_dir / "registry" / "repos.json", {})
 
     findings, aged_findings = filter_since(findings, args.since)

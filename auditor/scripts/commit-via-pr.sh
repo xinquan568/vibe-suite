@@ -64,7 +64,7 @@ if [ -z "${PAT_TOKEN:-}" ]; then
 fi
 
 if [ -n "${GITHUB_REPOSITORY:-}" ]; then
-  [ "$(printf '%s' "$GITHUB_REPOSITORY" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$REPO" | tr 'A-Z' 'a-z')" ] \
+  [ "$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" ] \
     || die repository-mismatch
 fi
 
@@ -78,7 +78,7 @@ NORMALISED="$(printf '%s' "$ORIGIN" | sed -E \
   -e 's#^https://github\.com/##' \
   -e 's#\.git$##')"
 printf '%s' "$NORMALISED" | grep -Eq '^[^/[:space:]]+/[^/[:space:]]+$' || die origin-unverifiable
-[ "$(printf '%s' "$NORMALISED" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$REPO" | tr 'A-Z' 'a-z')" ] \
+[ "$(printf '%s' "$NORMALISED" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" ] \
   || die repository-mismatch
 
 HEAD_SHA="$(git -C "$CHECKOUT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" || die head-missing

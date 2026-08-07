@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -56,6 +57,36 @@ def read_jsonl(path: Path):
             out.append(json.loads(line))
         except json.JSONDecodeError:
             continue
+    return out
+
+
+def read_exemplar_citations(directory: Path):
+    """One record per (rule, exemplar) from the exemplar corpus.
+
+    `exemplifies` is the join key SCHEMAS.md names; `audited` is the confirmation date. A bare
+    string in `exemplifies` is rejected by the exemplar workflow, so a non-list here is a
+    malformed file rather than a single-rule shorthand.
+    """
+    if not directory.is_dir():
+        return []
+    out = []
+    for path in sorted(directory.glob("*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        front = re.match(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", text, re.DOTALL)
+        if not front:
+            continue
+        block = front.group(1)
+        audited = re.search(r"^audited:[ \t]*(\S+)", block, re.MULTILINE)
+        inline = re.search(r"^exemplifies:[ \t]*\[(.*?)\][ \t]*$", block, re.MULTILINE)
+        if inline:
+            rules = re.findall(r"[A-Za-z0-9:_-]+", inline.group(1))
+        else:
+            listed = re.search(r"^exemplifies:[ \t]*\n((?:[ \t]*-[ \t]*\S+\n?)+)",
+                               block, re.MULTILINE)
+            rules = re.findall(r"-[ \t]*(\S+)", listed.group(1)) if listed else []
+        for rule in rules:
+            out.append({"rule_id": rule, "exemplar": path.name,
+                        "confirmed_at": audited.group(1).strip("\"'") if audited else None})
     return out
 
 
@@ -108,7 +139,11 @@ def main(argv=None):
         refuse(f"as-of-invalid {args.as_of}")
     cutoff = as_of - timedelta(days=STALE_AFTER_DAYS)
 
-    citations = read_jsonl(data_dir / "ledgers" / "citations.jsonl")
+    # Citations are not a ledger. The exemplar files ARE the citation record: each carries
+    # `exemplifies` (the rules it evidences) and `audited` (when it was last confirmed), per
+    # SCHEMAS.md section 8. Reading a separate ledger would be a second copy of the same fact,
+    # free to disagree with the files it describes.
+    citations = read_exemplar_citations(data_dir / "exemplars")
     disagreements = read_jsonl(data_dir / "ledgers" / "disagreements.jsonl")
 
     stale = []

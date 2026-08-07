@@ -198,7 +198,7 @@ class Test_render_dashboard(unittest.TestCase):
 
     def _data_dir(self, malformed=False):
         d = Path(tempfile.mkdtemp())
-        (d / "logs").mkdir()
+        (d / "ledgers").mkdir()
         (d / "registry").mkdir()
         (d / "registry" / "repos.json").write_text(json.dumps({"repos": {
             "acme/old": {"status": "audited", "score": 71, "security": "BLOCKED"},
@@ -215,14 +215,14 @@ class Test_render_dashboard(unittest.TestCase):
         lines = [json.dumps(f) for f in findings]
         if malformed:
             lines.insert(1, '{"repo": "acme/old", TRUNCATED')
-        (d / "findings.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        (d / "vocab-advisories.jsonl").write_text("\n".join(json.dumps(a) for a in [
+        (d / "ledgers" / "findings.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (d / "ledgers" / "vocab-advisories.jsonl").write_text("\n".join(json.dumps(a) for a in [
             {"repo": "acme/old", "terms": ["agent", "subagent"], "confidence": "high",
               "timestamp": "2026-01-01T00:00:00Z"},
             {"repo": "acme/new", "terms": ["agent", "subagent"], "confidence": "low",
               "timestamp": "2026-06-01T00:00:00Z"},
         ]) + "\n", encoding="utf-8")
-        (d / "logs" / "events.jsonl").write_text(json.dumps(
+        (d / "ledgers" / "events.jsonl").write_text(json.dumps(
             {"timestamp": "2026-06-01T09:00:00Z", "event": "audited"}) + "\n", encoding="utf-8")
         return d
 
@@ -312,7 +312,7 @@ class Test_render_dashboard(unittest.TestCase):
 
     def test_the_inline_payload_cannot_close_the_script_block(self):
         d = self._data_dir()
-        (d / "findings.jsonl").write_text(json.dumps(
+        (d / "ledgers" / "findings.jsonl").write_text(json.dumps(
             {"repo": "acme/</script><script>x", "rule_id": "R01"}) + "\n", encoding="utf-8")
         self._run(d)
         html = (d / "reports" / "dashboard.html").read_text(encoding="utf-8")
@@ -332,8 +332,8 @@ class Test_render_dashboard(unittest.TestCase):
         d = self._data_dir()
         self._run(d)
         forward = json.loads((d / "reports" / "dashboard.json").read_text())
-        lines = (d / "findings.jsonl").read_text().strip().splitlines()
-        (d / "findings.jsonl").write_text("\n".join(reversed(lines)) + "\n", encoding="utf-8")
+        lines = (d / "ledgers" / "findings.jsonl").read_text().strip().splitlines()
+        (d / "ledgers" / "findings.jsonl").write_text("\n".join(reversed(lines)) + "\n", encoding="utf-8")
         self._run(d)
         reversed_run = json.loads((d / "reports" / "dashboard.json").read_text())
         self.assertEqual(forward["rule_distribution"], reversed_run["rule_distribution"])
@@ -402,11 +402,12 @@ class Test_render_repo_report(unittest.TestCase):
     def _data_dir(self, repos=None):
         d = Path(tempfile.mkdtemp())
         (d / "registry").mkdir()
+        (d / "ledgers").mkdir(exist_ok=True)
         (d / "registry" / "repos.json").write_text(json.dumps({"repos": repos if repos is not None
             else {"acme/widget": {"status": "audited", "score": 71, "security": "OK"},
                   "acme/other": {"status": "audited", "score": 90, "security": "OK"}}}),
             encoding="utf-8")
-        (d / "findings.jsonl").write_text("\n".join(json.dumps(f) for f in [
+        (d / "ledgers" / "findings.jsonl").write_text("\n".join(json.dumps(f) for f in [
             {"repo": "acme/widget", "rule_id": "R01", "confidence": "high",
              "file": "b.md", "line": 3},
             {"repo": "acme/widget", "rule_id": "R02", "confidence": "medium",
@@ -414,7 +415,7 @@ class Test_render_repo_report(unittest.TestCase):
             {"repo": "acme/other", "rule_id": "R01", "confidence": "high",
              "file": "z.md", "line": 1},
         ]) + "\n", encoding="utf-8")
-        (d / "vocab-advisories.jsonl").write_text(json.dumps(
+        (d / "ledgers" / "vocab-advisories.jsonl").write_text(json.dumps(
             {"repo": "acme/widget", "terms": ["agent", "subagent"], "confidence": "high"}
         ) + "\n", encoding="utf-8")
         return d
@@ -540,8 +541,8 @@ class Test_render_repo_report(unittest.TestCase):
     def test_a_repo_with_no_findings_still_renders(self):
         """A clean repository is a result, not an error."""
         d = self._data_dir()
-        (d / "findings.jsonl").write_text("", encoding="utf-8")
-        (d / "vocab-advisories.jsonl").write_text("", encoding="utf-8")
+        (d / "ledgers" / "findings.jsonl").write_text("", encoding="utf-8")
+        (d / "ledgers" / "vocab-advisories.jsonl").write_text("", encoding="utf-8")
         r, data = self._run(d)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(data["summary"]["total_findings"], 0)
@@ -604,10 +605,11 @@ class Test_renderer_workflow_composition(unittest.TestCase):
     def test_the_workflows_own_command_line_renders_a_report(self):
         d = Path(tempfile.mkdtemp())
         (d / "registry").mkdir()
+        (d / "ledgers").mkdir(exist_ok=True)
         (d / "registry" / "repos.json").write_text(
             json.dumps({"repos": {"acme/widget": {"status": "audited", "score": 71}}}),
             encoding="utf-8")
-        (d / "findings.jsonl").write_text(json.dumps(
+        (d / "ledgers" / "findings.jsonl").write_text(json.dumps(
             {"repo": "acme/widget", "rule_id": "R01", "confidence": "high",
              "file": "a.md", "line": 1}) + "\n", encoding="utf-8")
         env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp"),

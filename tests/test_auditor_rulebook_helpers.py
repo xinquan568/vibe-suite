@@ -402,11 +402,17 @@ class Test_generate_rule_review_body(unittest.TestCase):
     STALE_MUTANT = '        if confirmed > cutoff:'
     AS_OF = "2026-08-08"
 
-    CITATIONS = [
-        {"rule_id": "R01", "confirmed_at": "2026-08-01", "exemplar": "fresh.md"},
-        {"rule_id": "R02", "confirmed_at": "2026-01-01", "exemplar": "old.md"},
-        {"rule_id": "R03", "confirmed_at": "2025-06-01", "exemplar": "ancient.md"},
-    ]
+    #: Real exemplar files, not a ledger: `exemplifies` is the join key SCHEMAS.md names and
+    #: `audited` is the confirmation date. Both frontmatter shapes the exemplar workflow
+    #: accepts are covered — a bracketed inline sequence and a block list.
+    EXEMPLARS = {
+        "fresh.md": "---\nslug: a\nrepo: acme/a\naudited: 2026-08-01\n"
+                    "commit_sha: x\nscore: 95\nexemplifies: [R01]\n---\nbody\n",
+        "old.md": "---\nslug: b\nrepo: acme/b\naudited: 2026-01-01\n"
+                  "commit_sha: y\nscore: 92\nexemplifies:\n  - R02\n---\nbody\n",
+        "ancient.md": "---\nslug: c\nrepo: acme/c\naudited: 2025-06-01\n"
+                      "commit_sha: z\nscore: 91\nexemplifies: [R03]\n---\nbody\n",
+    }
     DISAGREEMENTS = [
         {"rule_id": "R02", "repo": "acme/w", "timestamp": "2026-05-02", "reason": "style"},
         {"rule_id": "R01", "repo": "acme/x", "timestamp": "2026-02-01", "reason": "old quarter"},
@@ -415,8 +421,9 @@ class Test_generate_rule_review_body(unittest.TestCase):
     def _data_dir(self):
         d = Path(tempfile.mkdtemp())
         (d / "ledgers").mkdir()
-        (d / "ledgers" / "citations.jsonl").write_text(
-            "".join(json.dumps(c) + "\n" for c in self.CITATIONS), encoding="utf-8")
+        (d / "exemplars").mkdir()
+        for name, text in self.EXEMPLARS.items():
+            (d / "exemplars" / name).write_text(text, encoding="utf-8")
         (d / "ledgers" / "disagreements.jsonl").write_text(
             "".join(json.dumps(c) + "\n" for c in self.DISAGREEMENTS), encoding="utf-8")
         return d

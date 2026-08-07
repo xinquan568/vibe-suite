@@ -1610,5 +1610,71 @@ class TestE83Complete(unittest.TestCase):
         self.assertNotIn("PENDING_S8", text[i:i + 200])
 
 
+
+class TestLedgerPaths(unittest.TestCase):
+    """Helpers must read the ledgers the workflows actually write.
+
+    This class exists because they did not. Both renderers read root-level `findings.jsonl`
+    while every workflow writes `ledgers/findings.jsonl`, and the dashboard looked for events
+    under `logs/`. Nothing failed: a wrong path yields no records, and no records renders as a
+    complete, well-formed dashboard reporting zero of everything.
+
+    It survived a grep, too. Searching for `findings\.jsonl` matches the bare filename and
+    hides the directory it sits in, so the search that was supposed to establish the path
+    confirmed the wrong one.
+    """
+
+    #: SCHEMAS.md section 1. The directory is the part that matters.
+    CANONICAL = {
+        "findings": "ledgers/findings.jsonl",
+        "disagreements": "ledgers/disagreements.jsonl",
+        "vocab-advisories": "ledgers/vocab-advisories.jsonl",
+        "events": "ledgers/events.jsonl",
+        "registry": "registry/repos.json",
+    }
+    #: Written by a workflow but not a SCHEMAS.md ledger: a plain proposals list, consumed and
+    #: rewritten wholesale rather than appended to.
+    NON_LEDGER = ("ledgers/citation-proposals.txt", "feedback/log.json",
+                  "feedback/suppressions.jsonl")
+
+    def test_schemas_md_still_declares_these_paths(self):
+        """Pinned against the document rather than restated from memory: if SCHEMAS.md moves a
+        ledger, this fails here instead of in a renderer that silently reports zero."""
+        schemas = (REPO / "auditor" / "SCHEMAS.md").read_text(encoding="utf-8")
+        for name, path in self.CANONICAL.items():
+            with self.subTest(ledger=name):
+                self.assertIn(path, schemas)
+
+    def test_the_workflows_write_only_canonical_ledger_paths(self):
+        bad = []
+        for wf in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            for i, line in enumerate(wf.read_text(encoding="utf-8").splitlines(), 1):
+                for stem in ("findings.jsonl", "vocab-advisories.jsonl", "events.jsonl"):
+                    for m in re.finditer(r"\$(?:DATA_DIR|\{DATA_DIR\})(/[^\s\"']*?)"
+                                         + re.escape(stem), line):
+                        rel = (m.group(1) + stem).lstrip("/")
+                        # audits/<slug>.findings.jsonl is the per-audit sidecar, section 4.
+                        if rel.startswith("audits/"):
+                            continue
+                        if rel not in self.CANONICAL.values():
+                            bad.append(f"{wf.name}:{i}: {rel}")
+        self.assertEqual(bad, [])
+
+    def test_the_helpers_read_only_canonical_ledger_paths(self):
+        bad = []
+        for helper in sorted((REPO / "auditor" / "scripts").glob("*.py")):
+            text = helper.read_text(encoding="utf-8")
+            for m in re.finditer(r'data_dir\s*/\s*"([^"]+)"\s*/\s*"([^"]+\.jsonl)"', text):
+                rel = f"{m.group(1)}/{m.group(2)}"
+                if (rel.startswith("audits/") or rel in self.CANONICAL.values()
+                        or rel in self.NON_LEDGER):
+                    continue
+                bad.append(f"{helper.name}: {rel} — not a ledger SCHEMAS.md declares")
+            for m in re.finditer(r'data_dir\s*/\s*"([^"/]+\.jsonl)"', text):
+                bad.append(f"{helper.name}: {m.group(1)} (root-level; ledgers live under "
+                           f"ledgers/)")
+        self.assertEqual(bad, [])
+
+
 if __name__ == "__main__":
     unittest.main()

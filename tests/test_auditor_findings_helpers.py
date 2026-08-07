@@ -623,9 +623,9 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
 
     def _data_dir(self, ledger=None):
         d = Path(tempfile.mkdtemp())
-        (d / "ledgers").mkdir()
+        (d / "feedback").mkdir()
         if ledger is not None:
-            (d / "ledgers" / "suppressions.jsonl").write_text(
+            (d / "feedback" / "suppressions.jsonl").write_text(
                 "".join(json.dumps(r, sort_keys=True) + "\n" for r in ledger), encoding="utf-8")
         return d
 
@@ -645,7 +645,7 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
         return subprocess.run(argv, capture_output=True, text=True, env=self.env(ghdir))
 
     def _ledger(self, d):
-        path = d / "ledgers" / "suppressions.jsonl"
+        path = d / "feedback" / "suppressions.jsonl"
         return [json.loads(x) for x in path.read_text().splitlines() if x.strip()] \
             if path.is_file() else []
 

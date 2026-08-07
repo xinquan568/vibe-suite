@@ -148,8 +148,10 @@ def main(argv=None):
     assert_no_slug_collision(args.repo, repos)
 
     dashboard = dashboard_module()
-    all_findings, _ = dashboard.read_jsonl(data_dir / "findings.jsonl")
-    all_advisories, _ = dashboard.read_jsonl(data_dir / "vocab-advisories.jsonl")
+    # `ledgers/`, per SCHEMAS.md section 1 — see the note in render-dashboard.py. A wrong path
+    # here publishes a report saying the repository has no findings.
+    all_findings, _ = dashboard.read_jsonl(data_dir / "ledgers" / "findings.jsonl")
+    all_advisories, _ = dashboard.read_jsonl(data_dir / "ledgers" / "vocab-advisories.jsonl")
     findings = [f for f in all_findings if f.get("repo") == args.repo]
     advisories = [a for a in all_advisories if a.get("repo") == args.repo]
 

@@ -46,6 +46,9 @@ log_event() {
   fi
 
   # `tonumber? // 0` keeps run_number numeric even when the environment supplies junk.
+  # shellcheck disable=SC2016  # a jq PROGRAM: $ts/$wf/... are jq variables bound by
+  # --arg below, not shell expansions. Double-quoting would let the shell substitute
+  # them away and jq would receive an empty envelope.
   local envelope='{timestamp:$ts, workflow:$wf, event:$ev, run_id:$rid,
                    run_number:($rn|tonumber? // 0), data:.}'
 

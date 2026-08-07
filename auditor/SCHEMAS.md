@@ -15,6 +15,8 @@ never beside the code on `main`:
 | Event log | `ledgers/events.jsonl` |
 | Vocab advisories ledger | `ledgers/vocab-advisories.jsonl` |
 | Reports / audits / articles / exemplars | `reports/` `audits/` `articles/` `exemplars/` |
+| Rule-health feedback log | `feedback/log.json` |
+| Published suppressions observed | `feedback/suppressions.jsonl` |
 
 Workflows use a dual checkout: code from `main` at the job workspace root, the data branch
 into `_data/`.

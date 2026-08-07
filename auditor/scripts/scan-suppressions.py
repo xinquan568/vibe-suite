@@ -4,7 +4,7 @@
 
     scan-suppressions.py --data-dir DIR --host-repo OWNER/NAME [--query Q] [--apply]
 
-Default is a dry run. `--apply` appends to `<data-dir>/ledgers/suppressions.jsonl`.
+Default is a dry run. `--apply` appends to `<data-dir>/feedback/suppressions.jsonl`.
 
 A maintainer who suppresses a rule is telling us something the audit cannot: that the rule
 misfires on their codebase, or that they disagree with it. Aggregated, those overrides are the
@@ -21,15 +21,17 @@ DEDUPE IS ON (repo, sha, path), ALL THREE. Each alone is wrong:
 
   * repo alone — a repository with configs in two directories loses one of them;
   * path alone — every repository using the conventional filename collapses to one record;
-  * repo+path without sha — an edited config never registers as changed, so the ledger keeps
+  * repo+path without sha — an edited config never registers as changed, so the record keeps
     the first version forever and a maintainer who later suppressed six more rules is recorded
     as having suppressed none of them.
 
 The sha is the blob sha of the file itself, so an unchanged config rescanned daily appends
 nothing while a genuine edit appends a new record and leaves the old one as history.
 
-Appends only. The ledger is an accumulating record, so a config that disappears from a
-repository is not deleted here — that it once existed is the fact worth keeping.
+Appends only, to `feedback/` rather than `ledgers/`: SCHEMAS.md reserves the ledgers for the
+four pipeline logs, and this is an observation about other repositories' opinions of our rules,
+so it sits with the rule-health feedback it feeds. A config that disappears from a repository
+is not deleted here — that it once existed is the fact worth keeping.
 """
 from __future__ import annotations
 
@@ -165,7 +167,11 @@ def main(argv=None):
     if items is None:
         refuse("search-failed")
 
-    ledger = data_dir / "ledgers" / "suppressions.jsonl"
+    # `feedback/`, not `ledgers/`: SCHEMAS.md reserves ledgers for the four pipeline
+    # logs. This is an observation about OTHER repositories' opinions of our rules, so
+    # it sits with the rule-health feedback it feeds. Declared in SCHEMAS.md rather
+    # than invented here.
+    ledger = data_dir / "feedback" / "suppressions.jsonl"
     seen, ends_with_newline = read_ledger(ledger)
     observed = args.observed_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     supp = parser_module()

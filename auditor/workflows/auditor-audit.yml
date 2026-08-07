@@ -361,7 +361,7 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-audit $SLUG score=$SCORE security=$SECURITY strategy=${STRATEGY:-single} artifacts=${ARTIFACT_COUNT:-0}"
-          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
+          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" --attempts 5
       - run: |
           # security-blocked side path: attempt a private disclosure issue on
           # the target; when filing fails (the default token cannot write
@@ -398,4 +398,4 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-audit queue disclosure state for $SLUG"
-          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
+          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" --attempts 5

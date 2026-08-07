@@ -24,21 +24,37 @@
 #
 # Options / env:
 #   --data-dir DIR   root of the data checkout (default $AUDITOR_DATA_DIR, then .)
+#   --source PATH    the staged registry to land (default $REG_TMP)
 #   REG_TMP          staging path (default /tmp/reg.json)
 #   REG_DEST         destination (default <data-dir>/registry/repos.json)
 
 set -euo pipefail
 
 DATA_DIR="${AUDITOR_DATA_DIR:-.}"
+SOURCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --data-dir) DATA_DIR="${2:-}"; shift 2 ;;
+    --source) SOURCE="${2:-}"; shift 2 ;;
     *) echo "REFUSE:atomic-registry-write:unknown-argument $1" >&2; exit 1 ;;
   esac
 done
 
-REG_TMP="${REG_TMP:-/tmp/reg.json}"
+REG_TMP="${SOURCE:-${REG_TMP:-/tmp/reg.json}}"
 REG_DEST="${REG_DEST:-$DATA_DIR/registry/repos.json}"
+
+# THE DESTINATION MUST ALREADY EXIST, and this is checked FIRST — before the source is read,
+# validated or consumed. This helper REPLACES a registry; it does not create one. Bootstrap
+# owns creation. With the destination gone, an "atomic replace" silently becomes a creation
+# from content computed against a registry that no longer exists, and the result looks like a
+# perfectly valid registry that nobody can explain.
+#
+# Checked before validation so a refusal costs nothing and consumes nothing: the staged file is
+# still there to inspect, which is the whole reason someone is reading this message.
+if [ ! -f "$REG_DEST" ]; then
+  echo "REFUSE:atomic-registry-write:registry-missing ($REG_DEST)" >&2
+  exit 1
+fi
 
 if [ ! -f "$REG_TMP" ]; then
   echo "REFUSE:atomic-registry-write:nothing-staged ($REG_TMP)" >&2

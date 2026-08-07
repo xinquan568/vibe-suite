@@ -121,18 +121,38 @@ fi
 
 export GH_TOKEN="$TOKEN"
 OPEN="$(gh pr list --repo "$REPO" --base "$BASE" --head "$BRANCH" --state open \
-        --json number --jq '.[].number' 2>/dev/null)" || die pr-query-failed
+        --json url --jq '.[].url' 2>/dev/null)" || die pr-query-failed
 COUNT="$(printf '%s' "$OPEN" | grep -c . || true)"
 
 if [ "$COUNT" -gt 1 ]; then
   die pr-collision
 elif [ "$COUNT" -eq 1 ]; then
-  printf '%s\n' "$OPEN"
+  PR_URL="$OPEN"
 else
+  # A closed or merged PR already consumed this branch and none is open. Reusing that history
+  # would republish under a PR somebody already adjudicated; refuse instead of reopening.
+  CONSUMED="$(gh pr list --repo "$REPO" --base "$BASE" --head "$BRANCH" --state all \
+              --json url --jq '.[].url' 2>/dev/null | grep -c . || true)"
+  [ "$CONSUMED" -eq 0 ] || die branch-already-consumed
   gh pr create --repo "$REPO" --base "$BASE" --head "$BRANCH" \
     --title "auditor: $BRANCH" \
     --body "Automated data-branch update published by the auditor pipeline." \
     --label auditor-bot >/dev/null 2>&1 || die pr-create-failed
-  gh pr list --repo "$REPO" --base "$BASE" --head "$BRANCH" --state open \
-    --json number --jq '.[].number' 2>/dev/null || die pr-query-failed
+  PR_URL="$(gh pr list --repo "$REPO" --base "$BASE" --head "$BRANCH" --state open \
+            --json url --jq '.[].url' 2>/dev/null)" || die pr-query-failed
 fi
+[ -n "$PR_URL" ] || die pr-url-missing
+
+# PUBLICATION IS THE POINT. Opening a PR and stopping leaves the data on a branch nobody
+# merges: the run reports success, the registry update never reaches auditor-data, and the next
+# stage reads stale state. Auto-merge first because it survives required checks that have not
+# finished; one synchronous attempt as a fallback where auto-merge is disabled on the repo.
+if ! gh pr merge "$PR_URL" --auto --merge >/dev/null 2>&1; then
+  if ! gh pr merge "$PR_URL" --merge >/dev/null 2>&1; then
+    # The PR and branch are deliberately left intact: the work is published and recoverable by
+    # hand. Only the merge failed, and saying so beats deleting the evidence.
+    die merge-failed
+  fi
+fi
+
+printf 'PR_URL=%s\n' "$PR_URL"

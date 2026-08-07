@@ -104,12 +104,22 @@ def read_exemplars(data_dir: Path):
         if not front:
             continue
         block = front.group(1)
-        rules = re.search(r"^rule_ids:[ \t]*\[(.*?)\][ \t]*$", block, re.MULTILINE)
+        # `exemplifies`, not `rule_ids`: SCHEMAS.md section 8 names it as the join key, and the
+        # exemplar workflow accepts either a bracketed inline sequence or a block list. Reading
+        # the wrong key finds nothing in every real exemplar, so the citation blocks come out
+        # empty and the rulebook loses every link it had.
         repo = re.search(r"^repo:[ \t]*(.+?)[ \t]*$", block, re.MULTILINE)
+        inline = re.search(r"^exemplifies:[ \t]*\[(.*?)\][ \t]*$", block, re.MULTILINE)
+        if inline:
+            rules = re.findall(r"[A-Za-z0-9:_-]+", inline.group(1))
+        else:
+            listed = re.search(r"^exemplifies:[ \t]*\n((?:[ \t]*-[ \t]*\S+\n?)+)",
+                               block, re.MULTILINE)
+            rules = re.findall(r"-[ \t]*(\S+)", listed.group(1)) if listed else []
         if not rules:
             continue
         label = repo.group(1).strip().strip("\"'") if repo else path.stem
-        for rule in re.findall(r"[A-Za-z0-9:_-]+", rules.group(1)):
+        for rule in rules:
             by_rule.setdefault(rule, []).append((path.name, label))
     # Sorted per rule so two runs over the same corpus emit identical blocks.
     return {rule: sorted(set(items)) for rule, items in by_rule.items()}

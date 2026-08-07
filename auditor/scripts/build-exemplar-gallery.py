@@ -49,18 +49,26 @@ def parse_frontmatter(text):
         m = re.search(rf"^{key}:[ \t]*(\S+)", block, re.MULTILINE)
         if m:
             out[key] = m.group(1).strip().strip("\"'")
-    rules, in_list = [], False
-    for line in block.splitlines():
-        if re.match(r"^exemplifies:[ \t]*$", line):
-            in_list = True
-            continue
-        if not in_list:
-            continue
-        m = RULE.match(line)
-        if m:
-            rules.append(m.group(1))
-        elif line and not line[0].isspace():
-            in_list = False              # a new top-level key ends the list
+    # BOTH shapes the exemplar workflow accepts: a bracketed inline sequence and a block list.
+    # It documents both and refuses a bare string, so recognising only the block form drops
+    # every inline exemplar from the gallery — silently, since a gallery missing entries still
+    # renders and reads as "no exemplar demonstrates this rule".
+    inline = re.search(r"^exemplifies:[ \t]*\[(.*?)\][ \t]*$", block, re.MULTILINE)
+    if inline:
+        rules = re.findall(r"[A-Za-z0-9:_-]+", inline.group(1))
+    else:
+        rules, in_list = [], False
+        for line in block.splitlines():
+            if re.match(r"^exemplifies:[ \t]*$", line):
+                in_list = True
+                continue
+            if not in_list:
+                continue
+            m = RULE.match(line)
+            if m:
+                rules.append(m.group(1))
+            elif line and not line[0].isspace():
+                in_list = False          # a new top-level key ends the list
     out["exemplifies"] = rules
     return out
 

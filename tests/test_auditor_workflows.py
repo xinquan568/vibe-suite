@@ -1619,9 +1619,9 @@ class TestLedgerPaths(unittest.TestCase):
     under `logs/`. Nothing failed: a wrong path yields no records, and no records renders as a
     complete, well-formed dashboard reporting zero of everything.
 
-    It survived a grep, too. Searching for `findings\.jsonl` matches the bare filename and
-    hides the directory it sits in, so the search that was supposed to establish the path
-    confirmed the wrong one.
+    It survived a grep, too. Searching for the escaped filename pattern matches the bare
+    name and hides the directory it sits in, so the search that was supposed to establish
+    the path confirmed the wrong one.
     """
 
     #: SCHEMAS.md section 1. The directory is the part that matters.

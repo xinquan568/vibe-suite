@@ -172,4 +172,4 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-classify append classification events"
-          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
+          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" --attempts 5

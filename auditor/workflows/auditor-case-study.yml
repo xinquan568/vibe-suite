@@ -692,7 +692,7 @@ jobs:
                     git config user.name "vibe-suite-auditor"
                     git config user.email "auditor@users.noreply.github.com"
                     git commit -m "auditor-case-study $SLUG article and logs"
-                    bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
+                    bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" --attempts 5
       -             name: Commit cycle 2 - the registry
                     env:
                       GH_TOKEN: ${{ github.token }}
@@ -710,4 +710,4 @@ jobs:
                       git config user.name "vibe-suite-auditor"
                       git config user.email "auditor@users.noreply.github.com"
                       git commit -m "auditor-case-study $SLUG registry status"
-                      bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
+                      bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" --attempts 5

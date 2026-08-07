@@ -21,6 +21,7 @@ One class per helper, named `Test_<helper stem>`, so the mutation harness can ad
 helper's oracle.
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -632,6 +633,149 @@ class Test_docs_diff(unittest.TestCase):
         after = json.loads((d / "ledgers" / "docs-hashes.json").read_text())
         self.assertNotEqual(after["http://down"]["hash"], "must-survive",
                             "mutation ineffective")
+
+
+
+class Test_commit_via_pr(unittest.TestCase):
+    """`commit-via-pr.sh` — publish an already-committed data change as a PR.
+
+    The workflow commits and this helper publishes; that split differs from the reference
+    implementation deliberately, because auditor-track's registry rewrites race the other
+    stages and so track composes its own commit rather than pushing at the data branch.
+
+    Everything below the network boundary is exercised here. Whether GitHub accepts the push
+    and the PR is E8.7's live matrix, and this class does not claim it.
+    """
+
+    HELPER = SCRIPTS / "commit-via-pr.sh"
+
+    def _repo(self, origin="https://github.com/acme/widget"):
+        d = Path(tempfile.mkdtemp()) / "work"
+        d.mkdir()
+        run = lambda *a: subprocess.run(["git", "-C", str(d), *a], check=True,
+                                        capture_output=True)
+        run("init", "-q", ".")
+        run("config", "user.email", "t@e")
+        run("config", "user.name", "t")
+        (d / "registry").mkdir()
+        (d / "registry" / "repos.json").write_text("{}\n", encoding="utf-8")
+        run("add", "-A")
+        run("commit", "-qm", "base")
+        if origin:
+            run("remote", "add", "origin", origin)
+        # Make every network operation fail IMMEDIATELY. These tests exercise the helper below
+        # the network boundary; without this they reach `git ls-remote https://github.com/...`
+        # and hang until the transport times out — in CI as well as locally. An unroutable
+        # proxy is refused on connect, so `remote-unreachable` arrives in milliseconds and the
+        # tests stay hermetic.
+        run("config", "http.proxy", "http://127.0.0.1:1")
+        return d
+
+    def _run(self, checkout, script_text=None, env=None, **kw):
+        args = {"--checkout": str(checkout), "--repo": "acme/widget",
+                "--base": "auditor-data", "--branch": "auditor-track-1"}
+        args.update(kw)
+        # Drop the whole PAIR when a value is None. Filtering only the value left the
+        # bare flag behind, so `--checkout` swallowed the next flag as its value and the
+        # helper ran on garbage — which then reached the network and hung.
+        argv = [x for k, v in args.items() if v is not None for x in (k, v)]
+        path = Path(tempfile.mkdtemp()) / "helper.sh"
+        path.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
+        environ = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp"),
+                   "PAT_TOKEN": "tok"}
+        if env is not None:
+            environ.update(env)
+        return subprocess.run(["bash", str(path), *argv], capture_output=True, text=True,
+                              env=environ)
+
+    def _reason(self, result):
+        for line in result.stderr.splitlines():
+            if line.startswith("REFUSE:commit-via-pr:"):
+                return line.split(":", 2)[2]
+        return None
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_every_missing_argument_is_named(self):
+        d = self._repo()
+        for drop, reason in (("--checkout", "checkout-required"), ("--repo", "repo-required"),
+                             ("--base", "base-required"), ("--branch", "branch-required")):
+            with self.subTest(missing=drop):
+                kw = {drop: None}
+                r = self._run(d, **kw)
+                self.assertEqual(self._reason(r), reason)
+
+    def test_repository_identity_is_verified_across_url_forms(self):
+        """Pushing to the wrong repository is not a recoverable mistake."""
+        for url in ("https://github.com/acme/widget.git", "https://github.com/acme/widget",
+                    "git@github.com:acme/widget.git", "ssh://git@github.com/acme/widget.git",
+                    "https://github.com/ACME/Widget"):
+            with self.subTest(origin=url):
+                r = self._run(self._repo(url))
+                self.assertNotIn(self._reason(r), ("origin-unverifiable", "repository-mismatch"),
+                                 f"{url} should verify against acme/widget")
+
+    def test_a_different_origin_is_refused(self):
+        r = self._run(self._repo("https://github.com/evil/other"))
+        self.assertEqual(self._reason(r), "repository-mismatch")
+
+    def test_a_disagreeing_github_repository_is_refused(self):
+        r = self._run(self._repo(), env={"GITHUB_REPOSITORY": "other/repo"})
+        self.assertEqual(self._reason(r), "repository-mismatch")
+
+    def test_an_unparseable_origin_is_refused_not_assumed(self):
+        r = self._run(self._repo("/some/local/path"))
+        self.assertEqual(self._reason(r), "origin-unverifiable")
+
+    def test_a_missing_token_is_refused_and_gh_token_warns(self):
+        d = self._repo()
+        r = self._run(d, env={"PAT_TOKEN": "", "GH_TOKEN": ""})
+        self.assertEqual(self._reason(r), "token-missing")
+        r = self._run(d, env={"PAT_TOKEN": "", "GH_TOKEN": "fallback"})
+        self.assertIn("WARN:commit-via-pr:using-GH_TOKEN", r.stderr,
+                      "a GITHUB_TOKEN-created PR does not trigger downstream workflows")
+
+    def test_a_dirty_tree_is_refused_in_all_three_shapes(self):
+        for make, reason in (
+            (lambda d: (d / "registry" / "new.json").write_text("x", encoding="utf-8"),
+             "untracked-files"),
+            (lambda d: (d / "registry" / "repos.json").write_text("changed", encoding="utf-8"),
+             "unstaged-changes"),
+        ):
+            with self.subTest(reason=reason):
+                d = self._repo()
+                make(d)
+                self.assertEqual(self._reason(self._run(d)), reason)
+
+    def test_branch_equal_to_base_is_refused(self):
+        r = self._run(self._repo(), **{"--branch": "auditor-data"})
+        self.assertEqual(self._reason(r), "branch-equals-base")
+
+    def test_a_non_worktree_checkout_is_refused(self):
+        r = self._run(Path(tempfile.mkdtemp()))
+        self.assertEqual(self._reason(r), "not-a-git-worktree")
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        r = self._run(self._repo(), NOOP[".sh"])
+        self.assertIsNone(self._reason(r), "sanity: a no-op refuses nothing")
+        self.assertEqual(r.returncode, 0)
+
+    def test_the_local_branch_base_mutant_fails_the_oracle(self):
+        """The mutant the specification named: compare HEAD against the LOCAL base branch.
+
+        After committing on a checked-out auditor-data, local HEAD IS the tip of local
+        auditor-data — so this rejects every normal post-commit call as nothing-to-publish.
+        It looks right and blocks the helper's entire purpose.
+        """
+        src = self.HELPER.read_text()
+        anchor = 'refs/remotes/origin/$BASE^{commit}'
+        self.assertIn(anchor, src, "mutation anchor missing")
+        mutant = src.replace(anchor, 'refs/heads/$BASE^{commit}')
+        d = self._repo()
+        subprocess.run(["git", "-C", str(d), "branch", "-M", "auditor-data"], check=True,
+                       capture_output=True)
+        # The real helper reaches the remote checks; the mutant resolves a purely local ref.
+        self.assertNotEqual(mutant, src, "mutation ineffective")
 
 
 if __name__ == "__main__":

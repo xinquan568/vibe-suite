@@ -1686,24 +1686,93 @@ class TestPushCredentials(unittest.TestCase):
     at the END, after the branch has been built and the work done.
     """
 
-    def test_no_workflow_pushes_without_supplying_a_credential(self):
-        offenders = []
+    @staticmethod
+    def _logical_lines(text):
+        """Shell lines with `\\` continuations joined.
+
+        Scanning PHYSICAL lines is what made the first version of this test worthless: both
+        repaired workflows write `git \\` then `push origin` on the next line, so a search for
+        "git push" found NOTHING and the test passed while examining zero push commands.
+        Deleting both credential-helper blocks left it green.
+        """
+        joined, buf = [], ""
+        for line in text.splitlines():
+            buf += line.rstrip()
+            if buf.endswith("\\"):
+                buf = buf[:-1] + " "
+                continue
+            joined.append(buf)
+            buf = ""
+        if buf:
+            joined.append(buf)
+        return joined
+
+    def _push_sites(self):
+        """Every `git push` in a credentials-disabled workflow, as (workflow, command)."""
+        sites = []
         for wf in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
             text = wf.read_text(encoding="utf-8")
             if "persist-credentials: false" not in text:
                 continue
-            for i, line in enumerate(text.splitlines(), 1):
+            for line in self._logical_lines(text):
                 stripped = line.strip()
-                if stripped.startswith("#") or "git push" not in stripped:
+                # A call to a helper whose NAME contains "push" is not a push command; the
+                # helper owns its own authentication and has its own tests.
+                # Prose, not shell. Prompt blocks contain instructions like "Never run git,
+                # never push" — which a loose search reads as a push command and reports as an
+                # unauthenticated one. A command line starts WITH git (optionally behind `if`,
+                # `!`, or `&&`), and `push` follows its flags with no sentence punctuation in
+                # between.
+                if stripped.startswith(("#", "- ")) or ".sh" in stripped:
                     continue
-                # Authenticated either by the helper's wrapper or by an inline credential
-                # helper on the same command.
-                window = "\n".join(text.splitlines()[max(0, i - 6):i])
-                if "credential.helper" in window or "git_auth" in stripped:
+                if not re.match(r"^(?:if\s+|!\s+|then\s+|&&\s+)*git\s+[^,.;]*\bpush\b",
+                                stripped):
                     continue
-                offenders.append(f"{wf.name}:{i}: {stripped[:60]}")
+                sites.append((wf.name, stripped))
+        return sites
+
+    def test_the_test_actually_finds_push_commands(self):
+        """The guard on the guard. A property test over zero subjects passes for free, and the
+        first version of the check below did exactly that."""
+        self.assertGreaterEqual(len(self._push_sites()), 2,
+                                "no push commands found — the scan is broken, not the workflows")
+
+    #: auditor-contribute.yml is E8.2b's (issue #164) and is not in this item's scope. It has
+    #: FOUR unauthenticated pushes, found by this check once it was repaired to look at logical
+    #: lines. Recorded here rather than fixed, so the next item inherits a named defect instead
+    #: of an exemption nobody remembers the reason for — and so this check stays honest about
+    #: what it is not covering.
+    OUT_OF_SCOPE = {"auditor-contribute.yml"}
+
+    def test_no_workflow_pushes_without_supplying_a_credential(self):
+        offenders = [f"{name}: {cmd[:70]}" for name, cmd in self._push_sites()
+                     if name not in self.OUT_OF_SCOPE
+                     and "credential.helper" not in cmd and not cmd.startswith("git_auth")]
         self.assertEqual(offenders, [],
                          "a bare `git push` in a credentials-disabled checkout")
+
+    def test_the_out_of_scope_exemption_still_describes_something_real(self):
+        """An exemption that has quietly become unnecessary is worse than none: it keeps a file
+        excluded from a real check for a reason that no longer exists."""
+        exempt = {name for name, cmd in self._push_sites()
+                  if name in self.OUT_OF_SCOPE and "credential.helper" not in cmd}
+        self.assertEqual(exempt, self.OUT_OF_SCOPE,
+                         "an exempted workflow no longer has an unauthenticated push — "
+                         "drop it from OUT_OF_SCOPE")
+
+    def test_removing_a_credential_helper_is_detected(self):
+        """The mutant: strip the helper from each repaired workflow and confirm the check
+        notices. Without this the assertion above could be vacuously true for a second reason."""
+        for wf in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            text = wf.read_text(encoding="utf-8")
+            if "persist-credentials: false" not in text or "credential.helper" not in text:
+                continue
+            mutated = re.sub(r"-c '?credential\.helper=[^\n]*", "", text)
+            with self.subTest(workflow=wf.name):
+                bare = [ln for ln in self._logical_lines(mutated)
+                        if re.search(r"\bgit\b.*\bpush\b", ln)
+                        and "credential.helper" not in ln]
+                self.assertTrue(bare, f"{wf.name}: stripping the helper changed nothing")
 
     def test_the_token_is_never_written_into_a_url_or_config(self):
         """Ephemeral means ephemeral: not in a remote URL, not persisted by `git config`."""

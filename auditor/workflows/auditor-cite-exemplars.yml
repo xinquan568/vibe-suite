@@ -73,7 +73,17 @@ jobs:
               continue
             fi
             FILES=$((FILES+1))
-            RULES="$(sed -n '/^---$/,/^---$/p' "$f" | sed -n 's/^exemplifies:[ ]*//p' | tr ',' ' ')"
+            # BOTH shapes the exemplar workflow documents. Reading only the text ON the
+            # `exemplifies:` line yields nothing for a block list, so FILES counts the file,
+            # FOUND stays 0, the proposals file is deleted and the run prints SKIP:in-sync —
+            # a clean, confident "no citation drift" for a corpus full of exemplars.
+            FM="$(sed -n '/^---$/,/^---$/p' "$f")"
+            # `\?` is a GNU sed extension and is literal on BSD sed, so the brackets are
+            # stripped with tr instead — the runner is Ubuntu, which would have hidden this.
+            RULES="$(printf '%s\n' "$FM" | sed -n 's/^exemplifies:[ ]*//p' | tr -d '[]' | tr ',' ' ')"
+            if [ -z "$(printf '%s' "$RULES" | tr -d '[:space:]')" ]; then
+              RULES="$(printf '%s\n' "$FM" | awk '/^exemplifies:[ ]*$/{f=1;next} f&&/^[ ]*-[ ]+/{sub(/^[ ]*-[ ]+/,"");print;next} f&&/^[^ ]/{f=0}')"
+            fi
             for rule in $RULES; do
               if [ -z "$rule" ]; then
                 continue

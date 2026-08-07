@@ -46,18 +46,29 @@ git -C "$CHECKOUT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
 GIT_DIR_PATH="$(git -C "$CHECKOUT" rev-parse --absolute-git-dir 2>/dev/null)" \
   || { echo "REFUSE:git-push-with-retry:no-git-dir" >&2; exit 1; }
 
+# The checkouts set `persist-credentials: false`, so a bare push has nothing to authenticate
+# with — the retry loop then spends every attempt on an auth failure it cannot recover from and
+# exhausts. Token supplied through a credential helper reading it from the ENVIRONMENT, so it
+# never reaches argv, .git/config or a remote URL.
+# shellcheck disable=SC2016  # single quotes required: ${GIT_AUTH_TOKEN} must expand inside git
+GIT_CRED_HELPER='!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f'
+git_auth() {
+  GIT_AUTH_TOKEN="${PAT_TOKEN:-${GH_TOKEN:-}}" git -C "$CHECKOUT" \
+    -c "credential.helper=" -c "credential.helper=$GIT_CRED_HELPER" "$@"
+}
+
 unresolved() {
   git -C "$CHECKOUT" status --porcelain=v1 2>/dev/null \
     | grep -qE '^(UU|AA|DD|AU|UA|DU|UD)'
 }
 
 for attempt in $(seq 1 "$ATTEMPTS"); do
-  if git -C "$CHECKOUT" push; then
+  if git_auth push; then
     exit 0
   fi
   echo "git-push-with-retry: attempt $attempt/$ATTEMPTS failed; reconciling"
 
-  if git -C "$CHECKOUT" pull --rebase; then
+  if git_auth pull --rebase; then
     continue
   fi
 

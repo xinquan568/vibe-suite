@@ -14,9 +14,20 @@ layers, and the split matters — conflating them is what made three review roun
    than a hand-written shell parser — and Ruby is a system tool, not a third-party
    dependency (the ban is on adding parser LIBRARIES to shipped tooling; this is a test).
 
-2. **Contract properties — the subset grammar in `lint()`.** Which workflows exist, the
-   stage mapping, declared least privilege, known secrets only, the expression grammar, no
-   pinned model ids. These are project rules Psych knows nothing about.
+2. **Contract properties — the subset grammar in `lint()`.** Stated precisely, because an
+   earlier version of this list claimed more than the code did:
+
+   * which workflows exist, as an explicit name set;
+   * that authority is DECLARED — at workflow or job level — rather than inherited from the
+     repository default, plus the two documented whole-workflow scalars (`read-all`,
+     `write-all`). It does NOT validate permission scopes or their values: a table for those
+     was written twice and was wrong both times, and now lives in #165;
+   * that a stage workflow MENTIONS its entry label. Not that the label is operative — three
+     attempts at that were defeated, and it is #165's;
+   * that only known secrets are referenced by `secrets.X` and `secrets['X']`. A computed
+     index (`secrets[format(...)]`) is not detected — #165;
+   * no pinned model ids (escaped spellings excepted — #165);
+   * a targeted expression check. NOT an Actions expression grammar — #165.
 
 `lint()` therefore does NOT claim to detect malformed YAML, and the suite no longer asserts
 that it does. `test_every_workflow_is_wellformed_yaml` owns that half.
@@ -383,10 +394,28 @@ def lint(text, name="workflow.yml"):
     # Least privilege must be DECLARED, at the workflow or at every job — an undeclared workflow
     # inherits the repository default, which is exactly the authority the split exists to remove.
     if "permissions" not in top_keys:
-        jobs_missing = [j for j, b in _jobs(lines).items()
-                        if not any(re.match(r"^    permissions:", ln) for ln in b)]
-        for j in jobs_missing:
-            v.append(f"job '{j}': no permissions declared and none at workflow level")
+        for j, b in _jobs(lines).items():
+            declared = None
+            for n, ln in enumerate(b):
+                jm = re.match(r"""^    (?:["']?)permissions(?:["']?):[ \t]*(.*)$""", ln)
+                if not jm:
+                    continue
+                inline = jm.group(1).split("#")[0].strip()
+                if inline:
+                    # `{}` grants nothing and IS a declaration; null/bare is not.
+                    declared = inline.lower() not in ("null", "~")
+                else:
+                    nxt = next((x for x in b[n + 1:] if x.strip()
+                                and not x.lstrip().startswith("#")), None)
+                    declared = bool(nxt) and len(nxt) - len(nxt.lstrip(" ")) > 4
+                break
+            if declared is None:
+                v.append(f"job '{j}': no permissions declared and none at workflow level")
+            elif not declared:
+                # Matching the LINE was enough before, so `permissions: null` at job level
+                # satisfied the requirement while declaring nothing — the job then inherited
+                # the repository default, which is the authority this contract removes.
+                v.append(f"job '{j}': 'permissions:' declares nothing")
 
     # duplicate top-level keys (simpler, reliable pass)
     tops = [_key_of(mm) for mm in (_TOP_KEY.match(ln) for ln in lines) if mm]
@@ -568,11 +597,20 @@ def _expr_ok(inner):
 
 
 def extract_run_blocks(text):
-    """Yield the shell text of every run: block (raw-text extraction, no YAML parse)."""
+    """Yield the shell text of every run: block (raw-text extraction, no YAML parse).
+
+    The prefix must allow a leading `- `. A step written `- run: |` is the COMMONEST form in
+    this repo, and requiring `run:` to follow whitespace alone skipped every one of them: 28 of
+    the 81 run blocks in the staged set were never reached by `bash -n`, while the suite
+    reported checking "every extracted run block" — true, and misleading, because the extractor
+    was what silently narrowed the set.
+
+    Folded scalars (`>`) and explicit indicators (`|-`, `|2`) are block scalars too.
+    """
     lines = text.split("\n")
     i = 0
     while i < len(lines):
-        m = re.match(r"^(\s*)run:\s*\|", lines[i])
+        m = re.match(r"^(\s*(?:-\s+)?)run:\s*[|>][-+0-9]*\s*$", lines[i])
         if m:
             base = len(m.group(1)) + 2
             block = []
@@ -582,7 +620,7 @@ def extract_run_blocks(text):
                 i += 1
             yield "\n".join(block)
         else:
-            m2 = re.match(r"^\s*run:\s*(\S.*)$", lines[i])
+            m2 = re.match(r"^\s*(?:-\s+)?run:\s*(\S.*)$", lines[i])
             if m2:
                 yield m2.group(1)
             i += 1
@@ -758,6 +796,22 @@ class TestLintClean(unittest.TestCase):
             self.assertTrue(path.is_file(), f"{name} missing")
             with self.subTest(workflow=name):
                 self.assertEqual(lint(path.read_text(), name), [])
+
+    def test_dash_form_run_blocks_are_extracted(self):
+        """28 of 81 run blocks were never reached by `bash -n`.
+
+        The extractor required `run:` to follow whitespace alone, so every `- run: |` step —
+        the commonest form in this repo — was skipped. The suite still reported checking
+        "every extracted run block", which was true and misleading: the extractor was what
+        silently narrowed the set.
+        """
+        total = sum(1 for name in EXPECTED
+                    for _ in extract_run_blocks((WF_DIR / name).read_text()))
+        dash = sum(len(re.findall(r"^\s*-\s+run:", (WF_DIR / name).read_text(), re.M))
+                   for name in EXPECTED)
+        self.assertGreater(dash, 20, "the corpus must actually contain dash-form run steps")
+        self.assertGreaterEqual(
+            total, dash, f"extractor returned {total} blocks but {dash} dash-form steps exist")
 
     def test_every_run_block_passes_bash_n(self):
         for name in EXPECTED:
@@ -953,6 +1007,25 @@ class TestMutations(unittest.TestCase):
 
     def test_missing_jobs(self):
         self._assert_flagged("name: t\non:\n  workflow_dispatch:\npermissions:\n  contents: read\n")
+
+    def test_a_null_job_level_permissions_declares_nothing(self):
+        """Matching the LINE was enough before, so `permissions: null` satisfied the contract.
+
+        The job then inherited the repository default — the authority this contract removes.
+        """
+        for spelling in ("null", "~"):
+            with self.subTest(spelling=spelling):
+                self._assert_flagged(
+                    self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                        "    runs-on: ubuntu-latest\n",
+                        f"    runs-on: ubuntu-latest\n    permissions: {spelling}\n"))
+
+    def test_an_empty_job_level_permissions_mapping_IS_a_declaration(self):
+        # `{}` grants nothing, which is a real and maximally-restrictive declaration.
+        self.assertEqual(lint(
+            self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                "    runs-on: ubuntu-latest\n",
+                "    runs-on: ubuntu-latest\n    permissions: {}\n")), [])
 
     def test_no_permissions_anywhere(self):
         self._assert_flagged(self.GOOD.replace("permissions:\n  contents: read\n", ""))

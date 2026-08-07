@@ -246,6 +246,23 @@ class AuditorRowSplit(RowBase):
         self.assertFalse(self.ok(SITE_ROW),
                          "a site workflow present in both homes is a duplicate, not a pass")
 
+    def test_a_RENAMED_live_auditor_workflow_is_caught(self):
+        """Checking only KNOWN stems left the guard trivially bypassable by renaming.
+
+        `auditor-audit-live.yml` under `.github/workflows/` is an auditor workflow by every
+        meaningful reading, matched no known stem, and so was invisible while being live.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS, "auditor-audit-live")
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "any live auditor-* workflow contradicts the staged contract")
+
+    def test_unrelated_and_site_workflows_in_github_still_pass(self):
+        """Guards the other direction — the rule must not redden a legitimate checkout."""
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS, "ci", "release")
+        self.assertTrue(self.ok(PIPELINE_ROW), "ci.yml and the site workflows are legitimate")
+
     def test_a_pipeline_workflow_live_in_the_github_home_reddens_the_row(self):
         """The one place a LIVE copy of a staged workflow could hide from both rows.
 

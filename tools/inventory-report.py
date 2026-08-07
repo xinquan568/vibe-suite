@@ -117,8 +117,15 @@ def _pipeline_count(r):
     # never looked outside `auditor/`, and the site count filtered non-site names out before its
     # anomaly check. That is the one place a LIVE, executable copy of a staged workflow could
     # hide — staging is the safe state precisely because `.github/` is what GitHub runs.
-    if any(f.stem in PIPELINE_WORKFLOWS for f in _workflow_entries(r / ".github")):
-        return -1
+    # Checking only KNOWN stems was not enough: `auditor-audit-live.yml` is an auditor workflow
+    # by every meaningful reading and matched nothing. Any `auditor-*` name living under
+    # `.github/workflows/` that is not one of the six site/release workflows is a live copy of
+    # staged material, which is exactly the state staging exists to prevent.
+    for f in _workflow_entries(r / ".github"):
+        if f.stem in PIPELINE_WORKFLOWS:
+            return -1
+        if f.stem.startswith("auditor-") and f.stem not in SITE_RELEASE_WORKFLOWS:
+            return -1
     home = r / "auditor" / "workflows"
     entries = _workflow_entries(r / "auditor")
     if any(_bad_entry(f, {home}, r) for f in entries):

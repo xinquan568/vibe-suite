@@ -1049,5 +1049,127 @@ class Test_log_event(unittest.TestCase):
         self.assertIsInstance(rows[0]["run_number"], str, "mutation ineffective")
 
 
+
+class Test_repair_stale_statuses(unittest.TestCase):
+    """`repair-stale-statuses.py` — restore statuses a two-way merge race reverted."""
+
+    HELPER = SCRIPTS / "repair-stale-statuses.py"
+    TRUTHY_ANCHOR = 'if entry.get("score") is None:'
+    TRUTHY_MUTANT = 'if not entry.get("score"):'
+    DOWNSTREAM_ANCHOR = '        if status in DOWNSTREAM:\n            continue                       # the track workflow owns these\n'
+    DOWNSTREAM_MUTANT = ''
+
+    REGISTRY = {"repos": {
+        "a/reverted": {"status": "discovered", "commit_sha_at_audit": "abc"},
+        "b/contributed": {"status": "audited", "pipeline_prs": [1]},
+        "c/zero": {"status": "audited", "score": 0, "commit_sha_at_audit": "d"},
+        "d/missing": {"status": "audited", "commit_sha_at_audit": "e"},
+        "e/tracked": {"status": "tracked", "commit_sha_at_audit": "f", "pipeline_prs": [2]},
+        "f/complete": {"status": "complete", "pipeline_prs": [3]},
+    }}
+
+    def _run(self, script_text=None, registry=None):
+        d = Path(tempfile.mkdtemp())
+        (d / "registry").mkdir()
+        (d / "audits").mkdir()
+        (d / "registry" / "repos.json").write_text(
+            json.dumps(self.REGISTRY if registry is None else registry), encoding="utf-8")
+        (d / "audits" / "d-missing.md").write_text("**NL Score**: 77/100\n", encoding="utf-8")
+        (d / "audits" / "c-zero.md").write_text("**NL Score**: 55/100\n", encoding="utf-8")
+        (d / "audits" / "e-tracked.md").write_text("**NL Score**: 88/100\n", encoding="utf-8")
+        helper = d / "helper.py"
+        helper.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
+        r = subprocess.run([sys.executable, str(helper), "--data-dir", str(d)],
+                           capture_output=True, text=True)
+        after = json.loads((d / "registry" / "repos.json").read_text())["repos"]
+        return r, after
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_documented_reversions_are_repaired(self):
+        r, after = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(after["a/reverted"]["status"], "audited",
+                         "commit_sha_at_audit proves the audit ran")
+        self.assertEqual(after["b/contributed"]["status"], "contributed",
+                         "pipeline_prs proves contribute ran")
+
+    def test_a_real_zero_score_is_preserved(self):
+        """0/100 is a legitimate — catastrophic — audit outcome, and exactly the result worth
+        keeping. Truthiness would treat it as missing and overwrite it from the report."""
+        _, after = self._run()
+        self.assertEqual(after["c/zero"]["score"], 0,
+                         "a real 0 was overwritten from the audit report")
+
+    def test_a_genuinely_missing_score_is_recovered(self):
+        _, after = self._run()
+        self.assertEqual(after["d/missing"]["score"], 77)
+
+    def test_downstream_statuses_are_never_touched(self):
+        """tracked/complete belong to the track workflow; repairing them fabricates progress."""
+        _, after = self._run()
+        self.assertEqual(after["e/tracked"]["status"], "tracked")
+        self.assertEqual(after["f/complete"]["status"], "complete")
+
+    def test_dry_run_writes_nothing(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "registry").mkdir()
+        (d / "audits").mkdir()
+        original = json.dumps(self.REGISTRY)
+        (d / "registry" / "repos.json").write_text(original, encoding="utf-8")
+        subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d), "--dry-run"],
+                       capture_output=True, text=True)
+        self.assertEqual((d / "registry" / "repos.json").read_text(), original)
+
+    def test_an_unreadable_registry_is_refused(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "registry").mkdir()
+        (d / "registry" / "repos.json").write_text("{not json", encoding="utf-8")
+        r = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("registry-unreadable", r.stderr)
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        _, after = self._run(NOOP[".py"])
+        self.assertEqual(after["a/reverted"]["status"], "discovered",
+                         "sanity: a no-op repairs nothing")
+
+    def test_the_truthiness_mutant_overwrites_a_real_zero(self):
+        """The plausible wrong implementation: `if not entry.get("score")`.
+
+        It recovers every genuinely missing score correctly, so a test without a 0 in its
+        fixture passes — while silently destroying the worst real score in the corpus.
+        """
+        src = self.HELPER.read_text()
+        self.assertIn(self.TRUTHY_ANCHOR, src, "mutation anchor missing")
+        _, after = self._run(src.replace(self.TRUTHY_ANCHOR, self.TRUTHY_MUTANT, 1))
+        self.assertEqual(after["c/zero"]["score"], 55,
+                         "mutation ineffective: the mutant should overwrite the real 0")
+
+    def test_the_downstream_guard_prevents_score_recovery_on_tracked_repos(self):
+        """What the guard ACTUALLY does — measured, not assumed.
+
+        An earlier version of this test asserted the guard stops a `tracked` repo being
+        downgraded to `contributed`. It does not: the inner conditions already exclude
+        `tracked`, so removing the guard changes nothing about status. Its real effect is
+        narrower — it keeps repair out of downstream entries entirely, including their scores.
+        The test now asserts that, so it fails for the reason it claims.
+        """
+        registry = {"repos": {"e/tracked": {"status": "tracked", "commit_sha_at_audit": "f",
+                                            "pipeline_prs": [2]}}}
+        src = self.HELPER.read_text()
+        self.assertIn(self.DOWNSTREAM_ANCHOR, src, "mutation anchor missing")
+
+        _, guarded = self._run(registry=registry)
+        self.assertNotIn("score", guarded["e/tracked"],
+                         "a downstream entry must be left entirely alone")
+
+        _, unguarded = self._run(src.replace(self.DOWNSTREAM_ANCHOR, self.DOWNSTREAM_MUTANT, 1),
+                                 registry=registry)
+        self.assertEqual(unguarded["e/tracked"].get("score"), 88,
+                         "mutation ineffective: without the guard a tracked repo gains a score")
+
+
 if __name__ == "__main__":
     unittest.main()

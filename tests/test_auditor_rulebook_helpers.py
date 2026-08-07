@@ -363,6 +363,32 @@ class Test_validate_feedback(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("schema-invalid", r.stderr)
 
+
+    def test_schema_valid_rule_ids_are_accepted(self):
+        """`rule_id` is "a namespaced rule identifier" (SCHEMAS.md section 2), not one rubric's
+        R-numbers. UNCLASSIFIED is what the renderers themselves emit for a finding with no id.
+        Rejecting a real pipeline's own output as corrupt trains whoever sees it to ignore this
+        gate — the one failure mode a gate cannot recover from."""
+        r = self._run(self._log({"rules": [
+            {"rule_id": "SEC-001", "hits": 3, "submitted": 2, "merged": 1, "rejected": 0},
+            {"rule_id": "BUG-x_9", "hits": 1, "submitted": 1, "merged": 1, "rejected": 0},
+            {"rule_id": "nl:CC-7", "hits": 2, "submitted": 2, "merged": 1,
+             "applied_separately": 1, "rejected": 0},
+            {"rule_id": "UNCLASSIFIED", "hits": 1, "submitted": 1, "merged": 0, "rejected": 1},
+        ]}))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_applied_separately_counts_toward_the_resolved_invariant(self):
+        """It IS a resolution — the maintainer fixed it and closed our PR. Leaving it out of the
+        sum let a genuine over-count hide behind the one arm most likely to grow, and
+        contradicted rule-health, which counts it as acceptance."""
+        r = self._run(self._log({"rules": [
+            {"rule_id": "R04", "hits": 9, "submitted": 2,
+             "merged": 1, "applied_separately": 1, "rejected": 1}]}))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("resolved-exceeds-submitted", r.stderr)
+        self.assertIn("applied_separately=1", r.stderr)
+
     # --- mutants --------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):
         r = self._run(self._log({"rules": [{"rule_id": "BOGUS", "hits": -1}]}),

@@ -19,12 +19,18 @@
 #
 # The four content checks each encode an arithmetic that cannot be true of a real log:
 #
-#   * INVALID RULE IDS — a rule id outside the catalog's shape means the aggregation keyed on
-#     something that is not a rule, so every count under it is attributed to nothing.
+#   * INVALID RULE IDS — a rule id outside the SCHEMA's shape means the aggregation keyed on
+#     something that is not a rule, so every count under it is attributed to nothing. The shape
+#     is the schema's, not one rubric's: `rule_id` is "a namespaced rule identifier", so
+#     SEC-*/BUG-*/CC-* and their namespaced forms are valid, and UNCLASSIFIED is what the
+#     renderers themselves emit for a finding carrying no id. Rejecting those reports a real
+#     pipeline's own output as corrupt, which trains whoever sees it to ignore this gate.
 #   * NEGATIVE COUNTS — a count is a tally of records; below zero means subtraction happened
 #     somewhere that should only ever have added.
-#   * merged + rejected > submitted — more findings resolved than were ever sent. Guarantees
-#     double-counting upstream, and it is the specific shape that duplicate events produce.
+#   * merged + applied_separately + rejected > submitted — more findings resolved than were
+#     ever sent. `applied_separately` is a RESOLUTION: the maintainer fixed it and closed our
+#     PR. Omitting it from the sum let a genuine over-count hide behind it, in the one arm most
+#     likely to grow, and it contradicted rule-health, which counts it as acceptance.
 #   * MALFORMED JSON — a partial write. The file parses as a smaller, entirely plausible
 #     dataset rather than failing, so nothing else would notice.
 #
@@ -79,12 +85,12 @@ VIOLATIONS="$(
     .rules[]
     | . as $r
     | [
-        (if ($r.rule_id // "" | test("^(R[0-9]{1,2}|[a-z]+:R[0-9]{1,2})$")) then empty
+        (if ($r.rule_id // "" | test("^(R[0-9]{1,2}|[a-z]+:R[0-9]{1,2}|(SEC|BUG|CC)-[A-Za-z0-9_-]+|[a-z]+:(SEC|BUG|CC)-[A-Za-z0-9_-]+|UNCLASSIFIED)$")) then empty
          else "invalid-rule-id: \($r.rule_id // "<null>")" end),
         (   [$r | to_entries[] | select((.value | type) == "number" and .value < 0)
              | "negative-count: \($r.rule_id // "<null>").\(.key)=\(.value)"] | .[]),
-        (if ((($r.merged // 0) + ($r.rejected // 0)) > ($r.submitted // $r.hits // 0))
-         then "resolved-exceeds-submitted: \($r.rule_id // "<null>") merged=\($r.merged // 0) rejected=\($r.rejected // 0) submitted=\($r.submitted // $r.hits // 0)"
+        (if ((($r.merged // 0) + ($r.applied_separately // 0) + ($r.rejected // 0)) > ($r.submitted // $r.hits // 0))
+         then "resolved-exceeds-submitted: \($r.rule_id // "<null>") merged=\($r.merged // 0) applied_separately=\($r.applied_separately // 0) rejected=\($r.rejected // 0) submitted=\($r.submitted // $r.hits // 0)"
          else empty end)
       ]
     | .[]

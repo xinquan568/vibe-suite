@@ -219,6 +219,20 @@ def main(argv=None):
                 and str((event.get("data") or {}).get("outcome", "")).startswith("fixed_")}
     verified.discard(None)
 
+    # SELF-FALSE-POSITIVES ARE A DISAGREEMENT EVENT, not a flag on a finding. SCHEMAS.md
+    # section 5: the audit workflow routes a self-invalidated finding to
+    # ledgers/disagreements.jsonl as `self_false_positive`, carrying fingerprint, rule_id,
+    # reason and the rule_gap learning payload. Raw sidecars have no `false_positive` field at
+    # all, so reading one produced a 0% false-positive rate for every rule — the most
+    # flattering possible number, and the one that argues for changing nothing.
+    self_fp = set()
+    for record in read_jsonl(data_dir / "ledgers" / "disagreements.jsonl"):
+        data = record.get("data") if isinstance(record.get("data"), dict) else record
+        if record.get("event") == "self_false_positive" and data.get("fingerprint"):
+            self_fp.add(str(data["fingerprint"]))
+            if data.get("rule_id"):
+                rule_of.setdefault(str(data["fingerprint"]), str(data["rule_id"]))
+
     exemplars = exemplar_counts(data_dir / "exemplars")
 
     rules = {}
@@ -233,7 +247,7 @@ def main(argv=None):
             row[outcome] += 1
         if fingerprint in verified:
             row["verified"] += 1
-        if (findings.get(fingerprint) or {}).get("false_positive"):
+        if fingerprint in self_fp or (findings.get(fingerprint) or {}).get("false_positive"):
             row["false_positives"] += 1
 
     for rule, row in rules.items():

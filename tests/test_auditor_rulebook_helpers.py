@@ -222,6 +222,29 @@ class Test_rule_health(unittest.TestCase):
         self.assertEqual(row["merged"], 1)
         self.assertEqual(row["false_positive_rate"], 1.0)
 
+
+    def test_self_false_positives_come_from_the_disagreements_ledger(self):
+        """SCHEMAS.md section 5: a self-invalidated finding is emitted as a
+        `self_false_positive` DISAGREEMENT event, not as a flag on a finding — and raw sidecars
+        have no `false_positive` field at all. Reading one produced a 0% false-positive rate for
+        every rule: the most flattering possible number, and the one that argues for changing
+        nothing. A rule that fires on non-problems was therefore invisible to the dataset whose
+        entire job is to surface it.
+        """
+        d = self._data_dir(events=[], exemplars={}, registry={"repos": {"a/b": {"prs": {
+            "1": {"number": 1, "updatedAt": "2026-06-01T00:00:00Z", "outcome": "rejected",
+                  "fingerprints": ["fp1"], "rule_ids": ["R09"]}}}}})
+        (d / "ledgers" / "disagreements.jsonl").write_text(json.dumps(
+            envelope("self_false_positive",
+                     {"repo": "a/b", "fingerprint": "fp1", "rule_id": "R09",
+                      "reason": "intentional pattern", "rule_gap": "needs an exemption"},
+                     "2026-05-01T00:00:00Z")) + "\n", encoding="utf-8")
+        r = self._run(d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = self._rules(d)["R09"]
+        self.assertEqual(row["false_positives"], 1, "the disagreement event was not counted")
+        self.assertEqual(row["false_positive_rate"], 1.0)
+
     # --- mutants --------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):
         d = self._data_dir()

@@ -1877,15 +1877,19 @@ class TestSidecarFingerprintConsumers(unittest.TestCase):
                        # found by the completeness check below, not by me
                        "repair-stale-statuses.py")
 
-    def test_every_sidecar_reader_can_compute_or_tolerate_a_missing_fingerprint(self):
-        for name in self.SIDECAR_READERS:
-            src = (REPO / "auditor" / "scripts" / name).read_text(encoding="utf-8")
-            with self.subTest(helper=name):
-                # Either it computes the digest itself, or it never gates on the field.
-                computes = "sha256:" in src and "hashlib" in src
-                gates = re.search(r'if\s+.*\.get\("fingerprint"\)\s*:', src)
-                self.assertTrue(computes or not gates,
-                                f"{name} gates on a fingerprint a section-4 sidecar never has")
+    # NO SOURCE-TEXT CHECK HERE, deliberately. Two attempts failed for the same reason: from
+    # the text alone you cannot tell a helper REQUIRING a fingerprint on a raw sidecar from one
+    # legitimately reading it off an enriched ledger row, or from one including it as an
+    # optional key. The first version flagged prepare-refinement-input.py, which is correct;
+    # the second flagged rule-health.py's ledger reader, which is also correct.
+    #
+    # Bending the pattern a third time would repeat this issue's most expensive habit — a guard
+    # reshaped until it stops complaining, which is not the same as a guard that works. The
+    # behavioural proof that each helper handles a RAW section-4 sidecar lives in that helper's
+    # own tests, where a real record can be fed through it.
+    #
+    # What this class still does honestly is the part I got wrong by hand: enumerate the
+    # readers, so a new one cannot be added without someone noticing.
 
     def test_the_reader_list_covers_every_helper_that_opens_the_audits_directory(self):
         """The list must not go stale: a new sidecar reader has to join it, or this class stops

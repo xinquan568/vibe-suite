@@ -290,6 +290,39 @@ class Test_synthesize_sidecar(_FingerprintMixin, unittest.TestCase):
         self.assertEqual(records[1]["rule_id"], "UNCLASSIFIED")
         self.assertEqual(records[1]["pattern"], "name-matches-parent-dir")
 
+
+    def test_declared_ids_survive_every_heading_punctuation(self):
+        """`### R12: ...` stopped matching when I switched to whitespace splitting — a shape the
+        previous parser accepted, so my own fix re-keyed legacy findings. The id is the leading
+        TOKEN however it is punctuated."""
+        for heading, expected in (("R12: something", "R12"),
+                                  ("SEC-001 - thing", "SEC-001"),
+                                  ("nl:CC-7: x", "nl:CC-7"),
+                                  ("UNCLASSIFIED: y", "UNCLASSIFIED"),
+                                  ("R05 - body length over 500 lines", "R05")):
+            with self.subTest(heading=heading):
+                report = self._report(f"## X\n\n### {heading}\n- **File**: a.md\n")
+                self.assertEqual(self._records(report)[0]["rule_id"], expected)
+
+    def test_one_category_decision_governs_both_category_and_penalty(self):
+        """Deciding the category from description+path and the penalty-nulling from description
+        alone let `security/README.md` emit category security WITH a penalty, which section 2
+        forbids: penalty is a negative int for nl_quality and null otherwise."""
+        report = self._report("## X\n\n| Rule | File | Line | Issue | Penalty |\n"
+                              "|---|---|---|---|---|\n"
+                              "| -- | security/README.md | 1 | missing validation | -20 |\n")
+        record = self._records(report)[0]
+        self.assertEqual(record["category"], "security")
+        self.assertIsNone(record["penalty"], "a non-nl_quality finding carried a penalty")
+
+    def test_no_record_carries_evidence_at_medium_confidence(self):
+        """`confidence: high` requires actively reproduced breakage; synthesis from prose never
+        reproduced anything, so evidence — the reproduction record — must not be claimed."""
+        for record in self._records(self._report()):
+            with self.subTest(file=record["file"]):
+                self.assertEqual(record["confidence"], "medium")
+                self.assertIsNone(record["evidence"])
+
     # --- refusals -------------------------------------------------------------------------
     def test_a_missing_report_is_refused(self):
         r = self._run(Path("/nonexistent/report.md"))

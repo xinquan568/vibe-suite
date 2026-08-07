@@ -217,7 +217,19 @@ def main(argv=None):
     # digest is computed, which needs the repo: recovered from the registry by slug rather than
     # by reversing the filename, because `owner-name` cannot be split back reliably when either
     # half contains a hyphen.
-    slug_to_repo = {r.replace("/", "-"): r for r in registry["repos"]}
+    # AMBIGUOUS SLUGS ARE REFUSED, not resolved by iteration order. `a/b-c` and `a-b/c` both
+    # slug to `a-b-c`, so a dict comprehension silently attributes one repository's sidecar to
+    # the other and computes every fingerprint under the wrong repo — records that look valid
+    # and join to nothing. render-repo-report.py already refuses this; reintroducing the same
+    # lossiness here would have made it a bug in one helper and a guard in another.
+    slug_to_repo = {}
+    for repo in registry["repos"]:
+        slug = repo.replace("/", "-")
+        if slug in slug_to_repo:
+            print(f"REFUSE:rule-health:slug-collision {repo} and {slug_to_repo[slug]} "
+                  f"both produce '{slug}'", file=sys.stderr)
+            raise SystemExit(1)
+        slug_to_repo[slug] = repo
     for path in sorted(audits.glob("*.findings.jsonl")) if audits.is_dir() else []:
         repo = slug_to_repo.get(path.name[:-len(".findings.jsonl")])
         if repo is None:

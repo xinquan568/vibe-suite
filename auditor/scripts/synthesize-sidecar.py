@@ -64,7 +64,8 @@ RULE_INFERENCE = (
 #: only R## rewrote a legacy row declaring SEC-001 as UNCLASSIFIED, which CHANGES the
 #: fingerprint: the digest is taken over the rule id, so the synthesized record would never
 #: join the one the original audit recorded.
-DECLARED_ID = re.compile(r"^(?:[a-z][a-z0-9]*:)?(?:R\d{1,2}|(?:SEC|BUG|CC)-[A-Za-z0-9_-]+)$")
+DECLARED_ID = re.compile(
+    r"^(?:[a-z][a-z0-9]*:)?(?:R\d{1,2}|(?:SEC|BUG|CC)-[A-Za-z0-9_-]+|UNCLASSIFIED)$")
 
 STOPWORDS = frozenset("""a an and are as at be but by for from has have in into is it its not
 of on or that the their this to with without missing should must than then when which""".split())
@@ -201,8 +202,12 @@ def parse_row(row: dict):
     penalty = parse_penalty(first_of(row, "penalty", "score") or "")
     rule_id, pattern = infer_rule_and_pattern(description or path or "", declared)
     line_value = first_of(row, "line", "lineno")
+    # ONE decision, used for both. Deciding the category from description+path and the
+    # penalty-nulling from description alone let `security/README.md` come out
+    # `category: security` WITH a penalty, which section 2 forbids.
+    category = classify_category(f"{description or ''} {path or ''}")
     return {
-        "category": classify_category(f"{description or ''} {path or ''}"),
+        "category": category,
         # `rule_id` is required and non-null in section 4. An inference that found no rule is
         # UNCLASSIFIED — the value the renderers already use — not a null the schema forbids.
         "rule_id": rule_id or "UNCLASSIFIED",
@@ -214,7 +219,7 @@ def parse_row(row: dict):
         # `confidence: high` requires actively reproduced breakage, which synthesis from prose
         # never did — so these stay medium and carry no evidence, which is the reproduction
         # record a medium finding has not earned.
-        "penalty": penalty if classify_category(f"{description or ''}") == "nl_quality" else None,
+        "penalty": penalty if category == "nl_quality" else None,
         "severity": severity_for(penalty),
         "confidence": "medium",
         "evidence": None,
@@ -231,15 +236,20 @@ def parse_subsection(lines, start):
             break
         body.append(line)
     blob = "\n".join(body)
-    declared = DECLARED_ID.match(heading.split()[0]) if heading.split() else None
+    # The id is the leading TOKEN, however it is punctuated. Splitting on whitespace kept a
+    # trailing colon, so `### R12: ...` stopped matching — a heading shape the previous parser
+    # accepted, which means legacy findings were being re-keyed by my own fix.
+    declared = DECLARED_ID.match(re.split(r"[\s:—–-]+$", heading.split()[0].rstrip(":—–"))[0]
+                                 if heading.split() else "")
     path = re.search(r"\*\*(?:File|Path)\*\*:?\s*`?([^`\n]+?)`?\s*$", blob, re.MULTILINE)
     line_no = re.search(r"\*\*Line\*\*:?\s*(\d+)", blob)
     penalty = parse_penalty(blob)
     title = re.sub(r"^R\d{1,2}\s*[—:-]\s*", "", heading)
+    category = classify_category(f"{title} {blob}")
     rule_id, pattern = infer_rule_and_pattern(f"{title} {blob}",
                                               declared.group(0) if declared else None)
     return {
-        "category": classify_category(f"{title} {blob}"),
+        "category": category,
         # `rule_id` is required and non-null in section 4. An inference that found no rule is
         # UNCLASSIFIED — the value the renderers already use — not a null the schema forbids.
         "rule_id": rule_id or "UNCLASSIFIED",
@@ -247,7 +257,7 @@ def parse_subsection(lines, start):
         "line": int(line_no.group(1)) if line_no else None,
         "pattern": pattern,
         "description": title,
-        "penalty": penalty if classify_category(f"{title} {blob}") == "nl_quality" else None,
+        "penalty": penalty if category == "nl_quality" else None,
         "severity": severity_for(penalty),
         "confidence": "medium",
         "evidence": None,

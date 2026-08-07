@@ -245,6 +245,18 @@ class Test_rule_health(unittest.TestCase):
         self.assertEqual(row["false_positives"], 1, "the disagreement event was not counted")
         self.assertEqual(row["false_positive_rate"], 1.0)
 
+
+    def test_an_ambiguous_slug_is_refused(self):
+        """`a/b-c` and `a-b/c` both slug to `a-b-c`. Resolving by iteration order attributes one
+        repository's sidecar to the other and computes every fingerprint under the wrong repo —
+        records that look valid and join to nothing. render-repo-report already refuses this."""
+        d = self._data_dir(events=[], exemplars={}, registry={"repos": {
+            "acme/w-x": {"prs": {}}, "acme-w/x": {"prs": {}}}})
+        (d / "audits").mkdir(exist_ok=True)
+        r = self._run(d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:rule-health:slug-collision", r.stderr)
+
     # --- mutants --------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):
         d = self._data_dir()

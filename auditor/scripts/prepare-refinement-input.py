@@ -122,12 +122,17 @@ def main(argv=None):
         include, reasons = classify(row, args.min_hits)
         if not include:
             continue
-        # `fingerprint` is absent from section-4 sidecars; the reviewer reads file+line, so
-        # it is reported when enriched and simply omitted otherwise rather than shown null.
-        evidence = [{"fingerprint": f.get("fingerprint"), "file": f.get("file"),
-                     "line": f.get("line"), "description": f.get("description"),
-                     "false_positive": bool(f.get("false_positive"))}
-                    for f in by_rule.get(str(row.get("rule_id")), [])[:EVIDENCE_CAP]]
+        # `fingerprint` is absent from section-4 sidecars, so the key is OMITTED rather than
+        # emitted as null: a null reads as "this finding has no fingerprint", which is a claim
+        # about the finding rather than about the record shape.
+        evidence = []
+        for f in by_rule.get(str(row.get("rule_id")), [])[:EVIDENCE_CAP]:
+            item = {"file": f.get("file"), "line": f.get("line"),
+                    "description": f.get("description"),
+                    "false_positive": bool(f.get("false_positive"))}
+            if f.get("fingerprint"):
+                item["fingerprint"] = f["fingerprint"]
+            evidence.append(item)
         selected.append({
             "rule_id": row.get("rule_id"),
             "reasons": reasons,

@@ -117,15 +117,35 @@ def _pipeline_count(r):
     # never looked outside `auditor/`, and the site count filtered non-site names out before its
     # anomaly check. That is the one place a LIVE, executable copy of a staged workflow could
     # hide — staging is the safe state precisely because `.github/` is what GitHub runs.
-    # Checking only KNOWN stems was not enough: `auditor-audit-live.yml` is an auditor workflow
-    # by every meaningful reading and matched nothing. Any `auditor-*` name living under
-    # `.github/workflows/` that is not one of the six site/release workflows is a live copy of
-    # staged material, which is exactly the state staging exists to prevent.
+    # Detect a live copy by CONTENT, not by name. Two name-based attempts failed: known stems
+    # only (defeated by `auditor-audit-live.yml`), then an `auditor-` prefix (defeated by
+    # `review-live.yml`). A name heuristic can always be renamed around; the bytes cannot.
+    # Only SUBSTANTIAL content is compared. A real workflow needs at least name/on/jobs, so
+    # anything tiny is a stub — and two unrelated stubs being byte-identical is ordinary, not
+    # evidence of copying. Without this, any repo whose workflows share a trivial body would be
+    # reddened, which is the false-positive class that sank the P9 escape decoder.
+    _COPY_MIN_BYTES = 64
+    staged_bodies = set()
+    for f in _workflow_entries(r / "auditor"):
+        if f.is_file() and not f.is_symlink():
+            try:
+                body = f.read_bytes()
+            except OSError:
+                return -1
+            if len(body) >= _COPY_MIN_BYTES:
+                staged_bodies.add(body)
     for f in _workflow_entries(r / ".github"):
         if f.stem in PIPELINE_WORKFLOWS:
             return -1
         if f.stem.startswith("auditor-") and f.stem not in SITE_RELEASE_WORKFLOWS:
             return -1
+        if f.is_file() and not f.is_symlink():
+            try:
+                body = f.read_bytes()
+            except OSError:
+                return -1
+            if len(body) >= _COPY_MIN_BYTES and body in staged_bodies:
+                return -1            # byte-identical to a staged workflow: a live copy
     home = r / "auditor" / "workflows"
     entries = _workflow_entries(r / "auditor")
     if any(_bad_entry(f, {home}, r) for f in entries):

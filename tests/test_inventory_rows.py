@@ -183,10 +183,16 @@ class AuditorRowSplit(RowBase):
     """The two auditor rows partition §5.0's 24 and neither may drift silently."""
 
     def seed_workflows(self, rel, *names):
+        """Seed DISTINCT bodies. Identical stub text made every file a byte-match of every
+        other, which the copy detector correctly flagged — a fixture artifact that looked
+        exactly like a real false positive."""
         d = self.tmp / rel
         d.mkdir(parents=True, exist_ok=True)
         for n in names:
-            (d / f"{n}.yml").write_text("name: x\n", encoding="utf-8")
+            (d / f"{n}.yml").write_text(
+                f"name: {n}\non:\n  workflow_dispatch:\npermissions: {{}}\n"
+                f"jobs:\n  {n.replace('-', '_')}:\n    runs-on: ubuntu-latest\n"
+                f"    steps:\n      - run: echo {n}\n", encoding="utf-8")
 
     def test_targets_still_sum_to_24(self):
         self.assertEqual(row(PIPELINE_ROW)[1] + row(SITE_ROW)[1], 24,
@@ -246,16 +252,29 @@ class AuditorRowSplit(RowBase):
         self.assertFalse(self.ok(SITE_ROW),
                          "a site workflow present in both homes is a duplicate, not a pass")
 
-    def test_a_RENAMED_live_auditor_workflow_is_caught(self):
-        """Checking only KNOWN stems left the guard trivially bypassable by renaming.
+    def test_a_live_copy_is_caught_however_it_is_renamed(self):
+        """Detected by CONTENT, because two name heuristics were each renamed around.
 
-        `auditor-audit-live.yml` under `.github/workflows/` is an auditor workflow by every
-        meaningful reading, matched no known stem, and so was invisible while being live.
+        Known stems only fell to `auditor-audit-live.yml`; an `auditor-` prefix rule then fell
+        to `review-live.yml`. A name test can always be renamed around — the bytes cannot. The
+        earlier test asserted only the prefix case while its name claimed renames generally.
         """
         self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
-        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS, "auditor-audit-live")
-        self.assertFalse(self.ok(PIPELINE_ROW),
-                         "any live auditor-* workflow contradicts the staged contract")
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        staged = (self.tmp / "auditor" / "workflows" / f"{PIPELINE_WORKFLOWS[0]}.yml")
+        for disguise in ("auditor-audit-live", "review-live", "totally-unrelated"):
+            with self.subTest(renamed_to=disguise):
+                copy = self.tmp / ".github" / "workflows" / f"{disguise}.yml"
+                copy.write_bytes(staged.read_bytes())
+                self.assertFalse(self.ok(PIPELINE_ROW),
+                                 f"a byte-identical live copy named {disguise}.yml must be seen")
+                copy.unlink()
+
+    def test_an_unrelated_live_workflow_is_not_a_copy(self):
+        """Guards the other direction — content matching must not redden an ordinary repo."""
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS, "ci", "release")
+        self.assertTrue(self.ok(PIPELINE_ROW), "ci.yml and release.yml are legitimate")
 
     def test_unrelated_and_site_workflows_in_github_still_pass(self):
         """Guards the other direction — the rule must not redden a legitimate checkout."""

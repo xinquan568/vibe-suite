@@ -42,6 +42,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 WF_DIR = REPO / "auditor" / "workflows"
+#: The live workflows. Shell in these RUNS today, so it is checked alongside the
+#: staged set — the bash -n loop used to skip it entirely.
+LIVE_WF_DIR = REPO / ".github" / "workflows"
 
 STAGES = {
     "auditor-discover.yml": "audit-candidate",
@@ -402,8 +405,21 @@ def lint(text, name="workflow.yml"):
                     continue
                 inline = jm.group(1).split("#")[0].strip()
                 if inline:
-                    # `{}` grants nothing and IS a declaration; null/bare is not.
-                    declared = inline.lower() not in ("null", "~")
+                    # A permissions value is a MAPPING or one of the two whole-workflow
+                    # scalars. Treating every non-null inline value as a declaration let
+                    # `permissions: []` (a sequence) and `permissions: |` (a block scalar)
+                    # satisfy the contract while granting nothing and declaring nothing —
+                    # the job then inherited the repository default.
+                    low = inline.lower()
+                    if low in ("null", "~"):
+                        declared = False
+                    elif inline.startswith("{") and inline.endswith("}"):
+                        declared = True          # `{}` grants nothing, and that IS a decision
+                    elif inline in ("read-all", "write-all") or \
+                            _unquote(inline) in ("read-all", "write-all"):
+                        declared = True
+                    else:
+                        declared = False         # sequences, block scalars, typos
                 else:
                     nxt = next((x for x in b[n + 1:] if x.strip()
                                 and not x.lstrip().startswith("#")), None)
@@ -814,17 +830,31 @@ class TestLintClean(unittest.TestCase):
             total, dash, f"extractor returned {total} blocks but {dash} dash-form steps exist")
 
     def test_every_run_block_passes_bash_n(self):
-        for name in EXPECTED:
-            path = WF_DIR / name
+        """Every run block in the CORPUS — staged AND live — not just the staged 18.
+
+        The name said "every run block" while the loop ran over EXPECTED alone, so 35 of the
+        116 blocks were unprotected by this regression. That is the same defect as the
+        extractor skipping dash form: a true-sounding name over a narrower set. The loop now
+        matches the name.
+        """
+        paths = [WF_DIR / n for n in EXPECTED] + sorted(LIVE_WF_DIR.glob("*.yml"))
+        checked = 0
+        for path in paths:
+            name = path.name
             if not path.is_file():
                 self.fail(f"{name} missing")
             for idx, block in enumerate(extract_run_blocks(path.read_text())):
+                checked += 1
                 shell = re.sub(r"\$\{\{.*?\}\}", "EXPR", block, flags=re.S)
                 with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
                     f.write(shell)
                 r = subprocess.run(["bash", "-n", f.name], capture_output=True, text=True)
                 with self.subTest(workflow=name, block=idx):
                     self.assertEqual(r.returncode, 0, r.stderr)
+        # A silently-shrinking corpus is how the previous hole hid; assert the scale too.
+        self.assertGreater(checked, 100,
+                           f"only {checked} run blocks checked — the extractor or the file "
+                           f"list has narrowed; the corpus carries ~116")
 
 
 class TestContracts(unittest.TestCase):
@@ -1019,6 +1049,27 @@ class TestMutations(unittest.TestCase):
                     self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
                         "    runs-on: ubuntu-latest\n",
                         f"    runs-on: ubuntu-latest\n    permissions: {spelling}\n"))
+
+    def test_a_job_level_sequence_or_block_scalar_declares_nothing(self):
+        """`permissions: []` and `permissions: |` satisfied the check while granting nothing.
+
+        Treating every non-null inline value as a declaration was too loose: a permissions
+        value is a MAPPING or one of the two whole-workflow scalars.
+        """
+        for spelling in ("[]", "|", ">", "bogus", "[read-all]"):
+            with self.subTest(spelling=spelling):
+                self._assert_flagged(
+                    self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                        "    runs-on: ubuntu-latest\n",
+                        f"    runs-on: ubuntu-latest\n    permissions: {spelling}\n"))
+
+    def test_job_level_whole_workflow_scalars_are_declarations(self):
+        for spelling in ("read-all", "write-all", "'read-all'"):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(lint(
+                    self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                        "    runs-on: ubuntu-latest\n",
+                        f"    runs-on: ubuntu-latest\n    permissions: {spelling}\n")), [])
 
     def test_an_empty_job_level_permissions_mapping_IS_a_declaration(self):
         # `{}` grants nothing, which is a real and maximally-restrictive declaration.

@@ -841,8 +841,12 @@ class Test_commit_via_pr(unittest.TestCase):
 
         self.assertEqual(self._reason(mutated), "nothing-to-publish",
                          "mutation ineffective: the mutant should reject a normal call")
-        self.assertNotEqual(self._reason(real), "nothing-to-publish",
-                            "the real helper must publish a commit ahead of the remote base")
+        # Assert publication SUCCEEDED, not merely that it failed differently. "not this
+        # refusal" is satisfied by any other refusal, which would leave the real side of the
+        # comparison unverified.
+        self.assertEqual(real.returncode, 0, real.stderr)
+        self.assertIn("PR_URL=", real.stdout,
+                      "the real helper must publish and report the PR")
 
 
 class Test_atomic_registry_write(unittest.TestCase):

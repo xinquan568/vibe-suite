@@ -62,20 +62,18 @@ def refuse(reason: str) -> None:
 def unwrap(record):
     """A ledger row's payload, whether or not it arrived in an event envelope.
 
-    THE CONTRACT AND THE PRODUCER DISAGREE, and this reads correctly under both. SCHEMAS.md
-    section 2 documents a FLAT finding record — `event`, `timestamp`, `repo`, `fingerprint` at
-    the top level with `event: "finding"` as a discriminator. But auditor-audit.yml appends
-    through its `envelope` helper, so what is actually on disk today is
-    `{timestamp, workflow, event, run_id, run_number, data: {...}}`.
+    THE ENVELOPE IS CANONICAL. SCHEMAS.md section 2 now states that a finding record's fields
+    are the contents of `data` inside the section 7 envelope —
+    `{timestamp, workflow, event, run_id, run_number, data: {...}}` — which is what every
+    emitter has always written. Flat rows are still accepted because legacy and transitional
+    data exists, not because the shape is undecided.
 
     Picking one shape silently discards every row of the other: reading flat rows from an
     enveloped ledger yields records with no `repo`, no `rule_id` and no `fingerprint`, which
     aggregate to zero of everything and render as a complete, confident dashboard.
 
-    So a row carrying BOTH `event` and a dict `data` is unwrapped; anything else is already
-    flat. This is deliberately not a choice between the two readings — it is the only reading
-    that survives whichever way the maintainer settles the conflict. The discrepancy is real
-    and is flagged in the PR rather than quietly resolved here.
+    So a row carrying BOTH `event` and a dict `data` is unwrapped; anything else is read as a
+    legacy flat row.
     """
     if isinstance(record, dict) and isinstance(record.get("data"), dict) and "event" in record:
         merged = dict(record["data"])

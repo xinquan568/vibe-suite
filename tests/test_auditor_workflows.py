@@ -1725,21 +1725,42 @@ class TestPushCredentials(unittest.TestCase):
                 # between.
                 if stripped.startswith(("#", "- ")) or ".sh" in stripped:
                     continue
-                if not re.match(r"^(?:if\s+|!\s+|then\s+|&&\s+)*git\s+[^,.;]*\bpush\b",
-                                stripped):
+                # Leading VAR=value assignments are part of the command, and BOTH repaired
+                # sites start with one (`GIT_AUTH_TOKEN="$GH_TOKEN" git ... push`). Omitting
+                # them from this pattern skipped exactly the two commands this check exists to
+                # protect — the third time this guard was vacuous, and each time it was green.
+                if not re.match(
+                        r"^(?:if\s+|!\s+|then\s+|&&\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+                        r"git\s+.*\bpush\b", stripped):
                     continue
                 sites.append((wf.name, stripped))
         return sites
 
-    def test_the_test_actually_finds_push_commands(self):
-        """The guard on the guard. A property test over zero subjects passes for free, and the
-        first version of the check below did exactly that."""
-        self.assertGreaterEqual(len(self._push_sites()), 2,
-                                "no push commands found — the scan is broken, not the workflows")
+    #: The workflows this item repaired. Naming them is the point: a count alone was satisfied
+    #: three times over by the EXEMPTED file's sites while covering neither repair.
+    REPAIRED = {"auditor-cite-exemplars.yml", "auditor-refine-rules.yml"}
+
+    def test_the_scan_covers_the_commands_it_was_written_to_protect(self):
+        """The guard on the guard, and it took three attempts to make honest.
+
+        v1 scanned physical lines while both commands use `\\` continuations: zero matches.
+        v2 required the line to start with `git`, but both start with an env assignment: zero.
+        v3 forbade punctuation between `git` and `push` to exclude prose — and the dot in
+        `credential.helper` is punctuation, so again zero. Each version passed, and each would
+        have stayed green with the credential blocks deleted.
+
+        A count is not enough: five sites in the EXEMPTED file satisfied `>= 2` every time.
+        This asserts the repaired files specifically.
+        """
+        covered = {name for name, _ in self._push_sites()}
+        self.assertTrue(self.REPAIRED <= covered,
+                        f"the scan misses {sorted(self.REPAIRED - covered)} — it is vacuous "
+                        f"for exactly the commands it exists to protect")
 
     #: auditor-contribute.yml is E8.2b's (issue #164) and is not in this item's scope. It has
-    #: FOUR unauthenticated pushes, found by this check once it was repaired to look at logical
-    #: lines. Recorded here rather than fixed, so the next item inherits a named defect instead
+    #: several unauthenticated pushes, found by this check once it was repaired. The count is
+    #: deliberately not written here: the last version said "four", the scanner found five, and
+    #: a stale number in a comment is a small lie that outlives whoever can correct it. Recorded here rather than fixed, so the next item inherits a named defect instead
     #: of an exemption nobody remembers the reason for — and so this check stays honest about
     #: what it is not covering.
     OUT_OF_SCOPE = {"auditor-contribute.yml"}

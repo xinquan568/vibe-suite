@@ -57,6 +57,7 @@ SCANNED = frozenset(
         "hooks",  # executed by the harness
         "schemas",
         "scripts",  # "used by commands, hooks and CI"
+        "site",  # the public site (E8.4) — shipped and served, so its sources are pin-scanned
         "skills",
         "templates",  # "copied or rendered into a target project"
     }

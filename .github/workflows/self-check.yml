@@ -1,0 +1,102 @@
+# Scheduled self-check (E8.4 / vibe-61).
+#
+# The suite auditing itself, on a schedule and on demand. Two jobs:
+#
+#   badge      refreshes the shields.io endpoint payload from the score history via
+#              `bin/vibe-badge`. The tool writes no files by design — the caller redirects —
+#              so the payload leaves as a run artifact. A missing history is an honest
+#              "no data" badge (exit 0): a repository before its first scored run still
+#              deserves a rendering badge. The attestation sidecar refuses when there is
+#              nothing to attest, so it is requested only when a history exists.
+#   structure  runs `bin/vibe-check` over the repository, and again with `--mirrors` so a
+#              hand-edited `codex/` file is caught here even if no PR touched it. Mirror
+#              staleness is a drift defect: it appears with time, not with a commit, which is
+#              exactly what a scheduled run is for.
+#
+# Both jobs hold `contents: read` alone. This workflow reports; it changes nothing.
+#
+# No model identifiers appear in this workflow (principle P9) — every tool uses its own
+# default.
+
+name: self-check
+
+on:
+  schedule:
+    # Weekly, off the hour: a scheduled run at :00 queues behind everyone else's cron.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: self-check-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SCORE_HISTORY: .claude/vibe-history.json
+
+jobs:
+  badge:
+    name: refresh the score badge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Badge endpoint payload
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/badge"
+          mkdir -p "$out"
+          bin/vibe-badge --history "$SCORE_HISTORY" > "$out/badge.json"
+          python3 -m json.tool "$out/badge.json"
+
+      - name: Attestation sidecar, when there is something to attest
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/badge"
+          if [ ! -f "$SCORE_HISTORY" ]; then
+            echo "no score history at $SCORE_HISTORY; nothing to attest"; exit 0
+          fi
+          bin/vibe-badge --history "$SCORE_HISTORY" --attestation > "$out/attestation.json"
+          python3 -m json.tool "$out/attestation.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vibe-badge
+          path: ${{ runner.temp }}/badge
+          retention-days: 30
+          if-no-files-found: error
+
+  structure:
+    name: structural and mirror checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Structural checks
+        run: |
+          set -euo pipefail
+          bin/vibe-check .
+
+      - name: Generated mirror is not stale
+        run: |
+          set -euo pipefail
+          bin/vibe-check . --mirrors

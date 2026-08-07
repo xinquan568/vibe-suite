@@ -1,0 +1,6 @@
+nouns:
+  - canonical: finding
+    deprecated: [issue]
+verbs:
+  - canonical: audit
+    deprecated: [review]

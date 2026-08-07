@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: ISC
+"""Render per-repo audit results into one report page per audited repo (E8.4 / vibe-61).
+
+Reads `<corpus>/manifest.json`, follows its `repos` list to each repo's audit JSON, and emits
+`<out>/data/reports.json` plus `<out>/reports/index.md` and a page per repo. Per D-C an absent
+corpus is the honest pre-migration state: exit 0 with zero entries and a "no audit data yet"
+notice. A manifest that cannot be parsed is an error and renders nothing; so is an audit file
+that is present but corrupt, because a half-read audit would publish a score nobody measured.
+
+    bin/vibe-build-site-report-pages --corpus <dir> --out <dir>
+"""
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+BUILDER = "vibe-build-site-report-pages"
+SLUG = "reports"
+PAGE = "reports/index.md"
+NOTICE = "no audit data yet"
+
+#: worst first — the order findings are counted and listed in.
+SEVERITIES = ("critical", "major", "minor", "info")
+
+
+def fail(message):
+    """Report a named input defect on stderr and exit non-zero without rendering."""
+    sys.stderr.write(f"{BUILDER}: {message}\n")
+    raise SystemExit(2)
+
+
+def load_manifest(corpus):
+    """Parse the corpus manifest, or return None when the corpus does not exist yet."""
+    manifest = corpus / "manifest.json"
+    if not corpus.is_dir() or not manifest.is_file():
+        return None
+    try:
+        parsed = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        fail(f"unparseable manifest at {manifest}: {exc}")
+    if not isinstance(parsed, dict):
+        fail(f"manifest at {manifest} is not a JSON object")
+    return parsed
+
+
+def slugify(text):
+    return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-") or "repo"
+
+
+def tally(findings):
+    counts = {}
+    for finding in findings:
+        severity = finding.get("severity") if isinstance(finding, dict) else None
+        name = str(severity).lower() if severity else "unrated"
+        counts[name] = counts.get(name, 0) + 1
+    return dict(sorted(counts.items(),
+                       key=lambda pair: (SEVERITIES.index(pair[0])
+                                         if pair[0] in SEVERITIES else len(SEVERITIES), pair[0])))
+
+
+def read_audit(corpus, repo):
+    """Turn one manifest repo record into an entry carrying its score and finding tally."""
+    if isinstance(repo, str):
+        name, rel = Path(repo).stem, repo
+    elif isinstance(repo, dict):
+        name, rel = repo.get("name"), repo.get("audit") or repo.get("path")
+    else:
+        return None
+    if not isinstance(rel, str):
+        sys.stderr.write(f"{BUILDER}: skipping repo record with no audit path: {repo!r}\n")
+        return None
+    path = corpus / rel
+    if not path.is_file():
+        sys.stderr.write(f"{BUILDER}: skipping audit named by the manifest but absent: {rel}\n")
+        return None
+    try:
+        audit = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        fail(f"unparseable audit at {path}: {exc}")
+    if not isinstance(audit, dict):
+        fail(f"audit at {path} is not a JSON object")
+    findings = audit.get("findings") if isinstance(audit.get("findings"), list) else []
+    name = name or audit.get("repo") or Path(rel).stem
+    return {"repo": str(name), "slug": slugify(name), "source": rel,
+            "score": audit.get("score"), "findings": len(findings),
+            "severities": tally(findings), "page": f"reports/{slugify(name)}.md",
+            "detail": [f for f in findings if isinstance(f, dict)]}
+
+
+def collect(corpus, manifest):
+    repos = manifest.get("repos") if isinstance(manifest.get("repos"), list) else []
+    entries = [read_audit(corpus, repo) for repo in repos]
+    return sorted([entry for entry in entries if entry], key=lambda entry: entry["repo"])
+
+
+def render_index(entries):
+    if not entries:
+        return ("# Audit reports\n\n"
+                f"_{NOTICE}._ No repository has been published here yet; a report page appears "
+                "for each repo as its results land.\n")
+    lines = ["# Audit reports", "", f"{len(entries)} repositor(y/ies) published.", "",
+             "| Repo | Score | Findings |", "| --- | --- | --- |"]
+    lines += [f"| [{e['repo']}]({e['slug']}.md) | {e['score'] if e['score'] is not None else '—'}"
+              f" | {e['findings']} |" for e in entries]
+    return "\n".join(lines) + "\n"
+
+
+def render_report(entry):
+    score = entry["score"] if entry["score"] is not None else "unscored"
+    lines = [f"# {entry['repo']}", "", f"Score: **{score}**  ",
+             f"Findings: **{entry['findings']}**", ""]
+    if entry["severities"]:
+        lines += ["| Severity | Count |", "| --- | --- |"]
+        lines += [f"| {name} | {count} |" for name, count in entry["severities"].items()]
+        lines.append("")
+    if entry["detail"]:
+        lines += ["## Findings", ""]
+        lines += [f"- `{f.get('id', '?')}` — {f.get('severity', 'unrated')}"
+                  f"{': ' + str(f['title']) if f.get('title') else ''}" for f in entry["detail"]]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog=BUILDER, description=__doc__.splitlines()[0])
+    parser.add_argument("--corpus", required=True, type=Path, help="corpus root directory")
+    parser.add_argument("--out", required=True, type=Path, help="site output directory")
+    args = parser.parse_args(argv)
+
+    manifest = load_manifest(args.corpus)
+    entries = [] if manifest is None else collect(args.corpus, manifest)
+
+    payload = {"builder": BUILDER, "count": len(entries), "entries": entries}
+    write(args.out / "data" / f"{SLUG}.json", json.dumps(payload, indent=2) + "\n")
+    write(args.out / PAGE, render_index(entries))
+    for entry in entries:
+        write(args.out / entry["page"], render_report(entry))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

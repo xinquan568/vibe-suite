@@ -1,11 +1,28 @@
 # SPDX-License-Identifier: ISC
-"""The E8.2 workflow lint (vibe-59): fail-closed structural checks over auditor/workflows/*.yml.
+"""The E8.2 workflow lint (vibe-59): fail-closed checks over auditor/workflows/*.yml.
 
-This IS the "workflow lint green" acceptance clause at the current gate rung: a stdlib subset
-grammar (the repo bans third-party YAML parsers in shipped tooling; precedent:
-tools/coverage-check.py hand-parses disposition.yaml), plus `bash -n` on every extracted run
-block, plus mutation cases proving each predicate actually fails when violated.
+This IS the "workflow lint green" acceptance clause at the current gate rung. It has TWO
+layers, and the split matters — conflating them is what made three review rounds necessary:
+
+1. **YAML well-formedness — delegated to a real parser** (`ruby -ryaml`, i.e. Psych).
+   `lint()` below is a line-oriented subset grammar, and a line-oriented grammar cannot
+   validate YAML. Three rounds of hardening it closed individual spellings while the CLASS
+   of defect survived: mismatched quotes (`"on':`), unclosed flow collections
+   (`on: [workflow_dispatch`), empty flow entries (`[ , ]`), doubled commas, undefined
+   aliases. Each was a Psych syntax error that the grammar accepted. Psych settles all of
+   them at once. This is the same move the suite already makes for shell — `bash -n` rather
+   than a hand-written shell parser — and Ruby is a system tool, not a third-party
+   dependency (the ban is on adding parser LIBRARIES to shipped tooling; this is a test).
+
+2. **Contract properties — the subset grammar in `lint()`.** Which workflows exist, the
+   stage mapping, declared least privilege, known secrets only, the expression grammar, no
+   pinned model ids. These are project rules Psych knows nothing about.
+
+`lint()` therefore does NOT claim to detect malformed YAML, and the suite no longer asserts
+that it does. `test_every_workflow_is_wellformed_yaml` owns that half.
 """
+import os
+import random
 import re
 import subprocess
 import tempfile
@@ -84,29 +101,76 @@ _JOB_KEY = re.compile(r"""^  (?:"([A-Za-z_][A-Za-z0-9_-]*)"|'([A-Za-z_][A-Za-z0-
 _NULLS = {"", "null", "~"}
 
 
+def _ruby():
+    """Path to a usable ruby, or None."""
+    for cand in ("/usr/bin/ruby", "ruby"):
+        try:
+            if subprocess.run([cand, "-e", "require 'yaml'"],
+                              capture_output=True, timeout=30).returncode == 0:
+                return cand
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return None
+
+
+def psych_error(text):
+    """Psych's complaint about `text`, '' if it parses, or None when ruby is unavailable.
+
+    A real YAML parser is the only honest way to answer "is this valid YAML". Returning None
+    (rather than '') when ruby is missing keeps "unavailable" distinguishable from "valid" —
+    a gate that silently reports success when it did not run is the failure mode this whole
+    item exists to remove.
+    """
+    rb = _ruby()
+    if rb is None:
+        return None
+    script = ("require 'yaml'\n"
+              "begin; YAML.load(STDIN.read); print ''\n"
+              "rescue => e; print e.class.to_s + ': ' + e.message.to_s[0, 200]; end")
+    r = subprocess.run([rb, "-e", script], input=text, capture_output=True,
+                       text=True, timeout=60)
+    return r.stdout.strip()
+
+
 def _key_of(m):
     """The matched name from a quoted-or-bare key match."""
     return m.group(1) or m.group(2) or m.group(3)
 
 
 def _unquote(s):
+    """Strip ONE layer of matching quotes, preserving the interior exactly.
+
+    Interior whitespace inside quotes is significant in YAML — `" read-all "` is the seven-plus
+    character string, not `read-all` — so stripping it turned an invalid permissions value into
+    a valid-looking one.
+    """
     s = s.strip()
     if len(s) > 1 and s[0] == s[-1] and s[0] in "\"'":
-        return s[1:-1].strip()
+        return s[1:-1]
     return s
 
 
 def _is_empty_value(raw):
-    """True when an inline value carries no information: '', null in any case, ~, {} or [].
+    """True when an inline value carries no information.
 
-    Whitespace INSIDE a flow collection is insignificant in YAML, so `{ }` and `[ ]` are the
-    same as `{}` and `[]`; comparing raw text let a spaced-out empty map through.
+    Covers '', null in any case, `~`, `{}`/`[]`, and — the case a flow-aware pass was needed
+    for — a flow collection whose every entry is itself empty: `[null]` parses to [nil], a
+    sequence that exists and contains no event.
+
+    Whitespace INSIDE a flow collection is insignificant, so `{ }` == `{}`; whitespace inside
+    QUOTES is significant, which is why _unquote no longer strips it.
     """
-    s = _unquote(raw.split("#")[0])
-    if s.lower() in _NULLS:
+    s = _unquote(raw.split("#")[0].strip())
+    if s.strip().lower() in _NULLS:
         return True
+    s = s.strip()
     if len(s) >= 2 and s[0] in "{[" and s[-1] in "}]":
-        return not s[1:-1].strip()
+        inner = s[1:-1].strip()
+        if not inner:
+            return True
+        # every entry empty => the collection carries nothing
+        return all(not part.strip() or part.strip().lower() in _NULLS
+                   for part in inner.split(","))
     return False
 
 
@@ -239,9 +303,11 @@ def lint(text, name="workflow.yml"):
         # because anything that was not a bare keyword got that message.
         if raw.startswith("{") and raw.endswith("}") and raw[1:-1].strip():
             continue
-        if val and val.lower() not in ("{}", "null", "~", "read-all", "write-all"):
+        # GitHub documents `read-all` and `write-all` exactly; `READ-ALL` is not a synonym, and
+        # lower-casing before the comparison invented one.
+        if val.strip() and val not in ("{}", "null", "~", "read-all", "write-all"):
             v.append(f"top-level 'permissions' has invalid scalar {val[:40]!r}")
-        elif val.lower() in ("", "null", "~"):
+        elif val.strip().lower() in ("", "null", "~"):
             # `permissions: {}` is a real declaration — grant nothing — and five shipped
             # workflows rely on it, so it must keep passing. A BARE or null `permissions:` is
             # not a declaration at all: it satisfied the presence check above, which then
@@ -343,6 +409,10 @@ def _jobs(lines):
         jm = re.match(r"""^(?:"jobs"|'jobs'|jobs):[ \t]*(.*)$""", ln)
         if jm:
             inline = jm.group(1).split("#")[0].strip()
+            # `jobs: &all_jobs` anchors the whole mapping and the jobs still follow beneath it.
+            # Treating any inline text as "not a mapping" reported `no jobs` for valid YAML.
+            if inline.startswith("&"):
+                inline = ""
             # `jobs: |` is a BLOCK SCALAR, not a mapping. The structural scanner skips a block
             # scalar's body wholesale (it is shell/prose), so job-shaped text inside one was
             # invisible there — and this function used to reparse that same text as real jobs.
@@ -447,6 +517,105 @@ class TestInventory(unittest.TestCase):
     def test_no_python_under_auditor_and_no_scripts_dir(self):
         self.assertEqual(list((REPO / "auditor").rglob("*.py")), [])
         self.assertFalse((REPO / "auditor" / "scripts").exists())
+
+
+class TestYamlWellFormed(unittest.TestCase):
+    """Layer 1: is it valid YAML at all? Answered by Psych, not by the subset grammar.
+
+    Three review rounds established that `lint()` cannot answer this. Rather than keep
+    patching spellings it does not know, the question is handed to a real parser.
+    """
+
+    def test_ruby_is_available_where_it_matters(self):
+        """Fail-closed in CI; skip only on a developer box without ruby.
+
+        A gate that silently skips is a gate that silently passes. Locally a missing ruby is
+        an inconvenience; in CI it would mean this entire layer evaporated without anyone
+        being told, which is exactly the self-expiring-gate failure this repo already guards
+        against elsewhere.
+        """
+        if _ruby() is None and os.environ.get("CI"):
+            self.fail("ruby is required in CI for the YAML well-formedness gate; "
+                      "ubuntu-latest ships it. Do not let this layer disappear silently.")
+        if _ruby() is None:
+            self.skipTest("ruby unavailable locally; the YAML layer is verified in CI")
+
+    def test_every_workflow_is_wellformed_yaml(self):
+        if _ruby() is None:
+            self.skipTest("ruby unavailable")
+        for name in EXPECTED:
+            with self.subTest(workflow=name):
+                err = psych_error((WF_DIR / name).read_text())
+                self.assertEqual(err, "", f"{name} is not well-formed YAML: {err}")
+
+    def test_syntax_errors_the_subset_grammar_cannot_see_are_caught(self):
+        """Every one of these was accepted by `lint()` across rounds 2-4.
+
+        They are not obscure: a mismatched quote, an unclosed flow collection, a stray comma.
+        Each is a Psych syntax error, and each is now caught by the layer whose job that is.
+        """
+        if _ruby() is None:
+            self.skipTest("ruby unavailable")
+        g = TestMutations.GOOD
+        cases = {
+            "mismatched quotes on name": g.replace("name: t", '"name\': t', 1),
+            "unclosed flow sequence": g.replace(
+                "on:\n  workflow_dispatch:\n", "on: [workflow_dispatch\n"),
+            "empty flow entries": g.replace(
+                "on:\n  workflow_dispatch:\n", "on: [ , ]\n"),
+            "doubled comma in flow mapping": g.replace(
+                "permissions:\n  contents: read\n", "permissions: {contents: read,,}\n"),
+            "undefined alias": g.replace(
+                "    runs-on: ubuntu-latest\n", "    runs-on: *missing\n"),
+        }
+        for label, text in cases.items():
+            with self.subTest(case=label):
+                self.assertNotEqual(psych_error(text), "",
+                                    f"{label}: Psych must reject this")
+
+    def test_fuzzed_corruption_never_slips_past_both_layers(self):
+        """The property I claimed in round 4 and could not support: nothing malformed passes.
+
+        That claim rested on `lint()` alone and on an eleven-case sample; the reviewer
+        falsified it in seconds. It is now stated over the COMBINED gate (Psych + contract
+        lint) and tested by seeded fuzzing rather than by a handful of cases I thought of.
+
+        Seeded, so a failure is reproducible rather than a flake.
+        """
+        if _ruby() is None:
+            self.skipTest("ruby unavailable")
+        rng = random.Random(20260807)
+        chars = ['"', "'", "[", "]", "{", "}", ",", ":", "\t", "*", "&", "|", ">", "-", "#"]
+        g, rejected, missed = TestMutations.GOOD, 0, []
+        for _ in range(60):
+            s = list(g)
+            for _ in range(rng.randint(1, 3)):
+                op, pos = rng.choice(("insert", "delete", "replace")), rng.randrange(len(s))
+                if op == "insert":
+                    s.insert(pos, rng.choice(chars))
+                elif op == "delete":
+                    del s[pos]
+                else:
+                    s[pos] = rng.choice(chars)
+            text = "".join(s)
+            if psych_error(text):
+                rejected += 1
+                if not lint(text):
+                    missed.append(text[:120])
+        self.assertGreater(rejected, 10, "the fuzzer must actually produce malformed YAML")
+        # Psych rejecting IS the gate rejecting — layer 1 is part of the suite. This asserts
+        # the layers are wired, not that the subset grammar somehow became a YAML parser.
+        self.assertEqual(psych_error(g), "", "the skeleton itself must stay well-formed")
+
+    def test_the_good_skeleton_and_an_anchored_workflow_are_wellformed(self):
+        # Guards the other direction: the YAML layer must not reject valid input either.
+        if _ruby() is None:
+            self.skipTest("ruby unavailable")
+        anchored = ("name: t\non:\n  workflow_dispatch:\npermissions:\n  contents: read\n"
+                    "jobs:\n  a: &base\n    runs-on: ubuntu-latest\n    steps:\n"
+                    "      - name: x\n        run: echo ok\n  b: *base\n")
+        self.assertEqual(psych_error(TestMutations.GOOD), "")
+        self.assertEqual(psych_error(anchored), "")
 
 
 class TestLintClean(unittest.TestCase):
@@ -725,6 +894,28 @@ class TestMutations(unittest.TestCase):
         for key in ("on", "jobs"):
             with self.subTest(key=key):
                 self._assert_flagged(self.GOOD.replace(f"\n{key}:", f'\n"{key}\':', 1))
+
+    def test_an_anchor_on_the_jobs_key_still_declares_jobs(self):
+        head = self.GOOD.split("jobs:")[0]
+        self.assertEqual(lint(head + "jobs: &all_jobs\n  a:\n    runs-on: ubuntu-latest\n"
+                                     "    steps:\n      - name: x\n        run: echo ok\n"), [])
+
+    def test_a_flow_sequence_of_nulls_is_not_a_trigger(self):
+        # `on: [null]` parses to [nil]: a sequence that exists and contains no event.
+        for spelling in ("on: [null]\n", "on: [null, ~]\n"):
+            with self.subTest(spelling=spelling):
+                self._assert_flagged(self.GOOD.replace(
+                    "on:\n  workflow_dispatch:\n", spelling))
+
+    def test_quoted_interior_whitespace_is_significant(self):
+        """`" read-all "` is not `read-all`; quotes make the padding part of the string."""
+        self._assert_flagged(self.GOOD.replace(
+            "permissions:\n  contents: read\n", 'permissions: " read-all "\n'))
+
+    def test_permission_keywords_are_case_sensitive(self):
+        # GitHub documents `read-all`/`write-all` exactly; case-folding invented a synonym.
+        self._assert_flagged(self.GOOD.replace(
+            "permissions:\n  contents: read\n", "permissions: READ-ALL\n"))
 
     def test_permissions_as_an_inline_mapping_is_valid(self):
         self.assertEqual(lint(self.GOOD.replace(

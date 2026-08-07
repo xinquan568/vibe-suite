@@ -56,62 +56,76 @@ assert not set(PIPELINE_WORKFLOWS) & set(SITE_RELEASE_WORKFLOWS), "auditor row s
 assert len(set(PIPELINE_WORKFLOWS) | set(SITE_RELEASE_WORKFLOWS)) == 24, "union is not SS5.0's 24"
 
 
-def _workflow_files(d):
-    """Every real, non-empty workflow file under `d`, in BOTH extensions GitHub accepts.
+#: The five E8.4 site builders, by exact name. The row requires this SET, not a count, so a
+#: renamed builder yields -1 rather than passing as "still five files".
+SITE_BUILDERS = frozenset((
+    "vibe-build-case-studies-index", "vibe-build-docs", "vibe-build-reference-md",
+    "vibe-build-site-report-pages", "vibe-build-vocab-data",
+))
 
-    Three separate ways this used to under-count:
-      * `rglob` matches DIRECTORIES, so `auditor-audit.yml/` read as a present workflow;
-      * a zero-byte file satisfied presence while being no workflow at all;
-      * only `.yml` was scanned, though GitHub accepts `.yaml` equally — so a `.yaml` copy was
-        invisible to the inventory while being live to Actions.
+
+def _workflow_entries(d):
+    """Every path under `d` that LOOKS like a workflow, valid or not.
+
+    Deliberately unfiltered: the previous version dropped directories and empty files BEFORE
+    anomaly detection, so an extra `sneaky.yml/` or a zero-byte file simply vanished from the
+    census instead of reddening a row. Junk has to be SEEN to be rejected.
     """
     if not d.is_dir():
         return []
-    return [f for ext in ("*.yml", "*.yaml") for f in d.rglob(ext)
-            if f.is_file() and f.stat().st_size > 0]
+    return [f for ext in ("*.yml", "*.yaml") for f in d.rglob(ext)]
+
+
+def _bad_entry(f, homes):
+    """True when a workflow-shaped path is not a real workflow in an accepted home.
+
+    GitHub runs workflows only from a workflow directory, so a file parked in
+    `auditor/not-workflows/` is not part of the unit however correctly it is named.
+    """
+    return (f.parent not in homes or not f.is_file() or f.stat().st_size == 0)
 
 
 def _pipeline_count(r):
-    """Required pipeline workflows present, or -1 if `auditor/` holds anything unaccounted for.
+    """Required pipeline workflows present, or -1 on any structural anomaly under `auditor/`.
 
-    Returning -1 (never a legal target) is how a structural anomaly reddens the row instead of
-    being averaged away: a stray or renamed file cannot substitute for a deleted required one.
+    -1 is never a legal target, so an anomaly reddens the row instead of being averaged away:
+    a stray, misplaced, duplicated, empty or directory-shaped entry cannot substitute for a
+    deleted required workflow.
     """
-    files = _workflow_files(r / "auditor")
-    stems = [f.stem for f in files]
+    home = r / "auditor" / "workflows"
+    entries = _workflow_entries(r / "auditor")
+    if any(_bad_entry(f, {home}) for f in entries):
+        return -1
+    stems = [f.stem for f in entries]
     if set(stems) - set(PIPELINE_WORKFLOWS) - set(SITE_RELEASE_WORKFLOWS):
         return -1
-    # Reducing to a SET lost multiplicity, so the same workflow in a nested subdirectory (or
-    # under both extensions) collapsed into one and the unit carried more files than it claimed.
+    # A SET loses multiplicity, so the same workflow twice (nested, or under both extensions)
+    # collapsed into one and the unit carried more files than it claimed.
     if len(stems) != len(set(stems)):
         return -1
     return len(set(stems) & set(PIPELINE_WORKFLOWS))
 
 
 def _site_count(r):
-    """Site/release workflows present in exactly one accepted home, or -1 on a duplicate.
+    """Site/release workflows present exactly once in an accepted home, or -1 on an anomaly.
 
-    The reference keeps these under .github/workflows/ and this repo may stage them under
-    auditor/workflows/, so both are accepted — but a name present in BOTH is a real duplicate
-    that an existential test silently collapsed into a single satisfied name.
+    The reference keeps these under `.github/workflows/` and this repo may stage them under
+    `auditor/workflows/`, so both homes are accepted — but only those two, and only once each.
     """
-    # Scanned RECURSIVELY across both homes: checking two direct paths meant a nested copy was
-    # simply unseen, so a duplicate that Actions would happily run did not redden the row.
-    seen = [f.stem for f in
-            _workflow_files(r / ".github") + _workflow_files(r / "auditor")
-            if f.stem in SITE_RELEASE_WORKFLOWS]
+    homes = {r / ".github" / "workflows", r / "auditor" / "workflows"}
+    seen = []
+    for d in (r / ".github", r / "auditor"):
+        for f in _workflow_entries(d):
+            if f.stem not in SITE_RELEASE_WORKFLOWS:
+                continue          # ci.yml and friends are not this row's business
+            if _bad_entry(f, homes):
+                return -1
+            seen.append(f.stem)
     if len(seen) != len(set(seen)):
         return -1
     return len(set(seen))
 
-#: The five site builders E8.4 delivers, by exact filename. Counting alone would accept five
-#: wrongly-named files, so the row asserts membership of this frozen set.
-SITE_BUILDERS = frozenset((
-    "vibe-build-case-studies-index", "vibe-build-docs", "vibe-build-reference-md",
-    "vibe-build-site-report-pages", "vibe-build-vocab-data",
-))
 
-#: (label, §5.0 figure, rule, counter). The rule is a reviewed claim per row.
 ROWS = [
     ("Slash commands", 26, ATLEAST,
      lambda r: len([p for p in (r / "commands").glob("*.md")])),

@@ -246,6 +246,36 @@ class AuditorRowSplit(RowBase):
         self.assertFalse(self.ok(SITE_ROW),
                          "a site workflow present in both homes is a duplicate, not a pass")
 
+    def test_workflows_parked_outside_the_workflow_home_do_not_count(self):
+        """GitHub runs workflows from a workflow directory; elsewhere they are inert files.
+
+        The census scanned all of `auditor/` and `.github/`, so a complete set filed under
+        `auditor/not-workflows/` satisfied both rows while the unit had no live workflows.
+        """
+        self.seed_workflows("auditor/not-workflows", *PIPELINE_WORKFLOWS)
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "workflows outside the workflow home are not the unit")
+
+    def test_an_extra_empty_file_in_the_home_reddens_the_row(self):
+        """Junk has to be SEEN to be rejected.
+
+        Empty files and directories were filtered out BEFORE anomaly detection, so an extra
+        `sneaky.yml` simply vanished from the census rather than reddening anything.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        (self.tmp / "auditor" / "workflows" / "sneaky.yml").write_text("", encoding="utf-8")
+        self.assertFalse(self.ok(PIPELINE_ROW), "an extra empty entry must redden the row")
+
+    def test_an_extra_directory_in_the_home_reddens_the_row(self):
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        (self.tmp / "auditor" / "workflows" / "sneaky.yml").mkdir()
+        self.assertFalse(self.ok(PIPELINE_ROW), "an extra directory must redden the row")
+
+    def test_unrelated_workflows_in_the_github_home_are_not_this_rows_business(self):
+        # Guards the other direction: ci.yml lives there legitimately.
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS, "ci")
+        self.assertTrue(self.ok(SITE_ROW), "an unrelated .github workflow must not redden the row")
+
     def test_a_nested_duplicate_pipeline_workflow_is_caught(self):
         """Reducing paths to a SET of stems lost multiplicity.
 

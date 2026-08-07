@@ -1518,5 +1518,99 @@ class Test_git_push_with_retry(unittest.TestCase):
                             "mutation ineffective: the mutant should fail to complete the rebase")
 
 
+
+class Test_generate_daily_report(unittest.TestCase):
+    """`generate-daily-report.py` — the status page, and the two rates on it."""
+
+    HELPER = SCRIPTS / "generate-daily-report.py"
+    ACCEPT_ANCHOR = 'ACCEPTED = ("merged", "applied_separately")'
+    ACCEPT_MUTANT = 'ACCEPTED = ("merged",)'
+    DATE = "2026-08-07"
+
+    def _run(self, script_text=None, outcomes=None, empty=False):
+        d = Path(tempfile.mkdtemp())
+        if not empty:
+            (d / "report-cache").mkdir()
+            (d / "report-cache" / "registry-stats.json").write_text(
+                json.dumps({"total": 9, "by_status": {"discovered": 4, "audited": 3,
+                                                        "contributed": 2}}), encoding="utf-8")
+            (d / "report-cache" / "pr-outcomes.json").write_text(
+                json.dumps(outcomes if outcomes is not None else
+                           {"merged": 3, "applied_separately": 2, "rejected": 5, "open": 7}),
+                encoding="utf-8")
+            (d / "report-cache" / "rule-health.json").write_text(
+                json.dumps({"R01": {"findings": 10, "accepted": 4}}), encoding="utf-8")
+            (d / "report-cache" / "recent-activity.json").write_text(
+                json.dumps(["audited acme/widget"]), encoding="utf-8")
+        helper = Path(tempfile.mkdtemp()) / "helper.py"
+        helper.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
+        r = subprocess.run([sys.executable, str(helper), "--data-dir", str(d),
+                            "--date", self.DATE], capture_output=True, text=True)
+        report = d / "reports" / f"{self.DATE}.md"
+        return r, (report.read_text() if report.exists() else "")
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_acceptance_counts_applied_separately_not_only_merges(self):
+        """A maintainer who applies the fix themselves and closes the PR HAS accepted the
+        finding. Counting only merges undercounts the pipeline and pushes readers to optimise
+        for merges rather than for fixes."""
+        _, text = self._run()
+        self.assertIn("| **acceptance rate** (merged + applied separately) | **50%** |", text,
+                      "3 merged + 2 applied of 10 resolved is 50%")
+        self.assertIn("| merge-only rate | 30% |", text, "3 merged of 10 resolved is 30%")
+
+    def test_open_prs_are_not_counted_as_resolved(self):
+        """Dividing by open PRs makes the rate drift downward as new PRs appear, which says
+        nothing about whether findings are accepted."""
+        _, text = self._run()
+        self.assertIn("| resolved | 10 |", text, "open PRs leaked into the denominator")
+
+    def test_stage_counts_are_exact(self):
+        _, text = self._run()
+        for stage, count in (("discovered", 4), ("audited", 3), ("contributed", 2),
+                             ("tracked", 0), ("complete", 0)):
+            self.assertIn(f"| {stage} | {count} |", text, f"{stage} count wrong")
+        self.assertIn("| **total** | **9** |", text)
+
+    def test_missing_inputs_still_render(self):
+        """A missing section is information; it is not a reason to fail the run."""
+        r, text = self._run(empty=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("N/A", text)
+        self.assertIn("_No notable events._", text)
+
+    def test_no_resolved_prs_gives_na_not_a_division_error(self):
+        r, text = self._run(outcomes={"open": 4})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("**N/A**", text)
+
+    def test_the_same_date_and_inputs_render_identically(self):
+        _, first = self._run()
+        _, second = self._run()
+        self.assertEqual(first, second)
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        _, text = self._run(NOOP[".py"])
+        self.assertEqual(text, "", "sanity: a no-op writes no report")
+
+    def test_the_merges_only_mutant_understates_acceptance(self):
+        """The plausible wrong implementation: acceptance = merged / resolved.
+
+        It produces a perfectly well-formed report with a plausible percentage — nothing looks
+        wrong — while systematically understating the pipeline's effect.
+        """
+        src = self.HELPER.read_text()
+        self.assertIn(self.ACCEPT_ANCHOR, src, "mutation anchor missing")
+        _, text = self._run(src.replace(self.ACCEPT_ANCHOR, self.ACCEPT_MUTANT, 1))
+        # RESOLVED is derived from ACCEPTED, so this mutation shrinks the DENOMINATOR too:
+        # 3 merged of (3 merged + 5 rejected) = 38%, not 3 of 10. Asserting "not 50%" states
+        # the property — acceptance is understated — without depending on that coupling.
+        self.assertNotIn("| **acceptance rate** (merged + applied separately) | **50%** |", text,
+                         "mutation ineffective: the mutant still reports the true rate")
+        self.assertIn("| **acceptance rate** (merged + applied separately) | **38%** |", text,
+                      "the mutant should understate acceptance")
+
+
 if __name__ == "__main__":
     unittest.main()

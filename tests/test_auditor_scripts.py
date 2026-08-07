@@ -1612,5 +1612,77 @@ class Test_generate_daily_report(unittest.TestCase):
                       "the mutant should understate acceptance")
 
 
+
+class Test_report_resources(unittest.TestCase):
+    """I4.1 — the report templates and assets the renderers consume.
+
+    These are RESOURCES rather than helpers, so they have no no-op mutant. What they need is a
+    contract test: the placeholder set each template carries must be exactly what its renderer
+    substitutes. A template with a stale set substitutes nothing and renders literal braces —
+    which is precisely the state `single.html` was in before this.
+    """
+
+    TEMPLATES = REPO / "templates" / "report"
+    #: template -> the placeholders its renderer supplies. Anything else is drift.
+    CONTRACT = {
+        "single.html": {"PROJECT", "GENERATED_AT", "DATA_JSON"},
+        "dashboard.html": {"GENERATED_AT", "DATA_JSON"},
+        "docs/index.html": {"GENERATED_AT", "PRINCIPLES", "RULES", "SCORING", "VOCAB",
+                            "ARTIFACT_TYPES", "DRIFT", "WARRANT"},
+    }
+    ASSETS = ("vibe-report.css", "vibe-report.js", "vibe-dashboard.css",
+              "vibe-dashboard.js", "vibe-docs.css")
+
+    @staticmethod
+    def _placeholders(text):
+        return set(re.findall(r"\{\{([A-Z_0-9]+)\}\}", text))
+
+    def test_each_template_carries_exactly_its_renderers_placeholders(self):
+        for name, expected in self.CONTRACT.items():
+            with self.subTest(template=name):
+                path = self.TEMPLATES / name
+                self.assertTrue(path.is_file(), f"{name} missing")
+                found = self._placeholders(path.read_text(encoding="utf-8"))
+                self.assertEqual(found, expected,
+                                 f"{name} placeholder set drifted from the renderer contract")
+
+    def test_every_referenced_asset_exists(self):
+        """A missing stylesheet renders an unstyled page rather than an error, so the reference
+        is checked here instead of being noticed by eye."""
+        for name in self.CONTRACT:
+            path = self.TEMPLATES / name
+            for ref in re.findall(r'(?:href|src)="([^"]+)"', path.read_text(encoding="utf-8")):
+                if ref.startswith(("http:", "https:", "#")):
+                    continue
+                with self.subTest(template=name, asset=ref):
+                    self.assertTrue((path.parent / ref).resolve().is_file(),
+                                    f"{name} references missing {ref}")
+
+    def test_assets_carry_an_spdx_header(self):
+        for name in self.ASSETS:
+            with self.subTest(asset=name):
+                head = (self.TEMPLATES / "assets" / name).read_text(encoding="utf-8")[:200]
+                self.assertIn("SPDX-License-Identifier: ISC", head)
+
+    def test_no_external_hosts_are_referenced(self):
+        """These pages are opened offline and from artifact downloads. A CDN reference renders
+        a blank panel with no indication why, so the graph bundle is vendored instead."""
+        for name in self.CONTRACT:
+            text = (self.TEMPLATES / name).read_text(encoding="utf-8")
+            for ref in re.findall(r'(?:href|src)="(https?://[^"]+)"', text):
+                self.fail(f"{name} references an external host: {ref}")
+
+    def test_the_retired_placeholder_names_are_not_substitutable(self):
+        """The old names are documented in a comment; they must not look like placeholders.
+
+        A tool scanning for braces would otherwise find them and try to substitute tokens the
+        renderer does not supply.
+        """
+        text = (self.TEMPLATES / "single.html").read_text(encoding="utf-8")
+        for retired in ("G6_BUNDLE", "SCORE_SECTION", "RENDER_JS"):
+            with self.subTest(retired=retired):
+                self.assertNotIn("{{" + retired + "}}", text)
+
+
 if __name__ == "__main__":
     unittest.main()

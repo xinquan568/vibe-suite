@@ -149,5 +149,196 @@ class Test_batch_process(unittest.TestCase):
                          "mutation ineffective: the mutant should proceed with no registry")
 
 
+
+class Test_propose_rule_citations(unittest.TestCase):
+    """`propose-rule-citations.py` — S-4, and the links that end up in the rulebook."""
+
+    HELPER = SCRIPTS / "propose-rule-citations.py"
+    ANCHOR_A = '        if anchor not in text:'
+    MUTANT_A = '        if False:'
+    PREFIX = "https://github.com/xinquan568/vibe-suite/blob/auditor-data/exemplars"
+
+    RULES = ("# Rules\n\n**R01. No vague quantifiers.**\n"
+             "<!-- vibe-exemplar-citation:site R01 -->\n\n"
+             "**R02. Every line earns its cost.**\n"
+             "<!-- vibe-exemplar-citation:site R02 -->\n")
+
+    def _fixture(self, exemplars=None, rules=None):
+        d = Path(tempfile.mkdtemp())
+        (d / "exemplars").mkdir()
+        for name, text in (exemplars if exemplars is not None else {
+            "acme-widget.md": "---\nslug: acme-widget\nrepo: acme/widget\n"
+                              "audited: 2026-08-01\ncommit_sha: abc\nscore: 95\n"
+                              "exemplifies: [R01, R02]\n---\nbody\n",
+            "beta-tool.md": "---\nslug: beta-tool\nrepo: beta/tool\n"
+                            "audited: 2026-08-02\ncommit_sha: def\nscore: 92\n"
+                            "exemplifies:\n  - R01\n---\nbody\n",
+        }).items():
+            (d / "exemplars" / name).write_text(text, encoding="utf-8")
+        rules_path = d / "SKILL.md"
+        rules_path.write_text(self.RULES if rules is None else rules, encoding="utf-8")
+        return d, rules_path
+
+    def _run(self, d, rules_path, apply=True, prefix=None, script_text=None, env=None):
+        helper = self.HELPER
+        if script_text is not None:
+            helper = Path(tempfile.mkdtemp()) / "propose-rule-citations.py"
+            helper.write_text(script_text, encoding="utf-8")
+        argv = [sys.executable, str(helper), "--data-dir", str(d),
+                "--rules-path", str(rules_path)]
+        if apply:
+            argv.append("--apply")
+        if prefix is not False:
+            argv += ["--exemplar-url-prefix", prefix or self.PREFIX]
+        return subprocess.run(argv, capture_output=True, text=True,
+                              env=env if env is not None else
+                              {k: v for k, v in os.environ.items()
+                               if k not in ("VIBE_EXEMPLAR_URL_PREFIX", "GITHUB_REPOSITORY")})
+
+    # --- oracle ---------------------------------------------------------------------------
+    def test_citations_land_beneath_the_rulebooks_own_anchors(self):
+        """The rulebook carries hand-placed `:site RXX` anchors. Inventing marker pairs meant
+        every apply matched nothing, changed nothing, and still exited zero."""
+        d, rules = self._fixture()
+        r = self._run(d, rules)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = rules.read_text()
+        self.assertIn("<!-- vibe-exemplar-citation:site R01 -->\n"
+                      "<!-- vibe-exemplar-citation:begin R01 -->", text)
+        self.assertIn(f"]({self.PREFIX}/acme-widget.md)", text)
+
+    def test_both_frontmatter_shapes_are_read(self):
+        """The exemplar workflow documents an inline sequence AND a block list."""
+        d, rules = self._fixture()
+        self._run(d, rules)
+        block = rules.read_text().split("begin R01")[1].split("end R01")[0]
+        self.assertIn("acme/widget", block, "inline exemplifies was dropped")
+        self.assertIn("beta/tool", block, "block-list exemplifies was dropped")
+
+    def test_links_are_absolute(self):
+        """The rulebook is read on github.com, in editors, in rendered docs and inside quoted
+        issue bodies. A relative link resolves against whatever host is showing the page."""
+        d, rules = self._fixture()
+        self._run(d, rules)
+        for line in rules.read_text().splitlines():
+            if line.startswith("- ["):
+                with self.subTest(line=line):
+                    self.assertIn("](https://", line)
+
+    def test_a_second_apply_is_byte_identical(self):
+        """Appending stacks a block under the anchor on every run, and each block being
+        well-formed keeps the file looking correct as it grows without bound."""
+        d, rules = self._fixture()
+        self._run(d, rules)
+        first = rules.read_text()
+        self._run(d, rules)
+        self.assertEqual(rules.read_text(), first)
+
+    def test_ordering_is_stable(self):
+        d, rules = self._fixture()
+        self._run(d, rules)
+        first = rules.read_text()
+        d2, rules2 = self._fixture()
+        self._run(d2, rules2)
+        self.assertEqual(rules2.read_text(), first)
+
+    def test_a_rule_without_an_anchor_is_reported(self):
+        """Silence is how the original bug hid: nothing matched, nothing changed, exit zero."""
+        d, rules = self._fixture(rules="# Rules\n\n**R01.**\n"
+                                       "<!-- vibe-exemplar-citation:site R01 -->\n")
+        r = self._run(d, rules)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("no `:site R02` anchor", r.stderr)
+
+    def test_a_dry_run_writes_nothing(self):
+        d, rules = self._fixture()
+        before = rules.read_text()
+        r = self._run(d, rules, apply=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(rules.read_text(), before)
+
+    # --- refusals -------------------------------------------------------------------------
+    def test_a_missing_rules_file_is_refused(self):
+        d, _ = self._fixture()
+        r = self._run(d, d / "nope.md")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:propose-rule-citations:rules-file-missing", r.stderr)
+
+    def test_an_unconfigured_prefix_is_refused(self):
+        d, rules = self._fixture()
+        r = self._run(d, rules, prefix=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("exemplar-url-prefix-unconfigured", r.stderr)
+
+    def test_an_invalid_prefix_is_refused(self):
+        """HTTPS only, no userinfo, no query, no fragment, and the required path suffix."""
+        d, rules = self._fixture()
+        for bad in ("http://github.com/x/y/blob/auditor-data/exemplars",
+                    "https://u:p@github.com/x/y/blob/auditor-data/exemplars",
+                    "https://github.com/x/y/blob/auditor-data/exemplars?a=1",
+                    "https://github.com/x/y/blob/auditor-data/exemplars#f",
+                    "https://github.com/x/y/tree/main/exemplars"):
+            with self.subTest(prefix=bad):
+                r = self._run(d, rules, prefix=bad)
+                self.assertNotEqual(r.returncode, 0, f"{bad} accepted")
+                self.assertIn("exemplar-url-prefix-invalid", r.stderr)
+
+    def test_a_trailing_slash_is_stripped_rather_than_doubled(self):
+        d, rules = self._fixture()
+        r = self._run(d, rules, prefix=self.PREFIX + "/")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("exemplars//", rules.read_text())
+
+    def test_apply_with_no_exemplar_corpus_refuses(self):
+        """The explicit exception to "absent exemplars are optional": "none found" and "the
+        corpus failed to load" are identical empty lists, and one means every existing citation
+        should be deleted."""
+        d, rules = self._fixture()
+        before = rules.read_text()
+        import shutil
+        shutil.rmtree(d / "exemplars")
+        r = self._run(d, rules)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("exemplar-corpus-missing", r.stderr)
+        self.assertEqual(rules.read_text(), before, "the rules file must be untouched")
+
+    def test_apply_with_an_empty_corpus_refuses(self):
+        d, rules = self._fixture(exemplars={})
+        before = rules.read_text()
+        r = self._run(d, rules)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("exemplar-corpus-empty", r.stderr)
+        self.assertEqual(rules.read_text(), before)
+
+    def test_an_unsafe_exemplar_filename_is_refused(self):
+        d, rules = self._fixture()
+        (d / "exemplars" / "ok.md").write_text(
+            "---\nrepo: a/b\nexemplifies: [R01]\n---\n", encoding="utf-8")
+        r = self._run(d, rules, prefix="https://github.com/x/y/blob/auditor-data/exemplars")
+        self.assertEqual(r.returncode, 0, r.stderr)   # ordinary names are fine
+
+    # --- mutants --------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        d, rules = self._fixture()
+        before = rules.read_text()
+        self._run(d, rules, script_text=NOOP[".py"])
+        self.assertEqual(rules.read_text(), before, "sanity: a no-op writes nothing")
+
+    def test_the_stacking_mutant_grows_the_file_on_every_run(self):
+        """The plausible wrong implementation: insert beneath the anchor without replacing the
+        block already there. Each block stays well-formed, so the file keeps looking correct
+        while growing without bound."""
+        src = self.HELPER.read_text(encoding="utf-8")
+        anchor = "        if existing.search(text):"
+        self.assertIn(anchor, src, "mutation anchor missing")
+        mutant = src.replace(anchor, "        if False:", 1)
+        d, rules = self._fixture()
+        self._run(d, rules, script_text=mutant)
+        once = rules.read_text().count("begin R01")
+        self._run(d, rules, script_text=mutant)
+        self.assertGreater(rules.read_text().count("begin R01"), once,
+                           "mutation ineffective: the mutant should stack a second block")
+
+
 if __name__ == "__main__":
     unittest.main()

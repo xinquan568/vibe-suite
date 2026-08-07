@@ -76,17 +76,34 @@ def _workflow_entries(d):
     return [f for ext in ("*.yml", "*.yaml") for f in d.rglob(ext)]
 
 
-def _bad_entry(f, homes):
+def _bad_entry(f, homes, root=None):
     """True when a workflow-shaped path is not a real workflow in an accepted home.
 
     GitHub runs workflows only from a workflow directory, so a file parked in
     `auditor/not-workflows/` is not part of the unit however correctly it is named.
     """
     # is_file() and stat() FOLLOW symlinks, so a symlink to any real file counted as a
-    # workflow — including a link pointing outside the repo entirely. The unit must be made
-    # of real files, so the link itself is the thing to test.
-    return (f.parent not in homes or f.is_symlink()
-            or not f.is_file() or f.stat().st_size == 0)
+    # workflow — including a link pointing outside the repo entirely. The unit must be made of
+    # real files, so the link itself is the thing to test.
+    #
+    # Testing only the final component was not enough: making `auditor/` ITSELF a symlink to an
+    # externally populated tree left every child a plain file, so both rows went green over a
+    # directory that is not part of the repository. Every ancestor up to the home is checked.
+    if f.parent not in homes or f.is_symlink():
+        return True
+    # Walk ancestors only as far as the REPO ROOT. Going to the filesystem root reddened every
+    # legitimate tree on macOS, where `/var` is itself a symlink to `/private/var` — the check
+    # would have failed honest repositories, which is the same class of mistake as the reverted
+    # P9 decoder. What is outside the repository is not this row's business.
+    if root is not None:
+        ancestor = f.parent
+        while True:
+            if ancestor.is_symlink():
+                return True
+            if ancestor == root or ancestor == ancestor.parent:
+                break
+            ancestor = ancestor.parent
+    return not f.is_file() or f.stat().st_size == 0
 
 
 def _pipeline_count(r):
@@ -98,7 +115,7 @@ def _pipeline_count(r):
     """
     home = r / "auditor" / "workflows"
     entries = _workflow_entries(r / "auditor")
-    if any(_bad_entry(f, {home}) for f in entries):
+    if any(_bad_entry(f, {home}, r) for f in entries):
         return -1
     stems = [f.stem for f in entries]
     if set(stems) - set(PIPELINE_WORKFLOWS) - set(SITE_RELEASE_WORKFLOWS):
@@ -122,7 +139,7 @@ def _site_count(r):
         for f in _workflow_entries(d):
             if f.stem not in SITE_RELEASE_WORKFLOWS:
                 continue          # ci.yml and friends are not this row's business
-            if _bad_entry(f, homes):
+            if _bad_entry(f, homes, r):
                 return -1
             seen.append(f.stem)
     if len(seen) != len(set(seen)):

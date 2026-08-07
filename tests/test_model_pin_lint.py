@@ -457,54 +457,30 @@ class TestCIWiring(unittest.TestCase):
 
 
 
-class EscapedPins(unittest.TestCase):
-    """A pinned id spelled with string escapes must not slip past the raw-text scan.
+class EscapedPinsAreAKnownGap(unittest.TestCase):
+    """Pins the DECISION, so the gap is visible and the reverted fix is not re-attempted blind.
 
-    In YAML, JSON and most languages `"claude-opus-4-2025051\\u0034"` IS the dated id, but the
-    pattern only ever saw the literal backslash-u text, so the P9 gate could be bypassed by
-    spelling one digit as an escape. The scan now considers the decoded form as well.
+    A pinned id spelled with string escapes is invisible to this scanner. Closing it by decoding
+    escapes was tried and reverted: correct decoding needs the language and string context, so
+    the attempt missed the eight-digit `\\U` form and reported a pin for a Python RAW string
+    containing no escape at all. A repo-wide gate that fails honest code is worse than one with
+    a known evasion, and P9's job is to catch accidental pinning, not deliberate encoding.
     """
 
-    def test_a_unicode_escaped_dated_id_is_found(self):
-        line = 'model: "claude-opus-4-2025051\\u0034"'
-        self.assertEqual(lint.find_pins(line), [], "raw text alone cannot see it")
-        self.assertTrue(lint.find_pins(lint._decode_escapes(line)),
-                        "the decoded form must expose the pin")
+    def test_an_escaped_pin_is_not_detected_and_that_is_recorded(self):
+        line = 'model: "claude-opus-4-" "2025051\\u0034"'
+        self.assertEqual(lint.find_pins(line), [],
+                         "if this starts passing, the gap closed — update this test and the "
+                         "note in tools/model-pin-lint.py")
 
-    def test_hex_and_braced_escapes_are_decoded(self):
-        for line in ('a: "gpt-\\x35.6-sol"', 'a: "gpt-\\u{35}.6-sol"'):
-            with self.subTest(line=line):
-                self.assertTrue(lint.find_pins(lint._decode_escapes(line)))
+    def test_a_python_raw_string_is_not_reported_as_a_pin(self):
+        """The false positive the reverted fix introduced. This is the regression guard."""
+        self.assertEqual(lint.find_pins(r'X = r"gpt-\x35"'), [],
+                         "a raw string contains no escape; flagging it breaks honest builds")
 
-    def test_an_escaped_backslash_is_not_an_escape(self):
-        # An EVEN number of backslashes is a literal backslash, not a live escape sequence.
-        original = 'note: "C:\\\\umbrella"'
-        self.assertEqual(lint._decode_escapes(original), original)
-
-    def test_plain_text_is_unchanged(self):
-        for line in ("nothing here", "model: sonnet", "a: b"):
-            with self.subTest(line=line):
-                self.assertEqual(lint._decode_escapes(line), line)
-
-    def test_decoding_never_raises_on_hostile_input(self):
-        for line in ("\\uZZZZ", "\\u{FFFFFFFF}", "\\x", "\\u", "\\\\\\u0035", "\\u{}"):
-            with self.subTest(line=line):
-                lint._decode_escapes(line)   # must not raise
-
-    def test_a_scan_reports_the_escaped_pin_with_its_original_line(self):
-        """The reported line must be the SOURCE text, so the violation is findable in the file."""
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            (root / "scripts").mkdir()
-            (root / "scripts" / "x.py").write_text(
-                'MODEL = "claude-opus-4-2025051\\u0034"\n', encoding="utf-8")
-            found = lint.scan(root, lister=lambda r: ["scripts/x.py"], notice=lambda m: None)
-            self.assertEqual(len(found), 1, f"expected one violation, got {found}")
-            self.assertIn("\\u0034", found[0].text, "the original spelling must be reported")
-            # Assembled, not written whole: TestNoCommittedModelIds forbids a complete dated
-            # id literal anywhere in the tree, and this test is not exempt from the rule it
-            # exists to defend.
-            self.assertEqual(found[0].token, "claude-opus-4-" + "2025" + "0514")
+    def test_a_plainly_written_pin_is_still_caught(self):
+        self.assertTrue(lint.find_pins("model: gpt-5.6-sol"))
+        self.assertTrue(lint.find_pins("model: claude-opus-4-" + "2025" + "0514"))
 
 
 if __name__ == "__main__":

@@ -256,6 +256,31 @@ class AuditorRowSplit(RowBase):
         self.assertFalse(self.ok(PIPELINE_ROW),
                          "workflows outside the workflow home are not the unit")
 
+    def test_a_symlinked_ANCESTOR_directory_is_caught(self):
+        """Testing only the final path component was not enough.
+
+        Making `auditor/` itself a symlink to an externally populated tree left every child a
+        plain file, so both rows went green over a directory that is not part of the repo.
+        """
+        ext = self.tmp / "external"
+        (ext / "workflows").mkdir(parents=True)
+        for n in PIPELINE_WORKFLOWS:
+            (ext / "workflows" / f"{n}.yml").write_text("name: x\n", encoding="utf-8")
+        (self.tmp / "auditor").symlink_to(ext)
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "a symlinked auditor/ is not the repository's workflow set")
+
+    def test_an_ordinary_tree_is_not_reddened_by_ancestors_outside_the_repo(self):
+        """Guards the fix's own failure mode.
+
+        Walking ancestors to the FILESYSTEM root reddened every legitimate tree on macOS, where
+        `/var` is a symlink to `/private/var`. The walk stops at the repo root; what lies above
+        it is not this row's business.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.assertTrue(self.ok(PIPELINE_ROW),
+                        "a normal tree under a symlinked system temp dir must still pass")
+
     def test_a_symlinked_workflow_is_not_a_real_workflow(self):
         """`is_file()` and `stat()` FOLLOW symlinks, so a link counted as a real workflow.
 

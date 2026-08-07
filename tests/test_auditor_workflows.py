@@ -69,13 +69,19 @@ DATA_WRITERS = [
 
 TOP_KEYS = {"name", "on", "permissions", "concurrency", "env", "jobs"}
 KNOWN_SECRETS = {"CLAUDE_CODE_OAUTH_TOKEN", "PAT_TOKEN", "OPENAI_API_KEY", "GITHUB_TOKEN"}
-#: GitHub's closed set of permission scopes. Values are read/write/none. A mapping that merely
-#: PARSES is not a permissions declaration — `banana: read` and `contents: admin` are both valid
-#: YAML and both meaningless to Actions.
+#: GitHub's permission scopes and the values each accepts, verified against the current
+#: workflow-syntax documentation rather than recalled. The first version of this table was
+#: written from memory and was wrong in BOTH directions: it omitted `artifact-metadata`,
+#: `code-quality` and `vulnerability-alerts` (rejecting real workflows) and it accepted
+#: `id-token: read`, which is invalid. Values are per-scope for exactly that reason.
+_RW = frozenset(("read", "write", "none"))
 PERMISSION_SCOPES = {
-    "actions", "attestations", "checks", "contents", "deployments", "discussions",
-    "id-token", "issues", "models", "packages", "pages", "pull-requests",
-    "repository-projects", "security-events", "statuses",
+    "actions": _RW, "artifact-metadata": _RW, "attestations": _RW, "checks": _RW,
+    "code-quality": _RW, "contents": _RW, "deployments": _RW, "discussions": _RW,
+    "id-token": frozenset(("write", "none")),          # never `read`
+    "issues": _RW, "packages": _RW, "pages": _RW, "pull-requests": _RW,
+    "security-events": _RW, "statuses": _RW,
+    "vulnerability-alerts": frozenset(("read", "none")),  # never `write`
 }
 BLOCKED_CMDS = ["curl", "wget", "nc", "ncat", "socat", "telnet", "ssh", "scp", "sftp", "rsync"]
 
@@ -450,33 +456,57 @@ def lint(text, name="workflow.yml"):
     for sm in re.finditer(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)", text):
         if sm.group(1) not in KNOWN_SECRETS:
             v.append(f"unknown secret '{sm.group(1)}'")
-    for sm in re.finditer(r"""secrets\[\s*(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\s*\]""", text):
+    # `secrets [ 'X' ]` — the runner's lexer skips whitespace before the index operator, so
+    # requiring the bracket to touch the identifier left the allowlist bypassable by a space.
+    for sm in re.finditer(
+            r"""secrets\s*\[\s*(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\s*\]""", text):
         if sm.group(2) not in KNOWN_SECRETS:
             v.append(f"unknown secret '{sm.group(2)}' (index notation)")
-    # Permission SCOPES and VALUES, not merely "a mapping exists". GitHub defines a closed set
-    # of both; `contents: admin` and `banana: read` are valid YAML and invalid Actions, so the
-    # least-privilege contract this lint exists to enforce was only being checked for shape.
+    # Permission SCOPES and VALUES, at every location a declaration can appear. Checking only
+    # block form under a top-level `permissions:` left three bypasses: an INLINE flow mapping
+    # (`permissions: {banana: read}`), a NULL value (`contents:` with nothing after it, which is
+    # not a grant), and JOB-level declarations, which were never walked at all.
+    def _check_perm(scope, value, where):
+        allowed = PERMISSION_SCOPES.get(scope)
+        if allowed is None:
+            v.append(f"{where}: unknown permission scope '{scope}'")
+        elif not value:
+            v.append(f"{where}: permission scope '{scope}' has no value")
+        elif value not in allowed:
+            v.append(f"{where}: invalid permission value '{value}' for '{scope}' "
+                     f"(allowed: {', '.join(sorted(allowed))})")
+
     in_perms, perms_indent = False, 0
     for i, ln in enumerate(lines, 1):
         if ln.lstrip().startswith("#") or not ln.strip():
             continue
-        pm = re.match(r"""^(\s*)(?:"permissions"|'permissions'|permissions):\s*$""", ln)
+        pm = re.match(r"""^(\s*)(?:"permissions"|'permissions'|permissions):[ \t]*(.*)$""", ln)
         if pm:
-            in_perms, perms_indent = True, len(pm.group(1))
+            inline = pm.group(2).split("#")[0].strip()
+            if inline:
+                in_perms = False
+                # an inline flow mapping is a real declaration and must be validated too
+                if inline.startswith("{") and inline.endswith("}") and inline[1:-1].strip():
+                    for part in inline[1:-1].split(","):
+                        if ":" not in part:
+                            v.append(f"line {i}: malformed inline permissions entry "
+                                     f"{part.strip()[:30]!r}")
+                            continue
+                        k, _, val = part.partition(":")
+                        _check_perm(_unquote(k.strip()), _unquote(val.strip()), f"line {i}")
+            else:
+                in_perms, perms_indent = True, len(pm.group(1))
             continue
         if in_perms:
             ind = len(ln) - len(ln.lstrip(" "))
             if ind <= perms_indent:
                 in_perms = False
             else:
-                em = re.match(r"""^\s*(?:"([\w-]+)"|'([\w-]+)'|([\w-]+)):\s*(\S*)""", ln)
+                em = re.match(r"""^\s*(?:"([\w-]+)"|'([\w-]+)'|([\w-]+)):[ \t]*(.*)$""", ln)
                 if em:
                     scope = em.group(1) or em.group(2) or em.group(3)
                     value = _unquote(em.group(4).split("#")[0].strip())
-                    if scope not in PERMISSION_SCOPES:
-                        v.append(f"line {i}: unknown permission scope '{scope}'")
-                    elif value and value not in ("read", "write", "none"):
-                        v.append(f"line {i}: invalid permission value '{value}' for '{scope}'")
+                    _check_perm(scope, value, f"line {i}")
         # model pins
     for i, ln in enumerate(lines, 1):
         if ln.lstrip().startswith("#"):
@@ -490,6 +520,29 @@ def lint(text, name="workflow.yml"):
             if "deferred:E8.3" not in window:
                 v.append(f"line {i}: unguarded auditor/scripts/ reference")
     return v
+
+
+def _strip_block_scalars(text):
+    """`text` with every block-scalar body removed, keeping line numbering intact.
+
+    A block scalar holds shell or prose, so anything inside it is DATA. Matching structural
+    keys against the raw file let an `echo` inside a `run:` block impersonate an `if:` gate.
+    """
+    out, lines = [], text.split("\n")
+    idx = 0
+    while idx < len(lines):
+        ln = lines[idx]
+        out.append(ln)
+        idx += 1
+        m = re.match(r"^(\s*)(?:-\s+)?[\w\"'-]+:\s*[|>][-+0-9]*\s*$", ln)
+        if not m:
+            continue
+        indent = len(ln) - len(ln.lstrip(" "))
+        while idx < len(lines) and (not lines[idx].strip()
+                                    or len(lines[idx]) - len(lines[idx].lstrip(" ")) > indent):
+            out.append("")                      # blank keeps line numbers aligned
+            idx += 1
+    return "\n".join(out)
 
 
 def _jobs(lines):
@@ -808,6 +861,33 @@ class TestContracts(unittest.TestCase):
                 self.assertNotIn("WebFetch,", t.replace('"WebFetch"', ""))
                 self.assertRegex(t, r"data,? (never|not) instructions")
 
+    def test_a_label_echoed_in_a_run_block_does_not_satisfy_the_stage_contract(self):
+        """The mutation that defeated the previous two versions of the stage check.
+
+        Break the operative `if:` gate, then echo the same text inside an unrelated `run:`
+        block. Block-scalar bodies are data, so they are stripped before structural matching.
+        """
+        text = self._text("auditor-audit.yml").replace(
+            "github.event.label.name == 'audit-ready'",
+            "github.event.label.name == 'banana'")
+        text = text.replace(
+            "    steps:",
+            "    steps:\n      - run: echo \"github.event.label.name == 'audit-ready'\"", 1)
+        self.assertIsNone(
+            re.search(r"^\s*if:.*github\.event\.label\.name\s*==\s*'audit-ready'",
+                      _strip_block_scalars(text), re.M),
+            "an echo inside a run: block must not impersonate an `if:` gate")
+
+    def test_a_label_echoed_outside_gh_issue_create_does_not_satisfy_the_producer(self):
+        text = self._text("auditor-discover.yml").replace(
+            "--label audit-candidate", "--label banana")
+        text = text.replace("    steps:", "    steps:\n      - run: echo --label audit-candidate", 1)
+        cmds = re.sub(r"\\\n\s*", " ", text)
+        self.assertFalse(
+            any(re.search(r"--label\s+audit-candidate\b", ln) for ln in cmds.splitlines()
+                if "gh issue create" in ln),
+            "the label must be on the gh issue create command itself")
+
     def test_data_writers_name_the_data_branch(self):
         for name in DATA_WRITERS:
             with self.subTest(workflow=name):
@@ -816,36 +896,39 @@ class TestContracts(unittest.TestCase):
     def test_stage_workflows_carry_their_entry_labels(self):
         """The label must be LOAD-BEARING, not merely present somewhere in the file.
 
-        This used to be `assertIn(label, raw_text)`, which a mention in a comment satisfied.
-        Changing `auditor-audit.yml`'s operative condition from `audit-ready` to `banana` left
-        the assertion green because the label still appeared in the header comment — so the
-        check could not see the one thing it exists to protect.
+        Two earlier versions of this check were defeated in review:
 
-        A label is load-bearing in exactly two shapes here: a CONSUMER gates on
-        `github.event.label.name == '<label>'`, and a PRODUCER passes it to `gh issue` as
-        `--label` / `--add-label`. Comments are stripped before either is looked for.
+        * `assertIn(label, raw_text)` — a mention in a header COMMENT satisfied it, so mutating
+          `auditor-audit.yml`'s operative `if:` to a wrong label left the assertion green.
+        * comment-stripped regex — an `echo "github.event.label.name == 'audit-ready'"` added to
+          any unrelated `run:` block satisfied it just as well.
+
+        So the shape is checked where it actually has to live. A CONSUMER gates on an `if:` KEY
+        line, which cannot be inside a block scalar; block-scalar bodies are therefore removed
+        before looking. A PRODUCER passes the label to `gh issue create`, which necessarily IS
+        inside a run block — so that one is matched on the command itself, not on loose text.
         """
         for name, label in STAGES.items():
             if not label:
                 continue
             with self.subTest(workflow=name):
-                code = "\n".join(ln for ln in self._text(name).splitlines()
-                                 if not ln.lstrip().startswith("#"))
-                gated = re.search(
-                    r"github\.event\.label\.name\s*==\s*['\"]%s['\"]" % re.escape(label),
-                    code)
-                produced = re.search(
-                    r"--label\s+['\"]?%s\b" % re.escape(label), code)
-                # Accepting EITHER shape was too loose: mutating auditor-audit's `if:` gate to a
-                # wrong label still passed, because `--remove-label audit-ready` elsewhere in the
-                # file satisfied the producer branch. Each workflow owes the shape it actually
-                # uses — consumers gate on the event, the discovery producer labels what it makes.
-                required = produced if name in LABEL_PRODUCERS else gated
+                text = self._text(name)
+                if name in LABEL_PRODUCERS:
+                    cmds = re.sub(r"\\\n\s*", " ", text)       # join shell continuations
+                    ok = any(
+                        re.search(r"--label\s+['\"]?%s\b" % re.escape(label), line)
+                        for line in cmds.splitlines()
+                        if "gh issue create" in line and not line.lstrip().startswith("#"))
+                    how = "pass it to `gh issue create --label`"
+                else:
+                    ok = re.search(
+                        r"^\s*if:.*github\.event\.label\.name\s*==\s*['\"]%s['\"]"
+                        % re.escape(label), _strip_block_scalars(text), re.M)
+                    how = "gate an `if:` on github.event.label.name"
                 self.assertTrue(
-                    required,
-                    f"{name}: '{label}' appears in no operative position — a consumer must gate "
-                    f"an `if:` on github.event.label.name; the producer must pass it to "
-                    f"`gh issue create --label`. A comment mentioning it is not the contract.")
+                    ok,
+                    f"{name}: '{label}' appears in no operative position — it must {how}. "
+                    f"A comment, or an echo inside a run: block, is not the contract.")
 
     def test_contribute_separates_model_from_pat(self):
         t = self._text("auditor-contribute.yml")
@@ -1107,13 +1190,40 @@ class TestMutations(unittest.TestCase):
             "permissions:\n  contents: read\n", "permissions:\n  banana: read\n"))
 
     def test_every_real_permission_scope_is_accepted(self):
-        """Guards the other direction — a closed set that is too small is an over-rejection."""
-        for scope in ("contents", "id-token", "issues", "pull-requests", "packages",
-                      "pages", "actions", "checks", "statuses", "security-events"):
+        """The first version of this table was written from MEMORY and was wrong both ways.
+
+        It omitted `artifact-metadata`, `code-quality` and `vulnerability-alerts` — rejecting
+        real workflows — and accepted `id-token: read`, which GitHub does not allow. The table
+        is now taken from the published workflow syntax, with per-scope values.
+        """
+        for scope in sorted(PERMISSION_SCOPES):
+            value = "read" if "read" in PERMISSION_SCOPES[scope] else "write"
             with self.subTest(scope=scope):
                 self.assertEqual(lint(self.GOOD.replace(
                     "permissions:\n  contents: read\n",
-                    f"permissions:\n  {scope}: write\n")), [])
+                    f"permissions:\n  {scope}: {value}\n")), [])
+
+    def test_scope_specific_value_restrictions(self):
+        for scope, bad in (("id-token", "read"), ("vulnerability-alerts", "write")):
+            with self.subTest(scope=scope):
+                self._assert_flagged(self.GOOD.replace(
+                    "permissions:\n  contents: read\n", f"permissions:\n  {scope}: {bad}\n"))
+
+    def test_inline_mapping_permissions_are_validated_too(self):
+        # `permissions: {banana: read}` bypassed validation entirely — only block form was walked.
+        for bad in ("{banana: read}", "{contents: admin}"):
+            with self.subTest(spelling=bad):
+                self._assert_flagged(self.GOOD.replace(
+                    "permissions:\n  contents: read\n", f"permissions: {bad}\n"))
+
+    def test_a_scope_with_no_value_is_not_a_grant(self):
+        self._assert_flagged(self.GOOD.replace(
+            "permissions:\n  contents: read\n", "permissions:\n  contents:\n"))
+
+    def test_whitespace_before_the_secret_index_bracket(self):
+        """The runner's lexer skips whitespace before `[`, so a space defeated the allowlist."""
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", "run: echo ${{ secrets [ 'SNEAKY_TOKEN' ] }}"))
 
     def test_an_anchor_on_the_jobs_key_still_declares_jobs(self):
         head = self.GOOD.split("jobs:")[0]

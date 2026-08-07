@@ -1,0 +1,76 @@
+# Per-PR site preview (E8.4 / vibe-61).
+#
+# Builds the site as the PR would publish it and keeps the result as a downloadable run
+# artifact named after the PR. A reviewer fetches it from the run page; `site-preview-cleanup`
+# deletes it when the PR closes, so previews do not accumulate.
+#
+# The build goes through `site/build.sh` (I2b) — the same entry point `deploy-site` uses, so a
+# preview is the artifact that would ship rather than a differently-produced lookalike.
+#
+# Deliberately no PR comment and no deployment: the job holds `contents: read` alone. A
+# preview that posted a comment would need `pull-requests: write` on a workflow that runs
+# fork-authored build code, which is a wider scope than a downloadable artifact is worth.
+#
+# No model identifiers appear in this workflow (principle P9).
+
+name: site-preview
+
+on:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: site-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  SITE_CORPUS: auditor-data
+  SITE_OUT: site
+  SITE_DIST: site/.vitepress/dist
+
+jobs:
+  preview:
+    name: build the PR preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Install the site toolchain
+        run: npm ci
+        working-directory: site
+
+      - name: Build through the single entry point (I2b)
+        run: |
+          set -euo pipefail
+          bash site/build.sh --corpus "$SITE_CORPUS" --out "$SITE_OUT"
+
+      - name: The build actually produced a site
+        run: |
+          set -euo pipefail
+          if [ ! -d "$SITE_DIST" ]; then
+            echo "no build output at $SITE_DIST"; exit 1
+          fi
+          if [ ! -f "$SITE_DIST/index.html" ]; then
+            echo "$SITE_DIST has no index.html"; exit 1
+          fi
+          printf 'built %d file(s)\n' "$(find "$SITE_DIST" -type f | wc -l)"
+
+      # The name is the handle `site-preview-cleanup` deletes by; the two must agree.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-preview-pr-${{ github.event.pull_request.number }}
+          path: site/.vitepress/dist
+          retention-days: 7
+          if-no-files-found: error

@@ -354,17 +354,15 @@ mappings:
     paths: [bin/nlpm-build-docs]
     disposition: K
     target: F10.3
-    note: also serves F8.2
-    scheduled: S8
-    expected: [bin/vibe-build-docs]
+    note: also serves F8.2; delivered by E8.4 (vibe-61)
+    delivered: [bin/vibe-build-docs]
   - row: nlpm:13
     tree: nlpm
     paths: [bin/nlpm-build-case-studies-index, bin/nlpm-build-reference-md, bin/nlpm-build-site-report-pages, bin/nlpm-build-vocab-data]
     disposition: K
     target: F10.3
-    note: reference-md / vocab-data / site-report-pages / case-studies-index
-    scheduled: S8
-    expected: [bin/vibe-build-case-studies-index, bin/vibe-build-reference-md, bin/vibe-build-site-report-pages, bin/vibe-build-vocab-data]
+    note: reference-md / vocab-data / site-report-pages / case-studies-index; delivered by E8.4 (vibe-61)
+    delivered: [bin/vibe-build-case-studies-index, bin/vibe-build-reference-md, bin/vibe-build-site-report-pages, bin/vibe-build-vocab-data]
   - row: nlpm:14
     tree: nlpm
     paths: [commands/init.md]
@@ -434,9 +432,8 @@ mappings:
     paths: [.github/workflows/deploy-site.yml, .github/workflows/nlpm-self-check.yml, .github/workflows/pre-release-quality-gate.yml, .github/workflows/site-preview-cleanup.yml, .github/workflows/site-preview.yml, .github/workflows/site-validate.yml, site/.vitepress/config.ts, site/.vitepress/shims.d.ts, site/.vitepress/theme/Layout.vue, site/.vitepress/theme/components/DashboardPanels.vue, site/.vitepress/theme/components/RepoReport.vue, site/.vitepress/theme/components/VocabMap.vue, site/.vitepress/theme/custom.css, site/.vitepress/theme/index.ts, site/build.sh, site/dashboard.md, site/featured-audits.md, site/how-it-evolves.md, site/how-it-works.md, site/how-to-use-it.md, site/index.md, site/install.md, site/package.json, site/pnpm-lock.yaml, site/why.md]
     disposition: K
     target: F10.3
-    note: site + release workflows; site rebranded to vibe-suite (D4)
-    scheduled: S8
-    expected: [site]
+    note: site + release workflows; site rebranded to vibe-suite (D4); delivered by E8.4 (vibe-61). Generated pages (dashboard, featured-audits) are produced by site/build.sh and gitignored, so they are not listed as delivered artifacts
+    delivered: [site/index.md, site/why.md, site/install.md, site/how-it-works.md, site/how-it-evolves.md, site/how-to-use-it.md, site/build.sh, site/package.json, site/.vitepress/config.ts, site/.vitepress/theme/custom.css]
   - row: nlpm:24
     tree: nlpm
     corpus_roots: [auditor/reports, auditor/exemplars, auditor/audits, auditor/logs, case-studies]

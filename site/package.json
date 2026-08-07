@@ -1,0 +1,16 @@
+{
+  "name": "vibe-suite-site",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Public site for vibe-suite: the audit-and-contribute pipeline's reports, reference and case studies.",
+  "license": "ISC",
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev .",
+    "build": "vitepress build .",
+    "preview": "vitepress preview ."
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  }
+}

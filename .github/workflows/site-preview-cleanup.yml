@@ -1,0 +1,65 @@
+# Preview teardown (E8.4 / vibe-61).
+#
+# Deletes the preview artifacts `site-preview` produced for a pull request, once — when the PR
+# closes. `types: [closed]` is load-bearing: without it the workflow would fire on every PR
+# event and tear down the preview of an open PR the moment its author pushed again.
+#
+# `closed` covers both merged and abandoned PRs, which is the intent — either way the preview
+# has no further reader.
+#
+# Scope is `actions: write` and nothing else: deleting run artifacts is an Actions-API write,
+# and no repository content is read or written. The workflow does not check out the repository
+# at all — it needs the API, not the tree.
+#
+# Teardown is best-effort per artifact but fail-closed overall: a delete that the API refuses
+# fails the job, so a preview that outlived its PR is visible rather than silently retained.
+#
+# No model identifiers appear in this workflow (principle P9).
+
+name: site-preview-cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions: {}
+
+concurrency:
+  group: site-preview-cleanup-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: delete the PR preview artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+      - name: Delete the artifacts named for this PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW_NAME: site-preview-pr-${{ github.event.pull_request.number }}
+        # `--paginate` because a busy repository holds more than one page of artifacts, and a
+        # first-page-only sweep would leave older previews behind forever. The id list is
+        # collected into a file rather than a pipeline so the API call's own exit status is the
+        # one that decides, instead of the last command in a pipe.
+        run: |
+          set -euo pipefail
+          ids=$(mktemp)
+          if ! gh api --paginate \
+                 "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+                 --jq '.artifacts[] | select(.name == env.PREVIEW_NAME) | .id' > "$ids"; then
+            echo "could not list artifacts"; rm -f "$ids"; exit 1
+          fi
+          count=$(wc -l < "$ids" | tr -d ' ')
+          if [ "$count" -eq 0 ]; then
+            echo "no artifacts named $PREVIEW_NAME"; rm -f "$ids"; exit 0
+          fi
+          printf 'deleting %s artifact(s) named %s\n' "$count" "$PREVIEW_NAME"
+          while read -r id; do
+            [ -n "$id" ] || continue
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+            echo "deleted artifact $id"
+          done < "$ids"
+          rm -f "$ids"

@@ -31,6 +31,13 @@ REPO_ROOT = HERE.parent
 
 EXACT, ATLEAST, PENDING_S8, RECONCILED = ("exact", "at-least", "pending-S8", "reconciled")
 
+#: The five site builders E8.4 delivers, by exact filename. Counting alone would accept five
+#: wrongly-named files, so the row asserts membership of this frozen set.
+SITE_BUILDERS = frozenset((
+    "vibe-build-case-studies-index", "vibe-build-docs", "vibe-build-reference-md",
+    "vibe-build-site-report-pages", "vibe-build-vocab-data",
+))
+
 #: (label, §5.0 figure, rule, counter). The rule is a reviewed claim per row.
 ROWS = [
     ("Slash commands", 26, ATLEAST,
@@ -55,11 +62,25 @@ ROWS = [
      lambda r: len(json.loads((r / "hooks" / "hooks.json").read_text()).get("hooks", {}))),
     # 8 in §5.0, of which 5 are the site-build tools of F10.3 — stage S8. The 3 shipped ones
     # (vibe-check, vibe-report, vibe-badge) are asserted exactly; the rest are the S8 row.
+    # E8.4 (vibe-61) split this pair. The shipped-subset row previously counted EVERY file in
+    # bin/, so five builders would have taken it from 3 to 8 and broken an exact row that is
+    # meant to guard the shipped tools. It now counts only NON-builder files and stays EXACT 3;
+    # the site-builders row graduates to EXACT 5 and asserts the exact filename set, because a
+    # bare count would accept five wrongly-named files. Targets still sum to 8, and both
+    # counters are file-only so a directory named `vibe-build-x` cannot satisfy either.
     ("Python bin tools (shipped subset)", 3, EXACT,
      lambda r: len([p for p in (r / "bin").iterdir()
-                    if p.is_file() and p.name != "README.md"])),
-    ("Python bin tools (site builders)", 5, PENDING_S8,
-     lambda r: len([p for p in (r / "bin").glob("vibe-build-*")])),
+                    if p.is_file() and p.name != "README.md"
+                    and not p.name.startswith("vibe-build-")])),
+    # Counting only KNOWN names would let a sixth `vibe-build-*` file land uncounted by BOTH rows
+    # (the shipped-subset row excludes the prefix; this row would ignore the unknown name), so a
+    # stray builder would be invisible to the inventory. Count every `vibe-build-*` FILE and
+    # require the set to equal SITE_BUILDERS exactly; anything else yields -1, which no target
+    # matches — so an extra file, a missing one and a renamed one all fail.
+    ("Python bin tools (site builders)", 5, EXACT,
+     lambda r: (lambda found: len(found) if found == SITE_BUILDERS else -1)(
+         {p.name for p in (r / "bin").iterdir()
+          if p.is_file() and p.name.startswith("vibe-build-")})),
     ("Advisor templates", 6, EXACT,
      lambda r: len(list((r / "templates" / "advisors").glob("*.md")))),
     ("Auditor-unit workflows", 24, PENDING_S8,

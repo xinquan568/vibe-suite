@@ -1,0 +1,88 @@
+# Site validation on every pull request (E8.4 / vibe-61).
+#
+# Builds the site through `site/build.sh` (I2b) and then scans what the build actually
+# produced. The generated directories are gitignored (D-D), so `tools/legacy-string-sweep.sh`
+# and any scan over tracked files are structurally blind to them: a foreign brand string that
+# enters through a builder template or a rendered page appears only in the build output. This
+# workflow is where that output is read — a post-build scan is the only scan that can see it.
+#
+# Both scans run: the tracked sources under `site/`, and the built directory. They catch
+# different defects — a bad string in a page source, and one a builder synthesized — and
+# neither subsumes the other.
+#
+# The job holds `contents: read` alone: it validates and reports, and publishes nothing.
+#
+# No model identifiers appear in this workflow (principle P9).
+
+name: site-validate
+
+on:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: site-validate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  SITE_CORPUS: auditor-data
+  SITE_OUT: site
+  SITE_DIST: site/.vitepress/dist
+
+jobs:
+  validate:
+    name: build and validate the site
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Install the site toolchain
+        run: npm ci
+        working-directory: site
+
+      - name: Build through the single entry point (I2b)
+        run: |
+          set -euo pipefail
+          bash site/build.sh --corpus "$SITE_CORPUS" --out "$SITE_OUT"
+
+      - name: The build actually produced a site
+        # Asserted before the scans, so a clean brand-check result can never be the trivial
+        # consequence of an empty directory.
+        run: |
+          set -euo pipefail
+          if [ ! -d "$SITE_DIST" ]; then
+            echo "no build output at $SITE_DIST"; exit 1
+          fi
+          if [ ! -f "$SITE_DIST/index.html" ]; then
+            echo "$SITE_DIST has no index.html"; exit 1
+          fi
+          printf 'built %d file(s)\n' "$(find "$SITE_DIST" -type f | wc -l)"
+
+      - name: Brand check over the tracked site sources (D-A)
+        run: |
+          set -euo pipefail
+          bash tools/site-brand-check.sh site
+
+      - name: Brand check over the built output (D-A)
+        run: |
+          set -euo pipefail
+          bash tools/site-brand-check.sh "$SITE_DIST"
+
+      - name: Orchestrator and brand-check contracts
+        # The suites that own these contracts, invoked rather than restated, so this workflow
+        # cannot drift from them.
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_site_build_orchestrator tests.test_site_brand -v

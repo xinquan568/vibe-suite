@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: ISC
+"""Render the rules corpus into reference pages, one entry per rule id (E8.4 / vibe-61).
+
+Reads `<corpus>/manifest.json`, follows its `rules` list, and emits `<out>/data/reference.json`
+plus `<out>/reference/index.md` and a page per rule. Per D-C an absent corpus is the honest
+pre-migration state: exit 0 with zero entries and a "no audit data yet" notice. Only a corpus
+whose manifest cannot be parsed is an error, and it renders nothing at all — a corrupt input
+must never degrade into a page that reads as healthy.
+
+    bin/vibe-build-reference-md --corpus <dir> --out <dir>
+"""
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+BUILDER = "vibe-build-reference-md"
+SLUG = "reference"
+PAGE = "reference/index.md"
+NOTICE = "no audit data yet"
+
+#: `R7 — tests precede implementations` → ("R7", "tests precede implementations").
+HEADING = re.compile(r"^#\s+(?P<id>[A-Za-z]+[-_]?\d+)\b[\s—–:.-]*(?P<title>.*)$")
+
+
+def fail(message):
+    """Report a named input defect on stderr and exit non-zero without rendering."""
+    sys.stderr.write(f"{BUILDER}: {message}\n")
+    raise SystemExit(2)
+
+
+def load_manifest(corpus):
+    """Parse the corpus manifest, or return None when the corpus does not exist yet."""
+    manifest = corpus / "manifest.json"
+    if not corpus.is_dir() or not manifest.is_file():
+        return None
+    try:
+        parsed = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        fail(f"unparseable manifest at {manifest}: {exc}")
+    if not isinstance(parsed, dict):
+        fail(f"manifest at {manifest} is not a JSON object")
+    return parsed
+
+
+def as_list(value):
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return [value] if isinstance(value, str) else []
+
+
+def slugify(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "rule"
+
+
+def sort_key(entry):
+    match = re.search(r"(\d+)", entry["id"])
+    return (re.sub(r"\d+", "", entry["id"]), int(match.group(1)) if match else 0)
+
+
+def read_rule(corpus, rel):
+    """Turn one rule file into an entry: its id, title, and body prose."""
+    path = corpus / rel
+    if not path.is_file():
+        sys.stderr.write(f"{BUILDER}: skipping rule named by the manifest but absent: {rel}\n")
+        return None
+    lines = path.read_text(encoding="utf-8").splitlines()
+    rule_id, title = Path(rel).stem.upper(), ""
+    body = []
+    for index, line in enumerate(lines):
+        match = HEADING.match(line.strip()) if line.startswith("# ") else None
+        if match and not title:
+            rule_id, title = match.group("id"), match.group("title").strip()
+            body = lines[index + 1:]
+            break
+    prose = "\n".join(body).strip() or "\n".join(lines).strip()
+    return {"id": rule_id, "title": title or rule_id, "source": rel,
+            "slug": slugify(rule_id), "body": prose}
+
+
+def collect(corpus, manifest):
+    entries = [read_rule(corpus, rel) for rel in as_list(manifest.get("rules"))]
+    return sorted([entry for entry in entries if entry], key=sort_key)
+
+
+def render_index(entries):
+    if not entries:
+        return ("# Rules reference\n\n"
+                f"_{NOTICE}._ The rules corpus has not been migrated here yet; this page "
+                "fills in as soon as it lands.\n")
+    lines = ["# Rules reference", "",
+             f"{len(entries)} rule(s), one page each.", ""]
+    lines += [f"- [{e['id']} — {e['title']}]({e['slug']}.md)" for e in entries]
+    return "\n".join(lines) + "\n"
+
+
+def render_rule(entry):
+    return f"# {entry['id']} — {entry['title']}\n\n{entry['body']}\n"
+
+
+def write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog=BUILDER, description=__doc__.splitlines()[0])
+    parser.add_argument("--corpus", required=True, type=Path, help="corpus root directory")
+    parser.add_argument("--out", required=True, type=Path, help="site output directory")
+    args = parser.parse_args(argv)
+
+    manifest = load_manifest(args.corpus)
+    entries = [] if manifest is None else collect(args.corpus, manifest)
+
+    payload = {"builder": BUILDER, "count": len(entries), "entries": entries}
+    write(args.out / "data" / f"{SLUG}.json", json.dumps(payload, indent=2) + "\n")
+    write(args.out / PAGE, render_index(entries))
+    for entry in entries:
+        write(args.out / "reference" / f"{entry['slug']}.md", render_rule(entry))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

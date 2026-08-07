@@ -129,7 +129,7 @@ def line_of(finding):
     return None if value is None or value is False else value
 
 
-def classify(original, reaudit):
+def classify(original, reaudit, repo):
     """`(identical, shifted, fixed, introduced)`, each a list of records."""
     # Lists, not single entries: one file can carry the same rule and pattern at several
     # lines, and collapsing them loses every occurrence but one — so a maintainer who fixed
@@ -163,7 +163,15 @@ def classify(original, reaudit):
         for finding in unmatched:
             if matches:
                 moved = matches.pop(0)
-                shifted.append({**moved, "line_before": line_of(finding),
+                # THE ORIGINAL'S FINGERPRINT, not the re-audit line's. The digest includes the
+                # LINE, so a finding that moved from 10 to 20 hashes differently on each side —
+                # and the ledgers, the registry's `fingerprints[]` and the PR that carried it
+                # all know it by the ORIGINAL. Reporting the new digest emits a
+                # `persists_line_shifted` event that joins to nothing: pr_number comes out null
+                # and rule health never sees that the finding is still open.
+                shifted.append({**moved,
+                                "fingerprint": fingerprint_of(repo, finding),
+                                "line_before": line_of(finding),
                                 "line_after": line_of(moved)})
             else:
                 fixed.append(finding)
@@ -321,7 +329,7 @@ def main(argv=None):
     original, bad_original = read_sidecar(Path(args.original_sidecar), "original-sidecar")
     reaudit, bad_reaudit = read_sidecar(Path(args.reaudit_sidecar), "reaudit-sidecar")
 
-    identical, shifted, fixed, introduced = classify(original, reaudit)
+    identical, shifted, fixed, introduced = classify(original, reaudit, args.repo)
     summary = {
         "repo": args.repo,
         "commit_sha_before": sha_before,

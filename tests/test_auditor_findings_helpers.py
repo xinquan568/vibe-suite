@@ -901,7 +901,12 @@ class Test_diff_findings(unittest.TestCase):
         by_fp = {e["data"]["fingerprint"]: e["data"] for e in self._events(d)}
         self.assertEqual(by_fp["fp-fixed"]["outcome"], "fixed_upstream_not_merged")
         self.assertEqual(by_fp["fp-same"]["outcome"], "persists_identically")
-        self.assertEqual(by_fp["fp-new"]["outcome"], "persists_line_shifted")
+        # The ORIGINAL's fingerprint, not the re-audit line's. The digest includes the line,
+        # so a finding that moved hashes differently on each side — and the ledgers, the
+        # registry's fingerprints[] and the PR that carried it all know it by the original.
+        # Reporting the new digest emits an event that joins to nothing.
+        self.assertEqual(by_fp["fp-old"]["outcome"], "persists_line_shifted")
+        self.assertNotIn("fp-new", by_fp, "the shifted event used the re-audit fingerprint")
         self.assertEqual({e["event"] for e in self._events(d)},
                          {"finding_verified", "finding_introduced"})
 

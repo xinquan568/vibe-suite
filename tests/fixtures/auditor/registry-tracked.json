@@ -1,0 +1,16 @@
+{
+  "repos": {
+    "acme/claude-toolkit": {
+      "status": "contributed",
+      "audit_issue": 901,
+      "stars": 742,
+      "score": 64,
+      "security": "REVIEW",
+      "pipeline_prs": [17, 18],
+      "prs": {
+        "17": {"number": 17, "state": "MERGED", "mergedAt": "2026-08-01T10:00:00Z", "outcome": null, "fingerprints": ["sha256:aa"], "rule_ids": ["BUG-BROKEN-REF"], "updatedAt": "2026-08-01T10:00:00Z"},
+        "18": {"number": 18, "state": "CLOSED", "closedAt": "2026-08-02T10:00:00Z", "outcome": null, "fingerprints": ["sha256:bb"], "rule_ids": ["BUG-DEAD-LINK"], "updatedAt": "2026-08-02T10:00:00Z", "comments": [{"author": "acme-lead", "authorAssociation": "OWNER", "body": "consolidated fix landed on main already"}]}
+      }
+    }
+  }
+}

@@ -31,14 +31,158 @@ REPO_ROOT = HERE.parent
 
 EXACT, ATLEAST, PENDING_S8, RECONCILED = ("exact", "at-least", "pending-S8", "reconciled")
 
-#: The five site builders E8.4 delivers, by exact filename. Counting alone would accept five
-#: wrongly-named files, so the row asserts membership of this frozen set.
+#: SS5.0's 24 auditor-unit workflows as two EXPLICIT, DISJOINT name sets.
+#:
+#: Counting was not enough. Targets that merely SUM to 24 let a required workflow vanish and be
+#: replaced: an unrelated `auditor/**/*.yml` kept the pipeline count at 18, and a site workflow
+#: present in both accepted homes collapsed to one under an existential name test. Both rows now
+#: assert membership of a named set, so identity — not arithmetic — is what is enforced.
+#:
+#: Cross-pinned to tests/test_auditor_workflows.py:EXPECTED (the lint's own required set), the
+#: way MIRROR and RETIRED are pinned; tests/test_inventory_rows.py holds the two identical.
+PIPELINE_WORKFLOWS = (
+    "auditor-audit", "auditor-batch-processor", "auditor-case-study", "auditor-cite-exemplars",
+    "auditor-classify", "auditor-contribute", "auditor-daily-report", "auditor-discover",
+    "auditor-docs-diff", "auditor-exemplar", "auditor-integration-test", "auditor-refine-rules",
+    "auditor-render-dashboard", "auditor-repo-report", "auditor-rule-review",
+    "auditor-suppressions", "auditor-track", "auditor-vocab-drift",
+)
+#: The six site/release names (E8.4's five + E7.4's early release gate).
+SITE_RELEASE_WORKFLOWS = ("deploy-site", "self-check", "site-preview", "site-preview-cleanup",
+                          "site-validate", "pre-release-quality-gate")
+
+# The partition claim, asserted at import rather than asserted in prose.
+assert not set(PIPELINE_WORKFLOWS) & set(SITE_RELEASE_WORKFLOWS), "auditor row sets overlap"
+assert len(set(PIPELINE_WORKFLOWS) | set(SITE_RELEASE_WORKFLOWS)) == 24, "union is not SS5.0's 24"
+
+
+#: The five E8.4 site builders, by exact name. The row requires this SET, not a count, so a
+#: renamed builder yields -1 rather than passing as "still five files".
 SITE_BUILDERS = frozenset((
     "vibe-build-case-studies-index", "vibe-build-docs", "vibe-build-reference-md",
     "vibe-build-site-report-pages", "vibe-build-vocab-data",
 ))
 
-#: (label, §5.0 figure, rule, counter). The rule is a reviewed claim per row.
+
+def _workflow_entries(d):
+    """Every path under `d` that LOOKS like a workflow, valid or not.
+
+    Deliberately unfiltered: the previous version dropped directories and empty files BEFORE
+    anomaly detection, so an extra `sneaky.yml/` or a zero-byte file simply vanished from the
+    census instead of reddening a row. Junk has to be SEEN to be rejected.
+    """
+    if not d.is_dir():
+        return []
+    return [f for ext in ("*.yml", "*.yaml") for f in d.rglob(ext)]
+
+
+def _bad_entry(f, homes, root=None):
+    """True when a workflow-shaped path is not a real workflow in an accepted home.
+
+    GitHub runs workflows only from a workflow directory, so a file parked in
+    `auditor/not-workflows/` is not part of the unit however correctly it is named.
+    """
+    # is_file() and stat() FOLLOW symlinks, so a symlink to any real file counted as a
+    # workflow — including a link pointing outside the repo entirely. The unit must be made of
+    # real files, so the link itself is the thing to test.
+    #
+    # Testing only the final component was not enough: making `auditor/` ITSELF a symlink to an
+    # externally populated tree left every child a plain file, so both rows went green over a
+    # directory that is not part of the repository. Every ancestor up to the home is checked.
+    if f.parent not in homes or f.is_symlink():
+        return True
+    # Walk ancestors only as far as the REPO ROOT. Going to the filesystem root reddened every
+    # legitimate tree on macOS, where `/var` is itself a symlink to `/private/var` — the check
+    # would have failed honest repositories, which is the same class of mistake as the reverted
+    # P9 decoder. What is outside the repository is not this row's business.
+    if root is not None:
+        ancestor = f.parent
+        while True:
+            if ancestor.is_symlink():
+                return True
+            if ancestor == root or ancestor == ancestor.parent:
+                break
+            ancestor = ancestor.parent
+    return not f.is_file() or f.stat().st_size == 0
+
+
+def _pipeline_count(r):
+    """Required pipeline workflows present, or -1 on any structural anomaly under `auditor/`.
+
+    -1 is never a legal target, so an anomaly reddens the row instead of being averaged away:
+    a stray, misplaced, duplicated, empty or directory-shaped entry cannot substitute for a
+    deleted required workflow.
+    """
+    # A pipeline workflow parked in `.github/workflows/` was invisible to BOTH rows: this count
+    # never looked outside `auditor/`, and the site count filtered non-site names out before its
+    # anomaly check. That is the one place a LIVE, executable copy of a staged workflow could
+    # hide — staging is the safe state precisely because `.github/` is what GitHub runs.
+    # Detect a live copy by CONTENT, not by name. Two name-based attempts failed: known stems
+    # only (defeated by `auditor-audit-live.yml`), then an `auditor-` prefix (defeated by
+    # `review-live.yml`). A name heuristic can always be renamed around; the bytes cannot.
+    # No size floor. One was added on the reasoning that "a real workflow needs name/on/jobs",
+    # which was false in this very repo — `name` was made OPTIONAL in an earlier round, and a
+    # complete, Psych-valid, lint-clean workflow fits in 62 bytes. The justification was
+    # falsified by my own earlier change, and the floor it justified was a live blind spot.
+    #
+    # Comparing at any size is also the correct rule on its own terms: if a file under
+    # `.github/workflows/` is byte-identical to a staged workflow, it IS a copy, whatever its
+    # length. The false positives that motivated the floor came from test fixtures writing
+    # identical stub text everywhere — a fixture bug, since fixed, not a property of real repos.
+    staged_bodies = set()
+    for f in _workflow_entries(r / "auditor"):
+        if f.is_file() and not f.is_symlink():
+            try:
+                body = f.read_bytes()
+            except OSError:
+                return -1
+            staged_bodies.add(body)
+    for f in _workflow_entries(r / ".github"):
+        if f.stem in PIPELINE_WORKFLOWS:
+            return -1
+        if f.stem.startswith("auditor-") and f.stem not in SITE_RELEASE_WORKFLOWS:
+            return -1
+        if f.is_file() and not f.is_symlink():
+            try:
+                body = f.read_bytes()
+            except OSError:
+                return -1
+            if body in staged_bodies:
+                return -1            # byte-identical to a staged workflow: a live copy
+    home = r / "auditor" / "workflows"
+    entries = _workflow_entries(r / "auditor")
+    if any(_bad_entry(f, {home}, r) for f in entries):
+        return -1
+    stems = [f.stem for f in entries]
+    if set(stems) - set(PIPELINE_WORKFLOWS) - set(SITE_RELEASE_WORKFLOWS):
+        return -1
+    # A SET loses multiplicity, so the same workflow twice (nested, or under both extensions)
+    # collapsed into one and the unit carried more files than it claimed.
+    if len(stems) != len(set(stems)):
+        return -1
+    return len(set(stems) & set(PIPELINE_WORKFLOWS))
+
+
+def _site_count(r):
+    """Site/release workflows present exactly once in an accepted home, or -1 on an anomaly.
+
+    The reference keeps these under `.github/workflows/` and this repo may stage them under
+    `auditor/workflows/`, so both homes are accepted — but only those two, and only once each.
+    """
+    homes = {r / ".github" / "workflows", r / "auditor" / "workflows"}
+    seen = []
+    for d in (r / ".github", r / "auditor"):
+        for f in _workflow_entries(d):
+            if f.stem not in SITE_RELEASE_WORKFLOWS:
+                continue          # ci.yml and friends are not this row's business
+            if _bad_entry(f, homes, r):
+                return -1
+            seen.append(f.stem)
+    if len(seen) != len(set(seen)):
+        return -1
+    return len(set(seen))
+
+
 ROWS = [
     ("Slash commands", 26, ATLEAST,
      lambda r: len([p for p in (r / "commands").glob("*.md")])),
@@ -83,8 +227,21 @@ ROWS = [
           if p.is_file() and p.name.startswith("vibe-build-")})),
     ("Advisor templates", 6, EXACT,
      lambda r: len(list((r / "templates" / "advisors").glob("*.md")))),
-    ("Auditor-unit workflows", 24, PENDING_S8,
-     lambda r: len(list((r / "auditor").rglob("*.yml")))),
+    # SS5.0's 24 auditor-unit workflows, split by delivering item (vibe-59): E8.2 landed the 18
+    # pipeline workflows (full glob, so a stray auditor YAML breaks the row); E8.4 owes the
+    # site/release set. The site row counts the five outstanding names across BOTH possible homes
+    # (the reference keeps site workflows under .github/workflows/); pre-release-quality-gate is
+    # excluded because E7.4 delivered it before S8. Targets sum to 24 -- asserted by
+    # tests/test_inventory_rows.py, which also proves 17/19 fail and the self-expiry fires.
+    # The pipeline row counts auditor/**/*.yml MINUS the site/release names, and the site row
+    # counts only those names. Without the exclusion the two sets overlap: deleting one pipeline
+    # workflow while moving a site workflow into auditor/workflows/ left both rows green with 23
+    # unique files. The sets are now disjoint and their union is the 24 SS5.0 names.
+    ("Auditor pipeline workflows (E8.2)", 18, EXACT, _pipeline_count),
+    # E8.4 (vibe-61) delivered its five; the sixth, pre-release-quality-gate, arrived early with
+    # E7.4. All six now exist, so the row graduates from pending to EXACT and the two auditor rows
+    # again sum to SS5.0's 24. Counting by NAME (not a glob) keeps a stray workflow from passing.
+    ("Auditor site/release workflows (E8.4)", 6, EXACT, _site_count),
     ("Auditor helper scripts", 30, PENDING_S8,
      lambda r: len(list((r / "auditor").rglob("*.py")))),
 ]

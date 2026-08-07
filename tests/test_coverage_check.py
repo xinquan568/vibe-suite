@@ -1037,8 +1037,9 @@ class TestTargetEnforcement(TargetCase):
         self.assertIn("code change", result.stderr)
 
     def test_scheduled_anchor_decoy_fails(self):
+        # nlpm:21 is the exemplar scheduled row since nlpm:20 graduated with E8.2 (vibe-59).
         result = self.mutated(
-            "nlpm:20", lambda b: self.set_field(b, "expected", "[never/lands.md]"))
+            "nlpm:21", lambda b: self.set_field(b, "expected", "[never/lands.md]"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("frozen", result.stderr)
 
@@ -1079,8 +1080,8 @@ class TestTargetEnforcement(TargetCase):
     def test_renamed_scheduled_row_fails(self):
         # Renaming a scheduled row is not a way around the frozen set: the new id is outside
         # both the row inventory and the frozen keys.
-        result = self.mutated("nlpm:20", lambda b: b.replace(
-            "  - row: nlpm:20\n", "  - row: nlpm:26\n", 1))
+        result = self.mutated("nlpm:21", lambda b: b.replace(
+            "  - row: nlpm:21\n", "  - row: nlpm:26\n", 1))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("frozen scheduled set", result.stderr)
 
@@ -1097,8 +1098,11 @@ class TestTargetEnforcement(TargetCase):
 class TestScheduledListing(TargetCase):
     """D2's visibility promise: every run with a parseable disposition prints the scheduled rows."""
 
-    # nlpm:12, nlpm:13 and nlpm:23 graduated when E8.4 (vibe-61) landed the builders and site/.
-    ROWS = ("cc-suite:27", "nlpm:20", "nlpm:21")
+    # Both sides of this merge graduated rows, so the surviving scheduled set is their
+    # intersection: E8.2a's branch graduated nlpm:20 (auditor/SCHEMAS.md, workflows, prompts) and
+    # E8.4 on main graduated nlpm:12, nlpm:13 and nlpm:23 (the builders and site/). What remains
+    # scheduled is cc-suite:27 (awaits codex/AGENTS.md) and nlpm:21 (awaits auditor/scripts, E8.3).
+    ROWS = ("cc-suite:27", "nlpm:21")
 
     def test_listing_appears_on_a_passing_run(self):
         result = self.run_check()

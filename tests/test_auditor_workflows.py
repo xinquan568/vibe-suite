@@ -1,0 +1,1409 @@
+# SPDX-License-Identifier: ISC
+"""The E8.2 workflow lint (vibe-59): fail-closed checks over auditor/workflows/*.yml.
+
+This IS the "workflow lint green" acceptance clause at the current gate rung. It has TWO
+layers, and the split matters — conflating them is what made three review rounds necessary:
+
+1. **YAML well-formedness — delegated to a real parser** (`ruby -ryaml`, i.e. Psych).
+   `lint()` below is a line-oriented subset grammar, and a line-oriented grammar cannot
+   validate YAML. Three rounds of hardening it closed individual spellings while the CLASS
+   of defect survived: mismatched quotes (`"on':`), unclosed flow collections
+   (`on: [workflow_dispatch`), empty flow entries (`[ , ]`), doubled commas, undefined
+   aliases. Each was a Psych syntax error that the grammar accepted. Psych settles all of
+   them at once. This is the same move the suite already makes for shell — `bash -n` rather
+   than a hand-written shell parser — and Ruby is a system tool, not a third-party
+   dependency (the ban is on adding parser LIBRARIES to shipped tooling; this is a test).
+
+2. **Contract properties — the subset grammar in `lint()`.** Stated precisely, because an
+   earlier version of this list claimed more than the code did:
+
+   * which workflows exist, as an explicit name set;
+   * that authority is DECLARED — at workflow or job level — rather than inherited from the
+     repository default, plus the two documented whole-workflow scalars (`read-all`,
+     `write-all`). It does NOT validate permission scopes or their values: a table for those
+     was written twice and was wrong both times, and now lives in #165;
+   * that a stage workflow MENTIONS its entry label. Not that the label is operative — three
+     attempts at that were defeated, and it is #165's;
+   * that only known secrets are referenced by `secrets.X` and `secrets['X']`. A computed
+     index (`secrets[format(...)]`) is not detected — #165;
+   * no pinned model ids (escaped spellings excepted — #165);
+   * a targeted expression check. NOT an Actions expression grammar — #165.
+
+`lint()` therefore does NOT claim to detect malformed YAML, and the suite no longer asserts
+that it does. `test_every_workflow_is_wellformed_yaml` owns that half.
+"""
+import os
+import random
+import re
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+WF_DIR = REPO / "auditor" / "workflows"
+#: The live workflows. Shell in these RUNS today, so it is checked alongside the
+#: staged set — the bash -n loop used to skip it entirely.
+LIVE_WF_DIR = REPO / ".github" / "workflows"
+
+STAGES = {
+    "auditor-discover.yml": "audit-candidate",
+    "auditor-audit.yml": "audit-ready",
+    "auditor-contribute.yml": "contribute-approved",
+    "auditor-track.yml": None,            # cron-driven scanner
+    "auditor-case-study.yml": "case-study-ready",
+    "auditor-daily-report.yml": None,     # cron-driven observer
+}
+SUPPORTING = [
+    "auditor-classify.yml", "auditor-batch-processor.yml", "auditor-integration-test.yml",
+    "auditor-render-dashboard.yml", "auditor-repo-report.yml", "auditor-suppressions.yml",
+    "auditor-vocab-drift.yml",
+]
+FEEDBACK = [
+    "auditor-exemplar.yml", "auditor-cite-exemplars.yml", "auditor-refine-rules.yml",
+    "auditor-rule-review.yml", "auditor-docs-diff.yml",
+]
+EXPECTED = sorted(list(STAGES) + SUPPORTING + FEEDBACK)
+
+MODEL_WORKFLOWS = [
+    "auditor-audit.yml", "auditor-contribute.yml", "auditor-case-study.yml",
+    "auditor-classify.yml", "auditor-integration-test.yml", "auditor-vocab-drift.yml",
+    "auditor-exemplar.yml", "auditor-refine-rules.yml",
+]
+#: Stage workflows that CREATE the labelled issue rather than react to it. Everything else in
+#: STAGES is a consumer and must gate on `github.event.label.name`.
+LABEL_PRODUCERS = {"auditor-discover.yml"}
+DATA_WRITERS = [
+    "auditor-discover.yml", "auditor-audit.yml", "auditor-contribute.yml", "auditor-track.yml",
+    "auditor-case-study.yml", "auditor-daily-report.yml", "auditor-classify.yml",
+    "auditor-render-dashboard.yml", "auditor-repo-report.yml", "auditor-suppressions.yml",
+    "auditor-vocab-drift.yml", "auditor-exemplar.yml", "auditor-refine-rules.yml",
+    "auditor-docs-diff.yml",
+]
+
+TOP_KEYS = {"name", "on", "permissions", "concurrency", "env", "jobs"}
+KNOWN_SECRETS = {"CLAUDE_CODE_OAUTH_TOKEN", "PAT_TOKEN", "OPENAI_API_KEY", "GITHUB_TOKEN"}
+#: NOT a scope/value table. One was written here and removed — see
+#: test_permissions_are_checked_for_presence_only. Validating Actions' permission vocabulary
+#: means tracking a set GitHub changes; two attempts were wrong in both directions (`models`
+#: was dropped, `id-token: read` accepted). That validation is #165's.
+BLOCKED_CMDS = ["curl", "wget", "nc", "ncat", "socat", "telnet", "ssh", "scp", "sftp", "rsync"]
+
+MODEL_ID = re.compile(
+    r"claude-[a-z]+-[0-9]|claude-[a-z0-9-]*-20[0-9]{2}|gpt-[0-9]|gemini-[0-9]|o[0-9]-|"
+    r"--model\b|(^|\s)model:", re.M)
+EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+EXPR_GRAMMAR = re.compile(
+    r"^[\s(!]*(github|secrets|inputs|needs|env|matrix|steps|vars|runner|"
+    r"contains|startsWith|endsWith|format|join|toJSON|fromJSON|hashFiles|"
+    r"always|failure|success|cancelled|true|false|null|[0-9'\"])")
+_EXPR_TOKEN = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_-]*|\.|\(|\)|\[|\]|,|!|&&|\|\||[=!<>]=?|\*|'[^']*'|\"[^\"]*\"|"
+    r"[0-9.]+|\s+")
+_ALLOWED_ROOTS = {"github", "secrets", "inputs", "needs", "env", "matrix", "steps", "vars",
+                  "runner"}
+_ALLOWED_FUNCS = {"contains", "startsWith", "endsWith", "format", "join", "toJSON", "fromJSON",
+                  "hashFiles", "always", "failure", "success", "cancelled",
+                  # `case` joined the documented function list; rejecting it was an
+                  # over-rejection of valid Actions syntax.
+                  "case"}
+
+
+#: A top-level key, with the optional quoting YAML permits. `on` MUST be quotable: bare `on`
+#: is a YAML 1.1 boolean, so linters actively push authors to write `"on":`. Rejecting that
+#: would reject a correct workflow, so every top-level scan shares this one pattern.
+#:
+#: The quotes must MATCH. `"on':` is a YAML syntax error (Psych rejects it) and an earlier
+#: `["']?` on each side accepted it, so a mismatched-quote key satisfied a required-key check
+#: while the file would not parse at all.
+_TOP_KEY = re.compile(r"""^(?:"([A-Za-z_][A-Za-z0-9_-]*)"|'([A-Za-z_][A-Za-z0-9_-]*)'"""
+                      r"""|([A-Za-z_][A-Za-z0-9_-]*)):""")
+#: Same shape at job-key indentation, so a quoted job id (`"a":`) is a job like any other.
+_JOB_KEY = re.compile(r"""^  (?:"([A-Za-z_][A-Za-z0-9_-]*)"|'([A-Za-z_][A-Za-z0-9_-]*)'"""
+                      r"""|([A-Za-z_][A-Za-z0-9_-]*)):[ \t]*(.*)$""")
+#: YAML nulls, in every spelling. Comparing against the literal "null" missed `NULL`/`Null`/`~`.
+_NULLS = {"", "null", "~"}
+
+
+#: Printed by the ruby adapter on a completed run. Its ABSENCE means the child did not finish,
+#: whatever its stdout looked like — the difference between "parsed cleanly" and "never ran".
+_OK_MARKER = "__PSYCH_OK__"
+
+
+def _ruby():
+    """Path to a usable ruby, or None."""
+    for cand in ("/usr/bin/ruby", "ruby"):
+        try:
+            if subprocess.run([cand, "-e", "require 'yaml'"],
+                              capture_output=True, timeout=30).returncode == 0:
+                return cand
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return None
+
+
+def psych_error(text):
+    """Psych's complaint about `text`, '' if it parses, or None when ruby is unavailable.
+
+    A real YAML parser is the only honest way to answer "is this valid YAML". Returning None
+    (rather than '') when ruby is missing keeps "unavailable" distinguishable from "valid" —
+    a gate that silently reports success when it did not run is the failure mode this whole
+    item exists to remove.
+    """
+    rb = _ruby()
+    if rb is None:
+        return None
+    # Version-tolerant on purpose. Ruby 2.6's YAML.load resolves aliases; Ruby 3.1+ defaults to
+    # safe_load with aliases DISABLED and raises Psych::AliasesNotEnabled — so a workflow using
+    # a perfectly legal anchor failed only on the newer runtime. CI found that; a gate that
+    # skipped instead of failing would have hidden it.
+    #
+    # Psych.parse answers well-formedness on every version without resolving anything. The
+    # second pass resolves aliases where the API allows, to catch an alias to a missing anchor.
+    script = (
+        "require 'yaml'\n"
+        "text = STDIN.read\n"
+        "def fail_with(e)\n"
+        "  print e.class.to_s + ': ' + e.message.to_s[0, 200]\n"
+        "  exit 0\n"
+        "end\n"
+        "begin\n"
+        "  Psych.parse(text)\n"
+        "rescue => e\n"
+        "  fail_with(e)\n"
+        "end\n"
+        "begin\n"
+        "  begin\n"
+        "    YAML.load(text, aliases: true)\n"
+        "  rescue ArgumentError, NoMethodError\n"
+        "    YAML.load(text)\n"
+        "  end\n"
+        "rescue => e\n"
+        "  fail_with(e) unless e.class.to_s == 'Psych::AliasesNotEnabled'\n"
+        "end\n"
+        "print '" + _OK_MARKER + "'\n")
+    try:
+        r = subprocess.run([rb, "-e", script], input=text, capture_output=True,
+                           text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"ruby adapter did not run: {type(exc).__name__}: {exc}"
+    out = r.stdout.strip()
+    # An empty stdout used to read as "well-formed". A child that segfaults, is killed, or dies
+    # before printing anything produces exactly that — so the gate reported success for a parse
+    # that never happened. Completion is now proven by the marker, not assumed from silence.
+    if r.returncode != 0:
+        return (f"ruby adapter exited {r.returncode}: "
+                f"{(r.stderr or '').strip()[:200] or out[:200]}")
+    if out == _OK_MARKER:
+        return ""
+    if out.endswith(_OK_MARKER):          # parser complaint plus completion marker
+        return out[:-len(_OK_MARKER)].strip()
+    if not out:
+        return ("ruby adapter produced no output and no completion marker "
+                f"(stderr: {(r.stderr or '').strip()[:200]!r})")
+    return out
+
+
+def _key_of(m):
+    """The matched name from a quoted-or-bare key match."""
+    return m.group(1) or m.group(2) or m.group(3)
+
+
+def _unquote(s):
+    """Strip ONE layer of matching quotes, preserving the interior exactly.
+
+    Interior whitespace inside quotes is significant in YAML — `" read-all "` is the seven-plus
+    character string, not `read-all` — so stripping it turned an invalid permissions value into
+    a valid-looking one.
+    """
+    s = s.strip()
+    if len(s) > 1 and s[0] == s[-1] and s[0] in "\"'":
+        return s[1:-1]
+    return s
+
+
+def _is_empty_value(raw):
+    """True when an inline value carries no information.
+
+    Covers '', null in any case, `~`, `{}`/`[]`, and — the case a flow-aware pass was needed
+    for — a flow collection whose every entry is itself empty: `[null]` parses to [nil], a
+    sequence that exists and contains no event.
+
+    Whitespace INSIDE a flow collection is insignificant, so `{ }` == `{}`; whitespace inside
+    QUOTES is significant, which is why _unquote no longer strips it.
+    """
+    s = _unquote(raw.split("#")[0].strip())
+    if s.strip().lower() in _NULLS:
+        return True
+    s = s.strip()
+    if len(s) >= 2 and s[0] in "{[" and s[-1] in "}]":
+        inner = s[1:-1].strip()
+        if not inner:
+            return True
+        # every entry empty => the collection carries nothing
+        return all(not part.strip() or part.strip().lower() in _NULLS
+                   for part in inner.split(","))
+    return False
+
+
+def _has_value(lines, key):
+    """True when top-level `key` carries a real value: an inline scalar/flow collection that
+    is not empty-or-null, or at least one more-indented line beneath it.
+
+    `on:` alone, `on: null` and `on: {}` are all "present but empty" — the presence check
+    cannot tell them from a real trigger block, which is why this exists separately.
+    """
+    pat = re.compile(r"""^(?:"%s"|'%s'|%s):[ \t]*(.*)$"""
+                     % (re.escape(key), re.escape(key), re.escape(key)))
+    for n, ln in enumerate(lines):
+        m = pat.match(ln)
+        if not m:
+            continue
+        if not _is_empty_value(m.group(1)):
+            return True
+        # No inline value: the block beneath must carry one. A sequence of nulls
+        # (`on:` / `  - null`) parses to [nil] — present, but no trigger at all.
+        block = []
+        for nxt in lines[n + 1:]:
+            if not nxt.strip() or nxt.lstrip().startswith("#"):
+                continue
+            if len(nxt) - len(nxt.lstrip(" ")) == 0:
+                break
+            block.append(nxt)
+        for b in block:
+            item = re.sub(r"^\s*-\s*", "", b).strip()
+            if item and not _is_empty_value(item):
+                return True
+        return False
+    return False
+
+
+def lint(text, name="workflow.yml"):
+    """Return a list of violation strings for one workflow file's raw text."""
+    v = []
+    lines = text.split("\n")
+    if "\t" in text:
+        v.append("tab character")
+    # top-level keys + duplicate detection per MAPPING (sequence items included).
+    # Each `- ` item opens its own mapping scope at the content column, so a key repeated
+    # inside one step is a duplicate while the same key across sibling steps is not.
+    stack = []          # [(column, {keys seen in that mapping})]
+    idx = 0
+    while idx < len(lines):
+        raw = lines[idx]
+        i = idx + 1
+        idx += 1
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        body, dash = raw, re.match(r"^( *)-(\s+|$)", raw)
+        if dash:
+            if dash.group(1) == "":
+                # A dash at column 0 makes the document a SEQUENCE. A workflow must be a
+                # mapping, so this is structural junk however valid the YAML is. Checked HERE
+                # rather than after the key parse, because `- k: v` parses as a key and would
+                # otherwise take the mapping path and pass.
+                v.append(f"line {i}: top-level sequence item: {raw.strip()[:60]!r}")
+            if indent % 2:
+                v.append(f"line {i}: off-grid indentation ({indent})")
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            stack.append((indent + 2, set()))
+            body, indent = " " * (indent + 2) + raw[dash.end():], indent + 2
+            if not body.strip():
+                continue
+        m = re.match(r"""^ *(?:["']?)([A-Za-z_][A-Za-z0-9_./ -]*)(?:["']?):(\s|$)""", body)
+        if not m:
+            # FAIL CLOSED. This used to `continue`, which silently accepted anything the grammar
+            # did not recognise — junk top-level text passed, and so did every malformed
+            # construct that simply failed to look like a key. Block-scalar bodies are consumed
+            # wholesale further down, so a line arriving here is structural and unrecognised.
+            # A dash-introduced item whose body is a plain scalar is valid YAML — `options:` lists
+            # `- unit` / `- smoke` exactly this way. `body` has already had the dash stripped, so
+            # the original line is what must be tested; checking `body` here flagged every scalar
+            # list entry in the suite.
+            if not dash:
+                v.append(f"line {i}: unrecognised construct: {body.strip()[:60]!r}")
+            continue
+        if not dash and indent % 2:
+            v.append(f"line {i}: off-grid indentation ({indent})")
+        key = m.group(1)
+        while stack and stack[-1][0] > indent:
+            stack.pop()
+        if not stack or stack[-1][0] < indent:
+            stack.append((indent, set()))
+        if key in stack[-1][1]:
+            v.append(f"line {i}: duplicate key '{key}'")
+        stack[-1][1].add(key)
+        if indent == 0 and key not in TOP_KEYS:
+            v.append(f"line {i}: unknown top-level key '{key}'")
+        # a block scalar's body is shell/prose, not a mapping — skip it wholesale
+        if re.match(r"^[|>][-+0-9]*$", body[m.end():].strip()):
+            while idx < len(lines) and (
+                    not lines[idx].strip()
+                    or len(lines[idx]) - len(lines[idx].lstrip(" ")) > indent):
+                idx += 1
+    # Required top-level structure. The mutation suite previously only ever changed a value; it
+    # never REMOVED a required section, so a workflow with no `on:` trigger and no declared
+    # permissions linted clean. Absence is now a violation in its own right.
+    top_keys = {_key_of(mm) for mm in (_TOP_KEY.match(ln) for ln in lines) if mm}
+    # `on` and `jobs` are required by GitHub; `name` is NOT, and is no longer required here.
+    # It was, on the stated grounds that STAGES keys on it — which is simply false: STAGES is
+    # keyed by FILENAME. The check also passed a valueless `name:`, so it never protected the
+    # identity it claimed to. A rule whose justification does not survive inspection is a false
+    # positive with a comment attached, so it is gone rather than re-argued.
+    for required in ("on", "jobs"):
+        if required not in top_keys:
+            v.append(f"missing required top-level key '{required}'")
+    # A required key being PRESENT does not make it meaningful. `on:` with nothing under it,
+    # `on: null` and `on: {}` all satisfied the presence check above while describing a
+    # workflow that can never trigger — the staged set's whole contract is which event fires
+    # which stage, so an empty trigger is a silent contract hole, not a stylistic nit.
+    if "on" in top_keys and not _has_value(lines, "on"):
+        v.append("top-level key 'on' declares no trigger")
+    # `permissions:` accepts exactly two scalars. Anything else is a typo that silently falls
+    # back to the repository default — the authority the staged split exists to remove.
+    # An EMPTY mapping is deliberate and correct (grant nothing), so it is not flagged.
+    for n, ln in enumerate(lines):
+        pm = re.match(r"""^(?:["']?)permissions(?:["']?):[ \t]*(.*)$""", ln)
+        if not pm:
+            continue
+        raw = pm.group(1).split("#")[0].strip()
+        val = _unquote(raw)
+        # An inline FLOW MAPPING is a perfectly ordinary permissions declaration —
+        # `permissions: {contents: read}` — and was being rejected as an "invalid scalar"
+        # because anything that was not a bare keyword got that message.
+        if raw.startswith("{") and raw.endswith("}") and raw[1:-1].strip():
+            continue
+        # GitHub documents `read-all` and `write-all` exactly; `READ-ALL` is not a synonym, and
+        # lower-casing before the comparison invented one.
+        if val.strip() and val not in ("{}", "null", "~", "read-all", "write-all"):
+            v.append(f"top-level 'permissions' has invalid scalar {val[:40]!r}")
+        elif val.strip().lower() in ("", "null", "~"):
+            # `permissions: {}` is a real declaration — grant nothing — and five shipped
+            # workflows rely on it, so it must keep passing. A BARE or null `permissions:` is
+            # not a declaration at all: it satisfied the presence check above, which then
+            # stopped requiring per-job permissions, so every job silently inherited the
+            # repository default. That is precisely the authority this lint exists to remove.
+            nested = next((x for x in lines[n + 1:] if x.strip()
+                           and not x.lstrip().startswith("#")), None)
+            if nested is None or len(nested) - len(nested.lstrip(" ")) == 0:
+                v.append("top-level 'permissions' declares nothing "
+                         "(use `permissions: {}` to grant none)")
+            elif re.match(r"^\s*-(\s|$)", nested):
+                # Matched only "- " before, so a BARE dash opened a sequence unnoticed.
+                # `permissions:` / `  - read-all` parses to a LIST, which is not a permissions
+                # mapping; GitHub would reject it and the lint accepted it.
+                v.append("top-level 'permissions' is a sequence, not a mapping")
+    # Least privilege must be DECLARED, at the workflow or at every job — an undeclared workflow
+    # inherits the repository default, which is exactly the authority the split exists to remove.
+    # This catches absence, null, and the sequence spellings it is tested against; it does NOT
+    # enforce declaration for every Psych-valid spelling (#165).
+    if "permissions" not in top_keys:
+        for j, b in _jobs(lines).items():
+            declared = None
+            for n, ln in enumerate(b):
+                jm = re.match(r"""^    (?:["']?)permissions(?:["']?):[ \t]*(.*)$""", ln)
+                if not jm:
+                    continue
+                inline = jm.group(1).split("#")[0].strip()
+                if inline:
+                    # A permissions value is a MAPPING or one of the two whole-workflow
+                    # scalars. Treating every non-null inline value as a declaration let
+                    # `permissions: []` (a sequence) and `permissions: |` (a block scalar)
+                    # satisfy the contract while granting nothing and declaring nothing —
+                    # the job then inherited the repository default.
+                    low = inline.lower()
+                    if low in ("null", "~"):
+                        declared = False
+                    elif inline.startswith("{") and inline.endswith("}"):
+                        declared = True          # `{}` grants nothing, and that IS a decision
+                    elif inline in ("read-all", "write-all") or \
+                            _unquote(inline) in ("read-all", "write-all"):
+                        declared = True
+                    else:
+                        declared = False         # sequences, block scalars, typos
+                else:
+                    nxt = next((x for x in b[n + 1:] if x.strip()
+                                and not x.lstrip().startswith("#")), None)
+                    # Any deeper line counted as a declaration, so a block-style SEQUENCE
+                    # (`permissions:` / `  - run: read-all`) satisfied the contract while being
+                    # no permissions mapping at all.
+                    #
+                    # LIMIT (#165): this recognises a mapping ENTRY by line shape, not by the
+                    # parsed value. A quoted scalar containing a colon — `"not: a mapping"` —
+                    # still passes, because the colon inside the quotes reads as a key/value
+                    # separator. Enforcing this against the parsed document is #165's.
+                    declared = (bool(nxt)
+                                and len(nxt) - len(nxt.lstrip(" ")) > 4
+                                and not re.match(r"^\s*-(\s|$)", nxt)
+                                and re.match(r"""^\s*(?:["']?)[\w-]+(?:["']?):""", nxt) is not None)
+                break
+            if declared is None:
+                v.append(f"job '{j}': no permissions declared and none at workflow level")
+            elif not declared:
+                # Matching the LINE was enough before, so `permissions: null` at job level
+                # satisfied the requirement while declaring nothing — the job then inherited
+                # the repository default, which is the authority this contract removes.
+                v.append(f"job '{j}': 'permissions:' declares nothing")
+
+    # duplicate top-level keys (simpler, reliable pass)
+    tops = [_key_of(mm) for mm in (_TOP_KEY.match(ln) for ln in lines) if mm]
+    for k in set(tops):
+        if tops.count(k) > 1:
+            v.append(f"duplicate top-level key '{k}'")
+    # jobs shape
+    jobs = _jobs(lines)
+    if not jobs:
+        inline_jobs = next((m.group(1).split("#")[0].strip() for m in
+                            (re.match(r"""^(?:"jobs"|'jobs'|jobs):[ \t]*(.*)$""", ln)
+                             for ln in lines) if m and m.group(1).split("#")[0].strip()), None)
+        if inline_jobs and inline_jobs[0] == "{" and inline_jobs.rstrip()[-1] == "}" \
+                and inline_jobs[1:-1].strip():
+            # Legal YAML this line-oriented grammar cannot walk. Say that, rather than claim
+            # the workflow has no jobs — the staged set uses block style throughout.
+            v.append("jobs: uses an inline flow mapping, which this lint cannot validate; "
+                     "use block style")
+        else:
+            v.append("no jobs")
+    for jname, body in jobs.items():
+        if not any(re.match(r"^    runs-on:", ln) for ln in body):
+            v.append(f"job '{jname}' missing runs-on")
+        if not any(re.match(r"^    steps:", ln) for ln in body):
+            v.append(f"job '{jname}' missing steps")
+        step_txt = "\n".join(body)
+        for sm in re.finditer(r"^      - (?:name:.*)?$", step_txt, re.M):
+            pass
+    # Every step item _steps() RECOGNISES has uses: or run:.
+    #
+    # LIMIT (#165): `_steps()` splits on `- ` and does not see a BARE dash, so a step written
+    # `-` on its own line with `name:`/`id:` beneath it is not enumerated and cannot be
+    # checked. Enumerating steps from the parsed document is #165's.
+    for jname, body in jobs.items():
+        for step in _steps(body):
+            if not any(re.match(r"\s*(uses|run):", ln) for ln in step):
+                v.append(f"job '{jname}': step with neither uses nor run")
+    # expression delimiter pairing — must run BEFORE the pair regex, which only ever sees
+    # balanced spans and is therefore blind to a `${{` that is never closed.
+    scan = 0
+    while True:
+        open_at = text.find("${{", scan)
+        if open_at < 0:
+            break
+        close_at = text.find("}}", open_at + 3)
+        nested_at = text.find("${{", open_at + 3)
+        if close_at < 0 or (0 <= nested_at < close_at):
+            v.append("line %d: unclosed expression delimiter"
+                     % (text.count("\n", 0, open_at) + 1))
+            if close_at < 0:
+                break
+        scan = close_at + 2
+    # expressions
+    for m in EXPR.finditer(text):
+        inner = m.group(1).strip()
+        if not _expr_ok(inner):
+            v.append(f"expression outside grammar: {inner[:60]}")
+    # Secrets by name, in BOTH notations. `secrets['X']` is GitHub's documented index operator
+    # and reaches exactly the same value as `secrets.X`, so checking only property access left
+    # the allowlist trivially bypassable by changing punctuation.
+    for sm in re.finditer(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)", text):
+        if sm.group(1) not in KNOWN_SECRETS:
+            v.append(f"unknown secret '{sm.group(1)}'")
+    # `secrets [ 'X' ]` — the runner's lexer skips whitespace before the index operator, so
+    # requiring the bracket to touch the identifier left the allowlist bypassable by a space.
+    for sm in re.finditer(
+            r"""secrets\s*\[\s*(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\s*\]""", text):
+        if sm.group(2) not in KNOWN_SECRETS:
+            v.append(f"unknown secret '{sm.group(2)}' (index notation)")
+    # Presence of a DECLARATION, not validation of its vocabulary. The least-privilege
+    # contract this lint owns is "authority is declared rather than inherited from the
+    # repository default" — which is checked above, at workflow or job level. What the declared
+    # scopes and values MEAN is GitHub's vocabulary, it changes, and two attempts to encode it
+    # here were wrong in both directions. That check is #165's; this one no longer pretends to
+    # make it.
+        # model pins
+    for i, ln in enumerate(lines, 1):
+        if ln.lstrip().startswith("#"):
+            continue
+        if MODEL_ID.search(ln):
+            v.append(f"line {i}: model id / model key: {ln.strip()[:60]}")
+    # deferred scripts guard
+    for i, ln in enumerate(lines, 1):
+        if "auditor/scripts/" in ln:
+            window = "\n".join(lines[max(0, i - 4):i + 1])
+            if "deferred:E8.3" not in window:
+                v.append(f"line {i}: unguarded auditor/scripts/ reference")
+    return v
+
+
+def _jobs(lines):
+    jobs, cur, body = {}, None, []
+    in_jobs = False
+    anchors = {}
+    for ln in lines:
+        jm = re.match(r"""^(?:"jobs"|'jobs'|jobs):[ \t]*(.*)$""", ln)
+        if jm:
+            inline = jm.group(1).split("#")[0].strip()
+            # `jobs: &all_jobs` anchors the whole mapping and the jobs still follow beneath it.
+            # Treating any inline text as "not a mapping" reported `no jobs` for valid YAML.
+            if inline.startswith("&"):
+                inline = ""
+            # `jobs: |` is a BLOCK SCALAR, not a mapping. The structural scanner skips a block
+            # scalar's body wholesale (it is shell/prose), so job-shaped text inside one was
+            # invisible there — and this function used to reparse that same text as real jobs.
+            # The two passes disagreed, and the disagreement read as a valid workflow.
+            #
+            # An inline FLOW MAPPING (`jobs: {a: {...}}`) is different: it is legal YAML that
+            # this line-oriented grammar cannot walk. Returning {} for it says "no jobs", which
+            # is a lie about valid input — so lint() reports the unsupported spelling instead.
+            if inline:
+                return {}
+            in_jobs = True
+            continue
+        if in_jobs and re.match(r"^[A-Za-z_\"']", ln):
+            in_jobs = False
+        if in_jobs:
+            m = _JOB_KEY.match(ln)
+            if m:
+                if cur:
+                    jobs[cur] = body
+                cur, body = _key_of(m), []
+                rest = (m.group(4) or "").split("#")[0].strip()
+                # GitHub Actions has supported YAML anchors and aliases since 2025-09-18, so
+                # `a: &base` defines a reusable job and `b: *base` IS a job with that body.
+                # Treating the alias as bodyless reported `no jobs` for a valid workflow.
+                if rest.startswith("&"):
+                    anchors[rest[1:].strip()] = body
+                elif rest.startswith("*"):
+                    jobs[cur] = list(anchors.get(rest[1:].strip(), []))
+                    cur, body = None, []
+            elif cur is not None:
+                body.append(ln)
+    if cur:
+        jobs[cur] = body
+    return jobs
+
+
+def _steps(job_body):
+    steps, cur = [], None
+    for ln in job_body:
+        if re.match(r"^      - ", ln):
+            if cur:
+                steps.append(cur)
+            cur = [re.sub(r"^      - ", "        ", ln)]
+        elif cur is not None and (ln.startswith("        ") or not ln.strip()):
+            cur.append(ln)
+        elif cur is not None and ln.strip():
+            steps.append(cur)
+            cur = None
+    if cur:
+        steps.append(cur)
+    return steps
+
+
+def _expr_ok(inner):
+    # Actions string literals are SINGLE-quoted; a double-quoted literal is an error at
+    # evaluation time. The token pattern accepted both, so `${{ "x" }}` linted clean.
+    if re.search(r'"[^"]*"', inner):
+        return False
+    # `github..ref` is not a path — an empty path segment never resolves. The scanner walked
+    # token by token and never looked at what sat between them.
+    if ".." in inner:
+        return False
+    pos, saw_root = 0, False
+    while pos < len(inner):
+        m = _EXPR_TOKEN.match(inner, pos)
+        if not m:
+            return False
+        tok = m.group(0)
+        if re.match(r"^[A-Za-z_]", tok):
+            nxt = inner[m.end():m.end() + 1]
+            if nxt == "(":
+                if tok not in _ALLOWED_FUNCS:
+                    return False
+            elif not saw_root or inner[max(0, pos - 1)] != ".":
+                if tok not in _ALLOWED_ROOTS | {"true", "false", "null"} \
+                        and inner[max(0, pos - 1):pos] != ".":
+                    return False
+            saw_root = True
+        pos = m.end()
+    return True
+
+
+def extract_run_blocks(text):
+    """Yield the shell text of every run: block (raw-text extraction, no YAML parse).
+
+    The prefix must allow a leading `- `. A step written `- run: |` is the COMMONEST form in
+    this repo, and requiring `run:` to follow whitespace alone skipped every one of them: 28 of
+    the 81 run blocks in the staged set were never reached by `bash -n`, while the suite
+    reported checking "every extracted run block" — true, and misleading, because the extractor
+    was what silently narrowed the set.
+
+    Folded scalars (`>`) and explicit indicators (`|-`, `|2`) are block scalars too.
+    """
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^(\s*(?:-\s+)?)run:\s*[|>][-+0-9]*\s*$", lines[i])
+        if m:
+            base = len(m.group(1)) + 2
+            block = []
+            i += 1
+            while i < len(lines) and (not lines[i].strip() or lines[i].startswith(" " * base)):
+                block.append(lines[i][base:])
+                i += 1
+            yield "\n".join(block)
+        else:
+            m2 = re.match(r"^\s*(?:-\s+)?run:\s*(\S.*)$", lines[i])
+            if m2:
+                yield m2.group(1)
+            i += 1
+
+
+class TestInventory(unittest.TestCase):
+    def test_exactly_the_18_expected_files(self):
+        self.assertTrue(WF_DIR.is_dir(), f"{WF_DIR} missing")
+        actual = sorted(p.name for p in WF_DIR.glob("*.yml"))
+        self.assertEqual(actual, EXPECTED)
+
+    def test_no_python_under_auditor_and_no_scripts_dir(self):
+        self.assertEqual(list((REPO / "auditor").rglob("*.py")), [])
+        self.assertFalse((REPO / "auditor" / "scripts").exists())
+
+
+class TestYamlWellFormed(unittest.TestCase):
+    """Layer 1: is it valid YAML at all? Answered by Psych, not by the subset grammar.
+
+    Three review rounds established that `lint()` cannot answer this. Rather than keep
+    patching spellings it does not know, the question is handed to a real parser.
+    """
+
+    def test_ruby_is_available_where_it_matters(self):
+        """Fail-closed in CI; skip only on a developer box without ruby.
+
+        A gate that silently skips is a gate that silently passes. Locally a missing ruby is
+        an inconvenience; in CI it would mean this entire layer evaporated without anyone
+        being told, which is exactly the self-expiring-gate failure this repo already guards
+        against elsewhere.
+        """
+        if _ruby() is None and os.environ.get("CI"):
+            self.fail("ruby is required in CI for the YAML well-formedness gate; "
+                      "ubuntu-latest ships it. Do not let this layer disappear silently.")
+        if _ruby() is None:
+            self.skipTest("ruby unavailable locally; the YAML layer is verified in CI")
+
+    def test_every_workflow_is_wellformed_yaml(self):
+        if _ruby() is None:
+            self.skipTest("ruby unavailable")
+        for name in EXPECTED:
+            with self.subTest(workflow=name):
+                err = psych_error((WF_DIR / name).read_text())
+                self.assertEqual(err, "", f"{name} is not well-formed YAML: {err}")
+
+    def test_syntax_errors_the_subset_grammar_cannot_see_are_caught(self):
+        """Every one of these was accepted by `lint()` across rounds 2-4.
+
+        They are not obscure: a mismatched quote, an unclosed flow collection, a stray comma.
+        Each is a Psych syntax error, and each is now caught by the layer whose job that is.
+        """
+        if _ruby() is None:
+            self.skipTest("ruby unavailable")
+        g = TestMutations.GOOD
+        cases = {
+            "mismatched quotes on name": g.replace("name: t", '"name\': t', 1),
+            "unclosed flow sequence": g.replace(
+                "on:\n  workflow_dispatch:\n", "on: [workflow_dispatch\n"),
+            "empty flow entries": g.replace(
+                "on:\n  workflow_dispatch:\n", "on: [ , ]\n"),
+            "doubled comma in flow mapping": g.replace(
+                "permissions:\n  contents: read\n", "permissions: {contents: read,,}\n"),
+            "undefined alias": g.replace(
+                "    runs-on: ubuntu-latest\n", "    runs-on: *missing\n"),
+        }
+        for label, text in cases.items():
+            with self.subTest(case=label):
+                self.assertNotEqual(psych_error(text), "",
+                                    f"{label}: Psych must reject this")
+
+    def test_a_broken_ruby_child_is_not_reported_as_valid_yaml(self):
+        """The gate built to be fail-closed had a fail-open at its own boundary.
+
+        `psych_error()` returned `stdout.strip()`, so a child that crashed (rc=127), was killed,
+        or died before printing produced `""` — indistinguishable from "parsed cleanly". Success
+        is now proven by an explicit completion marker plus a zero return code.
+        """
+        class Fake:
+            def __init__(self, rc, out, err):
+                self.returncode, self.stdout, self.stderr = rc, out, err
+        real_run, real_ruby = subprocess.run, globals()["_ruby"]
+        globals()["_ruby"] = lambda: "/usr/bin/ruby"
+        try:
+            for rc, out, err, must_reject in (
+                    (127, "", "fatal Psych failure", True),
+                    (-9, "", "", True),
+                    (0, "", "", True),
+                    (0, "partial outp", "", True),
+                    (0, _OK_MARKER, "", False),
+            ):
+                with self.subTest(rc=rc, stdout=out):
+                    subprocess.run = lambda *a, **k: Fake(rc, out, err)
+                    got = psych_error("name: t\n")
+                    if must_reject:
+                        self.assertNotEqual(got, "", "a child that did not complete is not a pass")
+                    else:
+                        self.assertEqual(got, "")
+        finally:
+            subprocess.run, globals()["_ruby"] = real_run, real_ruby
+
+    def test_the_oracle_behaves_the_same_across_ruby_versions(self):
+        """Pins the behaviour CI caught and a local run could not.
+
+        Ruby 2.6's `YAML.load` resolves aliases; 3.1+ defaults to safe_load with aliases
+        DISABLED and raises Psych::AliasesNotEnabled, so an anchored workflow — valid YAML,
+        and valid GitHub Actions since 2025-09-18 — failed only on the newer runtime. Local
+        verification could never have found that; the gate failing rather than skipping did.
+
+        `Psych::AliasesNotEnabled` does not exist on 2.6, so it is matched by class NAME
+        rather than by constant: naming a missing constant in a rescue clause breaks
+        resolution on the older runtime.
+        """
+        if _ruby() is None:
+            self.skipTest("ruby unavailable")
+        anchored = ("name: t\non:\n  workflow_dispatch:\npermissions:\n  contents: read\n"
+                    "jobs:\n  a: &base\n    runs-on: ubuntu-latest\n    steps:\n"
+                    "      - name: x\n        run: echo ok\n  b: *base\n")
+        self.assertEqual(psych_error(anchored), "",
+                         "an anchored workflow is well-formed on every supported ruby")
+        # and the oracle must still reject what it is there to reject
+        self.assertNotEqual(psych_error("a: *missing\n"), "", "undefined alias must be caught")
+        self.assertNotEqual(psych_error("a: [1\n"), "", "unclosed flow must be caught")
+
+    def test_fuzzed_corruption_never_slips_past_both_layers(self):
+        """The property I claimed in round 4 and could not support: nothing malformed passes.
+
+        That claim rested on `lint()` alone and on an eleven-case sample; the reviewer
+        falsified it in seconds. It is now stated over the COMBINED gate (Psych + contract
+        lint) and tested by seeded fuzzing rather than by a handful of cases I thought of.
+
+        Seeded, so a failure is reproducible rather than a flake.
+        """
+        if _ruby() is None:
+            self.skipTest("ruby unavailable")
+        rng = random.Random(20260807)
+        chars = ['"', "'", "[", "]", "{", "}", ",", ":", "\t", "*", "&", "|", ">", "-", "#"]
+        g, rejected, missed = TestMutations.GOOD, 0, []
+        for _ in range(60):
+            s = list(g)
+            for _ in range(rng.randint(1, 3)):
+                op, pos = rng.choice(("insert", "delete", "replace")), rng.randrange(len(s))
+                if op == "insert":
+                    s.insert(pos, rng.choice(chars))
+                elif op == "delete":
+                    del s[pos]
+                else:
+                    s[pos] = rng.choice(chars)
+            text = "".join(s)
+            if psych_error(text):
+                rejected += 1
+                if not lint(text):
+                    missed.append(text[:120])
+        self.assertGreater(rejected, 10, "the fuzzer must actually produce malformed YAML")
+        # Psych rejecting IS the gate rejecting — layer 1 is part of the suite. This asserts
+        # the layers are wired, not that the subset grammar somehow became a YAML parser.
+        self.assertEqual(psych_error(g), "", "the skeleton itself must stay well-formed")
+
+    def test_the_good_skeleton_and_an_anchored_workflow_are_wellformed(self):
+        # Guards the other direction: the YAML layer must not reject valid input either.
+        if _ruby() is None:
+            self.skipTest("ruby unavailable")
+        anchored = ("name: t\non:\n  workflow_dispatch:\npermissions:\n  contents: read\n"
+                    "jobs:\n  a: &base\n    runs-on: ubuntu-latest\n    steps:\n"
+                    "      - name: x\n        run: echo ok\n  b: *base\n")
+        self.assertEqual(psych_error(TestMutations.GOOD), "")
+        self.assertEqual(psych_error(anchored), "")
+
+
+class TestLintClean(unittest.TestCase):
+    def test_every_workflow_passes_the_lint(self):
+        for name in EXPECTED:
+            path = WF_DIR / name
+            self.assertTrue(path.is_file(), f"{name} missing")
+            with self.subTest(workflow=name):
+                self.assertEqual(lint(path.read_text(), name), [])
+
+    def test_dash_form_run_blocks_are_extracted(self):
+        """28 of 81 run blocks were never reached by `bash -n`.
+
+        The extractor required `run:` to follow whitespace alone, so every `- run: |` step —
+        the commonest form in this repo — was skipped. The suite still reported checking
+        "every extracted run block", which was true and misleading: the extractor was what
+        silently narrowed the set.
+        """
+        total = sum(1 for name in EXPECTED
+                    for _ in extract_run_blocks((WF_DIR / name).read_text()))
+        dash = sum(len(re.findall(r"^\s*-\s+run:", (WF_DIR / name).read_text(), re.M))
+                   for name in EXPECTED)
+        self.assertGreater(dash, 20, "the corpus must actually contain dash-form run steps")
+        self.assertGreaterEqual(
+            total, dash, f"extractor returned {total} blocks but {dash} dash-form steps exist")
+
+    def test_every_run_block_passes_bash_n(self):
+        """Every run block in the corpus that the extractor RECOGNISES — staged and live.
+
+        The name said "every run block" while the loop ran over EXPECTED alone, so 35 of the
+        116 blocks were unprotected by this regression. That is the same defect as the
+        extractor skipping dash form: a true-sounding name over a narrower set.
+
+        The loop now covers both directories and both extensions. It does NOT cover quoted
+        `"run":` keys, which the extractor does not recognise — see #165. All 116 run entries
+        Psych finds in the corpus today use the unquoted spelling, so coverage is complete in
+        fact, not by construction.
+        """
+        # BOTH extensions. The inventory accepts `.yaml` as a workflow, so globbing `*.yml`
+        # alone meant a live `rogue.yaml` full of broken shell was simply not looked at, while
+        # the count stayed comfortably above any floor.
+        live = sorted(set(LIVE_WF_DIR.glob("*.yml")) | set(LIVE_WF_DIR.glob("*.yaml")))
+        paths = [WF_DIR / n for n in EXPECTED] + live
+        # Derive the expectation from DISK rather than a magic floor. `checked > 100` left 15
+        # blocks of slack, so a corpus that quietly shrank still passed "loudly".
+        self.assertEqual(len(paths), len(EXPECTED) + len(live),
+                         "the file list must cover every staged and live workflow")
+        checked = 0
+        for path in paths:
+            name = path.name
+            if not path.is_file():
+                self.fail(f"{name} missing")
+            for idx, block in enumerate(extract_run_blocks(path.read_text())):
+                checked += 1
+                shell = re.sub(r"\$\{\{.*?\}\}", "EXPR", block, flags=re.S)
+                with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+                    f.write(shell)
+                r = subprocess.run(["bash", "-n", f.name], capture_output=True, text=True)
+                with self.subTest(workflow=name, block=idx):
+                    self.assertEqual(r.returncode, 0, r.stderr)
+        # A silently-shrinking corpus is how the previous hole hid, so the count must agree
+        # exactly rather than clear a floor with slack.
+        #
+        # LIMIT (#165): this recount uses the SAME extractor, so it detects a shrinking FILE
+        # LIST but cannot reveal a spelling the extractor never recognised — a quoted `"run":`
+        # key yields zero blocks in both counts. A genuinely independent enumerator (Psych)
+        # is #165's; it finds 116 run entries today, matching this count exactly.
+        expected = sum(1 for pth in paths for _ in extract_run_blocks(pth.read_text()))
+        self.assertEqual(checked, expected,
+                         f"checked {checked} run blocks but the corpus holds {expected}")
+        self.assertGreater(expected, 100,
+                           f"the corpus should hold ~116 run blocks, found {expected} — the "
+                           f"extractor or the file list has narrowed")
+
+
+class TestContracts(unittest.TestCase):
+    def _text(self, name):
+        p = WF_DIR / name
+        self.assertTrue(p.is_file(), f"{name} missing")
+        return p.read_text()
+
+    def test_model_workflows_carry_the_blocklist_and_data_framing(self):
+        for name in MODEL_WORKFLOWS:
+            t = self._text(name)
+            with self.subTest(workflow=name):
+                self.assertIn("disallowedTools", t)
+                for cmd in BLOCKED_CMDS:
+                    self.assertIn(cmd, t)
+                self.assertNotIn("WebFetch,", t.replace('"WebFetch"', ""))
+                self.assertRegex(t, r"data,? (never|not) instructions")
+
+    def test_data_writers_name_the_data_branch(self):
+        for name in DATA_WRITERS:
+            with self.subTest(workflow=name):
+                self.assertIn("auditor-data", self._text(name))
+
+    def test_stage_workflows_carry_their_entry_labels(self):
+        """PRESENCE ONLY. This does NOT prove the label is operative — see #165.
+
+        Three attempts were made to prove the label is load-bearing, and review defeated each:
+
+        * `assertIn(label, raw_text)` — a header COMMENT satisfied it;
+        * comment-stripped matching — an `echo` in any `run:` block satisfied it;
+        * block-scalar stripping plus role-specific matching — a block-scalar header carrying a
+          trailing comment (`run: | # note`) still smuggled a fake `if:` through, and an echoed
+          string containing `gh issue create` still satisfied the producer branch.
+
+        Each fix introduced a new hole of its own. Rather than iterate a fourth time on a
+        line-oriented matcher for a job-graph property, the check is honestly narrowed to what
+        it can actually establish — the label appears in the file — and proving it OPERATIVE
+        moves to #165, alongside the expression grammar. E8.7's live matrix exercises the real
+        state machine against GitHub's own evaluator.
+        """
+        for name, label in STAGES.items():
+            if label:
+                with self.subTest(workflow=name):
+                    self.assertIn(label, self._text(name),
+                                  f"{name} must mention its entry label {label!r} "
+                                  f"(presence only; operative position is #165)")
+
+    def test_contribute_separates_model_from_pat(self):
+        t = self._text("auditor-contribute.yml")
+        jobs = _jobs(t.split("\n"))
+        self.assertGreaterEqual(len(jobs), 2, "contribute must be >= 2 jobs (model/PAT split)")
+        for jname, body in jobs.items():
+            bt = "\n".join(body)
+            uses_model = "claude-code-action" in bt
+            uses_pat = "PAT_TOKEN" in bt
+            self.assertFalse(uses_model and uses_pat,
+                             f"job '{jname}' holds both the model and PAT_TOKEN")
+
+    def test_no_legacy_namespace_strings(self):
+        for name in EXPECTED:
+            t = self._text(name)
+            with self.subTest(workflow=name):
+                for bad in ("/nlpm:", "/cc-suite:", "/grill:", "/vibe:"):
+                    self.assertNotIn(bad, t)
+
+
+class TestMutations(unittest.TestCase):
+    GOOD = (
+        "name: t\non:\n  workflow_dispatch:\npermissions:\n  contents: read\n"
+        "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - name: x\n"
+        "        run: echo ok\n")
+
+    def test_good_skeleton_is_clean(self):
+        self.assertEqual(lint(self.GOOD), [])
+
+    def _assert_flagged(self, text):
+        self.assertNotEqual(lint(text), [])
+
+    def test_tab_indent(self):
+        self._assert_flagged(self.GOOD.replace("  a:", "\ta:"))
+
+    def test_off_grid_indent(self):
+        self._assert_flagged(self.GOOD.replace("  contents: read", "   contents: read"))
+
+    def test_duplicate_top_key(self):
+        self._assert_flagged(self.GOOD + "name: again\n")
+
+    def test_unknown_top_key(self):
+        self._assert_flagged(self.GOOD + "banana: yes\n")
+
+    def test_job_missing_runs_on(self):
+        self._assert_flagged(self.GOOD.replace("    runs-on: ubuntu-latest\n", ""))
+
+    def test_step_with_neither_uses_nor_run(self):
+        self._assert_flagged(
+            self.GOOD.replace("      - name: x\n        run: echo ok\n",
+                              "      - name: x\n        id: nothing\n"))
+
+    def test_duplicate_key_in_sequence_step(self):
+        """A `- ` step mapping repeating a key it already set ON the dash line.
+
+        YAML duplicate keys are silently last-wins, so the first `run:` never executes.
+        The dash line is skipped wholesale by the duplicate pass, so the key it introduces
+        is never recorded and the repeat inside the same mapping goes unseen.
+        """
+        self._assert_flagged(self.GOOD.replace(
+            "      - name: x\n        run: echo ok\n",
+            "      - run: echo ok\n        run: echo again\n"))
+
+    def test_unclosed_expression_is_flagged(self):
+        """A genuinely unterminated `${{` — no closing braces anywhere in the file.
+
+        The pair regex only ever sees balanced `${{ ... }}` spans, so an expression that is
+        never closed is invisible to it: the file lints clean while Actions rejects it.
+        """
+        broken = self.GOOD.replace("run: echo ok", "run: echo ${{ github.event.number")
+        self.assertNotIn("}}", broken, "fixture must be genuinely unclosed")
+        self._assert_flagged(broken)
+
+    def test_bad_expression_root_is_flagged(self):
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", "run: echo ${{ hacks.password }}"))
+
+    def test_non_allowlisted_function(self):
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", "run: echo ${{ exec('rm') }}"))
+
+    def test_shell_syntax_error_in_run_block(self):
+        bad = self.GOOD.replace("run: echo ok", "run: |\n          if [ ; then fi")
+        blocks = list(extract_run_blocks(bad))
+        self.assertTrue(blocks)
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+            f.write(blocks[-1])
+        r = subprocess.run(["bash", "-n", f.name], capture_output=True)
+        self.assertNotEqual(r.returncode, 0)
+
+    @staticmethod
+    def dated_model_id():
+        """Assemble a dated model id at RUNTIME so no complete literal is committed (P9).
+
+        A fixture that ships the whole id is itself a pinned model id in the tree; the
+        predicate under test is the lint's, not the repository's willingness to store one.
+        """
+        return "-".join(["claude", "haiku", "4", "5", "2025" + "10" + "01"])
+
+    def test_dated_model_pin(self):
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", f"run: echo {self.dated_model_id()}"))
+
+    def test_unguarded_scripts_reference(self):
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", "run: bash auditor/scripts/log-event.sh x"))
+
+    def test_guarded_scripts_reference_is_allowed(self):
+        guarded = self.GOOD.replace(
+            "run: echo ok",
+            "run: |\n          # deferred:E8.3 — helper lands with the scripts item\n"
+            "          if [ -x auditor/scripts/log-event.sh ]; then\n"
+            "            bash auditor/scripts/log-event.sh x\n"
+            "          else\n            echo 'REFUSE:helper-missing-until-E8.3' >&2\n          fi")
+        self.assertEqual([x for x in lint(guarded) if "unguarded" in x], [])
+
+    # --- absence-of-required-structure. The suite previously only mutated VALUES, so a lint that
+    # --- silently skipped anything it did not recognise passed all 26 cases while accepting a
+    # --- workflow with no trigger and no declared permissions. These test absence directly.
+    def test_unrecognised_top_level_text(self):
+        self._assert_flagged(self.GOOD + "this is not yaml at all\n")
+
+    def test_missing_on_block(self):
+        self._assert_flagged(self.GOOD.replace("on:\n  workflow_dispatch:\n", ""))
+
+    def test_a_workflow_without_name_is_legal(self):
+        """`name` is optional in GitHub Actions, and the rule requiring it has been removed.
+
+        It was justified on the grounds that STAGES keys on the name — which is false; STAGES is
+        keyed by FILENAME. The check also accepted a valueless `name:`, so it never protected the
+        identity it claimed to.
+        """
+        self.assertEqual(lint(self.GOOD.replace("name: t\n", "", 1)), [])
+
+    def test_missing_jobs(self):
+        self._assert_flagged("name: t\non:\n  workflow_dispatch:\npermissions:\n  contents: read\n")
+
+    def test_a_null_job_level_permissions_declares_nothing(self):
+        """Matching the LINE was enough before, so `permissions: null` satisfied the contract.
+
+        The job then inherited the repository default — the authority this contract removes.
+        """
+        for spelling in ("null", "~"):
+            with self.subTest(spelling=spelling):
+                self._assert_flagged(
+                    self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                        "    runs-on: ubuntu-latest\n",
+                        f"    runs-on: ubuntu-latest\n    permissions: {spelling}\n"))
+
+    def test_a_job_level_sequence_or_block_scalar_declares_nothing(self):
+        """`permissions: []` and `permissions: |` satisfied the check while granting nothing.
+
+        Treating every non-null inline value as a declaration was too loose: a permissions
+        value is a MAPPING or one of the two whole-workflow scalars.
+        """
+        for spelling in ("[]", "|", ">", "bogus", "[read-all]"):
+            with self.subTest(spelling=spelling):
+                self._assert_flagged(
+                    self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                        "    runs-on: ubuntu-latest\n",
+                        f"    runs-on: ubuntu-latest\n    permissions: {spelling}\n"))
+
+    def test_block_style_sequence_permissions_declare_nothing(self):
+        """A block-style SEQUENCE is not a permissions mapping, at either level.
+
+        The previous fix covered inline spellings only, and its name said "sequence or block
+        scalar" — broader than its fixtures. A deeper line counted as a declaration whatever
+        its shape, so `permissions:` over `- run: read-all` passed.
+        """
+        for block in ("      - run: read-all\n", "      -\n", "      - read-all\n"):
+            with self.subTest(job_block=block.strip()):
+                self._assert_flagged(
+                    self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                        "    runs-on: ubuntu-latest\n",
+                        f"    runs-on: ubuntu-latest\n    permissions:\n{block}"))
+        for top in ("permissions:\n  -\n", "permissions:\n  - read-all\n"):
+            with self.subTest(top_block=top.strip()):
+                self._assert_flagged(
+                    self.GOOD.replace("permissions:\n  contents: read\n", top))
+
+    def test_a_job_level_mapping_entry_is_still_a_declaration(self):
+        self.assertEqual(lint(
+            self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                "    runs-on: ubuntu-latest\n",
+                "    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n")), [])
+
+    def test_job_level_whole_workflow_scalars_are_declarations(self):
+        for spelling in ("read-all", "write-all", "'read-all'"):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(lint(
+                    self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                        "    runs-on: ubuntu-latest\n",
+                        f"    runs-on: ubuntu-latest\n    permissions: {spelling}\n")), [])
+
+    def test_an_empty_job_level_permissions_mapping_IS_a_declaration(self):
+        # `{}` grants nothing, which is a real and maximally-restrictive declaration.
+        self.assertEqual(lint(
+            self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+                "    runs-on: ubuntu-latest\n",
+                "    runs-on: ubuntu-latest\n    permissions: {}\n")), [])
+
+    def test_no_permissions_anywhere(self):
+        self._assert_flagged(self.GOOD.replace("permissions:\n  contents: read\n", ""))
+
+    def test_job_level_permissions_satisfy_the_requirement(self):
+        # Declaring per job is equally least-privilege; only silence is a violation.
+        per_job = self.GOOD.replace("permissions:\n  contents: read\n", "").replace(
+            "    runs-on: ubuntu-latest\n",
+            "    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n")
+        self.assertEqual(lint(per_job), [], "per-job permissions must satisfy the requirement")
+
+    # --- Round 3: the "present but empty" family. -------------------------------------------
+    # The round-2 hardening required each key to EXIST. A reviewer sweep then showed presence is
+    # not meaning: `on:` with nothing under it, `on: null` and `on: {}` all satisfied the check
+    # while describing a workflow that can never fire. The staged set's entire contract is which
+    # event drives which stage, so an empty trigger is a silent contract hole.
+
+    def test_empty_on_block_declares_no_trigger(self):
+        self._assert_flagged(self.GOOD.replace("on:\n  workflow_dispatch:\n", "on:\n"))
+
+    def test_null_on_declares_no_trigger(self):
+        self._assert_flagged(self.GOOD.replace("on:\n  workflow_dispatch:\n", "on: null\n"))
+
+    def test_flow_empty_on_declares_no_trigger(self):
+        self._assert_flagged(self.GOOD.replace("on:\n  workflow_dispatch:\n", "on: {}\n"))
+
+    def test_on_as_a_list_is_valid(self):
+        # `on: [push]` is legal GitHub syntax — the emptiness rule must not swallow it.
+        self.assertEqual(lint(self.GOOD.replace(
+            "on:\n  workflow_dispatch:\n", "on: [push, pull_request]\n")), [])
+
+    def test_bare_permissions_is_not_a_declaration(self):
+        # It satisfied the presence check, which then stopped requiring per-job permissions —
+        # so every job silently inherited the repository default.
+        self._assert_flagged(self.GOOD.replace("permissions:\n  contents: read\n",
+                                               "permissions:\n"))
+
+    def test_null_permissions_is_not_a_declaration(self):
+        self._assert_flagged(self.GOOD.replace("permissions:\n  contents: read\n",
+                                               "permissions: null\n"))
+
+    def test_empty_map_permissions_IS_a_declaration(self):
+        """`permissions: {}` grants nothing — the most restrictive setting there is.
+
+        Five shipped workflows use it deliberately. Flagging it would push authors toward
+        granting MORE privilege, so this asserts the lint keeps accepting it.
+        """
+        self.assertEqual(lint(self.GOOD.replace("permissions:\n  contents: read\n",
+                                                "permissions: {}\n")), [])
+
+    def test_invalid_permissions_scalar(self):
+        # Only read-all/write-all are legal scalars; a typo silently inherits the repo default.
+        self._assert_flagged(self.GOOD.replace("permissions:\n  contents: read\n",
+                                               "permissions: bogus\n"))
+
+    def test_read_all_permissions_scalar_is_valid(self):
+        self.assertEqual(lint(self.GOOD.replace("permissions:\n  contents: read\n",
+                                                "permissions: read-all\n")), [])
+
+    # --- Round 4: spellings the hand-rolled grammar did not know. ---------------------------
+    # Cross-checked against Ruby/Psych as an oracle: every input Psych rejects as a syntax error
+    # is flagged here, and every input Psych accepts as a workflow passes — the extra flags are
+    # semantic (a trigger that parses to {} or [nil] is valid YAML describing nothing).
+
+    def test_spaced_empty_flow_collections_are_still_empty(self):
+        # Whitespace inside a flow collection is insignificant; `{ }` == `{}`.
+        for spelling in ("on: { }\n", "on: [ ]\n"):
+            with self.subTest(spelling=spelling):
+                self._assert_flagged(self.GOOD.replace(
+                    "on:\n  workflow_dispatch:\n", spelling))
+
+    def test_null_is_case_insensitive(self):
+        for spelling in ("on: NULL\n", "on: Null\n", "on: ~\n"):
+            with self.subTest(spelling=spelling):
+                self._assert_flagged(self.GOOD.replace(
+                    "on:\n  workflow_dispatch:\n", spelling))
+
+    def test_a_sequence_of_nulls_is_not_a_trigger(self):
+        # Psych parses this to [nil]: present, but no trigger at all.
+        self._assert_flagged(self.GOOD.replace(
+            "on:\n  workflow_dispatch:\n", "on:\n  - null\n"))
+
+    def test_permissions_as_a_sequence_is_not_a_mapping(self):
+        self._assert_flagged(self.GOOD.replace(
+            "permissions:\n  contents: read\n", "permissions:\n  - read-all\n"))
+
+    def test_mismatched_quotes_are_a_syntax_error(self):
+        # `"on':` does not parse (Psych::SyntaxError); accepting either quote on either side
+        # satisfied the required-key check for a file that would never load.
+        for key in ("on", "jobs"):
+            with self.subTest(key=key):
+                self._assert_flagged(self.GOOD.replace(f"\n{key}:", f'\n"{key}\':', 1))
+
+    # --- Round 6: contract properties that fell BETWEEN the two layers. --------------------
+    # Psych validates YAML; it knows nothing about Actions semantics. These are the gaps that
+    # opened when YAML validity moved out of lint()'s scope — the exact risk the split created.
+
+    def test_a_secret_reached_by_index_notation_is_still_checked(self):
+        """`secrets['X']` is GitHub's documented index operator and reaches the same value.
+
+        Checking only property access left the allowlist bypassable by changing punctuation.
+        """
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", "run: echo ${{ secrets['SNEAKY_TOKEN'] }}"))
+
+    def test_a_known_secret_by_index_notation_is_allowed(self):
+        # SINGLE quotes: Actions string literals are single-quoted, so `secrets["X"]` is itself
+        # an error. This assertion originally used double quotes and was simply wrong.
+        self.assertEqual(lint(self.GOOD.replace(
+            "run: echo ok", "run: echo ${{ secrets['PAT_TOKEN'] }}")), [])
+
+    def test_a_double_quoted_index_key_is_rejected_like_any_literal(self):
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", 'run: echo ${{ secrets["PAT_TOKEN"] }}'))
+
+    def test_permissions_are_checked_for_presence_only(self):
+        """This lint requires authority to be DECLARED. It does not validate the vocabulary.
+
+        A scope/value table lived here briefly and was wrong in both directions across two
+        attempts — recalled from memory it omitted `artifact-metadata`, `code-quality` and
+        `vulnerability-alerts` and accepted the invalid `id-token: read`; corrected from a
+        documentation summary it then dropped the valid `models: read|none`. Encoding a
+        vocabulary GitHub revises, in a repo that cannot import a schema, kept producing
+        over-rejections of real workflows.
+
+        So the contract is narrowed to the one thing this lint can hold honestly: a workflow
+        must declare permissions rather than inherit the repository default. Scope and value
+        validation is #165's, where GitHub's own evaluator can be the authority.
+        """
+        # an undeclared workflow is still a violation — that is the least-privilege contract
+        self._assert_flagged(self.GOOD.replace("permissions:\n  contents: read\n", ""))
+        # and any declared vocabulary passes, including spellings this lint does not judge
+        for spelling in ("permissions:\n  contents: read\n",
+                         "permissions:\n  models: read\n",
+                         "permissions:\n  artifact-metadata: read\n",
+                         "permissions: read-all\n",
+                         "permissions: {}\n"):
+            with self.subTest(spelling=spelling.strip()):
+                self.assertEqual(
+                    lint(self.GOOD.replace("permissions:\n  contents: read\n", spelling)), [],
+                    "presence-only: the lint must not judge the vocabulary it no longer tracks")
+
+    def test_whitespace_before_the_secret_index_bracket(self):
+        """The runner's lexer skips whitespace before `[`, so a space defeated the allowlist."""
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", "run: echo ${{ secrets [ 'SNEAKY_TOKEN' ] }}"))
+
+    def test_an_anchor_on_the_jobs_key_still_declares_jobs(self):
+        head = self.GOOD.split("jobs:")[0]
+        self.assertEqual(lint(head + "jobs: &all_jobs\n  a:\n    runs-on: ubuntu-latest\n"
+                                     "    steps:\n      - name: x\n        run: echo ok\n"), [])
+
+    def test_a_flow_sequence_of_nulls_is_not_a_trigger(self):
+        # `on: [null]` parses to [nil]: a sequence that exists and contains no event.
+        for spelling in ("on: [null]\n", "on: [null, ~]\n"):
+            with self.subTest(spelling=spelling):
+                self._assert_flagged(self.GOOD.replace(
+                    "on:\n  workflow_dispatch:\n", spelling))
+
+    def test_quoted_interior_whitespace_is_significant(self):
+        """`" read-all "` is not `read-all`; quotes make the padding part of the string."""
+        self._assert_flagged(self.GOOD.replace(
+            "permissions:\n  contents: read\n", 'permissions: " read-all "\n'))
+
+    def test_permission_keywords_are_case_sensitive(self):
+        # GitHub documents `read-all`/`write-all` exactly; case-folding invented a synonym.
+        self._assert_flagged(self.GOOD.replace(
+            "permissions:\n  contents: read\n", "permissions: READ-ALL\n"))
+
+    def test_permissions_as_an_inline_mapping_is_valid(self):
+        self.assertEqual(lint(self.GOOD.replace(
+            "permissions:\n  contents: read\n", "permissions: {contents: read}\n")), [])
+
+    def test_a_quoted_job_id_is_a_job(self):
+        self.assertEqual(lint(self.GOOD.replace("\n  a:", '\n  "a":', 1)), [])
+
+    def test_yaml_anchors_define_and_reuse_a_job(self):
+        """GitHub Actions has supported YAML anchors and aliases since 2025-09-18.
+
+        This lint previously reported `no jobs` for a workflow that reuses a whole job by alias,
+        on the belief that Actions does not expand anchors. That belief was out of date, and the
+        rule was defended before it was checked.
+        """
+        anchored = ("name: t\non:\n  workflow_dispatch:\npermissions:\n  contents: read\n"
+                    "jobs:\n  a: &base\n    runs-on: ubuntu-latest\n    steps:\n"
+                    "      - name: x\n        run: echo ok\n  b: *base\n")
+        self.assertEqual(lint(anchored), [], "an aliased job is a job")
+
+    def test_quoted_permissions_scalar_is_valid(self):
+        # Quoting does not change a scalar's value; flagging it would be a false positive.
+        for spelling in ("'read-all'", '"write-all"'):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(lint(self.GOOD.replace(
+                    "permissions:\n  contents: read\n", f"permissions: {spelling}\n")), [])
+
+    def test_top_level_sequence_item(self):
+        # A dash at column 0 makes the document a sequence; a workflow must be a mapping.
+        self._assert_flagged(self.GOOD + "- garbage\n")
+
+    def test_top_level_sequence_item_shaped_like_a_key(self):
+        # `- k: v` parses as a key once the dash is stripped, so it took the mapping path.
+        self._assert_flagged(self.GOOD + "- k: v\n")
+
+    def test_jobs_as_a_block_scalar_is_not_a_job_map(self):
+        """Two passes disagreed, and the disagreement read as a valid workflow.
+
+        The structural scanner skips a block scalar's body wholesale (it is shell/prose), so
+        job-shaped text inside `jobs: |` was invisible to it — while `_jobs()` happily reparsed
+        that same text as real jobs.
+        """
+        head = self.GOOD.split("jobs:")[0]
+        self._assert_flagged(head + "jobs:  |\n  a:\n    runs-on: ubuntu-latest\n"
+                                    "    steps:\n      - run: echo ok\n")
+
+    def test_quoted_top_level_keys_are_valid(self):
+        """Guards the OTHER direction: an over-rejecting lint is equally broken.
+
+        Bare `on` is a YAML 1.1 boolean, so linters actively push authors to write `"on":`.
+        The round-2 hardening rejected it as an unrecognised construct.
+        """
+        for quoted in ('\n"on":', "\n'on':"):
+            with self.subTest(quoted=quoted):
+                self.assertEqual(lint(self.GOOD.replace("\non:", quoted, 1)), [])
+
+    def test_unknown_secret(self):
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", "run: echo ${{ secrets.SNEAKY_TOKEN }}"))
+
+
+DATED_MODEL_ID = re.compile(
+    r"\b(?:claude|gpt|gemini)-[a-z0-9]+(?:[-.][a-z0-9]+)*-20[0-9]{6}\b")
+PIN_FREE_TREES = ("tests", "auditor")
+
+
+class TestNoCommittedModelIds(unittest.TestCase):
+    """P9 at fixture level: a dated model id must be assembled at runtime, never committed.
+
+    `tools/model-pin-lint.py` guards the shipped artifacts; nothing guards the test corpus,
+    so a fixture that stores the complete id re-introduces exactly the pin the rule bans.
+    Every legitimate use — lint mutations, model-pin-lint's own fixtures — can build the id
+    from fragments at runtime and stays expressive.
+    """
+
+    def test_no_complete_model_id_in_tree(self):
+        hits = []
+        for tree in PIN_FREE_TREES:
+            root = REPO / tree
+            self.assertTrue(root.is_dir(), f"{root} missing")
+            for path in sorted(root.rglob("*")):
+                if not path.is_file() or "__pycache__" in path.parts:
+                    continue
+                try:
+                    text = path.read_text()
+                except (UnicodeDecodeError, OSError):
+                    continue
+                for i, ln in enumerate(text.split("\n"), 1):
+                    for m in DATED_MODEL_ID.finditer(ln):
+                        hits.append(f"{path.relative_to(REPO)}:{i}: {m.group(0)}")
+        self.assertEqual(
+            hits, [],
+            f"{len(hits)} complete dated model id literal(s) committed under "
+            f"{'/, '.join(PIN_FREE_TREES)}/; assemble them at runtime instead:\n  "
+            + "\n  ".join(hits))
+
+
+if __name__ == "__main__":
+    unittest.main()

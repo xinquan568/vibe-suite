@@ -1,0 +1,256 @@
+# ported from the nlpm auditor at capability parity
+# auditor-suppressions — weekly scan of public GitHub code search for
+# third-party committed configs that suppress or override vibe-suite audit
+# rules. Untrusted content: every candidate is fetched at one pinned commit
+# SHA and parsed by a deterministic line grammar (shell plus jq only, no
+# runtime dependency install, never a model), so the parsed bytes and the
+# recorded commit_sha can never disagree. Search failure is fail-soft —
+# partial results are still recorded, and the failure is surfaced as its own
+# event so the daily report can flag the scan incomplete.
+name: auditor-suppressions
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: auditor-suppressions
+  cancel-in-progress: false
+env:
+  CODE_DIR: ${{ github.workspace }}
+  DATA_DIR: ${{ github.workspace }}/_data
+  REGISTRY: ${{ github.workspace }}/_data/registry/repos.json
+  EVENT_LOG: ${{ github.workspace }}/_data/ledgers/events.jsonl
+  RUN_ID: ${{ github.run_id }}
+  RUN_NUMBER: ${{ github.run_number }}
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      -   uses: actions/checkout@v4
+          with:
+            ref: auditor-data
+            path: _data
+            persist-credentials: false
+      - name: Scan for downstream suppressions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # One downstream-suppression event per discovered override goes to
+          # the disagreements ledger so rule refinement sees where the
+          # community disagrees with rules. Search, then fetch each candidate
+          # at a pinned SHA, then parse, then dedupe, then append.
+          # logic:suppressions
+          set -euo pipefail
+          TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          WF="auditor-suppressions"
+          RID="${RUN_ID:-${GITHUB_RUN_ID:-local}}"
+          RNUM="${RUN_NUMBER:-${GITHUB_RUN_NUMBER:-0}}"
+          case "$RNUM" in ''|*[!0-9]*) RNUM=0 ;; esac
+          [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
+          LEDGERS="$DATA_DIR/ledgers"
+          mkdir -p "$LEDGERS"
+          DISAGREE="$LEDGERS/disagreements.jsonl"
+          [ -f "$DISAGREE" ] || : > "$DISAGREE"
+          WORK="$(mktemp -d)"
+          : > "$WORK/seen"
+          : > "$WORK/items.jsonl"
+          : > "$WORK/config"
+          SRC_REPO=""
+          SRC_PATH=""
+          SRC_COMMIT=""
+          FOUND=0
+          CANDIDATES=0
+          FETCH_FAILED=0
+          emit_event() {
+            jq -cn --arg t "$TS" --arg w "$WF" --arg e "$1" --arg i "$RID" \
+              --argjson n "$RNUM" --argjson d "$2" \
+              '{timestamp: $t, workflow: $w, event: $e, run_id: $i, run_number: $n, data: $d}'
+          }
+          is_rule_id() {
+            case "$1" in
+              R[0-9][0-9]) return 0 ;;
+              SEC-?*|BUG-?*|CC-?*|VOCAB-?*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          map_type() {
+            case "$1" in
+              suppress|suppressed|ignore) printf 'suppress' ;;
+              max_penalty|penalty_cap) printf 'max_penalty' ;;
+              threshold|threshold_adjustment) printf 'threshold_adjustment' ;;
+              override|rule_override) printf 'rule_override' ;;
+              *) printf '' ;;
+            esac
+          }
+          record() {
+            # $1 rule id, $2 suppression type, $3 reason (may be empty).
+            # The canonical record identity is repo|path|rule_id|type with the
+            # same mandatory trailing newline the other digests fold in.
+            RFP="sha256:$(printf '%s|%s|%s|%s\n' "$SRC_REPO" "$SRC_PATH" "$1" "$2" \
+              | shasum -a 256 | cut -d' ' -f1)"
+            if grep -qxF "$RFP" "$WORK/seen"; then
+              return 0
+            fi
+            printf '%s\n' "$RFP" >> "$WORK/seen"
+            if jq -e --arg f "$RFP" 'select(.event == "downstream_suppression" and .data.fingerprint == $f)' "$DISAGREE" > /dev/null 2>&1; then
+              return 0
+            fi
+            jq -cn --arg t "$TS" --arg w "$WF" --arg i "$RID" --argjson n "$RNUM" \
+              --arg repo "$SRC_REPO" --arg sha "$SRC_COMMIT" --arg rule "$1" \
+              --arg kind "$2" --arg why "$3" --arg p "$SRC_PATH" --arg f "$RFP" \
+              '{timestamp: $t, workflow: $w, event: "downstream_suppression", run_id: $i, run_number: $n, data: ({repo: $repo, commit_sha: $sha, rule_id: $rule, suppression_type: $kind, path: $p, fingerprint: $f} + (if $why == "" then {} else {reason_given: $why} end))}' >> "$DISAGREE"
+            FOUND=$((FOUND + 1))
+          }
+          flush_block() {
+            if [ -n "$RULE" ] && [ -s "$WORK/pending" ]; then
+              while IFS= read -r kind; do
+                [ -n "$kind" ] || continue
+                record "$RULE" "$kind" "$REASON"
+              done < "$WORK/pending"
+            fi
+            : > "$WORK/pending"
+          }
+          parse_overrides() {
+            # Deterministic line grammar over one fetched config. Supported
+            # override forms, all recorded with their contracted enum type:
+            #   <RULE-ID>:               opens a per-rule block
+            #     suppress: true         suppress
+            #     max_penalty: <n>       max_penalty
+            #     threshold: <n>         threshold_adjustment
+            #     override: <text>       rule_override
+            #     reason: <text>         reason_given for the open block
+            #   <RULE-ID>: suppress      inline per-rule form
+            #   suppress: [R01, R02]     flat form, one record per listed id
+            RULE=""
+            REASON=""
+            : > "$WORK/pending"
+            while IFS= read -r raw; do
+              TRIM="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+              case "$TRIM" in
+                ''|'#'*|-*) continue ;;
+                *:*) : ;;
+                *) continue ;;
+              esac
+              case "$raw" in
+                [[:space:]]*) NESTED=1 ;;
+                *) NESTED=0 ;;
+              esac
+              KEY="${TRIM%%:*}"
+              VAL="${TRIM#*:}"
+              VAL="$(printf '%s' "$VAL" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^["'"'"']//; s/["'"'"']$//')"
+              if is_rule_id "$KEY"; then
+                flush_block
+                RULE="$KEY"
+                REASON=""
+                if [ -n "$VAL" ]; then
+                  KIND="$(map_type "$VAL")"
+                  if [ -n "$KIND" ]; then
+                    printf '%s\n' "$KIND" >> "$WORK/pending"
+                  fi
+                fi
+                continue
+              fi
+              if [ "$NESTED" = "0" ]; then
+                flush_block
+                RULE=""
+              fi
+              case "$KEY" in
+                reason|reason_given|note) REASON="$VAL"; continue ;;
+              esac
+              KIND="$(map_type "$KEY")"
+              [ -n "$KIND" ] || continue
+              if [ -n "$RULE" ]; then
+                # the reason line may follow the override line inside the same
+                # block, so buffer and resolve the whole block at its close
+                printf '%s\n' "$KIND" >> "$WORK/pending"
+              else
+                for cand in $(printf '%s' "$VAL" | tr -c 'A-Za-z0-9_-' ' '); do
+                  if is_rule_id "$cand"; then
+                    record "$cand" "$KIND" "$REASON"
+                  fi
+                done
+              fi
+            done < "$1"
+            flush_block
+            RULE=""
+          }
+          SEARCH_OK="true"
+          RESULTS=""
+          if ! RESULTS="$(gh api -X GET search/code -f q='vibe-suite-audit rule override in:file filename:.vibe-suite-audit.yml' 2> /dev/null)"; then
+            SEARCH_OK="false"
+          fi
+          TOTAL="$(printf '%s' "$RESULTS" | jq -r '.total_count // 0' 2> /dev/null || echo 0)"
+          TOTAL="${TOTAL:-0}"
+          case "$TOTAL" in ''|*[!0-9]*) TOTAL=0 ;; esac
+          INCOMPLETE="$(printf '%s' "$RESULTS" | jq -r '.incomplete_results // false' 2> /dev/null || echo false)"
+          INCOMPLETE="${INCOMPLETE:-false}"
+          if [ "$TOTAL" != "0" ]; then
+            printf '%s' "$RESULTS" | jq -c '.items[]?' 2> /dev/null > "$WORK/items.jsonl" || : > "$WORK/items.jsonl"
+          fi
+          while IFS= read -r item; do
+            [ -n "$item" ] || continue
+            CANDIDATES=$((CANDIDATES + 1))
+            SRC_REPO="$(printf '%s' "$item" | jq -r '.repository.full_name // ""')"
+            SRC_PATH="$(printf '%s' "$item" | jq -r '.path // ""')"
+            if [ -z "$SRC_REPO" ] || [ -z "$SRC_PATH" ]; then
+              FETCH_FAILED=$((FETCH_FAILED + 1))
+              continue
+            fi
+            SRC_COMMIT="$(gh api "repos/$SRC_REPO/commits" -X GET -f per_page=1 --jq '.[0].sha // empty' 2> /dev/null || true)"
+            if [ -z "$SRC_COMMIT" ]; then
+              # no resolvable commit means no honest commit_sha; fail soft on
+              # this candidate rather than recording an unpinned override
+              FETCH_FAILED=$((FETCH_FAILED + 1))
+              continue
+            fi
+            if ! gh api "repos/$SRC_REPO/contents/$SRC_PATH" -X GET -f ref="$SRC_COMMIT" --jq '.content // ""' 2> /dev/null | tr -d '\n' | base64 -d > "$WORK/config" 2> /dev/null; then
+              FETCH_FAILED=$((FETCH_FAILED + 1))
+              : > "$WORK/config"
+              continue
+            fi
+            parse_overrides "$WORK/config"
+          done < "$WORK/items.jsonl"
+          if [ "$SEARCH_OK" != "true" ] || [ "$INCOMPLETE" = "true" ] || [ "$FETCH_FAILED" != "0" ]; then
+            emit_event suppression_search_failed "$(jq -cn --arg s "$SEARCH_OK" --arg i "$INCOMPLETE" --argjson x "$FETCH_FAILED" \
+              '{search_ok: ($s == "true"), incomplete_results: ($i == "true"), fetch_failed: $x, partial: true}')" >> "$EVENT_LOG"
+          fi
+          emit_event suppression_scan_complete "$(jq -cn --argjson f "$FOUND" --argjson c "$CANDIDATES" --argjson x "$FETCH_FAILED" --argjson n "$TOTAL" \
+            '{found: $f, candidates: $c, fetch_failed: $x, search_total: $n}')" >> "$EVENT_LOG"
+          rm -rf "$WORK"
+          echo "PASS"
+          # /logic
+      -   name: Commit new suppression events
+          env:
+            GH_TOKEN: ${{ github.token }}
+          run: |
+            set -euo pipefail
+            cd "$DATA_DIR"
+            # deferred:E8.3 — protected-path guard lands with the scripts item
+            if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
+              bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
+            else
+              echo "REFUSE:guard-helper-missing-until-E8.3"
+              exit 1
+            fi
+            git add ledgers/disagreements.jsonl ledgers/events.jsonl
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+              exit 0
+            fi
+            git config user.name "vibe-suite-auditor"
+            git config user.email "auditor@users.noreply.github.com"
+            git commit -m "auditor-suppressions append downstream suppression events"
+            # deferred:E8.3 — retrying push helper lands with the scripts item
+            if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
+              bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
+            else
+              echo "REFUSE:push-helper-missing-until-E8.3"
+              exit 1
+            fi

@@ -1,0 +1,11 @@
+{
+  "repos": {
+    "acme/claude-toolkit": {
+      "status": "discovered",
+      "audit_issue": 901,
+      "stars": 742,
+      "pipeline_prs": [],
+      "prs": {}
+    }
+  }
+}

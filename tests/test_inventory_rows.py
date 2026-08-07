@@ -165,3 +165,308 @@ class SiteBuildersRow(RowBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# ---------------------------------------------------------------------------------------------
+# Auditor workflow rows (E8.2a / vibe-59). Merged in from the other branch of the E8.2 rescope:
+# that side created this file for the auditor rows, this side for the bin/ rows, so the two test
+# sets are unioned rather than one replacing the other. §5.0's single 24-row was split into a
+# pipeline row (18) and a site/release row (6); both are asserted here so the total stays guarded.
+# ---------------------------------------------------------------------------------------------
+PIPELINE_ROW = "Auditor pipeline workflows (E8.2)"
+SITE_ROW = "Auditor site/release workflows (E8.4)"
+SITE_WORKFLOWS = ("deploy-site", "self-check", "site-preview", "site-preview-cleanup",
+                  "site-validate", "pre-release-quality-gate")
+PIPELINE_WORKFLOWS = MOD.PIPELINE_WORKFLOWS
+
+
+class AuditorRowSplit(RowBase):
+    """The two auditor rows partition §5.0's 24 and neither may drift silently."""
+
+    def seed_workflows(self, rel, *names):
+        """Seed DISTINCT bodies. Identical stub text made every file a byte-match of every
+        other, which the copy detector correctly flagged — a fixture artifact that looked
+        exactly like a real false positive."""
+        d = self.tmp / rel
+        d.mkdir(parents=True, exist_ok=True)
+        for n in names:
+            (d / f"{n}.yml").write_text(
+                f"name: {n}\non:\n  workflow_dispatch:\npermissions: {{}}\n"
+                f"jobs:\n  {n.replace('-', '_')}:\n    runs-on: ubuntu-latest\n"
+                f"    steps:\n      - run: echo {n}\n", encoding="utf-8")
+
+    def test_targets_still_sum_to_24(self):
+        self.assertEqual(row(PIPELINE_ROW)[1] + row(SITE_ROW)[1], 24,
+                         "the split must preserve §5.0's total, or the inventory silently shrinks")
+
+    def test_the_declared_set_is_a_strict_partition_of_24(self):
+        """Disjoint AND exhaustive — the property the row targets alone cannot express.
+
+        Summing to 24 was never the claim worth enforcing: two rows can sum to 24 while
+        describing 23 files. Intersection-empty plus union-of-24 is the real invariant, and it
+        is asserted at import in the tool as well as here.
+        """
+        pipeline, site = set(PIPELINE_WORKFLOWS), set(SITE_WORKFLOWS)
+        self.assertEqual(pipeline & site, set(), "the two auditor name sets overlap")
+        self.assertEqual(len(pipeline | site), 24, "the union is not §5.0's 24")
+
+    def test_the_name_set_is_cross_pinned_to_the_lint(self):
+        """The tool and the lint must require the SAME 18 workflows.
+
+        Two independent hand-maintained lists of the same thing drift; the repo's convention
+        (MIRROR, RETIRED) is to pin such pairs with a test rather than trust discipline.
+        """
+        from tests import test_auditor_workflows as lint_mod
+        self.assertEqual(sorted(PIPELINE_WORKFLOWS),
+                         sorted(n[:-4] for n in lint_mod.EXPECTED),
+                         "tools/inventory-report.py:PIPELINE_WORKFLOWS and "
+                         "tests/test_auditor_workflows.py:EXPECTED disagree")
+
+    def test_the_eighteen_named_workflows_pass_and_a_missing_one_fails(self):
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.assertTrue(self.ok(PIPELINE_ROW), "the declared 18 must satisfy the row")
+        (self.tmp / "auditor" / "workflows" / f"{PIPELINE_WORKFLOWS[0]}.yml").unlink()
+        self.assertFalse(self.ok(PIPELINE_ROW), "a deleted required workflow must redden the row")
+
+    def test_an_unrelated_auditor_yaml_cannot_replace_a_required_one(self):
+        """Attack B: delete a required workflow, add an unrelated one — count stays 18.
+
+        The old counter measured how MANY auditor YAML files existed, so any file could stand in
+        for any other. Membership of a named set is what makes substitution visible.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS[:-1],
+                            "auditor-totally-unrelated")
+        self.assertEqual(len(list((self.tmp / "auditor").rglob("*.yml"))), 18,
+                         "the attack must keep the physical file count at 18")
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "an unrelated auditor YAML must not substitute for a required workflow")
+
+    def test_a_site_workflow_in_both_homes_is_a_duplicate_not_a_pass(self):
+        """Attack C: the same site workflow in BOTH accepted homes.
+
+        Both locations are legitimate, so the row accepted either — but it tested EXISTENCE per
+        name, which silently collapsed a genuine duplicate into one satisfied name and let the
+        unit carry 25 files while reporting 24.
+        """
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        self.seed_workflows("auditor/workflows", SITE_WORKFLOWS[0])
+        self.assertFalse(self.ok(SITE_ROW),
+                         "a site workflow present in both homes is a duplicate, not a pass")
+
+    def test_a_live_copy_is_caught_however_it_is_renamed(self):
+        """Detected by CONTENT, because two name heuristics were each renamed around.
+
+        Known stems only fell to `auditor-audit-live.yml`; an `auditor-` prefix rule then fell
+        to `review-live.yml`. A name test can always be renamed around — the bytes cannot. The
+        earlier test asserted only the prefix case while its name claimed renames generally.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        staged = (self.tmp / "auditor" / "workflows" / f"{PIPELINE_WORKFLOWS[0]}.yml")
+        for disguise in ("auditor-audit-live", "review-live", "totally-unrelated"):
+            with self.subTest(renamed_to=disguise):
+                copy = self.tmp / ".github" / "workflows" / f"{disguise}.yml"
+                copy.write_bytes(staged.read_bytes())
+                self.assertFalse(self.ok(PIPELINE_ROW),
+                                 f"a byte-identical live copy named {disguise}.yml must be seen")
+                copy.unlink()
+
+    def test_a_tiny_live_copy_is_caught(self):
+        """A 62-byte workflow is complete and valid, so no size floor can be safe.
+
+        A 64-byte floor was added on the reasoning that "a real workflow needs name/on/jobs" —
+        false in this repo, where `name` was made optional in an earlier round. The
+        justification was falsified by my own earlier change, and the floor it justified was a
+        live blind spot.
+        """
+        tiny = "on: x\npermissions: {}\njobs:\n  a:\n    runs-on: x\n    steps: []\n"
+        self.assertLess(len(tiny.encode()), 64, "the fixture must sit under the removed floor")
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        (self.tmp / "auditor" / "workflows"
+         / f"{PIPELINE_WORKFLOWS[0]}.yml").write_text(tiny, encoding="utf-8")
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        (self.tmp / ".github" / "workflows" / "rogue.yml").write_text(tiny, encoding="utf-8")
+        self.assertFalse(self.ok(PIPELINE_ROW), "a small live copy is still a live copy")
+
+    def test_an_unrelated_live_workflow_is_not_a_copy(self):
+        """Guards the other direction — content matching must not redden an ordinary repo."""
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS, "ci", "release")
+        self.assertTrue(self.ok(PIPELINE_ROW), "ci.yml and release.yml are legitimate")
+
+    def test_unrelated_and_site_workflows_in_github_still_pass(self):
+        """Guards the other direction — the rule must not redden a legitimate checkout."""
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS, "ci", "release")
+        self.assertTrue(self.ok(PIPELINE_ROW), "ci.yml and the site workflows are legitimate")
+
+    def test_a_pipeline_workflow_live_in_the_github_home_reddens_the_row(self):
+        """The one place a LIVE copy of a staged workflow could hide from both rows.
+
+        The pipeline count never looked outside `auditor/`, and the site count filtered
+        non-site names out before its anomaly check — so `.github/workflows/auditor-audit.yml`
+        was invisible to both while being fully executable. Staging is the safe state precisely
+        because `.github/` is what GitHub runs.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        self.seed_workflows(".github/workflows", PIPELINE_WORKFLOWS[0])
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "a staged workflow must not also exist live under .github/workflows/")
+
+    def test_workflows_parked_outside_the_workflow_home_do_not_count(self):
+        """GitHub runs workflows from a workflow directory; elsewhere they are inert files.
+
+        The census scanned all of `auditor/` and `.github/`, so a complete set filed under
+        `auditor/not-workflows/` satisfied both rows while the unit had no live workflows.
+        """
+        self.seed_workflows("auditor/not-workflows", *PIPELINE_WORKFLOWS)
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "workflows outside the workflow home are not the unit")
+
+    def test_a_symlinked_ANCESTOR_directory_is_caught(self):
+        """Testing only the final path component was not enough.
+
+        Making `auditor/` itself a symlink to an externally populated tree left every child a
+        plain file, so both rows went green over a directory that is not part of the repo.
+        """
+        ext = self.tmp / "external"
+        (ext / "workflows").mkdir(parents=True)
+        for n in PIPELINE_WORKFLOWS:
+            (ext / "workflows" / f"{n}.yml").write_text("name: x\n", encoding="utf-8")
+        (self.tmp / "auditor").symlink_to(ext)
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "a symlinked auditor/ is not the repository's workflow set")
+
+    def test_an_ordinary_tree_is_not_reddened_by_ancestors_outside_the_repo(self):
+        """Guards the fix's own failure mode.
+
+        Walking ancestors to the FILESYSTEM root reddened every legitimate tree on macOS, where
+        `/var` is a symlink to `/private/var`. The walk stops at the repo root; what lies above
+        it is not this row's business.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.assertTrue(self.ok(PIPELINE_ROW),
+                        "a normal tree under a symlinked system temp dir must still pass")
+
+    def test_a_symlinked_workflow_is_not_a_real_workflow(self):
+        """`is_file()` and `stat()` FOLLOW symlinks, so a link counted as a real workflow.
+
+        A required name could therefore be satisfied by a link to any file at all — including
+        one pointing outside the repository. The link itself is what has to be tested.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS[1:])
+        target = self.tmp / "elsewhere.yml"
+        target.write_text("name: x\n", encoding="utf-8")
+        (self.tmp / "auditor" / "workflows"
+         / f"{PIPELINE_WORKFLOWS[0]}.yml").symlink_to(target)
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "a symlink must not satisfy a required workflow")
+
+    def test_a_symlinked_site_workflow_is_rejected_too(self):
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS[1:])
+        target = self.tmp / "elsewhere-site.yml"
+        target.write_text("name: x\n", encoding="utf-8")
+        (self.tmp / ".github" / "workflows"
+         / f"{SITE_WORKFLOWS[0]}.yml").symlink_to(target)
+        self.assertFalse(self.ok(SITE_ROW), "a symlink must not satisfy a site workflow")
+
+    def test_an_extra_empty_file_in_the_home_reddens_the_row(self):
+        """Junk has to be SEEN to be rejected.
+
+        Empty files and directories were filtered out BEFORE anomaly detection, so an extra
+        `sneaky.yml` simply vanished from the census rather than reddening anything.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        (self.tmp / "auditor" / "workflows" / "sneaky.yml").write_text("", encoding="utf-8")
+        self.assertFalse(self.ok(PIPELINE_ROW), "an extra empty entry must redden the row")
+
+    def test_an_extra_directory_in_the_home_reddens_the_row(self):
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        (self.tmp / "auditor" / "workflows" / "sneaky.yml").mkdir()
+        self.assertFalse(self.ok(PIPELINE_ROW), "an extra directory must redden the row")
+
+    def test_unrelated_workflows_in_the_github_home_are_not_this_rows_business(self):
+        # Guards the other direction: ci.yml lives there legitimately.
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS, "ci")
+        self.assertTrue(self.ok(SITE_ROW), "an unrelated .github workflow must not redden the row")
+
+    def test_a_nested_duplicate_pipeline_workflow_is_caught(self):
+        """Reducing paths to a SET of stems lost multiplicity.
+
+        The same workflow in `auditor/workflows/` and `auditor/workflows/nested/` collapsed to
+        one name, so the unit carried 25 files while both rows reported 24.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows("auditor/workflows/nested", PIPELINE_WORKFLOWS[0])
+        self.assertFalse(self.ok(PIPELINE_ROW), "a nested duplicate must redden the row")
+
+    def test_a_nested_duplicate_site_workflow_is_caught(self):
+        # The site row checked two DIRECT paths, so a nested copy was simply unseen.
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        self.seed_workflows("auditor/workflows/nested", SITE_WORKFLOWS[0])
+        self.assertFalse(self.ok(SITE_ROW), "a nested duplicate site workflow must redden the row")
+
+    def test_a_yaml_extension_duplicate_is_caught(self):
+        # GitHub runs .yaml as readily as .yml, so a .yaml twin is a live duplicate.
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        (self.tmp / "auditor" / "workflows"
+         / f"{PIPELINE_WORKFLOWS[0]}.yaml").write_text("name: x\n", encoding="utf-8")
+        self.assertFalse(self.ok(PIPELINE_ROW), "a .yaml twin of a .yml workflow is a duplicate")
+
+    def test_a_workflow_may_legitimately_use_the_yaml_extension(self):
+        """Guards the other direction: .yaml alone is valid and must not be counted missing."""
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS[1:])
+        (self.tmp / "auditor" / "workflows"
+         / f"{PIPELINE_WORKFLOWS[0]}.yaml").write_text("name: x\n", encoding="utf-8")
+        self.assertTrue(self.ok(PIPELINE_ROW), "a .yaml workflow is a workflow")
+
+    def test_a_directory_named_like_a_workflow_does_not_count(self):
+        """`rglob("*.yml")` matches DIRECTORIES, so `auditor-audit.yml/` read as present.
+
+        The bin rows already guarded this (test_a_directory_named_like_a_builder_does_not_count);
+        the auditor rows did not, so the same trick worked one directory over.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        target = self.tmp / "auditor" / "workflows" / f"{PIPELINE_WORKFLOWS[0]}.yml"
+        target.unlink()
+        target.mkdir()
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "a directory named like a workflow is not a workflow")
+
+    def test_an_empty_file_is_not_a_workflow(self):
+        # Presence is not content: a zero-byte file satisfied the row while being no workflow.
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        (self.tmp / "auditor" / "workflows" / f"{PIPELINE_WORKFLOWS[0]}.yml").write_text(
+            "", encoding="utf-8")
+        self.assertFalse(self.ok(PIPELINE_ROW), "an empty file must not satisfy the row")
+
+    def test_an_empty_site_workflow_is_not_a_workflow(self):
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        (self.tmp / ".github" / "workflows" / f"{SITE_WORKFLOWS[0]}.yml").write_text(
+            "", encoding="utf-8")
+        self.assertFalse(self.ok(SITE_ROW), "an empty file must not satisfy the site row")
+
+    def test_a_stray_yaml_in_a_nested_auditor_dir_is_caught(self):
+        # The pipeline scan is recursive, so a nested stray must not hide from it.
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows("auditor/workflows/nested", "sneaky")
+        self.assertFalse(self.ok(PIPELINE_ROW), "a nested stray auditor YAML must redden the row")
+
+    def test_delete_and_move_cannot_hide_a_missing_workflow(self):
+        """The two auditor rows must be a strict PARTITION, not merely sum to 24.
+
+        Before this, the pipeline row counted every `auditor/**/*.yml` while the site row also
+        permitted its names there — so deleting one pipeline workflow and moving one site workflow
+        into `auditor/workflows/` left both rows green with only 23 unique files. The site name is
+        now excluded from the pipeline count, so the shortfall surfaces.
+        """
+        # one required pipeline workflow deleted, one site workflow moved in to replace it
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS[:-1], "deploy-site")
+        gh = self.tmp / ".github" / "workflows"
+        gh.mkdir(parents=True, exist_ok=True)
+        for n in SITE_WORKFLOWS:
+            if n != "deploy-site":
+                (gh / f"{n}.yml").write_text("x", encoding="utf-8")
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "a site workflow moved into auditor/workflows/ must not substitute for a "
+                         "deleted pipeline workflow")

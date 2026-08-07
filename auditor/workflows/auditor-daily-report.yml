@@ -1,0 +1,125 @@
+# ported from the nlpm auditor at capability parity
+# auditor-daily-report — pure observer: reads the registry and the seven
+# pipeline label counts, writes a markdown report to the data branch, and
+# appends a report_generated event. Label listing always passes an explicitly
+# high --limit because the CLI default 30-item page once silently capped a
+# label count for the report's entire history. Changes no labels and no
+# statuses; the issues permission is deliberately read-only. No model.
+name: auditor-daily-report
+on:
+  schedule:
+    - cron: "0 22 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: read
+concurrency:
+  group: auditor-daily-report
+  cancel-in-progress: false
+env:
+  CODE_DIR: ${{ github.workspace }}
+  DATA_DIR: ${{ github.workspace }}/_data
+  REGISTRY: ${{ github.workspace }}/_data/registry/repos.json
+  EVENT_LOG: ${{ github.workspace }}/_data/ledgers/events.jsonl
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: auditor-data
+          path: _data
+          persist-credentials: false
+      - name: Generate the daily report
+        run: |
+          # Any per-label count failure defaults that count to 0; the recent
+          # activity query defaults to 0. The 24-hour window is computed with
+          # jq so it works on any runner platform.
+          # stage-logic:daily-report
+          set -euo pipefail
+          TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          DAY="$(date -u +%Y-%m-%d)"
+          [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
+          REPORT_DIR="$DATA_DIR/reports"
+          mkdir -p "$REPORT_DIR"
+          OUT="$REPORT_DIR/daily-$DAY.md"
+          TOTAL="$(jq -r '.repos | length' "$REGISTRY")"
+          CANDIDATES="$(jq -r '[.repos[] | select(.case_study_candidate // false)] | length' "$REGISTRY")"
+          count_label() {
+            local raw
+            raw="$(gh issue list --label "$1" --state open --limit 1000 --json number --jq 'length' 2> /dev/null || echo 0)"
+            case "$raw" in ''|*[!0-9]*) raw=0 ;; esac
+            printf '%s' "$raw"
+          }
+          L_CANDIDATE="$(count_label audit-candidate)"
+          L_READY="$(count_label audit-ready)"
+          L_AUDITED="$(count_label audit-complete)"
+          L_APPROVED="$(count_label contribute-approved)"
+          L_SUBMITTED="$(count_label prs-submitted)"
+          L_CASE="$(count_label case-study-ready)"
+          L_COMPLETE="$(count_label complete)"
+          SINCE="$(jq -rn 'now - 86400 | todate')"
+          RECENT="$(gh issue list --state all --search "updated:>=$SINCE" --limit 1000 --json number --jq 'length' 2> /dev/null || echo 0)"
+          case "$RECENT" in ''|*[!0-9]*) RECENT=0 ;; esac
+          {
+            printf '# vibe-suite auditor daily report — %s\n\n' "$DAY"
+            printf 'Generated %s\n\n' "$TS"
+            printf '## Registry\n\n'
+            printf 'Repos tracked: %s\n\n' "$TOTAL"
+            printf 'Case-study candidates: %s\n\n' "$CANDIDATES"
+            printf '### Status breakdown\n\n'
+            jq -r '[.repos[].status // "unknown"] | if length == 0 then "- empty registry" else (group_by(.) | map("- " + .[0] + ": " + (length | tostring)) | .[]) end' "$REGISTRY"
+            printf '\n### PR outcomes\n\n'
+            jq -r '[.repos[].prs[]?.outcome // empty] | if length == 0 then "- none recorded" else (group_by(.) | map("- " + .[0] + ": " + (length | tostring)) | .[]) end' "$REGISTRY"
+            printf '\n### Top repos by stars\n\n'
+            jq -r '.repos | to_entries | sort_by(-(.value.stars // 0)) | .[:5][] | "- " + .key + " (" + ((.value.stars // 0) | tostring) + " stars)"' "$REGISTRY"
+            printf '\n## Open issues by pipeline label\n\n'
+            printf -- '- audit-candidate: %s\n' "$L_CANDIDATE"
+            printf -- '- audit-ready: %s\n' "$L_READY"
+            printf -- '- audit-complete: %s\n' "$L_AUDITED"
+            printf -- '- contribute-approved: %s\n' "$L_APPROVED"
+            printf -- '- prs-submitted: %s\n' "$L_SUBMITTED"
+            printf -- '- case-study-ready: %s\n' "$L_CASE"
+            printf -- '- complete: %s\n' "$L_COMPLETE"
+            printf '\n## Activity\n\n'
+            printf 'Issues updated in the last 24 hours: %s\n' "$RECENT"
+          } > "$OUT"
+          # §7 envelope: the record's own fields live under `data`, never at top level
+          RUN_ID="${GITHUB_RUN_ID:-0}"
+          RUN_NUMBER="${GITHUB_RUN_NUMBER:-0}"
+          case "$RUN_NUMBER" in ''|*[!0-9]*) RUN_NUMBER=0 ;; esac
+          jq -cn --arg t "$TS" --arg ri "$RUN_ID" --argjson rn "$RUN_NUMBER" --arg p "reports/daily-$DAY.md" \
+            '{timestamp: $t, workflow: "auditor-daily-report", event: "report_generated", run_id: $ri, run_number: $rn, data: {report: $p}}' >> "$EVENT_LOG"
+          echo "PASS"
+          # /stage-logic
+      - run: |
+          set -euo pipefail
+          cd "$DATA_DIR"
+          # deferred:E8.3 — protected-path guard lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
+          else
+            echo "REFUSE:helper-missing-until-E8.3"
+            exit 1
+          fi
+          git add reports ledgers
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git config user.name "vibe-suite-auditor"
+          git config user.email "auditor@users.noreply.github.com"
+          git commit -m "auditor-daily-report publish daily report"
+          # deferred:E8.3 — retrying push helper lands with the scripts item
+          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
+            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
+          else
+            echo "REFUSE:helper-missing-until-E8.3"
+            exit 1
+          fi

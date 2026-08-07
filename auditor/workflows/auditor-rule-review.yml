@@ -1,0 +1,65 @@
+# ported from the nlpm auditor at capability parity
+# auditor-rule-review — "Quarterly Rule Review". Cron on the first day of
+# each quarter; the narrowest surface of the feedback set: no model, no
+# repository writes, one checklist issue. Exists to catch what the other
+# automation structurally cannot: rules lacking doc citations, stale
+# verification dates, new upstream features and silently aged premises.
+# Deliberately fixes nothing; the maintainer works the checklist by hand.
+name: auditor-rule-review
+on:
+  schedule:
+    - cron: "0 9 1 1,4,7,10 *"
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: auditor-rule-review
+  cancel-in-progress: false
+env:
+  CODE_DIR: ${{ github.workspace }}
+  DATA_DIR: ${{ github.workspace }}/_data
+  REGISTRY: ${{ github.workspace }}/_data/registry/repos.json
+  EVENT_LOG: ${{ github.workspace }}/_data/ledgers/events.jsonl
+  GH_TOKEN: ${{ github.token }}
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: auditor-data
+          path: _data
+          persist-credentials: false
+      - run: |
+          set -euo pipefail
+          YEAR="$(date -u +%Y)"
+          MONTH="$(date -u +%m)"
+          QUARTER="Q$(( (10#$MONTH - 1) / 3 + 1 ))"
+          TITLE="Quarterly rule review $QUARTER $YEAR"
+          # dedupe gate: manual dispatch plus the cron firing in the same
+          # quarter must not file twice
+          EXISTING="$(gh issue list --state open --label rule-review --search "$TITLE" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "${EXISTING:-0}" -gt 0 ]; then
+            echo "SKIP:already-filed-this-quarter"
+            exit 0
+          fi
+          REPO_COUNT="$(jq -r '.repos | length' "$REGISTRY" 2>/dev/null || echo 0)"
+          BODY="$RUNNER_TEMP/rule-review-body.md"
+          printf '%s\n' \
+            "Quarterly review of the auditor rulebook ($QUARTER $YEAR). The automation cannot see these; a maintainer works the checklist by hand and this workflow deliberately fixes nothing." \
+            "" \
+            "- [ ] every rule still cites current upstream documentation" \
+            "- [ ] no rule carries a last-verified date older than one quarter" \
+            "- [ ] upstream features shipped since last quarter are covered or consciously skipped" \
+            "- [ ] silently aged premises are re-validated or retired" \
+            "- [ ] the suppression and disagreement ledgers were skimmed for rule-gap signals" \
+            "- [ ] the registry tracks $REPO_COUNT repos on the auditor-data branch; spot-check a sample against the rules" \
+            > "$BODY"
+          gh issue create --title "$TITLE" --label rule-review --body-file "$BODY"
+          echo "PASS"

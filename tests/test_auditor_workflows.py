@@ -81,6 +81,22 @@ DATA_WRITERS = [
     "auditor-docs-diff.yml",
 ]
 
+#: The 30 E8.3 helpers, by exact name (F10.4). Declared here so the tree can be guarded while
+#: the item lands incrementally: anything under auditor/scripts/ that is not on this list is a
+#: stray, and a stray is how an inventory row passes for the wrong reason.
+E83_HELPERS = (
+    "atomic-registry-write.sh", "backfill-findings.py", "backfill-pr-fingerprints.py",
+    "batch-process.py", "build-exemplar-gallery.py", "commit-via-pr.sh",
+    "compute-fingerprint.sh", "compute-vocab-fingerprint.sh", "diff-findings.py",
+    "docs-diff.py", "generate-daily-report.py", "generate-rule-review-body.py",
+    "git-push-with-retry.sh", "guard-protected-paths.sh", "log-event.sh",
+    "parse-pr-metadata.py", "parse-suppressions.py", "prepare-refinement-input.py",
+    "propose-rule-citations.py", "render-dashboard.py", "render-repo-report.py",
+    "repair-stale-statuses.py", "resolve-merge-conflicts.sh", "rule-health.py",
+    "scan-suppressions.py", "synthesize-sidecar.py", "three-way-merge-registry.py",
+    "validate-feedback.sh", "validate-rule-ids.py", "vendor_default_filter.py",
+)
+
 TOP_KEYS = {"name", "on", "permissions", "concurrency", "env", "jobs"}
 KNOWN_SECRETS = {"CLAUDE_CODE_OAUTH_TOKEN", "PAT_TOKEN", "OPENAI_API_KEY", "GITHUB_TOKEN"}
 #: NOT a scope/value table. One was written here and removed — see
@@ -666,9 +682,24 @@ class TestInventory(unittest.TestCase):
         actual = sorted(p.name for p in WF_DIR.glob("*.yml"))
         self.assertEqual(actual, EXPECTED)
 
-    def test_no_python_under_auditor_and_no_scripts_dir(self):
-        self.assertEqual(list((REPO / "auditor").rglob("*.py")), [])
-        self.assertFalse((REPO / "auditor" / "scripts").exists())
+    def test_auditor_scripts_holds_only_declared_helpers(self):
+        """Replaces E8.2a's `no auditor/scripts/` assertion, which pinned "not yet".
+
+        That assertion became false the moment E8.3 created the directory, so deleting it
+        outright would leave the tree unguarded. It is replaced by the NEW truth: the directory
+        exists and contains only helpers E8.3 has declared. Membership of a named set, not a
+        count — a count of `*.py` reports 21 for the correct 21-py/9-sh library and would pass
+        for the wrong reason.
+
+        The set grows slice by slice as E8.3 lands; the full 30 and their expected modes are
+        asserted by the inventory row when the item completes.
+        """
+        scripts = REPO / "auditor" / "scripts"
+        self.assertTrue(scripts.is_dir(), "auditor/scripts/ must exist once E8.3 has started")
+        found = {p.name for p in scripts.iterdir() if p.is_file()}
+        self.assertTrue(found <= set(E83_HELPERS),
+                        f"undeclared file(s) under auditor/scripts/: "
+                        f"{sorted(found - set(E83_HELPERS))}")
 
 
 class TestYamlWellFormed(unittest.TestCase):

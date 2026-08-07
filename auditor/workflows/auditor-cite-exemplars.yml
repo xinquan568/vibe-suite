@@ -123,7 +123,17 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -am "auditor-cite-exemplars refresh rule citations for $DATE"
-          git push origin "$BRANCH"
+          # Both checkouts use `persist-credentials: false`, so there is no ambient credential
+          # and a bare `git push` fails after all the work is done. The token is supplied
+          # through a credential helper reading it from the ENVIRONMENT, so it never lands in
+          # argv (where `ps` shows it), in .git/config, or in a remote URL — the same ephemeral
+          # discipline commit-via-pr.sh uses.
+          #
+          # The single quotes are required: ${GIT_AUTH_TOKEN} must reach git and expand THERE.
+          GIT_AUTH_TOKEN="$GH_TOKEN" git \
+            -c 'credential.helper=' \
+            -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f' \
+            push origin "$BRANCH"
           BODY="$DATA_DIR/ledgers/citation-pr-body.md"
           printf '%s\n' \
             "Weekly exemplar citation refresh for $DATE." \

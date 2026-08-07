@@ -172,7 +172,15 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -am "auditor-refine-rules propose rule refinements for $DATE"
-          git push origin "$BRANCH"
+          # persist-credentials: false on the checkout, so a bare push has nothing to
+          # authenticate with and fails after the branch is already built. Token supplied
+          # through a credential helper reading it from the ENVIRONMENT — never argv, never
+          # .git/config, never a remote URL. Single quotes required: ${GIT_AUTH_TOKEN} must
+          # reach git and expand there.
+          GIT_AUTH_TOKEN="$GH_TOKEN" git \
+            -c 'credential.helper=' \
+            -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f' \
+            push origin "$BRANCH"
           gh pr create --title "auditor rule refinement proposals ($DATE)" --label rule-refinement-proposal --body-file refine-out/pr-body.md
       - if: ${{ always() }}
         uses: actions/checkout@v4

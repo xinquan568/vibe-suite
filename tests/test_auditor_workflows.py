@@ -1676,5 +1676,43 @@ class TestLedgerPaths(unittest.TestCase):
         self.assertEqual(bad, [])
 
 
+
+class TestPushCredentials(unittest.TestCase):
+    """A push needs a credential, and these checkouts deliberately have none.
+
+    Every auditor checkout sets `persist-credentials: false`, which is the right posture: a
+    token left in .git/config outlives the step in a working tree the auditor commits from.
+    The consequence is that a bare `git push` has nothing to authenticate with — and it fails
+    at the END, after the branch has been built and the work done.
+    """
+
+    def test_no_workflow_pushes_without_supplying_a_credential(self):
+        offenders = []
+        for wf in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            text = wf.read_text(encoding="utf-8")
+            if "persist-credentials: false" not in text:
+                continue
+            for i, line in enumerate(text.splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("#") or "git push" not in stripped:
+                    continue
+                # Authenticated either by the helper's wrapper or by an inline credential
+                # helper on the same command.
+                window = "\n".join(text.splitlines()[max(0, i - 6):i])
+                if "credential.helper" in window or "git_auth" in stripped:
+                    continue
+                offenders.append(f"{wf.name}:{i}: {stripped[:60]}")
+        self.assertEqual(offenders, [],
+                         "a bare `git push` in a credentials-disabled checkout")
+
+    def test_the_token_is_never_written_into_a_url_or_config(self):
+        """Ephemeral means ephemeral: not in a remote URL, not persisted by `git config`."""
+        for wf in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            text = wf.read_text(encoding="utf-8")
+            with self.subTest(workflow=wf.name):
+                self.assertNotIn("@github.com", text, "credentials in a remote URL")
+                self.assertNotIn("git config credential", text, "persisted credential")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -122,6 +122,8 @@ def main(argv=None):
         include, reasons = classify(row, args.min_hits)
         if not include:
             continue
+        # `fingerprint` is absent from section-4 sidecars; the reviewer reads file+line, so
+        # it is reported when enriched and simply omitted otherwise rather than shown null.
         evidence = [{"fingerprint": f.get("fingerprint"), "file": f.get("file"),
                      "line": f.get("line"), "description": f.get("description"),
                      "false_positive": bool(f.get("false_positive"))}

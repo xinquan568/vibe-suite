@@ -28,6 +28,7 @@ falls hardest on the best rules in the book.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -53,6 +54,19 @@ PIPELINE_OUTCOMES = ("merged", "applied_separately", "rejected", "open", "cla_bl
 def refuse(reason: str) -> None:
     print(f"REFUSE:rule-health:{reason}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def fingerprint_of(repo: str, finding: dict) -> str:
+    """The finding's digest, computed — section 4 sidecars store none."""
+    line = finding.get("line")
+    payload = "|".join((
+        repo,
+        str(finding.get("file") or ""),
+        str(finding.get("rule_id") or ""),
+        str(finding.get("pattern") or ""),
+        "null" if line is None or line is False else str(line),
+    )) + "\n"
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def read_jsonl(path: Path):
@@ -198,12 +212,23 @@ def main(argv=None):
 
     findings = {}
     audits = data_dir / "audits"
+    # THE SIDECAR CARRIES NO FINGERPRINT (section 4) — skipping rows without one dropped every
+    # per-audit finding, so only findings that had already reached a PR were ever counted. The
+    # digest is computed, which needs the repo: recovered from the registry by slug rather than
+    # by reversing the filename, because `owner-name` cannot be split back reliably when either
+    # half contains a hyphen.
+    slug_to_repo = {r.replace("/", "-"): r for r in registry["repos"]}
     for path in sorted(audits.glob("*.findings.jsonl")) if audits.is_dir() else []:
+        repo = slug_to_repo.get(path.name[:-len(".findings.jsonl")])
+        if repo is None:
+            print(f"WARN {path.name}: no registry repo for this slug; skipped",
+                  file=sys.stderr)
+            continue
         for finding in read_jsonl(path):
-            if finding.get("fingerprint"):
-                findings.setdefault(finding["fingerprint"], finding)
-                if finding.get("rule_id"):
-                    rule_of.setdefault(finding["fingerprint"], str(finding["rule_id"]))
+            key = finding.get("fingerprint") or fingerprint_of(repo, finding)
+            findings.setdefault(key, finding)
+            if finding.get("rule_id"):
+                rule_of.setdefault(key, str(finding["rule_id"]))
     for finding in read_jsonl(data_dir / "ledgers" / "findings.jsonl"):
         if finding.get("fingerprint"):
             findings.setdefault(finding["fingerprint"], finding)

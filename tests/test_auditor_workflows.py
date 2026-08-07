@@ -1856,5 +1856,47 @@ class TestPushCredentials(unittest.TestCase):
                 self.assertNotIn("git config credential", text, "persisted credential")
 
 
+
+class TestSidecarFingerprintConsumers(unittest.TestCase):
+    """No helper may REQUIRE a fingerprint on a section-4 sidecar finding.
+
+    This class exists because the same defect shipped three times. Section 4 states the
+    per-audit sidecar carries no fingerprint — the aggregation post-step adds it — so a helper
+    that skips rows without one silently discards every finding and exits successfully.
+
+    It was fixed in diff-findings, then found again in backfill-findings, then again in
+    backfill-pr-fingerprints, and a search afterwards turned up rule-health doing the same. Each
+    fix was correct and none was a SEARCH. This is the search, kept as a test.
+    """
+
+    #: Helpers that read the per-audit sidecar. Reading `ledgers/findings.jsonl` is different —
+    #: those rows ARE enriched and a fingerprint is legitimately expected there.
+    SIDECAR_READERS = ("diff-findings.py", "backfill-findings.py",
+                       "backfill-pr-fingerprints.py", "rule-health.py",
+                       "validate-rule-ids.py", "prepare-refinement-input.py",
+                       # found by the completeness check below, not by me
+                       "repair-stale-statuses.py")
+
+    def test_every_sidecar_reader_can_compute_or_tolerate_a_missing_fingerprint(self):
+        for name in self.SIDECAR_READERS:
+            src = (REPO / "auditor" / "scripts" / name).read_text(encoding="utf-8")
+            with self.subTest(helper=name):
+                # Either it computes the digest itself, or it never gates on the field.
+                computes = "sha256:" in src and "hashlib" in src
+                gates = re.search(r'if\s+.*\.get\("fingerprint"\)\s*:', src)
+                self.assertTrue(computes or not gates,
+                                f"{name} gates on a fingerprint a section-4 sidecar never has")
+
+    def test_the_reader_list_covers_every_helper_that_opens_the_audits_directory(self):
+        """The list must not go stale: a new sidecar reader has to join it, or this class stops
+        being the search it claims to be."""
+        opens_audits = {
+            path.name for path in sorted((REPO / "auditor" / "scripts").glob("*.py"))
+            if '"audits"' in path.read_text(encoding="utf-8")
+        }
+        self.assertTrue(opens_audits <= set(self.SIDECAR_READERS),
+                        f"unlisted sidecar readers: {sorted(opens_audits - set(self.SIDECAR_READERS))}")
+
+
 if __name__ == "__main__":
     unittest.main()

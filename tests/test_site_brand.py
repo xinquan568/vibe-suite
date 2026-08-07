@@ -165,3 +165,29 @@ class NonRenderedPasses(BrandCheckBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuotedLiteralsRender(BrandCheckBase):
+    """A brand string inside a quoted literal RENDERS, so comment stripping must not exempt it.
+
+    Found at review: the checker stripped comment tokens without understanding quotes, so
+    `content: "/* nlpm */"` (painted by CSS) and a JS string `"// nlpm"` (reaching the DOM) both
+    passed. Genuine comments in the same syntaxes must still pass — otherwise the fix would be a
+    stricter checker rather than a correct one.
+    """
+
+    def test_css_generated_content_in_quotes_fails(self):
+        self.seed("a.css", '.a { content: "/* nlpm */"; }\n')
+        self.assertFlags(run_check(self.tmp), "a CSS content: string, which paints on the page")
+
+    def test_js_string_with_comment_marker_fails(self):
+        self.seed("b.js", 'const s = "// nlpm";\n')
+        self.assertFlags(run_check(self.tmp), "a JS string literal, which reaches the DOM")
+
+    def test_genuine_css_block_comment_still_passes(self):
+        self.seed("c.css", "/* nlpm */\n.b { color: red; }\n")
+        self.assertClean(run_check(self.tmp), "a real CSS block comment")
+
+    def test_genuine_js_line_comment_still_passes(self):
+        self.seed("d.js", "// nlpm\nconst y = 1;\n")
+        self.assertClean(run_check(self.tmp), "a real JS line comment")

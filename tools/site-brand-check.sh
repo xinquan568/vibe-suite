@@ -82,6 +82,34 @@ function strip_html(s,   i, out) {
   }
   return out
 }
+# A brand string inside a QUOTED LITERAL renders — CSS `content: "/* nlpm */"` paints it on the
+# page, and a JS string `"// nlpm"` reaches the DOM — so comment stripping must never exempt it.
+# Quoted spans are protected before any comment token is considered.
+# Inside a quoted span the brand text must survive for matching while every comment INTRODUCER is
+# destroyed — otherwise `content: "/* nlpm */"` is stripped as a block comment even though it paints
+# on the page. Only the introducer characters are substituted; letters are untouched.
+function neutralise(s) {
+  gsub(/\//, "\002", s)
+  gsub(/#/,  "\003", s)
+  gsub(/</,  "\004", s)
+  gsub(/!/,  "\005", s)
+  return s
+}
+function protect_quoted(s,   out, i, q, j) {
+  out = ""
+  while (length(s) > 0) {
+    i = match(s, /["\047]/)
+    if (i == 0) { out = out s; break }
+    out = out substr(s, 1, i - 1)
+    q = substr(s, i, 1)
+    s = substr(s, i + 1)
+    j = index(s, q)
+    if (j == 0) { out = out "\001" neutralise(s); break }   # unterminated: keep it scannable
+    out = out "\001" neutralise(substr(s, 1, j - 1)) "\001"
+    s = substr(s, j + 1)
+  }
+  return out
+}
 function strip_block(s,   i, out) {
   out = ""
   while (length(s) > 0) {
@@ -124,6 +152,9 @@ FNR == 1 {
 }
 {
   line = $0
+  # Protect quoted literals FIRST: a brand string inside one renders, so no comment rule may
+  # exempt it. \001 stands in for the quote marks and cannot be mistaken for a comment token.
+  if (html || slash || hash) line = protect_quoted(line)
   if (html) line = strip_html(line)
   if (slash) { line = strip_block(line); line = strip_line(line, "//") }
   if (hash) line = strip_line(line, "#")

@@ -5,6 +5,10 @@
 import { defineConfig } from "vitepress";
 
 export default defineConfig({
+  // GitHub Pages serves this as a PROJECT site at https://xinquan568.github.io/vibe-suite/, so
+  // every asset and nav URL must be scoped to that prefix. Without `base`, VitePress emits
+  // root-relative /assets/... which resolve to the USER site and 404 on the deployed project.
+  base: "/vibe-suite/",
   title: "vibe-suite",
   description:
     "A Claude Code plugin that audits natural-language programming artifacts, and an " +

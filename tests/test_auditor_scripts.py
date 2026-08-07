@@ -1171,5 +1171,103 @@ class Test_repair_stale_statuses(unittest.TestCase):
                          "mutation ineffective: without the guard a tracked repo gains a score")
 
 
+
+class Test_build_exemplar_gallery(unittest.TestCase):
+    """`build-exemplar-gallery.py` — the exemplar index, regenerated and CI-checked."""
+
+    HELPER = SCRIPTS / "build-exemplar-gallery.py"
+    SORT_ANCHOR = 'for item in sorted(items, key=lambda i: (i["repo"], i["slug"])):'
+    SORT_MUTANT = 'for item in items:'
+
+    def _corpus(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "exemplars").mkdir()
+        # Deliberately created in NON-alphabetical order so a helper that preserves input
+        # order produces different output from one that sorts.
+        for slug, repo, score, rule in (("zeta", "acme/zeta", "90", "R02"),
+                                        ("alpha", "acme/alpha", "90", "R01"),
+                                        ("mid", "beta/mid", "40", "R02")):
+            (d / "exemplars" / f"{slug}.md").write_text(
+                f"---\nslug: {slug}\nrepo: {repo}\naudited: 2026-01-01\n"
+                f"score: {score}\nexemplifies:\n  - {rule}\n---\nbody\n",
+                encoding="utf-8")
+        (d / "exemplars" / "broken.md").write_text("---\nslug: broken\n---\nno repo\n",
+                                                   encoding="utf-8")
+        return d
+
+    def _run(self, d, script_text=None, check=False):
+        helper = Path(tempfile.mkdtemp()) / "helper.py"
+        helper.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
+        argv = [sys.executable, str(helper), "--data-dir", str(d)]
+        if check:
+            argv.append("--check")
+        return subprocess.run(argv, capture_output=True, text=True)
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_output_is_byte_identical_across_runs(self):
+        """The gallery is CI-checked, so output must depend on the corpus, not on the order
+        the filesystem happened to return entries in."""
+        d = self._corpus()
+        self._run(d)
+        first = (d / "exemplars" / "README.md").read_text()
+        self._run(d)
+        self.assertEqual(first, (d / "exemplars" / "README.md").read_text())
+
+    def test_every_view_is_sorted(self):
+        d = self._corpus()
+        self._run(d)
+        text = (d / "exemplars" / "README.md").read_text()
+        by_repo = text.split("## By repo")[1]
+        order = [ln for ln in by_repo.splitlines() if ln.startswith("- [")]
+        self.assertEqual(order, sorted(order), "the by-repo view is not sorted")
+        # equal scores must tie-break on repo, not on input order
+        by_score = text.split("## By score")[1].split("## By repo")[0]
+        nineties = [ln for ln in by_score.splitlines() if ln.startswith("- 90/100")]
+        self.assertEqual(nineties, sorted(nineties), "equal scores did not tie-break")
+
+    def test_an_unparseable_exemplar_is_skipped_and_counted(self):
+        """The gallery is an index, not a validator — but a silent skip hides a broken corpus."""
+        d = self._corpus()
+        r = self._run(d)
+        self.assertIn("skipped 1", r.stderr)
+        self.assertNotIn("broken", (d / "exemplars" / "README.md").read_text())
+
+    def test_check_detects_a_stale_gallery(self):
+        d = self._corpus()
+        self._run(d)
+        self.assertEqual(self._run(d, check=True).returncode, 0, "fresh gallery reported stale")
+        readme = d / "exemplars" / "README.md"
+        readme.write_text(readme.read_text() + "drift\n", encoding="utf-8")
+        self.assertEqual(self._run(d, check=True).returncode, 1, "stale gallery not detected")
+
+    def test_check_on_a_missing_corpus_is_a_distinct_exit(self):
+        r = self._run(Path(tempfile.mkdtemp()), check=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("corpus-missing", r.stderr)
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        d = self._corpus()
+        self._run(d, NOOP[".py"])
+        self.assertFalse((d / "exemplars" / "README.md").exists(),
+                         "sanity: a no-op writes no gallery")
+
+    def test_the_input_order_mutant_fails_the_oracle(self):
+        """The plausible wrong implementation: index in filesystem order.
+
+        It produces a correct and complete gallery — every exemplar present, every link right —
+        so a content check passes. Only ordering exposes it, and the cost is a freshness gate
+        that reports drift on an unchanged corpus until people learn to ignore it.
+        """
+        src = self.HELPER.read_text()
+        self.assertIn(self.SORT_ANCHOR, src, "mutation anchor missing")
+        d = self._corpus()
+        self._run(d, src.replace(self.SORT_ANCHOR, self.SORT_MUTANT))
+        by_repo = (d / "exemplars" / "README.md").read_text().split("## By repo")[1]
+        order = [ln for ln in by_repo.splitlines() if ln.startswith("- [")]
+        self.assertNotEqual(order, sorted(order),
+                            "mutation ineffective: the mutant should emit unsorted output")
+
+
 if __name__ == "__main__":
     unittest.main()

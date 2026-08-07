@@ -64,9 +64,19 @@ def read_jsonl(path: Path):
         if not line:
             continue
         try:
-            records.append(json.loads(line))
+            record = json.loads(line)
         except json.JSONDecodeError:
             continue
+        # Same shape tolerance as render-dashboard.unwrap: SCHEMAS.md section 2 documents a
+        # flat finding record, auditor-audit.yml writes an enveloped one, and reading only one
+        # shape silently drops every row of the other.
+        if isinstance(record, dict) and isinstance(record.get("data"), dict) \
+                and record.get("event") == "finding":
+            merged = dict(record["data"])
+            for key in ("timestamp", "run_id"):
+                merged.setdefault(key, record.get(key))
+            record = merged
+        records.append(record)
     return records
 
 

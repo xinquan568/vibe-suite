@@ -89,6 +89,7 @@ class Test_generate_daily_report(unittest.TestCase):
         _, second = self._run()
         self.assertEqual(first, second)
 
+
     # --- mutants ------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):
         _, text = self._run(NOOP[".py"])
@@ -369,6 +370,37 @@ class Test_render_dashboard(unittest.TestCase):
                      for node in ast.walk(tree)
                      if isinstance(node, ast.ImportFrom) and node.module}
         self.assertNotIn("subprocess", imported, "the renderer must not shell out")
+
+    def test_enveloped_and_flat_ledger_rows_both_aggregate(self):
+        """SCHEMAS.md section 2 documents a FLAT finding record; auditor-audit.yml appends
+        through its `envelope` helper, so what is on disk is enveloped. Reading only one shape
+        drops every row of the other — and dropped rows aggregate to zero of everything, which
+        renders as a complete, confident dashboard rather than an error.
+        """
+        d = self._data_dir()
+        flat = {"repo": "acme/old", "rule_id": "R09", "confidence": "high",
+                "timestamp": "2026-01-01T00:00:00Z"}
+        enveloped = {"timestamp": "2026-01-02T00:00:00Z", "workflow": "auditor-audit",
+                     "event": "finding", "run_id": "1", "run_number": 1,
+                     "data": {"repo": "acme/new", "rule_id": "R10", "confidence": "high"}}
+        (d / "ledgers" / "findings.jsonl").write_text(
+            json.dumps(flat) + "\n" + json.dumps(enveloped) + "\n", encoding="utf-8")
+        _, data = self._run(d)
+        rules = {row["rule_id"] for row in data["rule_distribution"]}
+        self.assertIn("R09", rules, "the flat row was dropped")
+        self.assertIn("R10", rules, "the enveloped row was dropped")
+        self.assertEqual(data["summary"]["total_findings"], 2)
+
+    def test_an_unwrapped_row_keeps_its_own_fields(self):
+        """Envelope context fills gaps; it must never shadow a payload field of the same name."""
+        d = self._data_dir()
+        (d / "ledgers" / "findings.jsonl").write_text(json.dumps({
+            "timestamp": "2026-01-02T00:00:00Z", "event": "finding", "run_id": "1",
+            "data": {"repo": "acme/new", "rule_id": "R11", "confidence": "high",
+                     "timestamp": "2025-12-31T00:00:00Z"}}) + "\n", encoding="utf-8")
+        _, data = self._run(d, extra=("--since", "2026-01-01"))
+        self.assertEqual(data["summary"]["total_findings"], 0,
+                         "the payload's own timestamp must win over the envelope's")
 
     # --- mutants --------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):

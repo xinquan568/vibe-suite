@@ -59,6 +59,34 @@ def refuse(reason: str) -> None:
     raise SystemExit(1)
 
 
+def unwrap(record):
+    """A ledger row's payload, whether or not it arrived in an event envelope.
+
+    THE CONTRACT AND THE PRODUCER DISAGREE, and this reads correctly under both. SCHEMAS.md
+    section 2 documents a FLAT finding record — `event`, `timestamp`, `repo`, `fingerprint` at
+    the top level with `event: "finding"` as a discriminator. But auditor-audit.yml appends
+    through its `envelope` helper, so what is actually on disk today is
+    `{timestamp, workflow, event, run_id, run_number, data: {...}}`.
+
+    Picking one shape silently discards every row of the other: reading flat rows from an
+    enveloped ledger yields records with no `repo`, no `rule_id` and no `fingerprint`, which
+    aggregate to zero of everything and render as a complete, confident dashboard.
+
+    So a row carrying BOTH `event` and a dict `data` is unwrapped; anything else is already
+    flat. This is deliberately not a choice between the two readings — it is the only reading
+    that survives whichever way the maintainer settles the conflict. The discrepancy is real
+    and is flagged in the PR rather than quietly resolved here.
+    """
+    if isinstance(record, dict) and isinstance(record.get("data"), dict) and "event" in record:
+        merged = dict(record["data"])
+        # Envelope-level context the payload does not carry, without letting it shadow a
+        # payload field of the same name.
+        for key in ("timestamp", "event", "run_id"):
+            merged.setdefault(key, record.get(key))
+        return merged
+    return record
+
+
 def read_jsonl(path: Path):
     """`(records, malformed_count)`.
 
@@ -73,7 +101,7 @@ def read_jsonl(path: Path):
         if not line:
             continue
         try:
-            records.append(json.loads(line))
+            records.append(unwrap(json.loads(line)))
         except json.JSONDecodeError as exc:
             malformed += 1
             print(f"WARN {path}:{lineno} malformed JSON: {exc}", file=sys.stderr)

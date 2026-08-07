@@ -175,5 +175,94 @@ class Test_compute_vocab_fingerprint(unittest.TestCase):
         self.assertNotEqual(a, b, "the mutant should be order-SENSITIVE; mutation ineffective")
 
 
+class Test_guard_protected_paths(unittest.TestCase):
+    """`guard-protected-paths.sh` — refuse a pipeline run that touches core artifacts."""
+
+    HELPER = SCRIPTS / "guard-protected-paths.sh"
+
+    def _repo(self):
+        """A throwaway git repo with a committed data file and no protected changes."""
+        td = tempfile.mkdtemp()
+        root = Path(td)
+        subprocess.run(["git", "init", "-q", "."], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@e"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+        (root / "auditor").mkdir()
+        (root / "auditor" / "ok.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
+        return root
+
+    def _run(self, root, script_text=None):
+        path = root / "guard.sh"
+        path.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
+        return subprocess.run(["bash", str(path)], cwd=root, capture_output=True, text=True)
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_an_ordinary_data_change_passes(self):
+        root = self._repo()
+        (root / "auditor" / "ok.txt").write_text("x\ny\n", encoding="utf-8")
+        self.assertEqual(self._run(root).returncode, 0)
+
+    def test_every_protected_class_is_blocked_and_named(self):
+        for rel in ("skills/x/SKILL.md", "agents/a.md", "commands/c.md", "hooks/h.json",
+                    "CLAUDE.md", "README.md", ".claude-plugin/plugin.json"):
+            with self.subTest(path=rel):
+                root = self._repo()
+                target = root / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("x\n", encoding="utf-8")
+                r = self._run(root)
+                self.assertEqual(r.returncode, 1, f"{rel} was not blocked")
+                self.assertIn("VIOLATION", r.stdout)
+                self.assertIn(rel.split("/")[0], r.stdout, "the offending path must be named")
+
+    def test_staged_unstaged_and_untracked_are_all_seen(self):
+        """The untracked case is the one a diff-only guard misses entirely."""
+        # untracked
+        root = self._repo()
+        (root / "skills").mkdir()
+        (root / "skills" / "s.md").write_text("x\n", encoding="utf-8")
+        self.assertEqual(self._run(root).returncode, 1, "untracked not blocked")
+        # staged
+        subprocess.run(["git", "add", "skills/s.md"], cwd=root, check=True)
+        self.assertEqual(self._run(root).returncode, 1, "staged not blocked")
+        # unstaged modification of a tracked protected file
+        root2 = self._repo()
+        (root2 / "README.md").write_text("a\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=root2, check=True)
+        subprocess.run(["git", "commit", "-qm", "add readme"], cwd=root2, check=True)
+        (root2 / "README.md").write_text("a\nb\n", encoding="utf-8")
+        self.assertEqual(self._run(root2).returncode, 1, "unstaged not blocked")
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        root = self._repo()
+        (root / "skills").mkdir()
+        (root / "skills" / "s.md").write_text("x\n", encoding="utf-8")
+        self.assertNotEqual(self._run(root, NOOP[".sh"]).returncode, 1,
+                            "sanity: a no-op cannot block")
+        # the oracle above requires 1; a no-op returns 0, so the oracle rejects it
+        self.assertEqual(self._run(root, NOOP[".sh"]).returncode, 0)
+
+    def test_the_diff_only_mutant_fails_the_oracle(self):
+        """The plausible wrong implementation: inspect only `git diff`, skipping untracked.
+
+        It blocks staged and unstaged edits, so a test that only covers those would pass it —
+        while a workflow could create entirely new protected content unseen.
+        """
+        mutant = self.HELPER.read_text().replace(
+            'untracked="$(git ls-files --others --exclude-standard -- "$path" 2>/dev/null)"',
+            'untracked=""')
+        self.assertIn('untracked=""', mutant, "mutation did not apply")
+        root = self._repo()
+        (root / "skills").mkdir()
+        (root / "skills" / "s.md").write_text("x\n", encoding="utf-8")
+        self.assertEqual(self._run(root, mutant).returncode, 0,
+                         "mutation ineffective: the diff-only guard should miss this")
+        # and the real helper must catch what the mutant misses
+        self.assertEqual(self._run(root).returncode, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

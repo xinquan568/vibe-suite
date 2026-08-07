@@ -28,7 +28,20 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BIN = REPO_ROOT / "bin"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "site"
 CORPUS = FIXTURES / "corpus"
-MALFORMED = FIXTURES / "malformed"
+MALFORMED_SRC = FIXTURES / "malformed" / "manifest.json.broken"
+
+
+def materialise_malformed(tmp):
+    """Copy the broken manifest into `tmp` as a real `manifest.json`.
+
+    The fixture is stored with a `.broken` suffix because CI parses EVERY tracked `*.json`
+    ("Every other JSON file parses"), and a deliberately-unparseable one fails that gate. The
+    corpus the builder actually sees still has to be named `manifest.json`, so the test creates
+    it at run time instead of committing it.
+    """
+    dest = Path(tmp) / "manifest.json"
+    dest.write_bytes(MALFORMED_SRC.read_bytes())
+    return Path(tmp)
 
 NOTICE = "no audit data yet"
 
@@ -99,7 +112,7 @@ class Contract(BuilderBase):
     def test_the_fixture_corpus_is_present(self):
         # Guards the RED capture: a fixture-not-found failure would prove nothing.
         self.assertTrue((CORPUS / "manifest.json").is_file(), f"{CORPUS} fixture missing")
-        self.assertTrue((MALFORMED / "manifest.json").is_file(), f"{MALFORMED} missing")
+        self.assertTrue(MALFORMED_SRC.is_file(), f"{MALFORMED_SRC} missing")
 
 
 class AbsentCorpus(BuilderBase):
@@ -171,7 +184,8 @@ class MalformedCorpus(BuilderBase):
     def test_exits_nonzero(self):
         for name, _, _ in BUILDERS:
             with self.subTest(builder=name):
-                result = run_builder(name, MALFORMED, self.out_dir(name))
+                with tempfile.TemporaryDirectory() as md:
+                    result = run_builder(name, materialise_malformed(md), self.out_dir(name))
                 self.assertNotEqual(result.returncode, 0,
                                     f"{name} exited 0 on a malformed corpus manifest; "
                                     f"corrupt input must never render as healthy")
@@ -179,7 +193,8 @@ class MalformedCorpus(BuilderBase):
     def test_names_the_error(self):
         for name, _, _ in BUILDERS:
             with self.subTest(builder=name):
-                result = run_builder(name, MALFORMED, self.out_dir(name))
+                with tempfile.TemporaryDirectory() as md:
+                    result = run_builder(name, materialise_malformed(md), self.out_dir(name))
                 report = (result.stderr + result.stdout).lower()
                 self.assertIn("manifest", report,
                               f"{name} must name the malformed input; got {report!r}")
@@ -189,7 +204,8 @@ class MalformedCorpus(BuilderBase):
         for name, _, page in BUILDERS:
             with self.subTest(builder=name):
                 out = self.out_dir(name)
-                run_builder(name, MALFORMED, out)
+                with tempfile.TemporaryDirectory() as md:
+                    run_builder(name, materialise_malformed(md), out)
                 rendered = out / page
                 if rendered.is_file():
                     self.assertNotIn(NOTICE, rendered.read_text(encoding="utf-8").lower(),

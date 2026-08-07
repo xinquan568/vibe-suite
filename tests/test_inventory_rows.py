@@ -246,6 +246,20 @@ class AuditorRowSplit(RowBase):
         self.assertFalse(self.ok(SITE_ROW),
                          "a site workflow present in both homes is a duplicate, not a pass")
 
+    def test_a_pipeline_workflow_live_in_the_github_home_reddens_the_row(self):
+        """The one place a LIVE copy of a staged workflow could hide from both rows.
+
+        The pipeline count never looked outside `auditor/`, and the site count filtered
+        non-site names out before its anomaly check — so `.github/workflows/auditor-audit.yml`
+        was invisible to both while being fully executable. Staging is the safe state precisely
+        because `.github/` is what GitHub runs.
+        """
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        self.seed_workflows(".github/workflows", PIPELINE_WORKFLOWS[0])
+        self.assertFalse(self.ok(PIPELINE_ROW),
+                         "a staged workflow must not also exist live under .github/workflows/")
+
     def test_workflows_parked_outside_the_workflow_home_do_not_count(self):
         """GitHub runs workflows from a workflow directory; elsewhere they are inert files.
 

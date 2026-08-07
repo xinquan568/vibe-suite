@@ -113,6 +113,12 @@ def _pipeline_count(r):
     a stray, misplaced, duplicated, empty or directory-shaped entry cannot substitute for a
     deleted required workflow.
     """
+    # A pipeline workflow parked in `.github/workflows/` was invisible to BOTH rows: this count
+    # never looked outside `auditor/`, and the site count filtered non-site names out before its
+    # anomaly check. That is the one place a LIVE, executable copy of a staged workflow could
+    # hide — staging is the safe state precisely because `.github/` is what GitHub runs.
+    if any(f.stem in PIPELINE_WORKFLOWS for f in _workflow_entries(r / ".github")):
+        return -1
     home = r / "auditor" / "workflows"
     entries = _workflow_entries(r / "auditor")
     if any(_bad_entry(f, {home}, r) for f in entries):

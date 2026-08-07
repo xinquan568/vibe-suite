@@ -963,5 +963,91 @@ class Test_three_way_merge_registry(unittest.TestCase):
                          "mutation ineffective: the mutant should revert the remote's update")
 
 
+
+class Test_log_event(unittest.TestCase):
+    """`log-event.sh` — append one canonical event record to the ledger.
+
+    E8.2a already wired all 18 emitters and ten ledger readers to this envelope, so its shape
+    is a contract rather than a convention.
+    """
+
+    HELPER = SCRIPTS / "log-event.sh"
+    SPREAD_ANCHOR = "run_number:($rn|tonumber? // 0), data:.}'"
+    SPREAD_MUTANT = "run_number:($rn|tonumber? // 0)} + .'"
+    NUMBER_ANCHOR = "run_number:($rn|tonumber? // 0), data:.}'"
+    NUMBER_MUTANT = "run_number:$rn, data:.}'"
+
+    def _emit(self, payload, script_text=None, run_number="10", workflow="discover",
+              event="search_complete"):
+        d = Path(tempfile.mkdtemp())
+        helper = d / "helper.sh"
+        helper.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
+        env = dict(os.environ)
+        env["AUDITOR_DATA_DIR"] = str(d)
+        env["GITHUB_RUN_NUMBER"] = run_number
+        subprocess.run(
+            ["bash", "-c", f". '{helper}'\nlog_event {workflow} {event} '{payload}'"],
+            capture_output=True, text=True, env=env)
+        ledger = d / "ledgers" / "events.jsonl"
+        if not ledger.exists():
+            return []
+        return [json.loads(x) for x in ledger.read_text().splitlines() if x.strip()]
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_the_envelope_shape_is_exact(self):
+        rows = self._emit('{"candidates":42}')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(sorted(rows[0]),
+                         ["data", "event", "run_id", "run_number", "timestamp", "workflow"])
+        self.assertEqual(rows[0]["data"], {"candidates": 42})
+
+    def test_run_number_is_a_number_not_a_string(self):
+        """Strings sort wrongly: "10" < "9" lexically, so run ordering inverts."""
+        rows = self._emit('{"a":1}', run_number="10")
+        self.assertIsInstance(rows[0]["run_number"], int)
+        self.assertEqual(rows[0]["run_number"], 10)
+
+    def test_a_payload_field_cannot_overwrite_an_envelope_field(self):
+        """The reason the payload is nested rather than spread."""
+        rows = self._emit('{"event":"HIJACK"}', event="scored")
+        self.assertEqual(rows[0]["event"], "scored", "the envelope was overwritten")
+        self.assertEqual(rows[0]["data"]["event"], "HIJACK", "the payload was dropped")
+
+    def test_a_non_json_payload_is_raw_wrapped_not_lost(self):
+        rows = self._emit("not json at all")
+        self.assertEqual(rows[0]["data"], {"raw": "not json at all"})
+
+    def test_a_junk_run_number_degrades_to_zero_rather_than_failing(self):
+        rows = self._emit('{"a":1}', run_number="not-a-number")
+        self.assertEqual(rows[0]["run_number"], 0)
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        self.assertEqual(self._emit('{"a":1}', NOOP[".sh"]), [],
+                         "sanity: a no-op writes no ledger")
+
+    def test_the_spread_payload_mutant_fails_the_oracle(self):
+        """The plausible wrong implementation: merge the payload into the envelope.
+
+        The record still parses and still carries every field, so a shape check passes — until
+        a payload key collides with an envelope key and every reader mis-attributes it.
+        """
+        src = self.HELPER.read_text()
+        self.assertIn(self.SPREAD_ANCHOR, src, "mutation anchor missing")
+        rows = self._emit('{"event":"HIJACK"}',
+                          src.replace(self.SPREAD_ANCHOR, self.SPREAD_MUTANT, 1),
+                          event="scored")
+        self.assertEqual(rows[0]["event"], "HIJACK",
+                         "mutation ineffective: the payload should have overwritten the envelope")
+
+    def test_the_string_run_number_mutant_fails_the_oracle(self):
+        src = self.HELPER.read_text()
+        self.assertIn(self.NUMBER_ANCHOR, src, "mutation anchor missing")
+        rows = self._emit('{"a":1}',
+                          src.replace(self.NUMBER_ANCHOR, self.NUMBER_MUTANT, 1),
+                          run_number="10")
+        self.assertIsInstance(rows[0]["run_number"], str, "mutation ineffective")
+
+
 if __name__ == "__main__":
     unittest.main()

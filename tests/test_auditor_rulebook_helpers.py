@@ -545,9 +545,27 @@ class Test_generate_rule_review_body(unittest.TestCase):
         "ancient.md": "---\nslug: c\nrepo: acme/c\naudited: 2025-06-01\n"
                       "commit_sha: z\nscore: 91\nexemplifies: [R03]\n---\nbody\n",
     }
+    #: Canonical: FIVE event types share this ledger, all enveloped. Only maintainer_rejected
+    #: is a rejection, and its fields are pr/fingerprints[]/rule_ids[]/quote — not
+    #: repo/rule_id/reason. The old fixture used the singular flat names, so it exercised the
+    #: helper through a record the pipeline never writes.
     DISAGREEMENTS = [
-        {"rule_id": "R02", "repo": "acme/w", "timestamp": "2026-05-02", "reason": "style"},
-        {"rule_id": "R01", "repo": "acme/x", "timestamp": "2026-02-01", "reason": "old quarter"},
+        envelope("maintainer_rejected",
+                 {"pr": 12, "fingerprints": ["f1", "f2"], "rule_ids": ["R02", "R07"],
+                  "dissent_type": "style_disagreement", "commenter_role": "maintainer",
+                  "quote": "we prefer this"}, "2026-05-02T00:00:00Z"),
+        # captured AT that rejection — the same dispute, not a second one
+        envelope("pr_comments_snapshot",
+                 {"pr": 12, "fingerprints": ["f1"], "rule_ids": ["R02"], "comments": []},
+                 "2026-05-02T00:00:00Z"),
+        # our own invalidation, not a maintainer's
+        envelope("self_false_positive",
+                 {"repo": "acme/w", "fingerprint": "f9", "rule_id": "R51", "reason": "x"},
+                 "2026-05-03T00:00:00Z"),
+        envelope("maintainer_rejected",
+                 {"pr": 3, "fingerprints": ["f0"], "rule_ids": ["R01"],
+                  "dissent_type": "out_of_scope", "commenter_role": "maintainer",
+                  "quote": "old quarter"}, "2026-02-01T00:00:00Z"),
     ]
 
     def _data_dir(self):
@@ -584,11 +602,27 @@ class Test_generate_rule_review_body(unittest.TestCase):
         section = r.stdout.split("## Stale citations")[1]
         self.assertLess(section.index("R03"), section.index("R02"))
 
-    def test_only_this_quarters_rejections_appear(self):
+    def test_only_this_quarters_maintainer_rejections_appear(self):
+        """Snapshots and self-false-positives share this ledger. Counting them inflates the
+        section with duplicates of the same dispute and with findings no maintainer ever saw."""
         r = self._run(self._data_dir())
         section = r.stdout.split("## Rejections")[1]
-        self.assertIn("acme/w", section)
-        self.assertNotIn("acme/x", section, "a rejection from Q1 leaked into Q2")
+        self.assertIn("## Rejections this quarter (2)", r.stdout,
+                      "one bundled rejection over two rules, snapshot and self-FP excluded")
+        self.assertIn("R02", section)
+        self.assertIn("R07", section, "the bundled PR's second rule was dropped")
+        self.assertNotIn("R51", section, "a self-false-positive was counted as a rejection")
+        self.assertNotIn("out_of_scope", section, "a Q1 rejection leaked into Q2")
+
+    def test_rejection_rows_carry_real_values(self):
+        """Reading singular repo/rule_id/reason off an enveloped record yields null for every
+        one — a table of empty rows that still looks like a populated report."""
+        r = self._run(self._data_dir())
+        section = r.stdout.split("## Rejections")[1]
+        self.assertIn("style_disagreement", section)
+        self.assertIn("maintainer", section)
+        self.assertIn("we prefer this", section)
+        self.assertNotIn("| None |", section)
 
     def test_paths_point_at_this_suites_skills(self):
         """`skills/nlpm/...` 404s for every reviewer and is what the AC-6 sweep exists to

@@ -164,15 +164,37 @@ def main(argv=None):
                           "exemplar": citation.get("exemplar")})
     stale.sort(key=lambda r: (-r["age_days"], str(r["rule_id"])))
 
+    # FIVE EVENT TYPES SHARE THIS FILE, all inside the section 7 envelope. Only
+    # `maintainer_rejected` is a rejection: `pr_comments_snapshot` is the raw thread captured
+    # AT that rejection, `self_false_positive` is our own invalidation, and
+    # `downstream_suppression` is a config change. Counting them all inflated the section with
+    # duplicates of the same dispute and with findings no maintainer ever saw.
+    #
+    # And its fields are `pr`, `fingerprints[]`, `rule_ids[]`, `quote` — not `repo`, `rule_id`,
+    # `reason`. Reading the singular names off an enveloped record yields null for every one,
+    # so production rendered a table of empty rows that still looked like a populated report.
     rejections = []
     for record in disagreements:
-        when = parse_day(record.get("timestamp") or record.get("rejected_at"))
+        data = record.get("data") if isinstance(record.get("data"), dict) else record
+        if record.get("event") != "maintainer_rejected":
+            continue
+        when = parse_day(record.get("timestamp") or data.get("timestamp"))
         if when is None or not (start <= when <= end):
             continue
-        rejections.append({"rule_id": record.get("rule_id"), "repo": record.get("repo"),
-                           "when": when.isoformat(),
-                           "reason": (record.get("reason") or "").strip()})
-    rejections.sort(key=lambda r: (str(r["when"]), str(r["rule_id"]), str(r["repo"])))
+        rules = data.get("rule_ids")
+        rules = [str(r) for r in rules] if isinstance(rules, list) and rules else ["--"]
+        # One row per rule: a bundled PR disputes several findings at once, and collapsing them
+        # would credit the dispute to whichever rule happened to sort first.
+        for rule in rules:
+            rejections.append({
+                "rule_id": rule,
+                "pr": data.get("pr"),
+                "when": when.isoformat(),
+                "dissent": (data.get("dissent_type") or "").strip(),
+                "role": (data.get("commenter_role") or "").strip(),
+                "reason": (data.get("quote") or "").strip(),
+            })
+    rejections.sort(key=lambda r: (str(r["when"]), str(r["rule_id"]), str(r["pr"])))
 
     lines = [
         f"# Rule review — {args.quarter}", "",
@@ -191,8 +213,10 @@ def main(argv=None):
         lines.append("_Every cited exemplar was re-confirmed within the window._")
     lines += ["", f"## Rejections this quarter ({len(rejections)})", ""]
     if rejections:
-        lines += ["| Date | Rule | Repository | Reason |", "|---|---|---|---|"]
-        lines += [f"| {r['when']} | {r['rule_id']} | {r['repo']} "
+        lines += ["| Date | Rule | PR | Dissent | Role | Quote |",
+                  "|---|---|---|---|---|---|"]
+        lines += [f"| {r['when']} | {r['rule_id']} | {r['pr'] or '--'} "
+                  f"| {r['dissent'] or '--'} | {r['role'] or '--'} "
                   f"| {(r['reason'] or '--')[:200]} |" for r in rejections]
     else:
         lines.append("_No findings were declined in this window._")

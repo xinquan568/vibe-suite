@@ -872,5 +872,96 @@ class Test_atomic_registry_write(unittest.TestCase):
                             "mutation ineffective: the mutant should have clobbered the registry")
 
 
+
+class Test_three_way_merge_registry(unittest.TestCase):
+    """`three-way-merge-registry.py` — resolve a registry push race without losing updates.
+
+    The bug this replaces is subtle and was observed in production: deep-merging OURS over
+    THEIRS reverts every field this run did not touch, because OURS still holds the value read
+    at checkout. Entries then oscillate between states run after run while nothing looks broken.
+    """
+
+    HELPER = SCRIPTS / "three-way-merge-registry.py"
+    MERGE_ANCHOR = "    if theirs_changed and not ours_changed:\n        return theirs          # remote moved, our copy is stale\n    return ours                # we moved, or both did: this run's intent"
+    MERGE_MUTANT = '    return ours                # MUTANT: ours always wins'
+
+    BASE = {"repos": {"a/x": {"state": "discovered", "score": 1},
+                        "b/y": {"state": "discovered"}}}
+    OURS = {"repos": {"a/x": {"state": "audited", "score": 1},
+                        "b/y": {"state": "discovered"}}}
+    THEIRS = {"repos": {"a/x": {"state": "discovered", "score": 1},
+                          "b/y": {"state": "contributed"},
+                          "c/z": {"state": "new"}}}
+
+    def _run(self, script_text=None, base=None, ours=None, theirs=None):
+        d = Path(tempfile.mkdtemp())
+        # `is None`, NOT `or`: an empty registry `{}` is falsy, so `base or self.BASE`
+        # silently substituted the default fixture and the empty-input case never ran.
+        for name, doc in (("base", self.BASE if base is None else base),
+                          ("ours", self.OURS if ours is None else ours),
+                          ("theirs", self.THEIRS if theirs is None else theirs)):
+            (d / f"{name}.json").write_text(
+                doc if isinstance(doc, str) else json.dumps(doc), encoding="utf-8")
+        helper = d / "helper.py"
+        helper.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(helper), str(d / "base.json"), str(d / "ours.json"),
+             str(d / "theirs.json")], capture_output=True, text=True)
+
+    # --- oracle -------------------------------------------------------------------------
+    def test_disjoint_changes_from_both_sides_survive(self):
+        """The acceptance property: neither side's work is lost."""
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        repos = json.loads(r.stdout)["repos"]
+        self.assertEqual(repos["a/x"]["state"], "audited", "our change was lost")
+        self.assertEqual(repos["b/y"]["state"], "contributed",
+                         "the remote's change was REVERTED by our stale copy")
+        self.assertEqual(repos["c/z"]["state"], "new", "a remote-only addition was dropped")
+
+    def test_when_both_sides_change_a_field_ours_wins_deterministically(self):
+        ours = {"repos": {"a/x": {"state": "audited"}}}
+        theirs = {"repos": {"a/x": {"state": "contributed"}}}
+        base = {"repos": {"a/x": {"state": "discovered"}}}
+        first = self._run(base=base, ours=ours, theirs=theirs).stdout
+        second = self._run(base=base, ours=ours, theirs=theirs).stdout
+        self.assertEqual(json.loads(first)["repos"]["a/x"]["state"], "audited")
+        self.assertEqual(first, second, "resolution must be deterministic")
+
+    def test_output_is_byte_stable_so_concurrent_resolutions_agree(self):
+        self.assertEqual(self._run().stdout, self._run().stdout)
+
+    def test_unreadable_input_is_refused(self):
+        r = self._run(base="{not json")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unreadable-input", r.stderr)
+
+    def test_a_merge_without_a_repos_map_is_refused(self):
+        r = self._run(base={}, ours={}, theirs={})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("merged-has-no-repos-map", r.stderr,
+                      "a well-formed but meaningless registry must not be written")
+
+    # --- mutants ------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        r = self._run(NOOP[".py"])
+        self.assertEqual(r.stdout.strip(), "", "sanity: a no-op emits nothing")
+
+    def test_the_ours_always_wins_mutant_fails_the_oracle(self):
+        """The plausible wrong implementation — and the one that was actually shipped upstream
+        before this: overlay ours on theirs.
+
+        It produces a valid registry containing all the right repos, so a test checking shape
+        or repo coverage accepts it. Only asking what each side CHANGED exposes the reversion.
+        """
+        src = self.HELPER.read_text()
+        self.assertIn(self.MERGE_ANCHOR, src, "mutation anchor missing")
+        r = self._run(src.replace(self.MERGE_ANCHOR, self.MERGE_MUTANT))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        repos = json.loads(r.stdout)["repos"]
+        self.assertEqual(repos["b/y"]["state"], "discovered",
+                         "mutation ineffective: the mutant should revert the remote's update")
+
+
 if __name__ == "__main__":
     unittest.main()

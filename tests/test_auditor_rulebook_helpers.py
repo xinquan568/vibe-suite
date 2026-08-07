@@ -280,5 +280,209 @@ class Test_validate_feedback(unittest.TestCase):
                          "mutation ineffective: the mutant should pass a missing log")
 
 
+
+class Test_prepare_refinement_input(unittest.TestCase):
+    """`prepare-refinement-input.py` — the filter IS the value."""
+
+    HELPER = SCRIPTS / "prepare-refinement-input.py"
+    FLOOR_ANCHOR = '    if hits < min_hits:'
+    FLOOR_MUTANT = '    if hits < 0:'
+
+    RULES = [
+        # healthy and busy: must never be selected, however often it fired
+        {"rule_id": "R01", "hits": 200, "resolved": 100, "acceptance_rate": 0.95,
+         "false_positive_rate": 0.01},
+        # disputed, enough hits to mean something
+        {"rule_id": "R02", "hits": 10, "resolved": 8, "acceptance_rate": 0.10,
+         "false_positive_rate": 0.05},
+        # noisy, enough hits
+        {"rule_id": "R03", "hits": 20, "resolved": 5, "acceptance_rate": 0.80,
+         "false_positive_rate": 0.60},
+        # disputed on ONE hit: a single maintainer having a bad day
+        {"rule_id": "R04", "hits": 1, "resolved": 1, "acceptance_rate": 0.0,
+         "false_positive_rate": 1.0},
+        # two hits: still below the confidence floor
+        {"rule_id": "R05", "hits": 2, "resolved": 2, "acceptance_rate": 0.0,
+         "false_positive_rate": 1.0},
+        # more disputed than R02 but fewer hits, to pin the sort
+        {"rule_id": "R06", "hits": 4, "resolved": 4, "acceptance_rate": 0.0,
+         "false_positive_rate": 0.0},
+    ]
+
+    def _data_dir(self, rules=None, findings=None):
+        d = Path(tempfile.mkdtemp())
+        (d / "feedback").mkdir()
+        (d / "audits").mkdir()
+        (d / "feedback" / "log.json").write_text(
+            json.dumps({"rules": self.RULES if rules is None else rules}), encoding="utf-8")
+        if findings:
+            (d / "audits" / "x.findings.jsonl").write_text(
+                "".join(json.dumps(f) + "\n" for f in findings), encoding="utf-8")
+        return d
+
+    def _run(self, d, script_text=None):
+        helper = self.HELPER
+        if script_text is not None:
+            helper = Path(tempfile.mkdtemp()) / "prepare-refinement-input.py"
+            helper.write_text(script_text, encoding="utf-8")
+        r = subprocess.run([sys.executable, str(helper), "--data-dir", str(d)],
+                           capture_output=True, text=True)
+        return r, (json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None)
+
+    # --- oracle ---------------------------------------------------------------------------
+    def test_a_healthy_rule_is_never_selected_however_often_it_fired(self):
+        """A rule that fires 200 times and is accepted every time is the rulebook working.
+        Putting it in front of a reviewer invites a change that breaks something correct."""
+        _, out = self._run(self._data_dir())
+        self.assertNotIn("R01", [r["rule_id"] for r in out["rules"]])
+
+    def test_noisy_and_disputed_rules_are_selected(self):
+        _, out = self._run(self._data_dir())
+        selected = {r["rule_id"]: r["reasons"] for r in out["rules"]}
+        self.assertIn("disputed", selected["R02"])
+        self.assertIn("noisy", selected["R03"])
+
+    def test_the_three_hit_floor_keeps_out_single_anecdotes(self):
+        """One rejection of one hit is a 0% acceptance rate and means nothing. Acting on it
+        rewrites rules from anecdotes — worse than not reviewing them, because the change
+        carries the authority of a review."""
+        _, out = self._run(self._data_dir())
+        picked = [r["rule_id"] for r in out["rules"]]
+        self.assertNotIn("R04", picked, "a one-hit rule was selected")
+        self.assertNotIn("R05", picked, "a two-hit rule was selected")
+
+    def test_disputed_sorts_above_noisy_then_hits_descending(self):
+        """A noisy rule wastes our time; a disputed one wasted a maintainer's."""
+        _, out = self._run(self._data_dir())
+        self.assertEqual([r["rule_id"] for r in out["rules"]], ["R02", "R06", "R03"])
+
+    def test_evidence_is_capped_at_five_and_says_so(self):
+        """Forty examples of one failure is one fact presented forty times."""
+        findings = [{"rule_id": "R02", "fingerprint": f"fp{i}", "file": f"f{i}.md", "line": i}
+                    for i in range(12)]
+        _, out = self._run(self._data_dir(findings=findings))
+        row = next(r for r in out["rules"] if r["rule_id"] == "R02")
+        self.assertEqual(len(row["evidence"]), 5)
+        self.assertTrue(row["evidence_truncated"])
+
+    def test_a_zero_acceptance_rate_is_not_treated_as_absent(self):
+        """0.0 is the strongest possible dispute, and it is what truthiness throws away."""
+        _, out = self._run(self._data_dir())
+        self.assertIn("R06", [r["rule_id"] for r in out["rules"]])
+
+    def test_a_missing_feedback_log_is_refused(self):
+        """Selecting from nothing reports 'no rules need review' — the most reassuring possible
+        way to be wrong."""
+        d = Path(tempfile.mkdtemp())
+        (d / "feedback").mkdir()
+        r, _ = self._run(d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:prepare-refinement-input:feedback-missing", r.stderr)
+
+    # --- mutants --------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        r, _ = self._run(self._data_dir(), script_text=NOOP[".py"])
+        self.assertEqual(r.stdout, "", "sanity: a no-op emits nothing")
+
+    def test_the_dropped_floor_mutant_admits_single_anecdotes(self):
+        src = self.HELPER.read_text(encoding="utf-8")
+        self.assertIn(self.FLOOR_ANCHOR, src, "mutation anchor missing")
+        _, out = self._run(self._data_dir(),
+                           script_text=src.replace(self.FLOOR_ANCHOR, self.FLOOR_MUTANT, 1))
+        picked = [r["rule_id"] for r in out["rules"]]
+        self.assertIn("R04", picked,
+                      "mutation ineffective: the mutant should admit the one-hit rule")
+
+
+class Test_generate_rule_review_body(unittest.TestCase):
+    """`generate-rule-review-body.py` — the quarterly review issue."""
+
+    HELPER = SCRIPTS / "generate-rule-review-body.py"
+    STALE_ANCHOR = '        if confirmed < cutoff:'
+    STALE_MUTANT = '        if confirmed > cutoff:'
+    AS_OF = "2026-08-08"
+
+    CITATIONS = [
+        {"rule_id": "R01", "confirmed_at": "2026-08-01", "exemplar": "fresh.md"},
+        {"rule_id": "R02", "confirmed_at": "2026-01-01", "exemplar": "old.md"},
+        {"rule_id": "R03", "confirmed_at": "2025-06-01", "exemplar": "ancient.md"},
+    ]
+    DISAGREEMENTS = [
+        {"rule_id": "R02", "repo": "acme/w", "timestamp": "2026-05-02", "reason": "style"},
+        {"rule_id": "R01", "repo": "acme/x", "timestamp": "2026-02-01", "reason": "old quarter"},
+    ]
+
+    def _data_dir(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "ledgers").mkdir()
+        (d / "ledgers" / "citations.jsonl").write_text(
+            "".join(json.dumps(c) + "\n" for c in self.CITATIONS), encoding="utf-8")
+        (d / "ledgers" / "disagreements.jsonl").write_text(
+            "".join(json.dumps(c) + "\n" for c in self.DISAGREEMENTS), encoding="utf-8")
+        return d
+
+    def _run(self, d, script_text=None, quarter="2026-Q2"):
+        helper = self.HELPER
+        if script_text is not None:
+            helper = Path(tempfile.mkdtemp()) / "generate-rule-review-body.py"
+            helper.write_text(script_text, encoding="utf-8")
+        return subprocess.run([sys.executable, str(helper), "--data-dir", str(d),
+                               "--quarter", quarter, "--as-of", self.AS_OF],
+                              capture_output=True, text=True)
+
+    # --- oracle ---------------------------------------------------------------------------
+    def test_stale_means_older_than_ninety_days(self):
+        r = self._run(self._data_dir())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("## Stale citations (2)", r.stdout)
+        self.assertIn("R02", r.stdout)
+        self.assertIn("R03", r.stdout)
+        stale_section = r.stdout.split("## Stale citations")[1].split("## Rejections")[0]
+        self.assertNotIn("R01", stale_section, "a citation confirmed a week ago is not stale")
+
+    def test_stale_citations_sort_oldest_first(self):
+        r = self._run(self._data_dir())
+        section = r.stdout.split("## Stale citations")[1]
+        self.assertLess(section.index("R03"), section.index("R02"))
+
+    def test_only_this_quarters_rejections_appear(self):
+        r = self._run(self._data_dir())
+        section = r.stdout.split("## Rejections")[1]
+        self.assertIn("acme/w", section)
+        self.assertNotIn("acme/x", section, "a rejection from Q1 leaked into Q2")
+
+    def test_paths_point_at_this_suites_skills(self):
+        """`skills/nlpm/...` 404s for every reviewer and is what the AC-6 sweep exists to
+        catch."""
+        r = self._run(self._data_dir())
+        self.assertIn("skills/rules/SKILL.md", r.stdout)
+        self.assertNotIn("skills/nlpm", r.stdout)
+
+    def test_the_body_is_reproducible(self):
+        d = self._data_dir()
+        self.assertEqual(self._run(d).stdout, self._run(d).stdout)
+
+    def test_an_invalid_quarter_is_refused(self):
+        r = self._run(self._data_dir(), quarter="2026-Q9")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("quarter-invalid", r.stderr)
+
+    # --- mutants --------------------------------------------------------------------------
+    def test_a_no_op_helper_fails_the_oracle(self):
+        r = self._run(self._data_dir(), script_text=NOOP[".py"])
+        self.assertEqual(r.stdout, "", "sanity: a no-op emits nothing")
+
+    def test_the_reversed_comparison_lists_the_freshest_citations(self):
+        """`age < 90` reads perfectly: a plausible list under a heading saying the opposite,
+        with every genuinely stale citation omitted."""
+        src = self.HELPER.read_text(encoding="utf-8")
+        self.assertIn(self.STALE_ANCHOR, src, "mutation anchor missing")
+        r = self._run(self._data_dir(),
+                      script_text=src.replace(self.STALE_ANCHOR, self.STALE_MUTANT, 1))
+        self.assertIn("## Stale citations (1)", r.stdout,
+                      "mutation ineffective: the mutant should list only the fresh citation")
+        self.assertIn("R01", r.stdout.split("## Stale citations")[1].split("## Rejections")[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -277,16 +277,18 @@ class TestStrictMode(unittest.TestCase):
                          f"blocks still enabling only `set -u` (line numbers): {weak}")
 
 
-class TestStrictModeIsBehavioural(QuotaBase):
-    """W7.2: the failure classes strict mode newly aborts on, executed rather than asserted.
+class TestTheRefusalBranchesWork(QuotaBase):
+    """The named refusals, executed. **This class is not strict-mode evidence.**
 
-    `test_every_run_block_enables_strict_mode` is structural -- it proves a string is in a
-    position. It cannot show that a command which used to fail open now stops the job, and
-    that is the behavioural change strict mode actually makes. The review's objection was
-    exact: the claim that all 43 newly-aborting commands genuinely should abort was never
-    tested, only asserted.
+    It was called `TestStrictModeIsBehavioural` and claimed to be exactly that. The review
+    refuted it: every case here reaches an explicit `|| { echo REFUSE...; exit 1; }`, so every
+    one of them stays green with `set -euo pipefail` removed from the workflow entirely. They
+    test the guards, which is worth doing; they say nothing whatever about strict mode.
 
-    One case per failure class, each driving a real block.
+    The claim is corrected rather than the tests deleted, and the cases that DO isolate strict
+    mode live in TestStrictModeChangesBehaviour below, where each one is proved by running the
+    same block twice -- once as written, once with the marker stripped -- and requiring the two
+    to differ. A test that cannot tell the two apart is not evidence about the difference.
     """
 
     def _sb(self):
@@ -341,12 +343,106 @@ class TestStrictModeIsBehavioural(QuotaBase):
         self.assertIn("REFUSE:open-prs-unavailable", r.stdout + r.stderr)
 
     def test_a_failing_early_pipeline_stage_is_not_hidden_by_a_successful_last_one(self):
-        # `pipefail` is the half of the flag set with no structural evidence at all: a block
-        # can carry `set -euo pipefail` and still never run a pipeline whose FIRST stage
-        # fails. This drives one directly, in the same shell dialect the blocks use.
+        # Kept for the property, but note it runs a SYNTHETIC script, not a workflow block --
+        # so it establishes that bash honours pipefail, which was never in doubt. It is not
+        # evidence about this workflow. See TestStrictModeChangesBehaviour.
         script = "set -euo pipefail\nfalse | cat\necho REACHED\n"
         r = self._sb().run(script)
         self.assertNotEqual(0, r.returncode,
                             "a failing first pipeline stage was masked by a successful last "
                             "stage; pipefail is not in effect")
         self.assertNotIn("REACHED", r.stdout)
+
+
+def _without_strict_mode(block):
+    """The same block with its strict-mode marker removed, and nothing else changed."""
+    out = [l for l in block.split("\n") if l.strip() != "set -euo pipefail"]
+    assert len(out) < len(block.split("\n")), "the block carried no strict-mode marker to strip"
+    return "\n".join(out)
+
+
+class TestStrictModeChangesBehaviour(QuotaBase):
+    """F11, round 3: prove the difference by executing both sides of it.
+
+    The structural assertion shows a string sits in a position. The refusal tests above show
+    the guards fire. Neither can show what strict mode itself buys, because a block whose
+    failure paths are all explicitly guarded behaves identically without it -- which is exactly
+    what the review found, and why those four cases were withdrawn as evidence.
+
+    So each case here runs the SAME block twice, once as written and once with `set -euo
+    pipefail` stripped, and requires the two to differ. If a case cannot tell them apart it is
+    not evidence about strict mode, and it fails rather than passing quietly.
+
+    The two failure classes below were found by trying candidates and keeping the ones that
+    actually differed; `${SIDECAR:?}` was tried and REJECTED, because the explicit `:?` does
+    that work and `set -u` adds nothing to it.
+    """
+
+    def _both(self, block, env_builder):
+        """Run `block` as written and stripped, in two fresh sandboxes. Returns both results."""
+        results = []
+        for script in (block, _without_strict_mode(block)):
+            sb = Sandbox(registry="registry-audited.json")
+            self.addCleanup(sb.cleanup)
+            results.append((sb, sb.run(script, env=env_builder(sb))))
+        return results
+
+    def test_an_unwritable_relay_destination_aborts_instead_of_exporting_a_broken_path(self):
+        def env(sb):
+            canned = sb.root / "canned"; canned.write_text("[]")
+            m = sb.root / "map"; m.write_text("pr list\t" + str(canned) + "\n")
+            # A regular file where a directory would have to be: the redirect cannot succeed.
+            blocker = sb.root / "blocker"; blocker.write_text("x")
+            return {"REPO": TARGET, "GH_CANNED_MAP": str(m),
+                    "GITHUB_ENV": str(sb.root / "gh.env"),
+                    "OPEN_PRS_FILE": str(blocker / "prs.json")}
+
+        (sb_real, real), (sb_weak, weak) = self._both(
+            self.block("open-prs", marker="stage-logic"), env)
+
+        self.assertNotEqual(0, real.returncode,
+                            "the block reported success after failing to write the open-PR list")
+        self.assertEqual(0, weak.returncode,
+                         "stripping strict mode changed nothing here, so this case proves "
+                         "nothing about strict mode -- replace it with one that does")
+        weak_env = (sb_weak.root / "gh.env").read_text()
+        self.assertIn(
+            "OPEN_PRS_FILE=", weak_env,
+            "without strict mode the block should export a path to a file it never wrote; if "
+            "it does not, the two runs are indistinguishable and the case is vacuous")
+        real_env_file = sb_real.root / "gh.env"
+        self.assertNotIn(
+            "OPEN_PRS_FILE=", real_env_file.read_text() if real_env_file.exists() else "",
+            "the real block exported the path anyway, so the abort came too late to matter")
+
+    def test_an_unwritable_manifest_aborts_instead_of_reporting_an_allowlist_it_never_wrote(self):
+        # The sharpest one. Without strict mode this block prints `MANIFEST:n admitted` and
+        # `PASS` while the file it describes does not exist -- gates reports the allowlist was
+        # written, and submit then refuses `manifest-missing` for reasons the gate log denies.
+        def env(sb):
+            ctx = sb.root / "context.json"
+            ctx.write_text(json.dumps({
+                "version": 1, "repo": TARGET, "issue": "42",
+                "expected_fork_slug": "vibe-bot/claude-toolkit", "audited_sha": "cafebabe",
+                "base_branch": "main", "author_name": "n", "author_email": "e@x.invalid",
+                "weekly_cap": 2, "patch_cap": 3}))
+            prs = sb.root / "open-prs.json"; prs.write_text("[]")
+            blocker = sb.root / "blocker"; blocker.write_text("x")
+            return {"REPO": TARGET, "OWNER": TARGET.split("/")[0],
+                    "SIDECAR": str(FIX / "findings-sidecar.jsonl"),
+                    "CODE_DIR": str(REPO_ROOT), "CONTEXT_FILE": str(ctx),
+                    "OPEN_PRS_FILE": str(prs), "PLANNED_COUNT": "4",
+                    "MANIFEST": str(blocker / "m.json")}
+
+        (_, real), (_, weak) = self._both(self.block("emit-manifest"), env)
+
+        self.assertNotEqual(0, real.returncode,
+                            "the gate passed without writing the allowlist submit validates "
+                            "every patch against")
+        self.assertEqual(0, weak.returncode,
+                         "stripping strict mode changed nothing here, so this case proves "
+                         "nothing about strict mode")
+        self.assertIn("PASS", weak.stdout,
+                      "without strict mode the gate should report PASS on a manifest it never "
+                      "wrote; if it does not, the two runs are indistinguishable")
+        self.assertNotIn("PASS", real.stdout)

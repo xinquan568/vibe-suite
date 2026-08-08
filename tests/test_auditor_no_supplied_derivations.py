@@ -67,9 +67,22 @@ DERIVED = ["AUDITED_SHA", "BASE_BRANCH", "PATCH_CAP", "EXPECTED_FORK_SLUG",
 # every later step in that job -- so a gate-block test finding them in the environment is
 # modelling production exactly, not bypassing it. For a consumer in another job they must come
 # from the relay, but that is a per-job distinction this line-based scan cannot draw, and a
-# rule that fires on both would be silenced within a week. The property they need is covered
-# instead by TestTheRealDerivationSatisfiesTheConsumers below, which runs derive-context and
-# feeds its actual output to the consumers with nothing else supplied.
+# rule that fires on both would be silenced within a week.
+#
+# WHERE THE PROPERTY ACTUALLY LIVES. This exclusion previously pointed at
+# TestTheRealDerivationSatisfiesTheConsumers as its substitute, and the substitute was hollow:
+# that test supplied no REPO and asserted no return code, so `logic:submit` exited on its
+# second line at REPO="${REPO:?}" and it passed having exercised nothing. Round 3 fixed it --
+# it now evaluates submit's DECLARED env bindings and asserts a positive checkpoint -- and,
+# more importantly, moved the guarantee off test hygiene entirely:
+#
+#   tests/test_auditor_context.py::TestEveryJobBindsWhatItReads
+#
+# reads the WORKFLOW and requires every job to bind, export or assign every name its blocks
+# need. That fails on the production defect directly rather than inferring it from how tests
+# behave, and on its first run it found DISCLOSURE_CONTACT bound nowhere in finalize -- so
+# `disclosure_filed` was unreachable and every disclosure recorded as `pending`. This lexical
+# scan is the backstop; that one is the guarantee.
 
 # Per-(module, name) exemptions. This used to be a whole-module pass for
 # test_auditor_context.py, which meant that suite could inject ANY derived value and the scan

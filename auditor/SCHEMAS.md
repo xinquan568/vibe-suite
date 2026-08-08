@@ -371,6 +371,31 @@ refuse any fingerprint absent from it. Deterministic filtering is thereby *enfor
 merely printed — without the manifest, a patch could reach a PR without any gate having
 admitted the finding behind it.
 
+Second contract point: `submit` MUST also bind each patch to the allowlist by the **paths the
+patch touches**, taken from the patch bytes (`git apply --numstat`) and required to be among
+the `file` values of the admitted findings. Fingerprint validation alone counts without
+binding: N patch files, N metadata entries and N allowlisted fingerprints leave patch *k* and
+fingerprint *k* unrelated, so a patch can be swapped for arbitrary content and still validate.
+Renames and binary diffs refuse — `--numstat` reports only a rename's destination, so a rename
+would move a file no gate considered while the reported path looked admitted.
+
+**What this establishes, and what it does not.** The binding is deliberately not a filename
+declared in `findings.json`. `propose` runs a model over third-party repository content that
+its own prompt treats as hostile, and that model writes both the patches and their metadata —
+so any self-declared mapping is the untrusted party describing its own output, and a
+compromised proposer would simply name its files correctly.
+
+So this is an **integrity** control against a sloppy or partially-compromised proposer, not an
+**authorization** control against an adversarial one. It bounds the blast radius from "any path
+in the target repository" to "paths the gates already admitted work on". It does **not** show
+that a patch does what its finding claims; that is not mechanically checkable, and the residual
+controls are that `disclosure.json` never reaches `propose` and that a human reads the PR.
+
+It reinforces the disclosure separation only **partially**: a disclosure-routed finding is
+excluded from the manifest, so its file is usually unadmitted — but if an ordinary admitted
+finding happens to sit in the same file, that path is admitted and the reinforcement does not
+apply. Do not read this control as protecting the disclosure path.
+
 ### `disclosure.json`
 
 The security findings routed away from the public-PR path.

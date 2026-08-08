@@ -583,6 +583,33 @@ class TestTheDisclosureSetGetsItsOwnDurableOutcome(CompositionBase):
                             "the security path is the failure this finding is about")
         self.assertIn("REFUSE:disclosure-malformed", res.out)
 
+    def test_a_finding_without_a_fingerprint_refuses_rather_than_recording_a_null(self):
+        """F5's residue: `.findings | type == "array"` is not validation of the findings.
+
+        The round-2 check confirmed the shape of the container and nothing about its contents,
+        so an entry with no fingerprint passed and was persisted into the ledger with a null in
+        the fingerprints array. A disclosure row exists to be joined back to the finding it is
+        about; one carrying a null records that something was disclosed and destroys the only
+        means of finding out what. Claiming "malformed refuses" while writing that row is the
+        overclaim, not the null.
+        """
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(
+                                 [{"rule_id": "SEC-A", "fingerprint": "sha256:abc",
+                                   "severity": "critical"},
+                                  {"rule_id": "SEC-B", "severity": "high"}])})
+        self.assertNotEqual(0, res.r.returncode)
+        self.assertIn("REFUSE:disclosure-unfingerprinted", res.out)
+        self.assertNotIn("disclosure_pending", res.pushed_events(),
+                         "an unjoinable disclosure row was committed and pushed anyway")
+
+    def test_an_empty_string_fingerprint_is_not_a_fingerprint_either(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(
+                                 [{"rule_id": "SEC-A", "fingerprint": "", "severity": "high"}])})
+        self.assertNotEqual(0, res.r.returncode)
+        self.assertIn("REFUSE:disclosure-unfingerprinted", res.out)
+
 
 if __name__ == "__main__":
     unittest.main()

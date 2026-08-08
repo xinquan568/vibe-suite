@@ -22,6 +22,17 @@ from tests.test_auditor_state_machine import Sandbox, extract, FIX
 
 WF = Path(__file__).resolve().parent.parent / "auditor" / "workflows" / "auditor-contribute.yml"
 
+
+def _job_bodies(text):
+    """{job name: its YAML body}. Shared by the relay-topology and job-binding checks."""
+    names = [m.group(1) for m in re.finditer(r"^  ([a-z][a-z-]*):$", text, re.M)]
+    out = {}
+    for i, n in enumerate(names):
+        start = text.index(f"\n  {n}:")
+        end = text.index(f"\n  {names[i+1]}:") if i + 1 < len(names) else len(text)
+        out[n] = text[start:end]
+    return out
+
 # The eight values the graph must derive rather than be handed.
 DERIVED = ["repo", "issue", "expected_fork_slug", "audited_sha",
            "base_branch", "author_name", "author_email", "weekly_cap", "patch_cap"]
@@ -272,6 +283,37 @@ class TestTheRealDerivationSatisfiesTheConsumers(TriggerBase):
         self.assertTrue(p.is_file(), "derive-context produced no relay to compose over")
         return p, sb
 
+    def job_env(self, job, needs=None):
+        """A job's declared step `env:` bindings, evaluated against a simulated context.
+
+        Same principle as `step_env` for derive-context: the values a consumer job receives are
+        read out of the workflow and evaluated, never invented here. `REPO` reaching submit via
+        `needs.reserve.outputs.repo` is JOB WIRING and modelling it is modelling production;
+        writing `"REPO": "acme/claude-toolkit"` into a dict by hand is the injection the
+        acceptance clause forbids. The difference is the whole point.
+        """
+        jobs = _job_bodies(WF.read_text(encoding="utf-8"))
+        self.assertIn(job, jobs, f"no job named {job}")
+        out = {}
+        for m in re.finditer(r"^\s+([A-Z][A-Z0-9_]*):\s*(\S.*)$", jobs[job], re.M):
+            name, expr = m.group(1), m.group(2).strip()
+            if not expr.startswith("${{"):
+                out[name] = expr
+                continue
+            inner = expr[3:-2].strip() if expr.endswith("}}") else expr[3:].strip()
+            if inner.startswith("needs."):
+                _, jb, _, key = inner.split(".", 3)
+                out[name] = (needs or {}).get(jb, {}).get(key, "")
+            elif inner.startswith("secrets."):
+                out[name] = "stub-secret"
+            elif inner.startswith("vars."):
+                out[name] = ""
+            elif inner == "github.token":
+                out[name] = "ghs_simulated_actions_token"
+            else:
+                out[name] = ""
+        return out
+
     def test_the_produced_relay_carries_every_key_the_consumers_read(self):
         p, sb = self.produced_context()
         produced = json.loads(p.read_text())
@@ -289,25 +331,222 @@ class TestTheRealDerivationSatisfiesTheConsumers(TriggerBase):
             f"test can see this.")
 
     def test_a_consumer_accepts_the_produced_relay_unchanged(self):
+        """The version of this test in iteration 2 asserted nothing.
+
+        It supplied no REPO and checked no return code, so `logic:submit` exited on its second
+        line at `REPO="${REPO:?}"` and the test passed having exercised none of the relay. A
+        test that passes because its subject quit immediately is worse than no test: it reports
+        coverage that does not exist. The fix is a POSITIVE checkpoint — a marker only
+        reachable after entry validation has consumed every value — not a longer list of
+        strings that must be absent.
+        """
         p, sb = self.produced_context()
-        # submit's entry validation, given ONLY the produced file and the API boundary stubs.
-        # No AUDITED_SHA, no BASE_BRANCH, no FORK_SLUG, no author, no cap.
+        produced = json.loads(p.read_text())
         u = sb.root / "canned-user"
         u.write_text("vibe-bot\n")
-        block = extract(WF, "logic", "submit-entry") or extract(WF, "logic", "submit")
-        if block is None:
-            self.skipTest("submit's entry block is not separately extractable")
-        r = sb.run(block, env={"CONTEXT_FILE": str(p), "PAT_SECRET": "stub-pat",
-                               "GH_CANNED_API_USER": str(u),
-                               "TARGET_DIR": str(sb.root / "_target")})
-        for name in ("relay-missing", "audited-sha-unresolvable", "base-branch-unresolvable",
+        block = extract(WF, "logic", "submit")
+        self.assertIsNotNone(block, "no logic:submit block to compose against")
+        # REPO arrives the way the workflow declares it: needs.reserve.outputs.repo, which is
+        # the repository gates derived. Job wiring, evaluated from the YAML — not a value
+        # written into a dict here.
+        env = self.job_env("submit", needs={"reserve": {"repo": produced["repo"]}})
+        env.update({"CONTEXT_FILE": str(p), "PAT_SECRET": "stub-pat",
+                    "GH_CANNED_API_USER": str(u),
+                    "TARGET_DIR": str(sb.root / "_target"),
+                    "PATCH_DIR": str(sb.root / "_patches")})
+        r = sb.run(block, env=env)
+        out = r.stdout + r.stderr
+
+        for name in ("relay-missing", "audited-sha-unresolvable", "default-branch-unresolvable",
                      "author-identity-unresolvable", "patch-cap-unresolvable",
                      "issue-unresolvable", "fork-slug-unresolvable"):
             self.assertNotIn(
-                f"REFUSE:context-{name}", r.stdout + r.stderr,
+                f"REFUSE:context-{name}", out,
                 f"the consumer refused '{name}' against a relay the real derivation produced. "
                 f"The producer and the consumer disagree about the relay's shape, and every "
                 f"hand-written context.json in the suite hides it.")
+        self.assertNotIn("REFUSE:pat-identity-unresolvable", out)
+        # The checkpoint. `manifest-missing` is raised AFTER the whole context has been read
+        # and the PAT identity proven, so reaching it is proof the produced relay satisfied
+        # entry validation end to end. Nothing in this sandbox supplies a manifest, so this is
+        # exactly where a fully-consumed relay is expected to stop.
+        self.assertIn(
+            "REFUSE:manifest-missing", out,
+            f"submit did not reach the manifest check, so it never finished consuming the "
+            f"relay. If it exited earlier the entry validation rejected something the real "
+            f"derivation produced.\n--- output ---\n{out[-600:]}")
+
+
+class TestAnEarlyRefusalIsStillReported(TriggerBase):
+    """F1's residue: the reporting path must not depend on the step that failed.
+
+    `derive-context` wrote DECISION and OUTCOME_DIR to $GITHUB_ENV at its END, after every
+    value that can refuse. So on exactly the runs that need reporting, the always-publisher
+    found neither: it wrote `./outcome-gates.json` instead of into the outcome directory, read
+    a `decision.json` that did not exist, and therefore reported `status=error` with an empty
+    reason — while the block had printed a perfectly good named refusal to stderr. The upload
+    step's `path: ${{ env.OUTCOME_DIR }}/...` resolved to `/outcome-gates.json` and found
+    nothing to upload.
+
+    The named refusal existed and reached nobody, which is the same shape as the finalize half
+    closed in iteration 2: the job that reports the failure was disabled by the failure.
+    """
+
+    def refuse_then_publish(self, sb=None):
+        """Refuse in derive-context, then run the publisher over the same sandbox."""
+        sb = Sandbox(registry="registry-audited.json")
+        self.addCleanup(sb.cleanup)
+        env = {k: self._eval(v, {"number": 4242, "labels": []}, {},
+                             {"AUDITOR_AUTHOR_NAME": "n", "AUDITOR_AUTHOR_EMAIL": "e",
+                              "AUDITOR_FORK_OWNER": "vibe-bot", "WEEKLY_CAP": "2"})
+               for k, v in self.step_env().items()}
+        env["FIXTURE"] = ""
+        env["GITHUB_ENV"] = str(sb.root / "gh.env")
+        env.update(self.canned(sb, login=None, default_branch="main"))
+        first = sb.run(self.block(), env=env)
+        self.assertNotEqual(0, first.returncode, "the setup did not actually refuse")
+
+        # The publisher runs `if: always()` in the same job, so it sees what the refusing step
+        # exported to $GITHUB_ENV and nothing else.
+        exported = {}
+        gh_env = sb.root / "gh.env"
+        if gh_env.exists():
+            for line in gh_env.read_text().splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    exported[k] = v
+        pub = extract(WF, "logic", "publish-gates") or _publisher_block()
+        self.assertIsNotNone(pub, "no gates publisher block to run")
+        return first, sb.run(pub, env=exported), sb, exported
+
+    def test_the_publisher_receives_the_paths_it_needs(self):
+        _, _, _, exported = self.refuse_then_publish()
+        for name in ("DECISION", "OUTCOME_DIR"):
+            self.assertIn(
+                name, exported,
+                f"{name} was never exported, because the refusal happened first. The "
+                f"publisher then writes to '.' and the upload path resolves to '/…', so the "
+                f"named refusal reaches nobody.")
+
+    def test_the_published_outcome_names_the_value_that_could_not_resolve(self):
+        _, pub, sb, exported = self.refuse_then_publish()
+        out = Path(exported["OUTCOME_DIR"]) / "outcome-gates.json"
+        self.assertTrue(out.is_file(),
+                        f"the publisher wrote no outcome file into {exported['OUTCOME_DIR']}")
+        doc = json.loads(out.read_text())
+        self.assertNotEqual(
+            "", doc.get("reason", ""),
+            "the outcome carries no reason, so the run reports that something broke without "
+            "saying which value was unresolvable — the refusal was named and then discarded")
+        self.assertIn("repo", doc["reason"],
+                      f"the reason does not name the unresolvable value: {doc}")
+
+    def test_the_upload_path_does_not_depend_on_the_step_that_can_refuse(self):
+        gates = _job_bodies(WF.read_text(encoding="utf-8"))["gates"]
+        # Comment lines may sit between the two keys; match past them rather than assuming
+        # they are adjacent.
+        m = re.search(r"name: outcome-gates\s*\n(?:\s*#[^\n]*\n)*\s*path:\s*(\S.*)$",
+                      gates, re.M)
+        self.assertIsNotNone(m, "no outcome-gates upload step")
+        self.assertNotIn(
+            "env.OUTCOME_DIR", m.group(1),
+            "the upload path reads env.OUTCOME_DIR, which the refusing step is the one that "
+            "sets — so on a refusal it resolves to '/outcome-gates.json' and uploads nothing. "
+            "Use a literal workspace path.")
+
+
+def _publisher_block():
+    """The gates `publish the gates outcome` step body, dedented."""
+    text = WF.read_text(encoding="utf-8")
+    m = re.search(r"- name: publish the gates outcome\s*\n\s*if: always\(\)\s*\n\s*run: \|\s*\n"
+                  r"((?:\s+[^\n]*\n)+?)(?=\s*- )", text)
+    if not m:
+        return None
+    lines = m.group(1).split("\n")
+    indent = min((len(l) - len(l.lstrip())) for l in lines if l.strip())
+    return "\n".join(l[indent:] if len(l) >= indent else l for l in lines)
+
+
+class TestEveryJobBindsWhatItReads(unittest.TestCase):
+    """The general form of finding 1, applied to every job rather than to one step.
+
+    F1 was: a block reads a name, no step binds it, so on a real run it is empty and the job
+    refuses — while a suite that supplies the name by hand stays green. That is not a property
+    of `derive-context`; it is a property of every block in the file, and checking it in one
+    place was how the same defect sat in four other jobs unnoticed.
+
+    Reading it off the WORKFLOW rather than off the tests is what makes it load-bearing: it
+    fails on the production defect directly, instead of inferring it from test hygiene. The
+    lexical scan in test_auditor_no_supplied_derivations.py is the backstop, not the guarantee.
+
+    A read needs a binding when it has no default (`$X`, `${X}`), an explicitly empty default
+    (`${X:-}`), or is required (`${X:?}`). A read with a NON-EMPTY default is self-sufficient
+    and is not flagged — `${DATA_DIR:-_data}` needs nothing from anybody.
+    """
+
+    #: Provided by the Actions runner, or by the harness that executes a block.
+    RUNTIME = {"GITHUB_WORKSPACE", "GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_RUN_ID",
+               "GITHUB_RUN_NUMBER", "PWD", "PATH", "HOME", "CI", "RUNNER_TEMP", "FIXTURE"}
+
+    #: Names that are genuinely optional, each with the reason. Not a list of jobs -- the same
+    #: discipline the derived-value scan's exemptions carry, for the same reason.
+    OPTIONAL = {
+        "GH_TOKEN_HTTPS": "an ALTERNATIVE inside ${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}; the "
+                          "primary is bound, so this being unset is the normal case",
+        "GH_TOKEN": "the second rung of ${PAT_SECRET:-${GH_TOKEN:-}}, whose empty case is a "
+                    "real branch: `reserve` checks out auditor-data WITHOUT "
+                    "persist-credentials:false, so git already holds a credential and the "
+                    "explicit helper is only needed when a PAT overrides it. Checked rather "
+                    "than assumed -- gates passes persist-credentials:false and reserve does "
+                    "not, and that difference is what makes this a fallback and not a gap.",
+        "OUTCOME_JOB": "a harness seam: production reaches it only when no outcome artifact "
+                       "carries a status, where empty is the correct reading. Production code "
+                       "reading a test-only override is a wart worth filing, not silencing.",
+        "OUTCOME_STATUS": "the status half of the same harness seam as OUTCOME_JOB; empty is "
+                          "the correct production reading and the default covers it",
+        "OUTCOME_REASON": "the reason half of the same harness seam as OUTCOME_JOB; empty is "
+                          "the correct production reading and the default covers it",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.jobs = _job_bodies(WF.read_text(encoding="utf-8"))
+
+    def test_every_job_binds_or_produces_every_name_its_blocks_require(self):
+        offenders = []
+        for job, body in self.jobs.items():
+            if job == "issues":  # the `on:` trigger block, not a job
+                continue
+            code = "\n".join(l for l in body.split("\n") if not l.lstrip().startswith("#"))
+            need = (set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):\?[^}]*\}", code))
+                    | set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):-\}", code))
+                    | set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)\}", code)))
+            bound = set(re.findall(r"^\s{8,}([A-Z][A-Z0-9_]*):\s*\S", code, re.M))
+            # Exported to $GITHUB_ENV by an earlier step of the SAME job, or assigned inside
+            # the block that reads it -- both make the name the job's own to produce.
+            exported = set(re.findall(r'echo "([A-Z][A-Z0-9_]*)=', code))
+            assigned = set(re.findall(r"(?:^|\s|\()([A-Z][A-Z0-9_]*)=", code))
+            for name in sorted(need - self.RUNTIME - set(self.OPTIONAL)
+                               - bound - exported - assigned):
+                offenders.append(f"{job}: {name}")
+        self.assertEqual(
+            [], offenders,
+            "a job reads a name nothing binds, exports or assigns, so on a real run it is "
+            "empty — the shape of finding 1, and of finding 9 before it:\n  "
+            + "\n  ".join(offenders))
+
+    def test_the_optional_list_stays_a_list_of_names_with_reasons(self):
+        for name, reason in self.OPTIONAL.items():
+            self.assertGreaterEqual(
+                len(reason), 40,
+                f"{name} is treated as optional without a reason anyone can check")
+
+    def test_the_scan_still_sees_every_job(self):
+        found = {j for j in self.jobs if j != "issues"}
+        for expected in ("gates", "reserve", "propose", "submit", "finalize"):
+            self.assertIn(expected, found,
+                          f"the job scan lost {expected}; it is now checking less than the "
+                          f"whole workflow and would pass regardless")
 
 
 class TestTheStepBindsEveryValueItReads(TriggerBase):

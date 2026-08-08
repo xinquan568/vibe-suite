@@ -54,12 +54,36 @@ jobs:
           # `[ -n "$AUDITED_SHA" ]`, so an empty default silently skipped the pin and the
           # engine proposed patches against whatever HEAD happened to be.
           set -euo pipefail
-          refuse() { echo "REFUSE:context-$1-unresolvable" >&2; exit 1; }
+          # F1 (round 3). A refusal used to be a bare message on stderr, and the paths the
+          # reporting steps need were exported at the END of this block — after every value
+          # that can refuse. So on exactly the runs that need reporting, the always-publisher
+          # found no DECISION and no OUTCOME_DIR: it wrote `./outcome-gates.json`, read a
+          # decision file that did not exist, and reported `status=error` with an empty reason
+          # while a perfectly good named refusal sat in the log. The job that reports the
+          # failure was disabled by the failure — the same shape as finalize's, closed in the
+          # previous iteration.
+          #
+          # So: record the NAMED reason where the publisher reads it, and publish the paths
+          # before anything can refuse.
+          refuse() {
+            printf '{"proceed":false,"reason":"context-%s-unresolvable","side_exit_label":"pipeline-error"}\n' \
+              "$1" > "${DECISION:-/dev/null}"
+            echo "REFUSE:context-$1-unresolvable" >&2
+            exit 1
+          }
           DATA_DIR="${DATA_DIR:-${GITHUB_WORKSPACE:-$PWD}/_data}"
           REGISTRY="${REGISTRY:-$DATA_DIR/registry/repos.json}"
           EVENT_LOG="${EVENT_LOG:-$DATA_DIR/ledgers/events.jsonl}"
           DECISION="${DECISION:-${GITHUB_WORKSPACE:-$PWD}/decision.json}"
           OUTCOME_DIR="${OUTCOME_DIR:-${GITHUB_WORKSPACE:-$PWD}/_outcomes}"
+          mkdir -p "$OUTCOME_DIR"
+          {
+            echo "DATA_DIR=$DATA_DIR"
+            echo "REGISTRY=$REGISTRY"
+            echo "EVENT_LOG=$EVENT_LOG"
+            echo "DECISION=$DECISION"
+            echo "OUTCOME_DIR=$OUTCOME_DIR"
+          } >> "${GITHUB_ENV:-/dev/null}"
           # ISSUE resolves FIRST, because on the `issues` trigger it is the only handle the
           # payload carries and the repository is looked up from it. F1.
           # Both triggers carry it directly -- `github.event.issue.number` on `issues`,
@@ -638,7 +662,11 @@ jobs:
         if: always()
         with:
           name: outcome-gates
-          path: ${{ env.OUTCOME_DIR }}/outcome-gates.json
+          # F1: a literal path, not ${{ env.OUTCOME_DIR }}. The step that sets that variable
+          # is the step that can refuse, so on a refusal the path resolved to
+          # `/outcome-gates.json` and the upload found nothing — losing the outcome exactly
+          # when there was an outcome worth having.
+          path: ${{ github.workspace }}/_outcomes/outcome-gates.json
           if-no-files-found: warn
   reserve:
     needs: gates
@@ -1085,6 +1113,56 @@ jobs:
             echo "REFUSE:patch-not-in-manifest — $bad was admitted by no gate" >&2
             exit 1
           fi
+          # F6, round 3. Everything above COUNTS; none of it BINDS. N patch files, N metadata
+          # entries and N allowlisted fingerprints leave patch #k and fingerprint #k unrelated,
+          # so a stray patch cannot be added but one can be swapped in — and `git apply` then
+          # writes arbitrary content to a third party's repository under a pull request that
+          # claims gate approval.
+          #
+          # The binding is taken from the patch BYTES: the paths `git apply --numstat` reports,
+          # checked against the `file` each admitted manifest entry names. It is deliberately
+          # NOT taken from a filename declared in findings.json. `propose` runs a model over
+          # third-party repository content that this workflow's own prompt treats as hostile,
+          # and that model writes both the patches and their metadata, so a declared filename
+          # is the untrusted party describing its own output — a compromised proposer would
+          # simply name its files correctly. SCHEMAS section 14 records what this establishes
+          # and, as importantly, what it does not.
+          #
+          # This runs BEFORE the fork is created. A binding validated afterwards has already
+          # made a repository under the bot account for a patch set that was never admissible.
+          admitted_files="$(jq -r '.findings[].file // empty' "$MANIFEST" 2>/dev/null | sort -u)"
+          numstat_tmp="$(mktemp)"
+          for p in "$PATCH_DIR"/*.patch; do
+            [ -e "$p" ] || break
+            # --numstat reports only a rename's DESTINATION, so a rename could move a file no
+            # gate ever considered while the reported path looks admitted. A finding is about
+            # a file's content; renaming is not a fix for one.
+            if grep -qE '^rename (from|to) ' "$p"; then
+              echo "REFUSE:patch-renames-a-file — $(basename "$p") renames a file; --numstat reports only the destination, so the source would pass unexamined" >&2
+              exit 1
+            fi
+            if ! stat_out="$(git apply --numstat "$p" 2>&1)"; then
+              echo "REFUSE:patch-unreadable — $(basename "$p") is not a patch git can read: $(printf '%s' "$stat_out" | head -c 160)" >&2
+              exit 1
+            fi
+            printf '%s\n' "$stat_out" > "$numstat_tmp"
+            while IFS= read -r row; do
+              [ -z "$row" ] && continue
+              added="$(printf '%s' "$row" | cut -f1)"
+              path="$(printf '%s' "$row" | cut -f3-)"
+              # `-` in the numeric columns is how --numstat reports a binary diff. A binary
+              # blob is not a fix for an NL-artifact finding and is not applied on trust.
+              if [ "$added" = "-" ]; then
+                echo "REFUSE:patch-is-binary — $(basename "$p") carries a binary diff for $path" >&2
+                exit 1
+              fi
+              if ! printf '%s\n' "$admitted_files" | grep -qxF "$path"; then
+                echo "REFUSE:patch-touches-unadmitted-file — $(basename "$p") edits $path, which no admitted finding is about" >&2
+                exit 1
+              fi
+            done < "$numstat_tmp"
+          done
+          rm -f "$numstat_tmp"
           export GIT_AUTHOR_NAME="$AUTHOR_NAME"
           export GIT_AUTHOR_EMAIL="$AUTHOR_EMAIL"
           export GIT_COMMITTER_NAME="$AUTHOR_NAME"
@@ -1763,6 +1841,18 @@ jobs:
               exit 1
             fi
             disclosed="$(jq '.findings | length' "$DISCLOSURE")"
+            # The check above validates the CONTAINER and says nothing about its contents, so
+            # an entry with no fingerprint passed and was persisted with a null in the
+            # fingerprints array below. A disclosure row exists to be joined back to the
+            # finding it is about; one carrying a null records that something was disclosed and
+            # destroys the only means of finding out what. SCHEMAS section 14 declares the
+            # shape as {rule_id, fingerprint, severity} — this is that declaration enforced.
+            disc_fp="$(jq '[.findings[] | .fingerprint | select(type == "string" and length > 0)] | length' \
+              "$DISCLOSURE")"
+            if [ "$disc_fp" -ne "${disclosed:-0}" ]; then
+              echo "REFUSE:disclosure-unfingerprinted — $(( disclosed - disc_fp )) of $disclosed disclosure finding(s) carry no fingerprint; the record could not be joined back to them" >&2
+              exit 1
+            fi
           fi
           if [ "${disclosed:-0}" -gt 0 ]; then
             if [ -n "${DISCLOSURE_CONTACT:-}" ]; then
@@ -1851,6 +1941,13 @@ jobs:
           # carries the number directly — fall back to it so an early refusal still labels
           # and comments on the tracking issue instead of failing in silence.
           ISSUE_NUMBER: ${{ needs.gates.outputs.issue || github.event.issue.number }}
+          # F10 (round 3), found by the generalised job-binding check rather than by reading:
+          # this was read twice and bound nowhere, so `disclosure_filed` was unreachable and
+          # EVERY disclosure recorded as `disclosure_pending` — the same shape as F9's
+          # OPEN_PRS_FILE, in the branch that decides whether a security finding was actually
+          # handed to anybody. Unset is still legitimate (no contact configured yet); what was
+          # wrong is that it could never be set.
+          DISCLOSURE_CONTACT: ${{ vars.DISCLOSURE_CONTACT }}
           DATA_DIR: _data
           OUTCOME_DIR: _outcomes
       - name: publish the finalize outcome

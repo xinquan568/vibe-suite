@@ -237,8 +237,8 @@ class SubmitSandbox:
         (self.patches / "0002-fix.patch").write_text(SECOND_PATCH)
         (self.patches / "CAP").write_text("3\n")
         (self.patches / "findings.json").write_text(json.dumps(
-            [{"rule_id": "R7", "fingerprint": FINGERPRINTS[0]},
-             {"rule_id": "R12", "fingerprint": FINGERPRINTS[1]}]) + "\n")
+            [{"rule_id": "R7", "fingerprint": FINGERPRINTS[0], "file": "README.md"},
+             {"rule_id": "R12", "fingerprint": FINGERPRINTS[1], "file": "NOTES.md"}]) + "\n")
 
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -315,10 +315,17 @@ class SubmitSandbox:
             except Exception:
                 fps = []
         p = self.root / "proposal-manifest.json"
+        # The admitted FILE matters now, not just the fingerprint: submit binds each patch to
+        # the manifest by the paths the patch touches (F6). This fixture used to declare
+        # `file: "a.md"` for every entry while the patches touched README.md and NOTES.md --
+        # a manifest whose admitted files bore no relation to the patch set, which is exactly
+        # the state the binding exists to catch.
+        files = [f.get("file") for f in _json.loads(meta.read_text())] if meta.is_file() else []
         p.write_text(_json.dumps({
             "version": 1, "repo": TARGET_REPO,
-            "findings": [{"rule_id": "R", "fingerprint": f, "file": "a.md",
-                          "confidence": "high"} for f in fps]}))
+            "findings": [{"rule_id": "R", "fingerprint": f,
+                          "file": (files[i] if i < len(files) and files[i] else "README.md"),
+                          "confidence": "high"} for i, f in enumerate(fps)]}))
         return p
 
     def _write_context(self):
@@ -639,6 +646,89 @@ class SubmitAllowlistFailsClosed(unittest.TestCase):
         (self.sb.patches / "0003-stray.patch").write_text(GOOD_PATCH)
         r = self.sb.run()
         self._assert_nothing_shipped(r, "REFUSE:patch-meta-mismatch")
+
+
+class SubmitBindsPatchesToAdmittedFiles(unittest.TestCase):
+    """F6, round 3: counting is not binding.
+
+    Arity stops a stray patch being ADDED. It does nothing against one being SWAPPED IN: N
+    patch files, N metadata entries, N allowlisted fingerprints, and no relation between patch
+    file #k and fingerprint #k. `git apply` then writes arbitrary content to a third party's
+    repository under a pull request that claims gate approval.
+
+    The binding is taken from the patch BYTES -- the paths `git apply --numstat` reports --
+    against the `file` each admitted manifest entry names. It is deliberately NOT taken from a
+    filename declared in findings.json: `propose` runs a model over third-party repository
+    content that the prompt itself treats as hostile, and that model writes both the patches
+    and the metadata. Asking it to name its own patch files is the untrusted party describing
+    its own output, and a compromised proposer would simply name them correctly.
+
+    What this does and does not establish is written down in auditor/SCHEMAS.md section 14.
+    """
+
+    def setUp(self):
+        self.sb = SubmitSandbox(patch=GOOD_PATCH)
+        self.addCleanup(self.sb.cleanup)
+
+    def _assert_refused(self, r, needle):
+        self.assertNotEqual(0, r.returncode, f"submit proceeded despite {needle}")
+        self.assertIn(needle, r.stdout + r.stderr)
+        self.assertEqual(self.sb.gh_verbs("pr", "create"), [],
+                         "a pull request was opened from an unbound patch")
+        self.assertEqual(self.sb.fork_log().strip(), "",
+                         "a branch was pushed to the fork from an unbound patch")
+
+    def test_the_ordinary_patch_set_is_bound_and_proceeds(self):
+        # The control. Without it the refusal tests below could pass because the check refuses
+        # everything, which would be a different defect wearing the same green.
+        r = self.sb.run()
+        self.assertNotIn("REFUSE:patch-touches-unadmitted-file", r.stdout + r.stderr)
+
+    def test_a_swapped_patch_touching_an_unadmitted_file_refuses(self):
+        # The attack the arity check cannot see: counts still match, both fingerprints are
+        # still allowlisted, and the second patch now edits a file no gate ever admitted.
+        (self.sb.patches / "0002-fix.patch").write_text(
+            "diff --git a/src/evil.py b/src/evil.py\n"
+            "new file mode 100644\n--- /dev/null\n+++ b/src/evil.py\n"
+            "@@ -0,0 +1 @@\n+import os\n")
+        r = self.sb.run()
+        self._assert_refused(r, "REFUSE:patch-touches-unadmitted-file")
+
+    def test_a_rename_refuses(self):
+        # `--numstat` reports only a rename's DESTINATION, so a rename can move a file the
+        # gates never considered while the reported path looks admitted. Verified against
+        # git directly rather than assumed.
+        (self.sb.patches / "0002-fix.patch").write_text(
+            "diff --git a/NOTES.md b/README.md\nsimilarity index 100%\n"
+            "rename from NOTES.md\nrename to README.md\n")
+        r = self.sb.run()
+        self._assert_refused(r, "REFUSE:patch-renames-a-file")
+
+    def test_a_binary_patch_refuses(self):
+        (self.sb.patches / "0002-fix.patch").write_text(
+            "diff --git a/NOTES.md b/NOTES.md\n"
+            "new file mode 100644\nindex 0000000..1234567\n"
+            "GIT binary patch\nliteral 4\nHc$@<O00001\n\n")
+        r = self.sb.run()
+        self.assertNotEqual(0, r.returncode, "a binary blob was applied to a third party's repo")
+        self.assertRegex(r.stdout + r.stderr, r"REFUSE:patch-(unreadable|is-binary)")
+
+    def test_an_unparseable_patch_refuses(self):
+        (self.sb.patches / "0002-fix.patch").write_text("this is not a patch at all\n")
+        r = self.sb.run()
+        self._assert_refused(r, "REFUSE:patch-unreadable")
+
+    def test_the_check_runs_before_anything_is_cloned_or_pushed(self):
+        # Order is as load-bearing as presence -- the same lesson F8 taught in iteration 1.
+        # A binding validated after the fork exists has already created a repository under the
+        # bot account for a patch set that was never admissible.
+        (self.sb.patches / "0002-fix.patch").write_text(
+            "diff --git a/src/evil.py b/src/evil.py\n"
+            "new file mode 100644\n--- /dev/null\n+++ b/src/evil.py\n"
+            "@@ -0,0 +1 @@\n+import os\n")
+        r = self.sb.run()
+        self.assertEqual([], self.sb.gh_verbs("repo", "fork"),
+                         "the fork was created before the patch binding was validated")
 
 
 if __name__ == "__main__":

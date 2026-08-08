@@ -312,14 +312,16 @@ class TestTheRefusalBranchesWork(QuotaBase):
                 "OPEN_PRS_FILE": str(prs), "PLANNED_COUNT": "4"}
 
     def test_malformed_json_input_aborts_rather_than_reading_as_empty(self):
-        # jq on a non-JSON file exits non-zero and prints nothing. Under the old `set -u` the
-        # substitution simply became "", so the cap read as empty and the block carried on.
+        # jq on a non-JSON file exits non-zero and prints nothing, so the cap reads as empty.
+        # What stops the block is the explicit `[ -n "$cap" ] ||` guard below, NOT strict mode
+        # -- this comment used to credit strict mode and that was the overclaim the review
+        # caught. The guard is worth testing on its own terms.
         sb = self._sb()
         r = sb.run(self.block("emit-manifest"),
                    env=self._emit_env(sb, context_text="<html>502 Bad Gateway</html>"))
         self.assertNotEqual(0, r.returncode,
                             "a malformed relay was read as an absent value and the block "
-                            "continued; that is the fail-open strict mode is meant to end")
+                            "continued past the guard that exists to stop exactly that")
         self.assertIn("REFUSE:context-patch-cap-unresolvable", r.stdout + r.stderr)
 
     def test_a_missing_required_file_aborts(self):

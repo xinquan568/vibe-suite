@@ -601,6 +601,11 @@ class SubmitAllowlistFailsClosed(unittest.TestCase):
 
     The propose prompt's contract is one patch file per surviving finding, so a patch file with
     no metadata entry is content that nothing validated.
+
+    These checks are ARITY, and arity is not binding: they cannot see a patch being swapped for
+    another, because the counts still match. That is `SubmitBindsPatchesToAdmittedFiles` below,
+    which takes the binding from the patch bytes. Round 2 left this class reading as though it
+    closed the whole finding, and it did not.
     """
 
     def setUp(self):

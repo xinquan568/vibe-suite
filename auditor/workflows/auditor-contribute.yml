@@ -1091,9 +1091,11 @@ jobs:
             echo "REFUSE:patch-meta-duplicate — one fingerprint is claimed by more than one entry" >&2
             exit 1
           fi
-          # The propose prompt's contract is one patch file per surviving finding. A patch file
-          # with no metadata entry is content that nothing validated, and it would be applied
-          # to somebody else's repository on the strength of nothing at all.
+          # The propose prompt's contract is one patch file per surviving finding, so a count
+          # mismatch means a patch nothing accounted for. This is a cheap ADDITIVE check and
+          # explicitly NOT the binding — it cannot see a patch being swapped for another, since
+          # the counts still match. The binding is the file check below, taken from the patch
+          # bytes; this comment used to imply otherwise and that was the gap the review found.
           patch_n="$(ls -1 "$PATCH_DIR"/*.patch 2>/dev/null | wc -l | tr -d '[:space:]')"
           if [ "${patch_n:-0}" -ne "$meta_n" ]; then
             echo "REFUSE:patch-meta-mismatch — ${patch_n:-0} patch file(s) against $meta_n metadata entr(ies); the contract is one patch per finding" >&2

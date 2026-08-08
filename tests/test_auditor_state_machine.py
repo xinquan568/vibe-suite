@@ -24,7 +24,21 @@ GH_STUB = """#!/usr/bin/env bash
 # records every invocation; returns canned output when GH_CANNED_<verb> is set
 echo "gh $*" >> "$GH_LOG"
 key="GH_CANNED_$(echo "$1_$2" | tr ' -' '__' | tr '[:lower:]' '[:upper:]')"
-if [ -n "${!key:-}" ]; then cat "${!key}"; fi
+if [ -n "${!key:-}" ]; then cat "${!key}"; exit 0; fi
+# Path-shaped endpoints (gh api repos/<owner>/<name>) cannot form a legal variable name,
+# so they are served from a map file instead: one "<prefix><TAB><file>" per line, longest
+# prefix wins. Additive -- a caller that sets neither behaves exactly as before.
+if [ -n "${GH_CANNED_MAP:-}" ] && [ -f "${GH_CANNED_MAP}" ]; then
+  argv="$*"
+  best=""; bestlen=0
+  while IFS="$(printf '\t')" read -r prefix file; do
+    [ -z "$prefix" ] && continue
+    case "$argv" in
+      "$prefix"*) if [ "${#prefix}" -gt "$bestlen" ]; then best="$file"; bestlen="${#prefix}"; fi ;;
+    esac
+  done < "$GH_CANNED_MAP"
+  if [ -n "$best" ] && [ -f "$best" ]; then cat "$best"; exit 0; fi
+fi
 exit 0
 """
 

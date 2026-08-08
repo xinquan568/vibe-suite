@@ -1780,71 +1780,38 @@ class TestPushCredentials(unittest.TestCase):
                         f"the scan misses {sorted(self.REPAIRED - covered)} — it is vacuous "
                         f"for exactly the commands it exists to protect")
 
-    #: auditor-contribute.yml is E8.2b's (issue #164) and is not in this item's scope. It has
-    #: several unauthenticated pushes, found by this check once it was repaired. The count is
-    #: deliberately not written here: the last version said "four", the scanner found five, and
-    #: a stale number in a comment is a small lie that outlives whoever can correct it. Recorded here rather than fixed, so the next item inherits a named defect instead
-    #: of an exemption nobody remembers the reason for — and so this check stays honest about
-    #: what it is not covering.
-    OUT_OF_SCOPE = {"auditor-contribute.yml"}
-
-    #: An EFFECTIVE helper: `credential.helper=` with a non-empty value. The commands pass two
-    #: — an empty reset that discards inherited helpers, then the real one — so a substring
-    #: test for "credential.helper" is satisfied by the reset alone. Delete only the effective
-    #: line and the push is unauthenticated while the check stays green.
-    #: THE EXACT HELPER, not a pattern. Five successive regexes were evaded — by continuation
-    #: lines, a leading env assignment, punctuation in `credential.helper`, the empty reset,
-    #: and finally `credential.helper=${UNSET-}`, which looks like a value and expands to
-    #: nothing. That last one is the proof the approach was wrong: a regex over shell SOURCE
-    #: cannot decide what a shell EXPRESSION evaluates to at runtime, and any expression can
-    #: expand to empty.
-    #:
-    #: So this is an allowlist of the one construction the repaired workflows use. A different
-    #: form is not "probably fine" — it fails, and someone reads it. That is the correct
-    #: default for a credential on a push to a third party's repository.
+    #: THE EXACT HELPER, not a pattern. Five successive regexes were evaded during E8.3 —
+    #: continuation lines, a leading env assignment, punctuation in `credential.helper`, the
+    #: empty reset, and `credential.helper=${UNSET-}` which expands to nothing. A regex over
+    #: shell SOURCE cannot decide what a shell EXPRESSION evaluates to at RUNTIME, so this is
+    #: an allowlist of the one construction the workflows use.
     HELPER_LITERAL = ('credential.helper=!f() { echo "username=x-access-token"; '
                       'echo "password=${GIT_AUTH_TOKEN}"; }; f')
 
     @classmethod
-    def _has_effective_helper(cls, command):
-        return cls.HELPER_LITERAL in command
+    def _has_effective_helper(cls, command, text=""):
+        """The literal on the command, or in the `CRED_ARGS` array the command expands.
 
-    def test_no_workflow_pushes_without_supplying_a_credential(self):
-        offenders = [f"{name}: {cmd[:70]}" for name, cmd in self._push_sites()
-                     if name not in self.OUT_OF_SCOPE
-                     and not self._has_effective_helper(cmd)
-                     and not cmd.startswith("git_auth")]
-        self.assertEqual(offenders, [],
-                         "a bare `git push` in a credentials-disabled checkout")
-
-    def test_the_out_of_scope_exemption_still_describes_something_real(self):
-        """An exemption that has quietly become unnecessary is worse than none: it keeps a file
-        excluded from a real check for a reason that no longer exists."""
-        exempt = {name for name, cmd in self._push_sites()
-                  if name in self.OUT_OF_SCOPE and "credential.helper" not in cmd}
-        self.assertEqual(exempt, self.OUT_OF_SCOPE,
-                         "an exempted workflow no longer has an unauthenticated push — "
-                         "drop it from OUT_OF_SCOPE")
+        auditor-contribute builds the args conditionally — a credential is meaningful only for
+        an https remote, and a local or file:// remote needs none — so the literal sits in the
+        surrounding block rather than on the push line. Credited only when the SAME text both
+        defines CRED_ARGS with the literal and the command expands it.
+        """
+        if cls.HELPER_LITERAL in command:
+            return True
+        return ('${CRED_ARGS[@]}' in command and "CRED_ARGS=(-c" in text
+                and cls.HELPER_LITERAL in text)
 
     def test_removing_a_credential_helper_is_detected(self):
-        """The mutant: strip the helper from each repaired workflow and confirm the check
-        notices. Without this the assertion above could be vacuously true for a second reason."""
+        """The mutant: strip the effective helper and confirm the check notices."""
         for wf in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
             text = wf.read_text(encoding="utf-8")
             if "persist-credentials: false" not in text or "credential.helper" not in text:
                 continue
-            # Remove the EFFECTIVE helper's whole line, newline included. Stripping from `-c`
-            # to end-of-line instead leaves a whitespace-only line that breaks the `\`
-            # continuation, so the push command stops being recognised at all and the mutant
-            # "changes nothing" for a reason that has nothing to do with credentials.
             mutated = re.sub(r"\n[^\n]*credential\.helper=!f\(\)[^\n]*", "", text)
             with self.subTest(workflow=wf.name):
-                # Only the PUSH COMMANDS of this workflow, found the same way the real scan
-                # finds them. The previous version searched every line for git-and-push, so
-                # prose and helper-script filenames satisfied it before anything was removed —
-                # the mutation test was itself vacuous.
-                bare = [cmd for name, cmd in self._push_sites_in(wf.name, mutated)
-                        if not self._has_effective_helper(cmd)]
+                bare = [cmd for _n, cmd in self._push_sites_in(wf.name, mutated)
+                        if not self._has_effective_helper(cmd, mutated)]
                 self.assertTrue(bare, f"{wf.name}: stripping the helper changed nothing")
 
     def test_the_token_is_never_written_into_a_url_or_config(self):
@@ -1855,7 +1822,25 @@ class TestPushCredentials(unittest.TestCase):
                 self.assertNotIn("@github.com", text, "credentials in a remote URL")
                 self.assertNotIn("git config credential", text, "persisted credential")
 
+    #: EMPTY, and deliberately so. auditor-contribute.yml carried a named exemption here
+    #: through all of E8.3, guarded by a liveness assertion that would fail once the exemption
+    #: stopped describing anything real. E8.2b authenticated its five pushes, so both are gone
+    #: together — a carve-out that outlives its reason is how a check quietly stops checking.
+    OUT_OF_SCOPE: set = set()
 
+    def test_no_workflow_pushes_without_supplying_a_credential(self):
+        # Per workflow, because crediting a conditionally-built CRED_ARGS needs the
+        # surrounding text — the literal is not on the push line itself.
+        offenders = []
+        for wf in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            text = wf.read_text(encoding="utf-8")
+            if "persist-credentials: false" not in text or wf.name in self.OUT_OF_SCOPE:
+                continue
+            offenders += [f"{wf.name}: {cmd[:70]}"
+                          for _n, cmd in self._push_sites_in(wf.name, text)
+                          if not self._has_effective_helper(cmd, text)]
+        self.assertEqual(offenders, [],
+                         "a bare `git push` in a credentials-disabled checkout")
 
 class TestSidecarFingerprintConsumers(unittest.TestCase):
     """No helper may REQUIRE a fingerprint on a section-4 sidecar finding.

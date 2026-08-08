@@ -393,7 +393,23 @@ jobs:
             if [ "${distinct:-0}" -ge "$CAP" ]; then
               reason="weekly-cap"
               echo "SKIP:weekly-cap — $distinct distinct repos already reserved in the trailing ${WINDOW_DAYS}d (cap $CAP)"
-              if git -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null; then
+              # The credential is meaningful only for an https remote. A local or file://
+              # remote — what the harnesses and any bare fork use — needs none, and forcing
+              # an empty helper onto one makes git prompt for a password nobody can supply.
+              # Discriminating on the TOKEN was wrong: a harness can hold a token and still
+              # push locally.
+              CRED_ARGS=()
+              case "${PUSH_REMOTE_URL:-$(git -C "${PUSH_DIR:-.}" remote get-url origin 2>/dev/null)}" in
+                https://*) : ;;
+                *) PAT_SECRET="" ;;
+              esac
+              if [ -n "${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}" ]; then
+                CRED_ARGS=(-c 'credential.helper=' \
+                  -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
+              fi
+              if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+                 git "${CRED_ARGS[@]}" -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null
+              then
                 break
               fi
               echo "the tip advanced while the refusal was computed; re-reading and re-evaluating"
@@ -408,7 +424,23 @@ jobs:
             git -C "$DATA_REPO" -c "user.name=${GIT_AUTHOR_NAME:-vibe-suite auditor}" \
               -c "user.email=${GIT_AUTHOR_EMAIL:-auditor@users.noreply.github.com}" \
               commit -q -m "auditor: reserve a contact slot for $REPO"
-            if git -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null; then
+            # The credential is meaningful only for an https remote. A local or file://
+            # remote — what the harnesses and any bare fork use — needs none, and forcing
+            # an empty helper onto one makes git prompt for a password nobody can supply.
+            # Discriminating on the TOKEN was wrong: a harness can hold a token and still
+            # push locally.
+            CRED_ARGS=()
+            case "${PUSH_REMOTE_URL:-$(git -C "${PUSH_DIR:-.}" remote get-url origin 2>/dev/null)}" in
+              https://*) : ;;
+              *) PAT_SECRET="" ;;
+            esac
+            if [ -n "${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}" ]; then
+              CRED_ARGS=(-c 'credential.helper=' \
+                -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
+            fi
+            if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+               git "${CRED_ARGS[@]}" -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null
+            then
               reserved=true
               echo "RESERVED:$REPO — reservation appended and pushed to auditor-data"
               break
@@ -663,7 +695,23 @@ jobs:
           if [ -z "$FORK_REMOTE" ]; then
             FORK_REMOTE="https://github.com/${FORK_SLUG:-$REPO}.git"
           fi
-          if ! git -C "$TARGET_DIR" push -q "$FORK_REMOTE" \
+          # The credential is meaningful only for an https remote. A local or file://
+          # remote — what the harnesses and any bare fork use — needs none, and forcing
+          # an empty helper onto one makes git prompt for a password nobody can supply.
+          # Discriminating on the TOKEN was wrong: a harness can hold a token and still
+          # push locally.
+          PUSH_REMOTE_URL="$FORK_REMOTE"
+          CRED_ARGS=()
+          case "${PUSH_REMOTE_URL:-$(git -C "${PUSH_DIR:-.}" remote get-url origin 2>/dev/null)}" in
+            https://*) : ;;
+            *) PAT_SECRET="" ;;
+          esac
+          if [ -n "${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}" ]; then
+            CRED_ARGS=(-c 'credential.helper=' \
+              -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
+          fi
+          if ! GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+             git "${CRED_ARGS[@]}" -C "$TARGET_DIR" push -q "$FORK_REMOTE" \
               "refs/heads/$BRANCH:refs/heads/$BRANCH" 2>/dev/null; then
             echo "REFUSE:pre-pr-failure — the submission branch did not reach the fork" >&2
             outcome pre-pr-failure fork-push-failed ""
@@ -759,7 +807,23 @@ jobs:
                 || git -C "$DATA_DIR" -c "user.name=${GIT_AUTHOR_NAME:-vibe-suite auditor}" \
                      -c "user.email=${GIT_AUTHOR_EMAIL:-auditor@users.noreply.github.com}" \
                      commit -q -m "auditor: record the PR submission for $REPO"; then
-              if git -C "$DATA_DIR" push -q origin "HEAD:${DATA_BRANCH:-auditor-data}" 2>/dev/null; then
+              # The credential is meaningful only for an https remote. A local or file://
+              # remote — what the harnesses and any bare fork use — needs none, and forcing
+              # an empty helper onto one makes git prompt for a password nobody can supply.
+              # Discriminating on the TOKEN was wrong: a harness can hold a token and still
+              # push locally.
+              CRED_ARGS=()
+              case "${PUSH_REMOTE_URL:-$(git -C "${PUSH_DIR:-.}" remote get-url origin 2>/dev/null)}" in
+                https://*) : ;;
+                *) PAT_SECRET="" ;;
+              esac
+              if [ -n "${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}" ]; then
+                CRED_ARGS=(-c 'credential.helper=' \
+                  -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
+              fi
+              if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+                 git "${CRED_ARGS[@]}" -C "$DATA_DIR" push -q origin "HEAD:${DATA_BRANCH:-auditor-data}" 2>/dev/null
+              then
                 pushed=1
               fi
             fi
@@ -965,7 +1029,33 @@ jobs:
                 -c "user.email=${GIT_AUTHOR_EMAIL:-auditor@users.noreply.github.com}" \
                 commit -q -m "auditor: record $event for ${REPO:-the audited repo}"
             fi
-            if git -C "$DATA_DIR" push -q origin "HEAD:$DATA_BRANCH" 2>/dev/null; then pushed=1; fi
+            # The credential is supplied ONLY when a token exists. Three constraints meet at
+            # this line: it must authenticate against GitHub (the checkouts set
+            # `persist-credentials: false`, so a bare push fails at the end, after the work);
+            # it must still work against a LOCAL BARE remote, which needs no auth and where an
+            # empty helper makes git prompt for a password nobody can supply; and it must be
+            # self-contained, because the composition tests extract this marked block alone —
+            # a helper function defined elsewhere in the job is not in scope here.
+            #
+            # Hence the arg ARRAY: empty when there is no token, so the command degrades to a
+            # plain push rather than to a broken one.
+            # The credential is meaningful only for an https remote. A local or file://
+            # remote — what the harnesses and any bare fork use — needs none, and forcing
+            # an empty helper onto one makes git prompt for a password nobody can supply.
+            # Discriminating on the TOKEN was wrong: a harness can hold a token and still
+            # push locally.
+            CRED_ARGS=()
+            case "${PUSH_REMOTE_URL:-$(git -C "${PUSH_DIR:-.}" remote get-url origin 2>/dev/null)}" in
+              https://*) : ;;
+              *) PAT_SECRET="" ;;
+            esac
+            if [ -n "${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}" ]; then
+              CRED_ARGS=(-c 'credential.helper=' \
+                -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
+            fi
+            if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+               git "${CRED_ARGS[@]}" -C "$DATA_DIR" push -q origin "HEAD:$DATA_BRANCH" 2>/dev/null
+            then pushed=1; fi
           fi
           if [ "$pushed" != "1" ]; then
             echo "REFUSE:ledger-unreachable — the durable record could not be pushed; no issue transition is performed" >&2

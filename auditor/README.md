@@ -174,6 +174,50 @@ interpreter matches its extension.
 Python helpers are run with `python3`, shell helpers with `bash`; neither relies on the
 executable bit.
 
+### Orphaned forks — manual cleanup (E8.2b)
+
+The contribution engine creates a fork under the bot account before opening a PR, then
+re-confirms four things: the fork resolves, it *is* a fork, its owner is the PAT's own login,
+and its parent is the audited repository. If any check fails the run **refuses** — and
+deliberately **does not delete the fork**.
+
+Deleting a repository under a third-party account is not an action this pipeline takes on its
+own judgement (operator decision, 2026-08-07). An automated delete that misfires is
+unrecoverable and is visible to the account owner; a fork left in place is neither. So the
+engine records the failure and hands it to a human.
+
+**Finding them.** Each failure appends an `orphaned_fork` event to `ledgers/events.jsonl` on
+the `auditor-data` branch (contract: `auditor/SCHEMAS.md` §7):
+
+```bash
+git fetch origin auditor-data:auditor-data
+git show auditor-data:ledgers/events.jsonl \
+  | jq -c 'select(.event == "orphaned_fork") | .data'
+```
+
+Each record carries `repo`, `fork_slug`, `owner`, `created_at` and `invariant_failed` — the
+last naming which of the four checks failed (`resolves`, `is_fork`, `owner_matches`,
+`parent_matches`).
+
+**Deciding what to do.** `invariant_failed` tells you what to expect:
+
+| `invariant_failed` | Most likely cause | Usual action |
+|---|---|---|
+| `resolves` | creation raced, or the API returned before the fork was queryable | re-check by hand; often nothing to clean up |
+| `is_fork` | a repository of that name already existed under the bot account | rename or remove **that** repo, not a fork |
+| `owner_matches` | `PAT_TOKEN` belongs to a different account than expected | fix the token or the expectation first — a fork may not exist at all |
+| `parent_matches` | the fork points at a different upstream | inspect before deleting; it may be someone's legitimate work |
+
+**Cleaning up.** Only after deciding the fork is genuinely the pipeline's own stray:
+
+```bash
+gh repo view  <fork_slug>          # confirm what it is, and that it holds no unique work
+gh repo delete <fork_slug>          # interactive confirmation; never scripted in bulk
+```
+
+Do not script this across many records. The whole reason the engine refuses to delete is that
+"this looks like ours" is a judgement, and it is one a human makes per fork.
+
 ### Secrets behavior (recap; provisioning above)
 
 `PAT_TOKEN` absent → audit-only mode (the pipeline stops at `audit-complete`). `OPENAI_API_KEY`

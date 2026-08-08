@@ -46,6 +46,19 @@ for a in "$@"; do printf '%s\\0' "$a" >> "$GH_CALLS/call-$i"; done
 key="GH_CANNED_$(printf '%s_%s' "${1:-}" "${2:-}" | tr 'a-z-' 'A-Z_')"
 val="${!key:-}"
 if [ -n "$val" ] && [ -f "$val" ]; then cat "$val"; fi
+# Path-shaped endpoints (gh api repos/<owner>/<name>) cannot form a legal variable name, so
+# they come from a map file: "<prefix><TAB><file>" per line, longest prefix wins. Same
+# addition as tests/test_auditor_state_machine.py's stub; a caller setting neither is unaffected.
+if [ -z "$val" ] && [ -n "${GH_CANNED_MAP:-}" ] && [ -f "${GH_CANNED_MAP}" ]; then
+  argv="$*"; best=""; bestlen=0
+  while IFS="$(printf '\t')" read -r prefix file; do
+    [ -z "$prefix" ] && continue
+    case "$argv" in
+      "$prefix"*) if [ "${#prefix}" -gt "$bestlen" ]; then best="$file"; bestlen="${#prefix}"; fi ;;
+    esac
+  done < "$GH_CANNED_MAP"
+  if [ -n "$best" ] && [ -f "$best" ]; then cat "$best"; fi
+fi
 case " ${GH_FAIL:-} " in *" ${1:-}:${2:-} "*) exit 1 ;; esac
 exit 0
 """
@@ -245,6 +258,23 @@ class SubmitSandbox:
         shutil.rmtree(self.calls)
         self.calls.mkdir()
 
+    def _write_fork_response(self):
+        """The fork as the four-part invariant expects to find it.
+
+        E8.2b (vibe-164) W5.2: submit now re-confirms after creation that the fork resolves,
+        is a fork, is owned by the PAT login, and has the target as parent. Without a canned
+        response these tests fail at `fork-invariant:resolves` -- correct behaviour meeting a
+        harness that never modelled the fork's existence.
+        """
+        import json as _json
+        slug = "vibe-suite-bot/claude-toolkit"
+        body = self.root / "canned-fork-api"
+        body.write_text(_json.dumps({
+            "full_name": slug, "fork": True, "parent": {"full_name": TARGET_REPO}}))
+        m = self.root / "canned-map"
+        m.write_text("api repos/%s\t%s\n" % (slug, body))
+        return m
+
     def _write_manifest(self):
         """The gate allowlist, admitting exactly the fingerprints these patches carry.
 
@@ -308,6 +338,7 @@ class SubmitSandbox:
             "CLA_AUTHOR_NAME": AUTHOR_NAME, "CLA_AUTHOR_EMAIL": AUTHOR_EMAIL,
             "CONTEXT_FILE": str(self._write_context()),
             "MANIFEST": str(self._write_manifest()),
+            "GH_CANNED_MAP": str(self._write_fork_response()),
         })
         e.update(env or {})
         sh = self.root / "submit.sh"

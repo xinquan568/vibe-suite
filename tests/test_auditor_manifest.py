@@ -31,12 +31,22 @@ class ManifestBase(unittest.TestCase):
         self.assertIsNotNone(b, f"no {marker}:{name} block in {WF.name}")
         return b
 
-    def run_emit(self, name="emit-manifest", env=None, sidecar="findings-sidecar.jsonl"):
+    def run_emit(self, name="emit-manifest", env=None, sidecar="findings-sidecar.jsonl",
+                 patch_cap=3):
         sb = Sandbox(registry="registry-audited.json")
         self.addCleanup(sb.cleanup)
+        # The cap arrives through the relay, as production delivers it. Setting PATCH_CAP in
+        # the environment hid a real defect: emit-manifest read it from there, derive-context
+        # never exported it, and production silently fell back to PLANNED_COUNT.
+        ctx = sb.root / "context.json"
+        ctx.write_text(json.dumps({
+            "version": 1, "repo": TARGET, "issue": "42",
+            "expected_fork_slug": "vibe-bot/claude-toolkit", "audited_sha": "cafebabe",
+            "base_branch": "main", "author_name": "n", "author_email": "e@x.invalid",
+            "weekly_cap": 2, "patch_cap": patch_cap}))
         base = {"REPO": TARGET, "OWNER": TARGET.split("/")[0],
                 "SIDECAR": str(FIX / sidecar),
-                "CODE_DIR": str(REPO_ROOT),
+                "CODE_DIR": str(REPO_ROOT), "CONTEXT_FILE": str(ctx),
                 "MANIFEST": str(sb.root / "proposal-manifest.json"),
                 "DISCLOSURE": str(sb.root / "disclosure.json"),
                 "PLANNED_COUNT": "4", "FIRST_CONTACT": "true"}
@@ -87,7 +97,7 @@ class TestManifestContents(ManifestBase):
                             f"{f.get('rule_id')} has no section-3 fingerprint")
 
     def test_the_cap_bounds_the_allowlist(self):
-        r, sb = self.run_emit(env={"PLANNED_COUNT": "1", "PATCH_CAP": "1"})
+        r, sb = self.run_emit(env={"PLANNED_COUNT": "1"}, patch_cap=1)
         self.assertLessEqual(len(self.manifest(sb)["findings"]), 1)
 
 
@@ -263,9 +273,15 @@ class TestProducerFeedsConsumerUnchanged(ManifestBase):
         # disclosure.json and the test would fail for the wrong reason.
         sb = Sandbox(registry="registry-audited.json")
         self.addCleanup(sb.cleanup)
+        ctx = sb.root / "context.json"
+        ctx.write_text(json.dumps({
+            "version": 1, "repo": TARGET, "issue": "42",
+            "expected_fork_slug": "vibe-bot/claude-toolkit", "audited_sha": "cafebabe",
+            "base_branch": "main", "author_name": "n", "author_email": "e@x.invalid",
+            "weekly_cap": 2, "patch_cap": 3}))
         env = {"REPO": TARGET, "OWNER": TARGET.split("/")[0],
                "SIDECAR": str(FIX / "findings-sidecar.jsonl"),
-               "CODE_DIR": str(REPO_ROOT),
+               "CODE_DIR": str(REPO_ROOT), "CONTEXT_FILE": str(ctx),
                "MANIFEST": str(sb.root / "proposal-manifest.json"),
                "DISCLOSURE": str(sb.root / "disclosure.json"),
                "PLANNED_COUNT": "4", "FIRST_CONTACT": "true"}

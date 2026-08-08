@@ -39,12 +39,20 @@ class QuotaBase(unittest.TestCase):
     def emit(self, cap):
         sb = Sandbox(registry="registry-audited.json")
         self.addCleanup(sb.cleanup)
+        # Through the relay, not the environment -- see
+        # tests/test_auditor_no_supplied_derivations.py for why this matters.
+        ctx = sb.root / "context.json"
+        ctx.write_text(json.dumps({
+            "version": 1, "repo": TARGET, "issue": "42",
+            "expected_fork_slug": "vibe-bot/claude-toolkit", "audited_sha": "cafebabe",
+            "base_branch": "main", "author_name": "n", "author_email": "e@x.invalid",
+            "weekly_cap": 2, "patch_cap": cap}))
         r = sb.run(self.block("emit-manifest"), env={
             "REPO": TARGET, "OWNER": TARGET.split("/")[0],
             "SIDECAR": str(FIX / "findings-sidecar.jsonl"),
-            "CODE_DIR": str(REPO_ROOT),
+            "CODE_DIR": str(REPO_ROOT), "CONTEXT_FILE": str(ctx),
             "MANIFEST": str(sb.root / "proposal-manifest.json"),
-            "PATCH_CAP": str(cap), "PLANNED_COUNT": "4"})
+            "PLANNED_COUNT": "4"})
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         return json.loads((sb.root / "proposal-manifest.json").read_text())
 

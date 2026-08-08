@@ -346,8 +346,19 @@ jobs:
           CODE_DIR="${CODE_DIR:-${GITHUB_WORKSPACE:-$PWD}}"
           . "$CODE_DIR/auditor/scripts/compute-fingerprint.sh"
 
-          # The cap is the per-repo patch cap the relay carries; PLANNED_COUNT bounds it.
-          cap="${PATCH_CAP:-${PLANNED_COUNT:-0}}"
+          # The cap comes from the RELAY, not the environment. derive-context computes it
+          # from F10.1's first-contact rule (3 on first contact, 5 thereafter) and writes it
+          # to context.json -- but it does not export PATCH_CAP to $GITHUB_ENV, so reading
+          # ${PATCH_CAP:-${PLANNED_COUNT:-0}} here silently fell back to PLANNED_COUNT: a
+          # different quantity, and the first-contact rule was bypassed entirely. Found by
+          # tests/test_auditor_no_supplied_derivations.py, which flagged the tests that were
+          # hiding it by setting PATCH_CAP directly.
+          CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+          if [ ! -f "$CONTEXT_FILE" ]; then
+            echo "REFUSE:context-relay-missing-unresolvable" >&2; exit 1
+          fi
+          cap="$(jq -r '.patch_cap // empty' "$CONTEXT_FILE" 2>/dev/null || true)"
+          [ -n "$cap" ] || { echo "REFUSE:context-patch-cap-unresolvable" >&2; exit 1; }
 
           kept="$(mktemp)"
           n=0

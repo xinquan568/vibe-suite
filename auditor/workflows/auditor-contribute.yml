@@ -60,17 +60,45 @@ jobs:
           EVENT_LOG="${EVENT_LOG:-$DATA_DIR/ledgers/events.jsonl}"
           DECISION="${DECISION:-${GITHUB_WORKSPACE:-$PWD}/decision.json}"
           OUTCOME_DIR="${OUTCOME_DIR:-${GITHUB_WORKSPACE:-$PWD}/_outcomes}"
+          # ISSUE resolves FIRST, because on the `issues` trigger it is the only handle the
+          # payload carries and the repository is looked up from it. F1.
+          # Both triggers carry it directly -- `github.event.issue.number` on `issues`,
+          # `inputs.issue_number` on dispatch -- so there is no third source to fall back to,
+          # and inventing one would let an unresolvable issue proceed under another run's number.
+          ISSUE="${ISSUE_NUMBER:-${INPUT_ISSUE_NUMBER:-}}"
+          ISSUE="$(printf '%s' "$ISSUE" | tr -d '[:space:]')"
+          [ -n "$ISSUE" ] || refuse issue
+          case "$ISSUE" in ''|*[!0-9]*) refuse issue ;; esac
+
           REPO="${REPO:-${INPUT_REPO:-}}"
+          # `issues` is the ordinary production trigger and carries NO dispatch input, so
+          # INPUT_REPO is empty on every labelled-issue run. Nothing resolved the repository
+          # from the tracking issue, so the job refused `context-repo-unresolvable` before a
+          # single gate executed -- the graph could not complete on its main trigger, and the
+          # whole suite was green because every test handed the block a REPO. F1.
+          #
+          # The registry is the mapping: `discover` writes .repos[<slug>].audit_issue.
+          if [ -z "$REPO" ] && [ -r "$REGISTRY" ]; then
+            matches="$(jq -r --argjson n "$ISSUE" \
+              '[(.repos // {}) | to_entries[] | select((.value.audit_issue // null) == $n) | .key] | .[]' \
+              "$REGISTRY" 2>/dev/null || true)"
+            count="$(printf '%s\n' "$matches" | grep -c . || true)"
+            # Two repositories claiming one tracking issue is a registry defect. Picking the
+            # first would contribute to an arbitrary third-party repository, silently.
+            if [ "${count:-0}" -gt 1 ]; then
+              echo "REFUSE:context-repo-ambiguous — issue #$ISSUE maps to ${count} repositories" >&2
+              exit 1
+            fi
+            if [ "${count:-0}" -eq 1 ]; then REPO="$matches"; fi
+          fi
           if [ -z "$REPO" ] && [ -n "${FIXTURE:-}" ]; then
             REPO="$(jq -r '.repo.full_name' "$FIXTURE")"
           fi
           OWNER="${OWNER:-${REPO%%/*}}"
-          ISSUE="${ISSUE_NUMBER:-${INPUT_ISSUE_NUMBER:-}}"
           CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
 
           # --- the eight derived values -------------------------------------------------
           [ -n "$REPO" ] || refuse repo
-          [ -n "$ISSUE" ] || refuse issue
 
           # Fork identity. gates is read-only and holds NO PAT, so `gh api user` here proves
           # nothing about who owns the fork: unauthenticated it fails, and with github.token
@@ -130,12 +158,21 @@ jobs:
             echo "SIDECAR=$SIDECAR"
           } >> "${GITHUB_ENV:-/dev/null}"
           echo "context: repo=$REPO owner=$OWNER issue=$ISSUE"
+          # /stage-logic
+        # env-for:derive-context — the step's real trigger wiring. Everything the block reads
+        # from the environment is bound HERE; a read with no binding here is empty on a real
+        # run, which is what finding 1 was. tests/test_auditor_context.py enforces the pairing.
         env:
           INPUT_REPO: ${{ inputs.repo }}
           INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
-          # /stage-logic
+          AUDITOR_AUTHOR_NAME: ${{ vars.AUDITOR_AUTHOR_NAME }}
+          AUDITOR_AUTHOR_EMAIL: ${{ vars.AUDITOR_AUTHOR_EMAIL }}
+          AUDITOR_FORK_OWNER: ${{ vars.AUDITOR_FORK_OWNER }}
+          WEEKLY_CAP: ${{ vars.WEEKLY_CAP }}
+          GH_TOKEN: ${{ github.token }}
+          # /env-for
       - name: gate security-blocked
         run: |
           # gate:security-blocked
@@ -1359,7 +1396,12 @@ jobs:
         with:
           name: gate-disclosure
           path: ${{ github.workspace }}
+      # F1: NOT mandatory. gates refusing inside derive-context uploads no context at all, and
+      # finalize is the only job that can route that refusal — label the tracking issue, write
+      # the ledger row. A required download meant the reporting job died exactly when there was
+      # something to report, and the named refusal reached nobody.
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: gate-context
           path: ${{ github.workspace }}
@@ -1627,7 +1669,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ needs.gates.outputs.repo }}
-          ISSUE_NUMBER: ${{ needs.gates.outputs.issue }}
+          # F1: gates refusing inside derive-context never reaches the guard step, so its
+          # outputs are empty precisely on the runs that need routing. The `issues` payload
+          # carries the number directly — fall back to it so an early refusal still labels
+          # and comments on the tracking issue instead of failing in silence.
+          ISSUE_NUMBER: ${{ needs.gates.outputs.issue || github.event.issue.number }}
           DATA_DIR: _data
           OUTCOME_DIR: _outcomes
       - name: publish the finalize outcome

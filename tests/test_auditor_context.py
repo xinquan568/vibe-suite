@@ -14,6 +14,7 @@ Each test names the value and asserts the refusal, not just the resolution. A de
 resolves correctly but fails open is the defect this issue exists to close.
 """
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -117,6 +118,172 @@ class TestContextRefusesByName(ContextBase):
     def test_repo_refuses_when_the_trigger_carries_none(self):
         r, _ = self.run_ctx({"REPO": "", "INPUT_REPO": "", "FIXTURE": ""})
         self.assertIn("REFUSE:context-repo-unresolvable", r.stdout + r.stderr)
+
+
+class TriggerBase(ContextBase):
+    """Drive the derivation through the workflow's OWN `env:` mapping, not a supplied dict.
+
+    Every other test in this file hands the block `REPO` directly. That is precisely the hole
+    Step-8 finding 1 named: it means no test ever exercised what a real trigger actually
+    delivers, and on an `issues` event -- the ordinary production trigger -- `INPUT_REPO` is
+    empty, so `gates` refused `context-repo-unresolvable` before any gate ran. The graph could
+    not complete on either trigger and the whole suite was green.
+
+    So this harness reads the step's declared `env:` block out of the YAML, evaluates each
+    `${{ ... }}` against a simulated event payload, and passes ONLY that. A value the workflow
+    does not bind is a value the block does not get. Adding a test here cannot paper over a
+    missing binding, because the binding is the thing under test.
+    """
+
+    #: The expressions the mapping is allowed to use. Anything else fails loudly rather than
+    #: resolving to empty -- an unrecognised expression silently becoming "" would reproduce
+    #: the exact defect this class exists to catch.
+    def _eval(self, expr, event, inputs, variables):
+        expr = expr.strip()
+        if expr.startswith("${{") and expr.endswith("}}"):
+            expr = expr[3:-2].strip()
+        if expr.startswith("join(github.event.issue.labels.*.name"):
+            sep = expr.rsplit(",", 1)[1].strip().rstrip(")").strip().strip("'\"")
+            return sep.join(l for l in event.get("labels", []))
+        if expr == "github.event.issue.number":
+            n = event.get("number")
+            return "" if n is None else str(n)
+        if expr == "github.token":
+            return "ghs_simulated_actions_token"
+        if expr.startswith("inputs."):
+            return str(inputs.get(expr.split(".", 1)[1], "") or "")
+        if expr.startswith("vars."):
+            return str(variables.get(expr.split(".", 1)[1], "") or "")
+        raise AssertionError(
+            f"the derive-context env: block uses an expression this harness does not model: "
+            f"{expr!r}. Model it here rather than letting it resolve to empty -- an unmodelled "
+            f"expression reading as '' is how finding 1 stayed invisible.")
+
+    def step_env(self):
+        """The `env:` mapping of the derive-context step, as declared in the YAML."""
+        text = WF.read_text()
+        m = re.search(r"^\s*# env-for:derive-context.*?^\s*env:\s*$(.*?)^\s*# /env-for\s*$",
+                      text, re.M | re.S)
+        self.assertIsNotNone(
+            m, "no `# env-for:derive-context` ... `# /env-for` mapping in the workflow. The "
+               "marker pair exists so the step's real trigger wiring is testable; the shell "
+               "block's own `# /stage-logic` must close BEFORE it, or the YAML lands in the "
+               "extracted script.")
+        mapping = {}
+        for line in m.group(1).split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            k, _, v = line.partition(":")
+            mapping[k.strip()] = v.strip()
+        return mapping
+
+    def run_trigger(self, event_name, event=None, inputs=None, variables=None,
+                    registry="registry-audited.json", extra=None, default_branch="main"):
+        variables = {
+            "AUDITOR_AUTHOR_NAME": "vibe-suite auditor bot",
+            "AUDITOR_AUTHOR_EMAIL": "auditor@example.invalid",
+            "AUDITOR_FORK_OWNER": "vibe-bot",
+            "WEEKLY_CAP": "2",
+            **(variables or {}),
+        }
+        sb = Sandbox(registry=registry)
+        env = {k: self._eval(v, event or {}, inputs or {}, variables)
+               for k, v in self.step_env().items()}
+        # FIXTURE is a real cross-workflow channel (auditor-audit writes it), but it also
+        # carries repo.full_name, so leaving it set would hand the block the answer and the
+        # trigger path would never be exercised. Blank it for these tests only.
+        env["FIXTURE"] = ""
+        env.update(self.canned(sb, login=None, default_branch=default_branch))
+        env.update(extra or {})
+        r = sb.run(self.block(), env=env)
+        return r, sb
+
+
+class TestTheRealTriggersReachTheGraph(TriggerBase):
+    """Both production triggers must produce a context. Neither did."""
+
+    def test_the_issues_trigger_resolves_the_repository_from_the_registry(self):
+        # No dispatch input exists on an `issues` event. The tracking issue is the only handle
+        # the payload carries, and the registry maps it back to the repository (`audit_issue`).
+        r, sb = self.run_trigger("issues", event={"number": 901, "labels": ["contribute-approved"]})
+        self.assertNotIn("REFUSE:context-repo-unresolvable", r.stdout + r.stderr)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual("acme/claude-toolkit", self.context(sb)["repo"])
+
+    def test_the_dispatch_trigger_still_resolves_from_its_input(self):
+        r, sb = self.run_trigger(
+            "workflow_dispatch",
+            inputs={"repo": "acme/claude-toolkit", "issue_number": "901"})
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual("acme/claude-toolkit", self.context(sb)["repo"])
+
+    def test_the_issues_trigger_reaches_a_complete_context(self):
+        # The point of finding 1 is that the run must reach `reserve`, not merely resolve the
+        # repo. Every derived value has to survive the real mapping.
+        r, sb = self.run_trigger("issues", event={"number": 901, "labels": ["contribute-approved"]})
+        ctx = self.context(sb)
+        missing = [k for k in DERIVED if not str(ctx.get(k, "")).strip()]
+        self.assertEqual([], missing,
+                         f"the issues trigger reached a context missing {missing}; the run "
+                         f"would refuse before reserve")
+
+    def test_an_unknown_issue_still_refuses_by_name(self):
+        r, _ = self.run_trigger("issues", event={"number": 4242, "labels": []})
+        self.assertIn("REFUSE:context-repo-unresolvable", r.stdout + r.stderr)
+
+    def test_an_ambiguous_issue_refuses_rather_than_picking_one(self):
+        # Two repositories claiming the same tracking issue is a registry defect. Picking the
+        # first would contribute to an arbitrary repository -- the failure mode is silent and
+        # the blast radius is somebody else's codebase.
+        sb = Sandbox(registry="registry-audited.json")
+        reg = json.loads((sb.data / "registry" / "repos.json").read_text())
+        reg["repos"]["other/toolkit"] = dict(reg["repos"]["acme/claude-toolkit"])
+        (sb.data / "registry" / "repos.json").write_text(json.dumps(reg))
+        env = {k: self._eval(v, {"number": 901, "labels": []}, {},
+                             {"AUDITOR_AUTHOR_NAME": "n", "AUDITOR_AUTHOR_EMAIL": "e",
+                              "AUDITOR_FORK_OWNER": "vibe-bot", "WEEKLY_CAP": "2"})
+               for k, v in self.step_env().items()}
+        env["FIXTURE"] = ""
+        env.update(self.canned(sb, login=None, default_branch="main"))
+        r = sb.run(self.block(), env=env)
+        self.assertIn("REFUSE:context-repo-ambiguous", r.stdout + r.stderr)
+
+
+class TestTheStepBindsEveryValueItReads(TriggerBase):
+    """A value the block reads from the environment must be bound by the step's `env:`.
+
+    This is the general form of finding 1. The block read AUDITOR_AUTHOR_NAME,
+    AUDITOR_AUTHOR_EMAIL, WEEKLY_CAP and AUDITOR_FORK_OWNER, and the step bound none of them,
+    so `workflow_dispatch` refused at `author-identity` even when the repo resolved. Enumerating
+    the reads from the block text means a newly-added read cannot escape the check.
+    """
+
+    #: Set by the harness (Sandbox) or by an earlier step via $GITHUB_ENV, not by this step.
+    HARNESS_OR_UPSTREAM = {
+        "DATA_DIR", "REGISTRY", "EVENT_LOG", "DECISION", "OUTCOME_DIR", "SIDECAR",
+        "CONTEXT_FILE", "GITHUB_WORKSPACE", "GITHUB_ENV", "FIXTURE", "PWD",
+        "REPO", "OWNER", "ISSUE",
+    }
+
+    def test_every_configuration_value_the_block_reads_is_bound_by_the_step(self):
+        block = self.block()
+        read = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):?[-:]?[^}]*\}", block))
+        read |= set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)\}", block))
+        candidates = {n for n in read if n not in self.HARNESS_OR_UPSTREAM}
+        bound = set(self.step_env())
+        unbound = sorted(candidates - bound)
+        self.assertEqual(
+            [], unbound,
+            f"the derive-context block reads {unbound} but the step's env: binds none of them, "
+            f"so on a real run they are empty and the job refuses. Bind them from vars/github "
+            f"or stop reading them.")
+
+    def test_the_step_can_authenticate_the_default_branch_read(self):
+        # BASE_BRANCH comes from `gh api repos/<repo>`, which needs a token. Without one the
+        # call fails and the job refuses `default-branch` on every real run.
+        self.assertIn("GH_TOKEN", self.step_env(),
+                      "the block calls `gh api` but the step binds no GH_TOKEN")
 
 
 class TestForkSlugComesFromTheBotIdentity(ContextBase):
@@ -333,6 +500,42 @@ class TestTheRelayIsActuallyTransported(unittest.TestCase):
         missing = [f"{job} reads {art} but never downloads it"
                    for job, art in self.READS if art not in self._downloads(jobs[job])]
         self.assertEqual([], missing, "\n  ".join([""] + missing))
+
+    def test_finalize_can_route_a_refusal_that_happened_before_the_context_existed(self):
+        """F1's last clause: the refusal path must not depend on the refused job's output.
+
+        `gates` refusing in derive-context means no context.json is ever uploaded. finalize
+        runs `always()` and is the only job that can label the tracking issue and write the
+        ledger row -- but its gate-context download was mandatory, so it died on a missing
+        artifact and the named refusal reached nobody. The one job whose purpose is to report
+        the failure could not run precisely when there was a failure to report.
+        """
+        finalize = self._jobs()["finalize"]
+        m = re.search(r"uses:\s*actions/download-artifact@[^\n]*\n((?:\s+[^\n]*\n)+?)"
+                      r"(?=\s*- |\Z)", finalize)
+        blocks = [b.group(1) for b in re.finditer(
+            r"uses:\s*actions/download-artifact@[^\n]*\n((?:\s+[^\n]*\n)+?)(?=\s*- |\Z)", finalize)]
+        ctx = [b for b in blocks if re.search(r"name:\s*gate-context\b", b)]
+        self.assertTrue(ctx, "finalize no longer downloads gate-context at all")
+        self.assertTrue(
+            any("continue-on-error: true" in b for b in ctx),
+            "finalize's gate-context download is mandatory, so a context refusal in gates "
+            "takes finalize down with it and the refusal is never routed. Mark it "
+            "continue-on-error: true -- finalize already tolerates a missing context.")
+
+    def test_finalize_can_still_name_the_issue_when_gates_produced_no_outputs(self):
+        # A gates job that refused in derive-context never reached the guard step, so
+        # needs.gates.outputs.issue is empty. On the `issues` trigger the number is right
+        # there in the event payload; without a fallback the refusal is silent.
+        finalize = self._jobs()["finalize"]
+        # Match the YAML mapping, not the shell line `ISSUE="${ISSUE_NUMBER:-...}"` that reads
+        # it -- the binding and the read are different things and only one of them is wiring.
+        m = re.search(r"^\s+ISSUE_NUMBER:\s*(\$\{\{.+)$", finalize, re.M)
+        self.assertIsNotNone(m, "finalize's routing step binds no ISSUE_NUMBER expression")
+        self.assertIn(
+            "github.event.issue.number", m.group(1),
+            "ISSUE_NUMBER comes only from needs.gates.outputs, which is empty exactly when "
+            "gates refused early. Fall back to the event payload.")
 
     @staticmethod
     def _downloads(job_text):

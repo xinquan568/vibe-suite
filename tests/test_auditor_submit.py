@@ -258,6 +258,12 @@ class SubmitSandbox:
         shutil.rmtree(self.calls)
         self.calls.mkdir()
 
+    def _write_pat_identity(self):
+        """`gh api user --jq .login` for the PAT, matching FORK_SLUG's owner."""
+        p = self.root / "canned-pat-user"
+        p.write_text("vibe-suite-bot\n")
+        return p
+
     def _write_fork_response(self):
         """The fork as the four-part invariant expects to find it.
 
@@ -339,6 +345,11 @@ class SubmitSandbox:
             "CONTEXT_FILE": str(self._write_context()),
             "MANIFEST": str(self._write_manifest()),
             "GH_CANNED_MAP": str(self._write_fork_response()),
+            # F2: submit proves the PAT's own login matches the expected fork owner before
+            # creating anything. The stub must model that identity call, or every test stops
+            # at REFUSE:pat-identity-unresolvable -- correct behaviour meeting a harness that
+            # never modelled it.
+            "GH_CANNED_API_USER": str(self._write_pat_identity()),
         })
         e.update(env or {})
         sh = self.root / "submit.sh"

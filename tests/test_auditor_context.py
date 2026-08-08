@@ -68,6 +68,9 @@ class ContextBase(unittest.TestCase):
             "AUDITOR_AUTHOR_NAME": "vibe-suite auditor bot",
             "AUDITOR_AUTHOR_EMAIL": "auditor@example.invalid",
             "WEEKLY_CAP": "2",
+            # F2: gates holds no PAT, so the expected fork owner is a non-secret repo
+            # variable here; the claim is PROVEN in submit against `gh api user` with the PAT.
+            "AUDITOR_FORK_OWNER": "vibe-bot",
         }
         base.update(self.canned(sb, login=login, default_branch=default_branch))
         base.update(env or {})
@@ -119,10 +122,14 @@ class TestContextRefusesByName(ContextBase):
 class TestForkSlugComesFromTheBotIdentity(ContextBase):
     """The fork owner is the PAT's own login -- never the target owner, never guessed."""
 
-    def test_the_block_actually_asks_for_the_identity(self):
+    def test_gates_does_not_pretend_to_prove_identity(self):
+        # F2: gates holds no PAT. Calling `gh api user` here proved nothing -- unauthenticated
+        # it fails, and with github.token it identifies the Actions installation. The claim is
+        # verified in submit, where the PAT lives; gates only carries the expectation.
         r, sb = self.run_ctx()
-        self.assertTrue(any("api user" in c for c in sb.gh_calls()),
-                        "the block never called `gh api user`; the login was assumed")
+        self.assertFalse(any("api user" in c for c in sb.gh_calls()),
+                         "gates called `gh api user` with no PAT bound; the result cannot "
+                         "establish who owns the fork")
 
     def test_fork_slug_is_built_from_the_identity_response(self):
         r, sb = self.run_ctx()
@@ -135,9 +142,9 @@ class TestForkSlugComesFromTheBotIdentity(ContextBase):
             "the fork slug was built from OWNER (the TARGET owner). Probing that slug probes "
             "the target repository, not the bot's fork -- Step-5 finding 2.")
 
-    def test_fork_slug_refuses_when_the_identity_call_returns_nothing(self):
-        r, _ = self.run_ctx(login="")
-        self.assertIn("REFUSE:context-fork-slug-unresolvable", r.stdout + r.stderr)
+    def test_fork_owner_refuses_when_the_variable_is_unset(self):
+        r, _ = self.run_ctx({"AUDITOR_FORK_OWNER": ""})
+        self.assertIn("REFUSE:context-fork-owner-unresolvable", r.stdout + r.stderr)
 
 
 class TestContextIsAWrittenArtifact(ContextBase):
@@ -307,9 +314,53 @@ class TestTheRelayIsActuallyTransported(unittest.TestCase):
                 "name: gate-context", jobs[job],
                 f"the {job} job reads CONTEXT_FILE but never downloads gate-context")
 
-    def test_finalize_downloads_the_manifest_it_reads(self):
-        self.assertIn("name: proposal-manifest", self._jobs()["finalize"],
-                      "finalize reads quota facts from the manifest but never downloads it")
+    # Every (job, artifact) pair a job READS. Derived from the workflow's own consumption,
+    # not from memory: the previous version listed only the pairs I recalled, which is exactly
+    # how `submit` reading the manifest and `finalize` reading the disclosure both survived a
+    # test written to catch reads-without-downloads (Step-8 F4 and F5).
+    READS = [
+        ("reserve", "gate-context"),
+        ("propose", "gate-context"),
+        ("submit", "gate-context"),
+        ("submit", "proposal-manifest"),
+        ("finalize", "gate-context"),
+        ("finalize", "proposal-manifest"),
+        ("finalize", "gate-disclosure"),
+    ]
+
+    def test_every_reader_downloads_what_it_reads(self):
+        jobs = self._jobs()
+        missing = [f"{job} reads {art} but never downloads it"
+                   for job, art in self.READS if art not in self._downloads(jobs[job])]
+        self.assertEqual([], missing, "\n  ".join([""] + missing))
+
+    @staticmethod
+    def _downloads(job_text):
+        """Artifact names this job DOWNLOADS. Uploads are a different direction entirely.
+
+        A bare `name: gate-disclosure` search flagged gates, which PRODUCES the artifact --
+        the fourth time in this issue a prohibition assertion matched the wrong construct
+        (the others: the word 'disclosure' in prose, a comment warning against a pattern, and
+        text following an unrelated download step). Match the step, not the string.
+        """
+        import re
+        out = []
+        for m in re.finditer(r"uses:\s*actions/download-artifact@[^\n]*\n((?:\s+[^\n]*\n)+?)"
+                             r"(?=\s*- |\Z)", job_text):
+            for nm in re.finditer(r"name:\s*(\S+)", m.group(1)):
+                out.append(nm.group(1))
+        return out
+
+    def test_only_finalize_downloads_the_disclosure(self):
+        jobs = self._jobs()
+        for job in ("gates", "reserve", "propose", "submit"):
+            self.assertNotIn(
+                "gate-disclosure", self._downloads(jobs[job]),
+                f"{job} downloads the disclosure set; only finalize may. propose is the "
+                f"sharpest case -- it runs the model.")
+        self.assertIn("gate-disclosure", self._downloads(jobs["finalize"]),
+                      "finalize never downloads the disclosure set, so critical findings can "
+                      "vanish while an ordinary contribution proceeds")
 
     def test_propose_still_downloads_no_disclosure(self):
         # The transport must not accidentally hand the model job the disclosure artifact.

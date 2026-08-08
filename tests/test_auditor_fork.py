@@ -196,3 +196,53 @@ class TestCleanupRunbook(unittest.TestCase):
         self.assertIn("orphaned_fork", readme,
                       "the runbook never mentions orphaned_fork, so an operator has no way to "
                       "find the forks the policy deliberately leaves behind")
+
+
+class TestPatIdentityIsProvenBeforeCreation(unittest.TestCase):
+    """F2 -- the identity claim is established where the PAT lives, before any fork exists.
+
+    gates holds contents:read and no PAT, so `gh api user` there proved nothing: unauthenticated
+    it fails, and with github.token it identifies the Actions installation rather than the
+    account that will own the fork. The expectation now travels as a non-secret variable and is
+    VERIFIED in submit against the PAT -- before creation, because a fork created under an
+    unintended account cannot then be removed under the never-delete policy.
+    """
+
+    def block(self):
+        b = extract(WF, "logic", "submit")
+        self.assertIsNotNone(b, "no logic:submit block")
+        return b
+
+    def run_submit(self, pat_login):
+        sb = Sandbox(registry="registry-audited.json")
+        self.addCleanup(sb.cleanup)
+        u = sb.root / "canned-user"
+        u.write_text(pat_login + "\n")
+        ctx = sb.root / "context.json"
+        ctx.write_text(json.dumps({
+            "version": 1, "repo": TARGET, "issue": "42",
+            "expected_fork_slug": f"{BOT}/claude-toolkit", "audited_sha": "cafebabe",
+            "base_branch": "main", "author_name": "n", "author_email": "e@x.invalid",
+            "weekly_cap": 2, "patch_cap": 3}))
+        man = sb.root / "proposal-manifest.json"
+        man.write_text(json.dumps({"version": 1, "repo": TARGET, "findings": []}))
+        patches = sb.root / "_patches"; patches.mkdir()
+        (patches / "findings.json").write_text("[]")
+        return sb.run(self.block(), env={
+            "REPO": TARGET, "CONTEXT_FILE": str(ctx), "MANIFEST": str(man),
+            "FORK_SLUG": f"{BOT}/claude-toolkit", "PAT_SECRET": "stub-pat",
+            "GH_CANNED_API_USER": str(u),
+            "PATCH_DIR": str(patches), "PATCH_META": str(patches / "findings.json"),
+            "TARGET_DIR": str(sb.root / "_target")}), sb
+
+    def test_a_mismatched_pat_refuses_before_any_fork_is_created(self):
+        r, sb = self.run_submit(pat_login="someone-else")
+        out = r.stdout + r.stderr
+        self.assertIn("REFUSE:pat-identity-mismatch", out)
+        self.assertNotIn("repo fork", " ".join(sb.gh_calls()),
+                         "a fork was created under an account the PAT does not own -- and the "
+                         "never-delete policy then forbids removing it")
+
+    def test_an_unidentifiable_pat_refuses(self):
+        r, _ = self.run_submit(pat_login="")
+        self.assertIn("REFUSE:pat-identity-unresolvable", r.stdout + r.stderr)

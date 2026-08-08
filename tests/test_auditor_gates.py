@@ -29,7 +29,12 @@ class GateBase(unittest.TestCase):
     def run_gate(self, env, registry="registry.json"):
         sb = Sandbox(registry=registry)
         try:
+            # CODE_DIR is the code checkout root: gate:disclosure-routing sources
+            # auditor/scripts/compute-fingerprint.sh from it to key each disclosed finding.
+            # The sandbox's own `code` dir is empty, so it must point at the real tree. This
+            # is a PATH, not a derived value -- the block still computes the fingerprints.
             base = {"REPO": "acme/claude-toolkit", "OWNER": "acme",
+                    "CODE_DIR": str(WF.parent.parent.parent),
                     "SIDECAR": str(FIX / "findings-sidecar.jsonl")}
             base.update(env)
             r = sb.run(self.block(), env=base)

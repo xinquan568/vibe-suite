@@ -25,6 +25,10 @@ WF = REPO_ROOT / "auditor" / "workflows" / "auditor-contribute.yml"
 TARGET = "acme/claude-toolkit"
 
 
+def _pat_user(sb, login="vibe-bot"):
+    p = sb.root / "canned-user"; p.write_text(login + "\n"); return p
+
+
 class ManifestBase(unittest.TestCase):
     def block(self, name, marker="gate"):
         b = extract(WF, marker, name)
@@ -190,9 +194,13 @@ class TestSubmitValidatesAgainstTheAllowlist(unittest.TestCase):
             "expected_fork_slug": "vibe-bot/claude-toolkit", "audited_sha": "cafebabe",
             "base_branch": "main", "author_name": "n", "author_email": "e@x.invalid",
             "weekly_cap": 2, "patch_cap": 3}))
+        u = sb.root / "canned-user"; u.write_text("vibe-bot\n")
         env = {"REPO": TARGET, "CONTEXT_FILE": str(ctx), "MANIFEST": str(man),
                "PATCH_DIR": str(patches), "PATCH_META": str(patches / "findings.json"),
-               "TARGET_DIR": str(sb.root / "_target")}
+               "TARGET_DIR": str(sb.root / "_target"),
+               # F2/F3: submit validates issue, fork slug and PAT identity at ENTRY now.
+               "FORK_SLUG": "vibe-bot/claude-toolkit", "PAT_SECRET": "stub-pat",
+               "GH_CANNED_API_USER": str(u)}
         return sb.run(self.block(), env=env)
 
     def test_a_fingerprint_outside_the_allowlist_refuses(self):
@@ -219,6 +227,8 @@ class TestSubmitValidatesAgainstTheAllowlist(unittest.TestCase):
             "weekly_cap": 2, "patch_cap": 3}))
         r = sb.run(self.block(), env={
             "REPO": TARGET, "CONTEXT_FILE": str(ctx),
+            "FORK_SLUG": "vibe-bot/claude-toolkit", "PAT_SECRET": "stub-pat",
+            "GH_CANNED_API_USER": str(_pat_user(sb)),
             "MANIFEST": str(sb.root / "absent.json"),
             "PATCH_DIR": str(patches), "PATCH_META": str(patches / "findings.json"),
             "TARGET_DIR": str(sb.root / "_target")})
@@ -258,6 +268,8 @@ class TestProducerFeedsConsumerUnchanged(ManifestBase):
             "weekly_cap": 2, "patch_cap": 3}))
         r2 = sb.run(self.submit_block(), env={
             "REPO": TARGET, "CONTEXT_FILE": str(ctx),
+            "FORK_SLUG": "vibe-bot/claude-toolkit", "PAT_SECRET": "stub-pat",
+            "GH_CANNED_API_USER": str(_pat_user(sb)),
             "MANIFEST": str(sb.root / "proposal-manifest.json"),
             "PATCH_DIR": str(patches), "PATCH_META": str(patches / "findings.json"),
             "TARGET_DIR": str(sb.root / "_target")})
@@ -303,6 +315,8 @@ class TestProducerFeedsConsumerUnchanged(ManifestBase):
             "weekly_cap": 2, "patch_cap": 3}))
         r2 = sb.run(self.submit_block(), env={
             "REPO": TARGET, "CONTEXT_FILE": str(ctx),
+            "FORK_SLUG": "vibe-bot/claude-toolkit", "PAT_SECRET": "stub-pat",
+            "GH_CANNED_API_USER": str(_pat_user(sb)),
             "MANIFEST": str(sb.root / "proposal-manifest.json"),
             "PATCH_DIR": str(patches), "PATCH_META": str(patches / "findings.json"),
             "TARGET_DIR": str(sb.root / "_target")})

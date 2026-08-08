@@ -100,6 +100,11 @@ class Sandbox:
         e = dict(os.environ)
         e.update({
             "PATH": f"{self.bin}:{e['PATH']}",
+            # Actions sets GITHUB_WORKSPACE; a developer shell does not. Blocks resolve
+            # ${GITHUB_WORKSPACE:-$PWD}, so without pinning it here a block wrote into the
+            # runner's workspace under CI and into the sandbox locally -- four tests passed
+            # on a laptop and failed on the PR. Pin it to the sandbox so both agree.
+            "GITHUB_WORKSPACE": str(self.root),
             "CODE_DIR": str(self.code), "DATA_DIR": str(self.data),
             "FIXTURE": str(FIX / fixture),
             "REGISTRY": str(self.data / "registry" / "repos.json"),
@@ -231,8 +236,18 @@ class TestContribute(StageBase):
         try:
             shutil.copy(FIX / "findings-sidecar.jsonl",
                         sb.data / "audits" / "acme-claude-toolkit.findings.jsonl")
+            # E8.2b (vibe-164) F8: the durable transition now requires a numeric PR number,
+            # and a run that opened no PR exits before it. In production `gh pr create`
+            # returns the PR URL and the number is parsed from it; the stub returned nothing,
+            # so this test was asserting a label transition on a run that had no PR. Model the
+            # creation response rather than relaxing the contract.
             r = sb.run(self.block(), env={
-                "FIRST_CONTACT": "true", "WEEK_CONTACT_COUNT": "0", "LABELS": "contribute-approved"})
+                "FIRST_CONTACT": "true", "WEEK_CONTACT_COUNT": "0", "LABELS": "contribute-approved",
+                # This block does not open the PR -- `gh pr create` lives in logic:submit and
+                # hands the number down. Supplying it models "a PR was opened upstream", which
+                # is what a run reaching the durable transition means. Not a derived value the
+                # graph must compute, so the derived-value scan is unaffected.
+                "PR_NUMBER": "7"})
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             # 3 high-confidence findings, one is critical security -> disclosure, one duplicated? none here
             # plan surface: kept findings echoed as KEEP:<fingerprint-ish> lines

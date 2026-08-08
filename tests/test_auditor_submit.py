@@ -46,6 +46,19 @@ for a in "$@"; do printf '%s\\0' "$a" >> "$GH_CALLS/call-$i"; done
 key="GH_CANNED_$(printf '%s_%s' "${1:-}" "${2:-}" | tr 'a-z-' 'A-Z_')"
 val="${!key:-}"
 if [ -n "$val" ] && [ -f "$val" ]; then cat "$val"; fi
+# Path-shaped endpoints (gh api repos/<owner>/<name>) cannot form a legal variable name, so
+# they come from a map file: "<prefix><TAB><file>" per line, longest prefix wins. Same
+# addition as tests/test_auditor_state_machine.py's stub; a caller setting neither is unaffected.
+if [ -z "$val" ] && [ -n "${GH_CANNED_MAP:-}" ] && [ -f "${GH_CANNED_MAP}" ]; then
+  argv="$*"; best=""; bestlen=0
+  while IFS="$(printf '\t')" read -r prefix file; do
+    [ -z "$prefix" ] && continue
+    case "$argv" in
+      "$prefix"*) if [ "${#prefix}" -gt "$bestlen" ]; then best="$file"; bestlen="${#prefix}"; fi ;;
+    esac
+  done < "$GH_CANNED_MAP"
+  if [ -n "$best" ] && [ -f "$best" ]; then cat "$best"; fi
+fi
 case " ${GH_FAIL:-} " in *" ${1:-}:${2:-} "*) exit 1 ;; esac
 exit 0
 """
@@ -68,6 +81,16 @@ GOOD_PATCH = """diff --git a/README.md b/README.md
 
 -old line
 +new line
+"""
+# The second finding's patch. It adds a file rather than editing README.md, so it applies
+# cleanly whichever variant 0001 is -- including the conflict fixture, where the run must still
+# take the conflict branch on the strength of 0001 alone.
+SECOND_PATCH = """diff --git a/NOTES.md b/NOTES.md
+new file mode 100644
+--- /dev/null
++++ b/NOTES.md
+@@ -0,0 +1 @@
++second finding
 """
 CONFLICT_PATCH = """diff --git a/README.md b/README.md
 --- a/README.md
@@ -207,10 +230,15 @@ class SubmitSandbox:
         self.patches = self.root / "_patches"
         self.patches.mkdir()
         (self.patches / "0001-fix.patch").write_text(patch)
+        # One patch file per finding, which is what the propose prompt asks the model for.
+        # This fixture used to carry two metadata entries and a single patch, so it modelled
+        # a contract violation as the normal case -- and the count check that catches a stray
+        # unvalidated patch file (F6) had nothing to anchor against.
+        (self.patches / "0002-fix.patch").write_text(SECOND_PATCH)
         (self.patches / "CAP").write_text("3\n")
         (self.patches / "findings.json").write_text(json.dumps(
-            [{"rule_id": "R7", "fingerprint": FINGERPRINTS[0]},
-             {"rule_id": "R12", "fingerprint": FINGERPRINTS[1]}]) + "\n")
+            [{"rule_id": "R7", "fingerprint": FINGERPRINTS[0], "file": "README.md"},
+             {"rule_id": "R12", "fingerprint": FINGERPRINTS[1], "file": "NOTES.md"}]) + "\n")
 
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -245,6 +273,79 @@ class SubmitSandbox:
         shutil.rmtree(self.calls)
         self.calls.mkdir()
 
+    def _write_pat_identity(self):
+        """`gh api user --jq .login` for the PAT, matching FORK_SLUG's owner."""
+        p = self.root / "canned-pat-user"
+        p.write_text("vibe-suite-bot\n")
+        return p
+
+    def _write_fork_response(self):
+        """The fork as the four-part invariant expects to find it.
+
+        E8.2b (vibe-164) W5.2: submit now re-confirms after creation that the fork resolves,
+        is a fork, is owned by the PAT login, and has the target as parent. Without a canned
+        response these tests fail at `fork-invariant:resolves` -- correct behaviour meeting a
+        harness that never modelled the fork's existence.
+        """
+        import json as _json
+        slug = "vibe-suite-bot/claude-toolkit"
+        body = self.root / "canned-fork-api"
+        body.write_text(_json.dumps({
+            "full_name": slug, "fork": True, "parent": {"full_name": TARGET_REPO}}))
+        m = self.root / "canned-map"
+        m.write_text("api repos/%s\t%s\n" % (slug, body))
+        return m
+
+    def _write_manifest(self):
+        """The gate allowlist, admitting exactly the fingerprints these patches carry.
+
+        E8.2b (vibe-164) W4.3: submit now refuses any patch fingerprint no gate admitted, and
+        refuses outright when the manifest is absent -- failing open there would defeat the
+        allowlist. This harness therefore has to supply one. It mirrors PATCH_META rather than
+        inventing fingerprints, so these tests keep exercising submit's own behaviour instead
+        of the allowlist check.
+        """
+        import json as _json
+        meta = self.patches / "findings.json"
+        fps = []
+        if meta.is_file():
+            try:
+                fps = [f.get("fingerprint") for f in _json.loads(meta.read_text())
+                       if f.get("fingerprint")]
+            except Exception:
+                fps = []
+        p = self.root / "proposal-manifest.json"
+        # The admitted FILE matters now, not just the fingerprint: submit binds each patch to
+        # the manifest by the paths the patch touches (F6). This fixture used to declare
+        # `file: "a.md"` for every entry while the patches touched README.md and NOTES.md --
+        # a manifest whose admitted files bore no relation to the patch set, which is exactly
+        # the state the binding exists to catch.
+        files = [f.get("file") for f in _json.loads(meta.read_text())] if meta.is_file() else []
+        p.write_text(_json.dumps({
+            "version": 1, "repo": TARGET_REPO,
+            "findings": [{"rule_id": "R", "fingerprint": f,
+                          "file": (files[i] if i < len(files) and files[i] else "README.md"),
+                          "confidence": "high"} for i, f in enumerate(fps)]}))
+        return p
+
+    def _write_context(self):
+        """The relay gates emits, as submit now consumes it.
+
+        E8.2b (vibe-164): AUDITED_SHA, BASE_BRANCH and the author identity used to arrive as
+        loose environment variables, which is a test supplying values the graph must derive --
+        the exact injection the acceptance clause forbids, and what the W-scan flags. They now
+        arrive the way production delivers them. CLA_AUTHOR_* stays: it is a documented CLA
+        override with precedence over the derived identity, not an injected derivation.
+        """
+        p = self.root / "context.json"
+        p.write_text(json.dumps({
+            "version": 1, "repo": TARGET_REPO, "issue": "42",
+            "expected_fork_slug": "vibe-suite-bot/claude-toolkit",
+            "audited_sha": self.audited_sha, "base_branch": "main",
+            "author_name": AUTHOR_NAME, "author_email": AUTHOR_EMAIL,
+            "weekly_cap": 2, "patch_cap": 3}))
+        return p
+
     def run(self, env=None):
         e = dict(os.environ)
         e.update(self.gitenv)
@@ -253,17 +354,27 @@ class SubmitSandbox:
             "GH_LOG": str(self.log), "GH_CALLS": str(self.calls),
             "GH_TOKEN": "stub-pat", "GH_TOKEN_OVERRIDE": "stub-pat", "PAT_SECRET": "stub-pat",
             "REPO": TARGET_REPO, "OWNER": TARGET_REPO.split("/")[0],
-            "ISSUE_NUMBER": "42", "ISSUE": "42",
-            "AUDITED_SHA": self.audited_sha, "HEAD_SHA": self.head_sha,
+            "ISSUE_NUMBER": "42",
+            "HEAD_SHA": self.head_sha,
             "TARGET_DIR": str(self.target), "BRANCH": BRANCH,
-            "FORK_REMOTE": str(self.fork), "FORK_SLUG": "vibe-suite-bot/claude-toolkit",
+            # ISSUE and FORK_SLUG are NOT supplied: context.json carries `issue` and
+            # `expected_fork_slug`, and submit is contracted to read them from there. Handing
+            # them over as loose env vars is the injection the acceptance clause forbids (F10).
+            "FORK_REMOTE": str(self.fork),
             "DATA_REMOTE": str(self.data_remote), "DATA_DIR": str(self.data),
             "DATA_BRANCH": "auditor-data",
             "REGISTRY": str(self.data / "registry" / "repos.json"),
             "EVENT_LOG": str(self.data / "ledgers" / "events.jsonl"),
             "PATCH_DIR": str(self.patches), "PATCH_META": str(self.patches / "findings.json"),
-            "AUTHOR_NAME": AUTHOR_NAME, "AUTHOR_EMAIL": AUTHOR_EMAIL,
             "CLA_AUTHOR_NAME": AUTHOR_NAME, "CLA_AUTHOR_EMAIL": AUTHOR_EMAIL,
+            "CONTEXT_FILE": str(self._write_context()),
+            "MANIFEST": str(self._write_manifest()),
+            "GH_CANNED_MAP": str(self._write_fork_response()),
+            # F2: submit proves the PAT's own login matches the expected fork owner before
+            # creating anything. The stub must model that identity call, or every test stops
+            # at REFUSE:pat-identity-unresolvable -- correct behaviour meeting a harness that
+            # never modelled it.
+            "GH_CANNED_API_USER": str(self._write_pat_identity()),
         })
         e.update(env or {})
         sh = self.root / "submit.sh"
@@ -392,10 +503,10 @@ class SubmitEffects(unittest.TestCase):
                       f"the registry write never reached the bare auditor-data remote; the "
                       f"remote gained {written or 'nothing'} beyond the seed commit")
         self.assertIn("ledgers/events.jsonl", written,
-                      f"the prs_submitted event was never committed and pushed to the bare "
+                      f"the contribution_submitted event was never committed and pushed to the bare "
                       f"auditor-data remote; the remote gained {written or 'nothing'}")
-        self.assertIn("prs_submitted", self.sb.data_blob("ledgers/events.jsonl"),
-                      "the pushed events ledger contains no prs_submitted record")
+        self.assertIn("contribution_submitted", self.sb.data_blob("ledgers/events.jsonl"),
+                      "the pushed events ledger contains no contribution_submitted record")
         lines = self.sb.log_lines()
         pushes = [i for i, l in enumerate(lines) if l == "data-push"]
         labels = [i for i, l in enumerate(lines)
@@ -447,8 +558,8 @@ class SubmitEffects(unittest.TestCase):
         self.assertIn("ledgers/events.jsonl", written,
                       "the rerun did not reconcile: no ledger record reached the bare "
                       f"auditor-data remote (it gained {written or 'nothing'})" + self.diag(r))
-        self.assertIn("prs_submitted", self.sb.data_blob("ledgers/events.jsonl"),
-                      "the reconciling rerun wrote no prs_submitted record for the recovered PR")
+        self.assertIn("contribution_submitted", self.sb.data_blob("ledgers/events.jsonl"),
+                      "the reconciling rerun wrote no contribution_submitted record for the recovered PR")
         self.assertTrue(any("--add-label" in l and "prs-submitted" in l
                             for l in self.sb.log_lines()),
                         "the reconciling rerun never applied the prs-submitted label, so the "
@@ -477,6 +588,152 @@ class SubmitConflict(unittest.TestCase):
 
     def diag_text(self, r):
         return f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+
+class SubmitAllowlistFailsClosed(unittest.TestCase):
+    """F6, round 2: the allowlist's guards did not cover the cases where it iterates zero times.
+
+    `type == "array"` admits `[]`, and `.[]?.fingerprint // empty` silently skips an entry that
+    carries no fingerprint. In both cases the validation loop runs over nothing, `bad` stays
+    empty, and every patch file reaches `git apply` unvalidated -- on a third party's
+    repository. The first round closed the absent/non-array cases and left these, which is why
+    the closure came back `partially_closed`.
+
+    The propose prompt's contract is one patch file per surviving finding, so a patch file with
+    no metadata entry is content that nothing validated.
+
+    These checks are ARITY, and arity is not binding: they cannot see a patch being swapped for
+    another, because the counts still match. That is `SubmitBindsPatchesToAdmittedFiles` below,
+    which takes the binding from the patch bytes. Round 2 left this class reading as though it
+    closed the whole finding, and it did not.
+    """
+
+    def setUp(self):
+        self.sb = SubmitSandbox(patch=GOOD_PATCH)
+        self.addCleanup(self.sb.cleanup)
+        self.meta = self.sb.patches / "findings.json"
+
+    def _run_with_meta(self, doc):
+        self.meta.write_text(json.dumps(doc) + "\n")
+        return self.sb.run()
+
+    def _assert_nothing_shipped(self, r, needle):
+        self.assertNotEqual(0, r.returncode,
+                            f"submit proceeded with {needle}; the allowlist bound nothing")
+        self.assertIn(needle, r.stdout + r.stderr)
+        self.assertEqual(self.sb.gh_verbs("pr", "create"), [],
+                         "a pull request was opened from unvalidated patches")
+        self.assertEqual(self.sb.fork_log().strip(), "",
+                         "a branch was pushed to the fork from unvalidated patches")
+
+    def test_an_empty_metadata_array_refuses_instead_of_admitting_everything(self):
+        r = self._run_with_meta([])
+        self._assert_nothing_shipped(r, "REFUSE:patch-meta-empty")
+
+    def test_an_entry_without_a_fingerprint_refuses(self):
+        r = self._run_with_meta([{"rule_id": "R7", "fingerprint": FINGERPRINTS[0]},
+                                 {"rule_id": "R12"}])
+        self._assert_nothing_shipped(r, "REFUSE:patch-meta-unfingerprinted")
+
+    def test_an_empty_string_fingerprint_is_not_a_fingerprint(self):
+        r = self._run_with_meta([{"rule_id": "R7", "fingerprint": FINGERPRINTS[0]},
+                                 {"rule_id": "R12", "fingerprint": ""}])
+        self._assert_nothing_shipped(r, "REFUSE:patch-meta-unfingerprinted")
+
+    def test_a_duplicated_fingerprint_refuses(self):
+        # Two entries claiming one fingerprint inflates the count to match the patch files
+        # while leaving one patch unaccounted for -- the mismatch check alone would pass it.
+        r = self._run_with_meta([{"rule_id": "R7", "fingerprint": FINGERPRINTS[0]},
+                                 {"rule_id": "R12", "fingerprint": FINGERPRINTS[0]}])
+        self._assert_nothing_shipped(r, "REFUSE:patch-meta-duplicate")
+
+    def test_a_patch_file_with_no_metadata_entry_refuses(self):
+        (self.sb.patches / "0003-stray.patch").write_text(GOOD_PATCH)
+        r = self.sb.run()
+        self._assert_nothing_shipped(r, "REFUSE:patch-meta-mismatch")
+
+
+class SubmitBindsPatchesToAdmittedFiles(unittest.TestCase):
+    """F6, round 3: counting is not binding.
+
+    Arity stops a stray patch being ADDED. It does nothing against one being SWAPPED IN: N
+    patch files, N metadata entries, N allowlisted fingerprints, and no relation between patch
+    file #k and fingerprint #k. `git apply` then writes arbitrary content to a third party's
+    repository under a pull request that claims gate approval.
+
+    The binding is taken from the patch BYTES -- the paths `git apply --numstat` reports --
+    against the `file` each admitted manifest entry names. It is deliberately NOT taken from a
+    filename declared in findings.json: `propose` runs a model over third-party repository
+    content that the prompt itself treats as hostile, and that model writes both the patches
+    and the metadata. Asking it to name its own patch files is the untrusted party describing
+    its own output, and a compromised proposer would simply name them correctly.
+
+    What this does and does not establish is written down in auditor/SCHEMAS.md section 14.
+    """
+
+    def setUp(self):
+        self.sb = SubmitSandbox(patch=GOOD_PATCH)
+        self.addCleanup(self.sb.cleanup)
+
+    def _assert_refused(self, r, needle):
+        self.assertNotEqual(0, r.returncode, f"submit proceeded despite {needle}")
+        self.assertIn(needle, r.stdout + r.stderr)
+        self.assertEqual(self.sb.gh_verbs("pr", "create"), [],
+                         "a pull request was opened from an unbound patch")
+        self.assertEqual(self.sb.fork_log().strip(), "",
+                         "a branch was pushed to the fork from an unbound patch")
+
+    def test_the_ordinary_patch_set_is_bound_and_proceeds(self):
+        # The control. Without it the refusal tests below could pass because the check refuses
+        # everything, which would be a different defect wearing the same green.
+        r = self.sb.run()
+        self.assertNotIn("REFUSE:patch-touches-unadmitted-file", r.stdout + r.stderr)
+
+    def test_a_swapped_patch_touching_an_unadmitted_file_refuses(self):
+        # The attack the arity check cannot see: counts still match, both fingerprints are
+        # still allowlisted, and the second patch now edits a file no gate ever admitted.
+        (self.sb.patches / "0002-fix.patch").write_text(
+            "diff --git a/src/evil.py b/src/evil.py\n"
+            "new file mode 100644\n--- /dev/null\n+++ b/src/evil.py\n"
+            "@@ -0,0 +1 @@\n+import os\n")
+        r = self.sb.run()
+        self._assert_refused(r, "REFUSE:patch-touches-unadmitted-file")
+
+    def test_a_rename_refuses(self):
+        # `--numstat` reports only a rename's DESTINATION, so a rename can move a file the
+        # gates never considered while the reported path looks admitted. Verified against
+        # git directly rather than assumed.
+        (self.sb.patches / "0002-fix.patch").write_text(
+            "diff --git a/NOTES.md b/README.md\nsimilarity index 100%\n"
+            "rename from NOTES.md\nrename to README.md\n")
+        r = self.sb.run()
+        self._assert_refused(r, "REFUSE:patch-renames-a-file")
+
+    def test_a_binary_patch_refuses(self):
+        (self.sb.patches / "0002-fix.patch").write_text(
+            "diff --git a/NOTES.md b/NOTES.md\n"
+            "new file mode 100644\nindex 0000000..1234567\n"
+            "GIT binary patch\nliteral 4\nHc$@<O00001\n\n")
+        r = self.sb.run()
+        self.assertNotEqual(0, r.returncode, "a binary blob was applied to a third party's repo")
+        self.assertRegex(r.stdout + r.stderr, r"REFUSE:patch-(unreadable|is-binary)")
+
+    def test_an_unparseable_patch_refuses(self):
+        (self.sb.patches / "0002-fix.patch").write_text("this is not a patch at all\n")
+        r = self.sb.run()
+        self._assert_refused(r, "REFUSE:patch-unreadable")
+
+    def test_the_check_runs_before_anything_is_cloned_or_pushed(self):
+        # Order is as load-bearing as presence -- the same lesson F8 taught in iteration 1.
+        # A binding validated after the fork exists has already created a repository under the
+        # bot account for a patch set that was never admissible.
+        (self.sb.patches / "0002-fix.patch").write_text(
+            "diff --git a/src/evil.py b/src/evil.py\n"
+            "new file mode 100644\n--- /dev/null\n+++ b/src/evil.py\n"
+            "@@ -0,0 +1 @@\n+import os\n")
+        r = self.sb.run()
+        self.assertEqual([], self.sb.gh_verbs("repo", "fork"),
+                         "the fork was created before the patch binding was validated")
 
 
 if __name__ == "__main__":

@@ -24,7 +24,21 @@ GH_STUB = """#!/usr/bin/env bash
 # records every invocation; returns canned output when GH_CANNED_<verb> is set
 echo "gh $*" >> "$GH_LOG"
 key="GH_CANNED_$(echo "$1_$2" | tr ' -' '__' | tr '[:lower:]' '[:upper:]')"
-if [ -n "${!key:-}" ]; then cat "${!key}"; fi
+if [ -n "${!key:-}" ]; then cat "${!key}"; exit 0; fi
+# Path-shaped endpoints (gh api repos/<owner>/<name>) cannot form a legal variable name,
+# so they are served from a map file instead: one "<prefix><TAB><file>" per line, longest
+# prefix wins. Additive -- a caller that sets neither behaves exactly as before.
+if [ -n "${GH_CANNED_MAP:-}" ] && [ -f "${GH_CANNED_MAP}" ]; then
+  argv="$*"
+  best=""; bestlen=0
+  while IFS="$(printf '\t')" read -r prefix file; do
+    [ -z "$prefix" ] && continue
+    case "$argv" in
+      "$prefix"*) if [ "${#prefix}" -gt "$bestlen" ]; then best="$file"; bestlen="${#prefix}"; fi ;;
+    esac
+  done < "$GH_CANNED_MAP"
+  if [ -n "$best" ] && [ -f "$best" ]; then cat "$best"; exit 0; fi
+fi
 exit 0
 """
 
@@ -86,6 +100,11 @@ class Sandbox:
         e = dict(os.environ)
         e.update({
             "PATH": f"{self.bin}:{e['PATH']}",
+            # Actions sets GITHUB_WORKSPACE; a developer shell does not. Blocks resolve
+            # ${GITHUB_WORKSPACE:-$PWD}, so without pinning it here a block wrote into the
+            # runner's workspace under CI and into the sandbox locally -- four tests passed
+            # on a laptop and failed on the PR. Pin it to the sandbox so both agree.
+            "GITHUB_WORKSPACE": str(self.root),
             "CODE_DIR": str(self.code), "DATA_DIR": str(self.data),
             "FIXTURE": str(FIX / fixture),
             "REGISTRY": str(self.data / "registry" / "repos.json"),
@@ -217,8 +236,18 @@ class TestContribute(StageBase):
         try:
             shutil.copy(FIX / "findings-sidecar.jsonl",
                         sb.data / "audits" / "acme-claude-toolkit.findings.jsonl")
+            # E8.2b (vibe-164) F8: the durable transition now requires a numeric PR number,
+            # and a run that opened no PR exits before it. In production `gh pr create`
+            # returns the PR URL and the number is parsed from it; the stub returned nothing,
+            # so this test was asserting a label transition on a run that had no PR. Model the
+            # creation response rather than relaxing the contract.
             r = sb.run(self.block(), env={
-                "FIRST_CONTACT": "true", "WEEK_CONTACT_COUNT": "0", "LABELS": "contribute-approved"})
+                "FIRST_CONTACT": "true", "WEEK_CONTACT_COUNT": "0", "LABELS": "contribute-approved",
+                # This block does not open the PR -- `gh pr create` lives in logic:submit and
+                # hands the number down. Supplying it models "a PR was opened upstream", which
+                # is what a run reaching the durable transition means. Not a derived value the
+                # graph must compute, so the derived-value scan is unaffected.
+                "PR_NUMBER": "7"})
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             # 3 high-confidence findings, one is critical security -> disclosure, one duplicated? none here
             # plan surface: kept findings echoed as KEEP:<fingerprint-ish> lines

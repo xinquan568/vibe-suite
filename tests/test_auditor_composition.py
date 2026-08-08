@@ -443,13 +443,13 @@ class TestOutcomeTable(CompositionBase):
 
     def test_row_submit_submitted(self):
         res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77})
-        rec = res.rec("prs_submitted")
-        self.assertIsNotNone(rec, f"(submit,submitted) needs prs_submitted; got {res.names()}")
+        rec = res.rec("contribution_submitted")
+        self.assertIsNotNone(rec, f"(submit,submitted) needs contribution_submitted; got {res.names()}")
         self.assertEqual(payload(rec).get("pr_number"), 77,
-                         "(submit,submitted) prs_submitted must carry pr_number; the current "
+                         "(submit,submitted) contribution_submitted must carry pr_number; the current "
                          "record carries only a `kept` count, so the label is a proxy oracle")
-        self.assertIn("prs_submitted", res.pushed_events(),
-                      "(submit,submitted) prs_submitted was never committed and pushed to the "
+        self.assertIn("contribution_submitted", res.pushed_events(),
+                      "(submit,submitted) contribution_submitted was never committed and pushed to the "
                       "bare auditor-data remote")
         self.assertIn("prs-submitted", res.added, "(submit,submitted) must apply prs-submitted")
         self.assertIn("contribute-approved", res.removed,
@@ -457,12 +457,158 @@ class TestOutcomeTable(CompositionBase):
 
     def test_row_submit_error(self):
         res = self.drive_row("submit", "error", "label-step-failed", ids={"pr_number": 77})
-        self.assertIn("prs_submitted", res.pushed_events(),
+        self.assertIn("contribution_submitted", res.pushed_events(),
                       "(submit,error) the ledger is authoritative and must ALREADY be persisted "
                       "in the bare remote when the label step fails")
         self.assertNotEqual(res.r.returncode, 0,
                             "(submit,error) must fail the run loudly so a rerun re-derives "
                             "the label")
+
+
+class TestFinalizePersistsARelayedOrphanRecord(CompositionBase):
+    """The other end of F7's relay: submit could not push the row, so finalize must.
+
+    `verify-fork` refuses and exits, and its runner's auditor-data checkout dies with the job.
+    Retrying helps with a lost race; it does not help when the remote refuses outright. In that
+    case the row travels as an outcome-* artifact and lands here, where the durable write
+    already happens. Without this end the relay writes a file nobody reads.
+    """
+
+    ROW = {"timestamp": "2026-08-09T00:00:00Z", "workflow": "auditor-contribute",
+           "event": "orphaned_fork", "run_id": "local", "run_number": 0,
+           "data": {"repo": "acme/claude-toolkit", "fork_slug": "vibe-bot/claude-toolkit",
+                    "owner": "vibe-bot", "created_at": "2026-08-09T00:00:00Z",
+                    "invariant_failed": "owner_matches"}}
+
+    def _relay(self, doc):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="auditor-orphan-")
+        self.addCleanup(shutil.rmtree, d, True)
+        p = Path(d) / "orphaned-fork.json"
+        p.write_text(json.dumps(doc) if not isinstance(doc, str) else doc)
+        return str(p)
+
+    def test_a_relayed_orphan_record_is_committed_and_pushed(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"ORPHAN_RELAY": self._relay(self.ROW)})
+        self.assertIn("orphaned_fork", res.pushed_events(),
+                      "the relayed orphan record never reached the bare auditor-data remote, "
+                      "so the fork under the bot account is recorded nowhere at all")
+
+    def test_no_relay_means_no_orphan_row(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77})
+        self.assertNotIn("orphaned_fork", res.names(),
+                         "an orphan row appeared with no relay to justify it")
+
+    def test_a_malformed_relay_refuses_rather_than_dropping_it(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"ORPHAN_RELAY": self._relay("<html>502</html>")})
+        self.assertNotEqual(0, res.r.returncode,
+                            "an unreadable orphan relay was ignored; the never-delete policy "
+                            "then leaves nothing behind and no one is told")
+        self.assertIn("REFUSE:orphan-relay-malformed", res.out)
+
+
+class TestTheDisclosureSetGetsItsOwnDurableOutcome(CompositionBase):
+    """F5's second half: downloading the artifact is not the same as acting on it.
+
+    `finalize` now downloads `gate-disclosure` -- and then never opened it. The disclosure
+    outcome was inferred from `reason: security-*`, which only fires when the whole run was
+    BLOCKED. So the ordinary case -- a run that produces both patchable findings and
+    critical security ones -- completed happily, opened its public PR, and the disclosure set
+    vanished with no durable record anywhere. The transport was fixed and the consumption was
+    not, which is why the closure came back `partially_closed`.
+
+    A contribution outcome and a disclosure outcome are independent facts about one run, so
+    they get independent ledger rows.
+    """
+
+    def _disclosure(self, findings):
+        p = Path(self.mkdtemp()) / "disclosure.json"
+        p.write_text(json.dumps({"version": 1, "repo": "acme/claude-toolkit",
+                                 "findings": findings}))
+        return str(p)
+
+    def mkdtemp(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="auditor-disc-")
+        self.addCleanup(shutil.rmtree, d, True)
+        return d
+
+    FINDINGS = [{"rule_id": "SEC-CURL-PIPE", "fingerprint": "sha256:abc", "severity": "critical"}]
+
+    def test_a_successful_contribution_still_records_the_disclosure_set(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(self.FINDINGS)})
+        self.assertIn("contribution_submitted", res.names(),
+                      "the ordinary outcome must be unaffected -- these are independent facts")
+        self.assertIn("disclosure_pending", res.names(),
+                      f"a run carrying critical findings completed with no disclosure record; "
+                      f"got {res.names()}")
+        self.assertIn("disclosure_pending", res.pushed_events(),
+                      "the disclosure record was never committed and pushed to the bare "
+                      "auditor-data remote, so it is not durable")
+
+    def test_a_configured_contact_files_rather_than_pends(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(self.FINDINGS),
+                                    "DISCLOSURE_CONTACT": "security@example.invalid"})
+        self.assertIn("disclosure_filed", res.names(), res.names())
+
+    def test_the_record_carries_the_fingerprints_it_is_meant_to_join_on(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(self.FINDINGS)})
+        rec = res.rec("disclosure_pending")
+        self.assertIsNotNone(rec)
+        data = payload(rec)
+        self.assertEqual(1, data.get("disclosed_count"))
+        self.assertIn("sha256:abc", json.dumps(data),
+                      "the record cannot be joined back to the finding it is about")
+
+    def test_an_empty_disclosure_set_records_nothing(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure([])})
+        self.assertNotIn("disclosure_pending", res.names(),
+                         "an empty disclosure set is not an event; recording one would make "
+                         "the ledger's disclosure rows meaningless")
+        self.assertNotIn("disclosure_filed", res.names())
+
+    def test_a_malformed_disclosure_artifact_refuses_rather_than_dropping_it(self):
+        p = Path(self.mkdtemp()) / "disclosure.json"
+        p.write_text("<html>502</html>")
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": str(p)})
+        self.assertNotEqual(0, res.r.returncode,
+                            "an unreadable disclosure artifact was ignored; silently dropping "
+                            "the security path is the failure this finding is about")
+        self.assertIn("REFUSE:disclosure-malformed", res.out)
+
+    def test_a_finding_without_a_fingerprint_refuses_rather_than_recording_a_null(self):
+        """F5's residue: `.findings | type == "array"` is not validation of the findings.
+
+        The round-2 check confirmed the shape of the container and nothing about its contents,
+        so an entry with no fingerprint passed and was persisted into the ledger with a null in
+        the fingerprints array. A disclosure row exists to be joined back to the finding it is
+        about; one carrying a null records that something was disclosed and destroys the only
+        means of finding out what. Claiming "malformed refuses" while writing that row is the
+        overclaim, not the null.
+        """
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(
+                                 [{"rule_id": "SEC-A", "fingerprint": "sha256:abc",
+                                   "severity": "critical"},
+                                  {"rule_id": "SEC-B", "severity": "high"}])})
+        self.assertNotEqual(0, res.r.returncode)
+        self.assertIn("REFUSE:disclosure-unfingerprinted", res.out)
+        self.assertNotIn("disclosure_pending", res.pushed_events(),
+                         "an unjoinable disclosure row was committed and pushed anyway")
+
+    def test_an_empty_string_fingerprint_is_not_a_fingerprint_either(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(
+                                 [{"rule_id": "SEC-A", "fingerprint": "", "severity": "high"}])})
+        self.assertNotEqual(0, res.r.returncode)
+        self.assertIn("REFUSE:disclosure-unfingerprinted", res.out)
 
 
 if __name__ == "__main__":

@@ -1037,9 +1037,11 @@ class TestTargetEnforcement(TargetCase):
         self.assertIn("code change", result.stderr)
 
     def test_scheduled_anchor_decoy_fails(self):
-        # nlpm:21 is the exemplar scheduled row since nlpm:20 graduated with E8.2 (vibe-59).
+        # cc-suite:27 is the exemplar scheduled row since nlpm:21 graduated with E8.3
+        # (vibe-60). These tests retarget each time a row graduates — the point is that SOME
+        # row is genuinely still scheduled, not which one.
         result = self.mutated(
-            "nlpm:21", lambda b: self.set_field(b, "expected", "[never/lands.md]"))
+            "cc-suite:27", lambda b: self.set_field(b, "expected", "[never/lands.md]"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("frozen", result.stderr)
 
@@ -1054,44 +1056,44 @@ class TestTargetEnforcement(TargetCase):
     def test_graduation_is_data_only_when_the_anchors_land(self):
         # A scheduled row flips to delivered with no checker edit (subset semantics) — but only
         # into its promise: the delivered paths must cover the frozen anchors.
-        # Uses nlpm:21 (anchor auditor/scripts, owned by E8.3) because E8.4 landed site/, so
-        # nlpm:23 is delivered now and can no longer stand in for a scheduled row.
+        # Uses cc-suite:27 (anchor codex/AGENTS.md, owned by F9.6) because E8.3 landed the
+        # thirty helpers, so nlpm:21 is delivered now and can no longer stand in.
         root = self.tree_sandbox()
-        (root / "auditor" / "scripts").mkdir(parents=True, exist_ok=True)
-        (root / "auditor" / "scripts" / "log-event.sh").write_text("landed\n", encoding="utf-8")
-        self.mutate_in_tree(root, "nlpm:21", lambda b: self.drop_field(
+        (root / "codex").mkdir(parents=True, exist_ok=True)
+        (root / "codex" / "AGENTS.md").write_text("landed\n", encoding="utf-8")
+        self.mutate_in_tree(root, "cc-suite:27", lambda b: self.drop_field(
             self.drop_field(b, "scheduled"), "expected")
-            + "    delivered: [auditor/scripts/log-event.sh]\n")
+            + "    delivered: [codex/AGENTS.md]\n")
         result = self.run_on_tree(root)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_graduation_with_an_unrelated_artifact_fails(self):
-        # Flipping to `delivered: [README.md]` while site/ is still absent is exactly the false
-        # delivery assertion the gate exists to reject.
+        # Flipping to `delivered: [README.md]` while the anchor is still absent is exactly the
+        # false delivery assertion the gate exists to reject.
         def graduate(block):
             block = self.drop_field(block, "scheduled")
             block = self.drop_field(block, "expected")
             return block + "    delivered: [README.md]\n"
-        result = self.mutated("nlpm:21", graduate)
+        result = self.mutated("cc-suite:27", graduate)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("nlpm:21", result.stderr)
+        self.assertIn("cc-suite:27", result.stderr)
         self.assertIn("graduated, but no delivered path covers", result.stderr)
 
     def test_renamed_scheduled_row_fails(self):
         # Renaming a scheduled row is not a way around the frozen set: the new id is outside
         # both the row inventory and the frozen keys.
-        result = self.mutated("nlpm:21", lambda b: b.replace(
-            "  - row: nlpm:21\n", "  - row: nlpm:26\n", 1))
+        result = self.mutated("cc-suite:27", lambda b: b.replace(
+            "  - row: cc-suite:27\n", "  - row: cc-suite:99\n", 1))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("frozen scheduled set", result.stderr)
 
     def test_landed_anchor_demands_the_flip(self):
         root = self.tree_sandbox()
-        (root / "auditor" / "scripts").mkdir(parents=True, exist_ok=True)
-        (root / "auditor" / "scripts" / "log-event.sh").write_text("landed\n", encoding="utf-8")
+        (root / "codex").mkdir(parents=True, exist_ok=True)
+        (root / "codex" / "AGENTS.md").write_text("landed\n", encoding="utf-8")
         result = self.run_on_tree(root)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("nlpm:21", result.stderr)
+        self.assertIn("cc-suite:27", result.stderr)
         self.assertIn("flip the row to delivered", result.stderr)
 
 
@@ -1102,7 +1104,10 @@ class TestScheduledListing(TargetCase):
     # intersection: E8.2a's branch graduated nlpm:20 (auditor/SCHEMAS.md, workflows, prompts) and
     # E8.4 on main graduated nlpm:12, nlpm:13 and nlpm:23 (the builders and site/). What remains
     # scheduled is cc-suite:27 (awaits codex/AGENTS.md) and nlpm:21 (awaits auditor/scripts, E8.3).
-    ROWS = ("cc-suite:27", "nlpm:21")
+    #: nlpm:21 graduated when the thirty helpers landed; only cc-suite:27 is still
+    #: scheduled. A scheduled row that has been delivered would keep a gate reporting
+    #: "not yet" for work already shipped.
+    ROWS = ("cc-suite:27",)
 
     def test_listing_appears_on_a_passing_run(self):
         result = self.run_check()

@@ -197,13 +197,7 @@ jobs:
       - run: |
           set -euo pipefail
           cd "$DATA_DIR"
-          # deferred:E8.3 — protected-path guard lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
-          else
-            echo "REFUSE:guard-helper-missing-until-E8.3"
-            exit 1
-          fi
+          bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
           git add registry ledgers
           if git diff --cached --quiet; then
             echo "nothing to commit"
@@ -215,12 +209,17 @@ jobs:
           # Track never pushes straight at auditor-data: its registry rewrites
           # race the other stages, so the run's commits go up on a branch and
           # land through a PR the helper opens.
-          # deferred:E8.3 — the commit-via-PR helper lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/commit-via-pr.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/commit-via-pr.sh" --base auditor-data --branch "auditor-track-${GITHUB_RUN_ID:-local}"
-          else
-            echo "REFUSE:commit-via-pr-helper-missing-until-E8.3"
-            exit 1
-          fi
+          # All four flags, per S-1. --checkout and --repo were omitted: the helper then fell
+          # back to its defaults and verified `origin` against nothing, so a checkout pointing
+          # at the wrong remote would have published there without complaint.
+          bash "$CODE_DIR/auditor/scripts/commit-via-pr.sh" \
+            --checkout "$DATA_DIR" \
+            --repo "$GITHUB_REPOSITORY" \
+            --base auditor-data \
+            --branch "auditor-track-${GITHUB_RUN_ID:-local}"
         env:
-          PAT_SECRET: ${{ secrets.PAT_TOKEN }}
+          # PAT_TOKEN, not PAT_SECRET. The helper reads PAT_TOKEN (falling back to GH_TOKEN
+          # with a warning), so the old name bound the secret to a variable nothing read — the
+          # step ran with no PAT at all and silently used the weaker fallback, whose PRs do not
+          # trigger downstream workflows.
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}

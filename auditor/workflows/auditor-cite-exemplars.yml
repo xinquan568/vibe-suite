@@ -20,6 +20,10 @@ concurrency:
 env:
   CODE_DIR: ${{ github.workspace }}
   DATA_DIR: ${{ github.workspace }}/_data
+  # S-4: absolute links into this repository's auditor-data branch. Derived here
+  # rather than left to the helper's fallback so the value is visible in the run
+  # log next to the commit it produced.
+  VIBE_EXEMPLAR_URL_PREFIX: https://github.com/${{ github.repository }}/blob/auditor-data/exemplars
   REGISTRY: ${{ github.workspace }}/_data/registry/repos.json
   EVENT_LOG: ${{ github.workspace }}/_data/ledgers/events.jsonl
   GH_TOKEN: ${{ github.token }}
@@ -69,7 +73,17 @@ jobs:
               continue
             fi
             FILES=$((FILES+1))
-            RULES="$(sed -n '/^---$/,/^---$/p' "$f" | sed -n 's/^exemplifies:[ ]*//p' | tr ',' ' ')"
+            # BOTH shapes the exemplar workflow documents. Reading only the text ON the
+            # `exemplifies:` line yields nothing for a block list, so FILES counts the file,
+            # FOUND stays 0, the proposals file is deleted and the run prints SKIP:in-sync —
+            # a clean, confident "no citation drift" for a corpus full of exemplars.
+            FM="$(sed -n '/^---$/,/^---$/p' "$f")"
+            # `\?` is a GNU sed extension and is literal on BSD sed, so the brackets are
+            # stripped with tr instead — the runner is Ubuntu, which would have hidden this.
+            RULES="$(printf '%s\n' "$FM" | sed -n 's/^exemplifies:[ ]*//p' | tr -d '[]' | tr ',' ' ')"
+            if [ -z "$(printf '%s' "$RULES" | tr -d '[:space:]')" ]; then
+              RULES="$(printf '%s\n' "$FM" | awk '/^exemplifies:[ ]*$/{f=1;next} f&&/^[ ]*-[ ]+/{sub(/^[ ]*-[ ]+/,"");print;next} f&&/^[^ ]/{f=0}')"
+            fi
             for rule in $RULES; do
               if [ -z "$rule" ]; then
                 continue
@@ -105,17 +119,31 @@ jobs:
           BRANCH="exemplar-citations/$DATE"
           cd "$CODE_DIR"
           git checkout -b "$BRANCH"
-          # deferred:E8.3 — the citation applier lands with the scripts item
-          if [ -x auditor/scripts/apply-rule-citations.sh ]; then
-            bash auditor/scripts/apply-rule-citations.sh "$PROPOSALS"
-          else
-            echo "REFUSE:citation-helper-missing-until-E8.3"
-            exit 1
-          fi
+          # propose-rule-citations.py IS the applier — `--apply` writes the blocks into the
+          # rulebook. There was never a separate shell helper; the seam here named one that
+          # E8.3's closed thirty does not contain and never would, so it refused on every run.
+          #
+          # The prefix names THIS repository, the one holding skills/rules/SKILL.md and the
+          # auditor-data branch — not the audited repository an exemplar is about.
+          python3 "$CODE_DIR/auditor/scripts/propose-rule-citations.py" \
+            --apply \
+            --data-dir "$DATA_DIR" \
+            --rules-path "$CODE_DIR/skills/rules/SKILL.md" \
+            --exemplar-url-prefix "$VIBE_EXEMPLAR_URL_PREFIX"
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -am "auditor-cite-exemplars refresh rule citations for $DATE"
-          git push origin "$BRANCH"
+          # Both checkouts use `persist-credentials: false`, so there is no ambient credential
+          # and a bare `git push` fails after all the work is done. The token is supplied
+          # through a credential helper reading it from the ENVIRONMENT, so it never lands in
+          # argv (where `ps` shows it), in .git/config, or in a remote URL — the same ephemeral
+          # discipline commit-via-pr.sh uses.
+          #
+          # The single quotes are required: ${GIT_AUTH_TOKEN} must reach git and expand THERE.
+          GIT_AUTH_TOKEN="$GH_TOKEN" git \
+            -c 'credential.helper=' \
+            -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f' \
+            push origin "$BRANCH"
           BODY="$DATA_DIR/ledgers/citation-pr-body.md"
           printf '%s\n' \
             "Weekly exemplar citation refresh for $DATE." \

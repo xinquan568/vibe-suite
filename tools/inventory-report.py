@@ -242,8 +242,12 @@ ROWS = [
     # E7.4. All six now exist, so the row graduates from pending to EXACT and the two auditor rows
     # again sum to SS5.0's 24. Counting by NAME (not a glob) keeps a stray workflow from passing.
     ("Auditor site/release workflows (E8.4)", 6, EXACT, _site_count),
-    ("Auditor helper scripts", 30, PENDING_S8,
-     lambda r: len(list((r / "auditor").rglob("*.py")))),
+    # Counted from the helper directory itself, not `rglob("*.py")` over all of auditor/:
+    # the glob also matched fixtures and missed the nine shell helpers entirely, so it could
+    # report 30 while the real set was wrong in both directions.
+    ("Auditor helper scripts", 30, EXACT,
+     lambda r: len([p for p in (r / "auditor" / "scripts").iterdir() if p.is_file()])
+     if (r / "auditor" / "scripts").is_dir() else 0),
 ]
 
 

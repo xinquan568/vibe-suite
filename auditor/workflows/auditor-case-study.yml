@@ -268,21 +268,66 @@ jobs:
                       exit 0
                     fi
                     SIDE="$DATA_DIR/audits/$SLUG.reaudit.findings.jsonl"
+                    # A missing sidecar is NOT "perfectly clean". Creating an empty one here
+                    # converts "the re-audit produced no sidecar" into "the re-audit found
+                    # nothing", and those are opposite facts: the first means every original
+                    # finding gets reported as FIXED and the maintainer is credited with work
+                    # nobody verified. The helper refuses a missing sidecar; let it.
                     if [ ! -f "$SIDE" ]; then
-                      # a present report with no sidecar means perfectly clean
-                      : > "$SIDE"
+                      echo "REFUSE:diff-findings:reaudit-sidecar-missing ($SIDE)" >&2
+                      exit 1
                     fi
                     # A present re-audit with no diff helper would publish an article whose
                     # verification claims were never computed and would emit no finding_verified
                     # or finding_introduced events at all. That is a preflight failure, not a
                     # tolerable degradation: refuse instead of continuing.
-                    # deferred:E8.3 - fingerprint diff helper lands with the scripts item
-                    if [ ! -x "$CODE_DIR/auditor/scripts/diff-findings.py" ]; then
-                      echo "REFUSE:diff-helper-missing-until-E8.3" >&2
+                    # Both SHAs are established HERE and validated before the helper runs, so
+                    # a diff can never be attributed to a commit nobody can name. The "before"
+                    # comes only from the registry value written at audit time; the "after"
+                    # only from the re-audit clone's own HEAD. No fallback, no workflow SHA, no
+                    # data-branch SHA, no "unknown" — once such a diff is in the ledger it is
+                    # indistinguishable from a real one.
+                    COMMIT_SHA_BEFORE="$(
+                      jq -er --arg r "$TARGET_REPO" '
+                        .repos[$r].commit_sha_at_audit
+                        | strings
+                        | ascii_downcase
+                        | select(test("^[0-9a-f]{40}([0-9a-f]{24})?$"))
+                      ' "$REGISTRY"
+                    )" || {
+                      echo "REFUSE:diff-findings:commit-sha-before-missing" >&2
                       exit 1
-                    fi
-                    # deferred:E8.3 - the diff itself, once the helper exists
-                    python3 "$CODE_DIR/auditor/scripts/diff-findings.py" "$DATA_DIR/audits/$SLUG.findings.jsonl" "$SIDE"
+                    }
+                    COMMIT_SHA_AFTER="$(
+                      git -C "$CODE_DIR/target" rev-parse --verify HEAD^{commit}
+                    )" || {
+                      echo "REFUSE:diff-findings:commit-sha-after-missing" >&2
+                      exit 1
+                    }
+                    case "$COMMIT_SHA_AFTER" in
+                      (*[!0-9a-fA-F]*|"")
+                        echo "REFUSE:diff-findings:commit-sha-after-invalid" >&2
+                        exit 1
+                        ;;
+                    esac
+                    case "${#COMMIT_SHA_AFTER}" in
+                      40|64) ;;
+                      (*)
+                        echo "REFUSE:diff-findings:commit-sha-after-invalid" >&2
+                        exit 1
+                        ;;
+                    esac
+                    COMMIT_SHA_AFTER="$(printf '%s' "$COMMIT_SHA_AFTER" | tr 'A-F' 'a-f')"
+                    python3 "$CODE_DIR/auditor/scripts/diff-findings.py" \
+                      --repo "$TARGET_REPO" \
+                      --original-sidecar "$DATA_DIR/audits/$SLUG.findings.jsonl" \
+                      --reaudit-sidecar "$SIDE" \
+                      --registry "$DATA_DIR/registry/repos.json" \
+                      --commit-sha-before "$COMMIT_SHA_BEFORE" \
+                      --commit-sha-after "$COMMIT_SHA_AFTER" \
+                      --events-out "$DATA_DIR/ledgers/events.jsonl" \
+                      --diff-report-out "$DATA_DIR/audits/$SLUG.re-audit.diff.md" \
+                      --summary-out "$DATA_DIR/audits/$SLUG.re-audit.summary.json"
       -             uses: anthropics/claude-code-action@v1
                     with:
                       claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -643,13 +688,7 @@ jobs:
 
                     set -euo pipefail
                     cd "$DATA_DIR"
-                    # deferred:E8.3 - protected-path guard lands with the scripts item
-                    if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
-                      bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
-                    else
-                      echo "REFUSE:guard-helper-missing-until-E8.3"
-                      exit 1
-                    fi
+                    bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
                     git add articles audits ledgers
                     if git diff --cached --quiet; then
                       echo "nothing to commit"
@@ -658,13 +697,7 @@ jobs:
                     git config user.name "vibe-suite-auditor"
                     git config user.email "auditor@users.noreply.github.com"
                     git commit -m "auditor-case-study $SLUG article and logs"
-                    # deferred:E8.3 - retrying push helper lands with the scripts item
-                    if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
-                      bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
-                    else
-                      echo "REFUSE:push-helper-missing-until-E8.3"
-                      exit 1
-                    fi
+                    bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" --attempts 5
       -             name: Commit cycle 2 - the registry
                     env:
                       GH_TOKEN: ${{ github.token }}
@@ -682,10 +715,4 @@ jobs:
                       git config user.name "vibe-suite-auditor"
                       git config user.email "auditor@users.noreply.github.com"
                       git commit -m "auditor-case-study $SLUG registry status"
-                      # deferred:E8.3 - retrying push helper lands with the scripts item
-                      if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
-                        bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
-                      else
-                        echo "REFUSE:push-helper-missing-until-E8.3"
-                        exit 1
-                      fi
+                      bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" --attempts 5

@@ -326,32 +326,39 @@ jobs:
           echo "PASS"
           # /stage-logic
       - run: |
-          # warn-only telemetry seams; neither ever fails the run
+          # Rule-id drift is warn-only BY DESIGN and stays that way: a drifted id is telemetry
+          # about the rulebook, not a defect in the audit that just ran.
+          #
+          # The guard is -f, not -x. Python helpers ship mode 100644 by contract, so `-x` can
+          # never be true for one — the branch would take the else forever and report a
+          # deferral that had already been delivered, with the helper silently switched off.
           set -euo pipefail
-          # deferred:E8.3 — sidecar rule-id drift helper lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/validate-rule-ids.py" ]; then
-            python3 "$CODE_DIR/auditor/scripts/validate-rule-ids.py" "$DATA_DIR/audits/$SLUG.findings.jsonl" || echo "rule-id drift check failed (warn-only)"
-          else
-            echo "REFUSE:drift-helper-missing-until-E8.3 (warn-only, continuing)"
-          fi
-          # deferred:E8.3 — per-repo HTML report helper lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/render-repo-report.py" ]; then
-            python3 "$CODE_DIR/auditor/scripts/render-repo-report.py" "$SLUG" || echo "report render failed (warn-only)"
-          else
-            echo "REFUSE:render-helper-missing-until-E8.3 (warn-only, continuing)"
-          fi
+          python3 "$CODE_DIR/auditor/scripts/validate-rule-ids.py" "$DATA_DIR/audits/$SLUG.findings.jsonl" || echo "rule-id drift check failed (warn-only)"
+      - run: |
+          # The per-repo report render is FAIL-CLOSED. It was previously guarded and its failure
+          # swallowed by `|| echo ... (warn-only)`, which meant an audit could be published,
+          # committed and announced while its report silently never rendered — the finding made,
+          # recorded as delivered, and never actually shown to anyone.
+          #
+          # TARGET_REPO, not SLUG. The slug is a lossy filename: owner/name -> owner-name cannot
+          # be reversed once either half contains a hyphen, so passing it here would render some
+          # other repository's audit under a plausible title. The helper refuses a slug outright.
+          set -euo pipefail
+          python3 "$CODE_DIR/auditor/scripts/render-repo-report.py" \
+            --repo "$TARGET_REPO" \
+            --data-dir "$DATA_DIR" \
+            --out "$DATA_DIR/reports"
       - run: |
           # commit cycle 1: report, sidecar, ledgers and registry to auditor-data
           set -euo pipefail
           cd "$DATA_DIR"
-          # deferred:E8.3 — protected-path guard lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/guard-protected-paths.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
-          else
-            echo "REFUSE:guard-helper-missing-until-E8.3"
-            exit 1
-          fi
-          git add audits ledgers registry
+          bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
+          # `reports` too: render-repo-report.py writes into $DATA_DIR/reports and this is
+          # the commit that publishes it. Omitting it meant every audit pushed cleanly
+          # with no report on the branch — and the unstaged file could make a later
+          # `git pull --rebase` refuse, exhausting the retry loop for a file nobody
+          # intended to leave behind.
+          git add audits ledgers registry reports
           if git diff --cached --quiet; then
             echo "nothing to commit"
             exit 0
@@ -359,13 +366,7 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-audit $SLUG score=$SCORE security=$SECURITY strategy=${STRATEGY:-single} artifacts=${ARTIFACT_COUNT:-0}"
-          # deferred:E8.3 — retrying push helper lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
-          else
-            echo "REFUSE:push-helper-missing-until-E8.3"
-            exit 1
-          fi
+          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" --attempts 5
       - run: |
           # security-blocked side path: attempt a private disclosure issue on
           # the target; when filing fails (the default token cannot write
@@ -402,10 +403,4 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-audit queue disclosure state for $SLUG"
-          # deferred:E8.3 — retrying push helper lands with the scripts item
-          if [ -x "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" ]; then
-            bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" 5
-          else
-            echo "REFUSE:push-helper-missing-until-E8.3"
-            exit 1
-          fi
+          bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh" --attempts 5

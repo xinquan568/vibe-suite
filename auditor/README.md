@@ -157,12 +157,22 @@ item — idempotent: an existing file is never rewritten by re-provisioning. Re-
 `git ls-remote origin auditor-data`, fetch the branch, add the file only if absent, push without
 force.
 
-### Deferred E8.3 seams
+### Helper scripts
 
-Helper scripts under `auditor/scripts/` do not exist yet. Every workflow reference to one sits
-behind an existence check marked `# deferred:E8.3` and fails with a named error
-(`REFUSE:helper-missing-until-E8.3`) if reached before E8.3 lands; the tested decision logic in
-the `# stage-logic:` / `# logic:` / `# gate:` blocks is self-contained and does not need them.
+`auditor/scripts/` holds exactly thirty helpers: twenty-one Python at mode `100644` and nine
+shell at `100755`. The set is CLOSED — `tests/test_auditor_workflows.py` asserts the names on
+disk equal the declared names in both directions, so an extra file fails as loudly as a missing
+one, and a workflow referencing a name outside the set fails the lint.
+
+Workflows call them directly. There is no existence check: a guard that can be false skips the
+helper silently, which is how `build-exemplar-gallery.sh` was invoked for months against a
+helper that is actually `.py`, and how every `[ -x ]` guard on a Python helper stayed false
+forever because Python helpers are not executable by contract. The lint enforces that a
+reference names a declared helper, that its predicate can be true for its mode, and that its
+interpreter matches its extension.
+
+Python helpers are run with `python3`, shell helpers with `bash`; neither relies on the
+executable bit.
 
 ### Secrets behavior (recap; provisioning above)
 

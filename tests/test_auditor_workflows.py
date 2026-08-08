@@ -81,6 +81,24 @@ DATA_WRITERS = [
     "auditor-docs-diff.yml",
 ]
 
+#: The 30 E8.3 helpers, by exact name (F10.4). Declared here so the tree can be guarded while
+#: the item lands incrementally: anything under auditor/scripts/ that is not on this list is a
+#: stray, and a stray is how an inventory row passes for the wrong reason.
+SCRIPTS_DIR = REPO / "auditor" / "scripts"
+
+E83_HELPERS = (
+    "atomic-registry-write.sh", "backfill-findings.py", "backfill-pr-fingerprints.py",
+    "batch-process.py", "build-exemplar-gallery.py", "commit-via-pr.sh",
+    "compute-fingerprint.sh", "compute-vocab-fingerprint.sh", "diff-findings.py",
+    "docs-diff.py", "generate-daily-report.py", "generate-rule-review-body.py",
+    "git-push-with-retry.sh", "guard-protected-paths.sh", "log-event.sh",
+    "parse-pr-metadata.py", "parse-suppressions.py", "prepare-refinement-input.py",
+    "propose-rule-citations.py", "render-dashboard.py", "render-repo-report.py",
+    "repair-stale-statuses.py", "resolve-merge-conflicts.sh", "rule-health.py",
+    "scan-suppressions.py", "synthesize-sidecar.py", "three-way-merge-registry.py",
+    "validate-feedback.sh", "validate-rule-ids.py", "vendor_default_filter.py",
+)
+
 TOP_KEYS = {"name", "on", "permissions", "concurrency", "env", "jobs"}
 KNOWN_SECRETS = {"CLAUDE_CODE_OAUTH_TOKEN", "PAT_TOKEN", "OPENAI_API_KEY", "GITHUB_TOKEN"}
 #: NOT a scope/value table. One was written here and removed — see
@@ -527,12 +545,46 @@ def lint(text, name="workflow.yml"):
             continue
         if MODEL_ID.search(ln):
             v.append(f"line {i}: model id / model key: {ln.strip()[:60]}")
-    # deferred scripts guard
+    # Helper references. Every helper is delivered, so the deferral seams are gone and the
+    # marker that guarded them is no longer accepted. Three properties remain, each of which
+    # has already failed silently once.
+    #
+    # The NAME must be one of the declared thirty, or explicitly deferred to a LATER epic.
+    # `build-exemplar-gallery.sh` was guarded and invoked for months; the helper is `.py`, so
+    # the guard was never true and the gallery never built. Nothing failed — the else branch
+    # printed a deferral notice. `apply-rule-citations.sh` is not in the thirty at all and is
+    # marked for the epic that does deliver it.
+    #
+    # The PREDICATE must be one the helper's contract mode permits. Python helpers ship
+    # 100644, so `[ -x helper.py ]` is false forever and the branch would skip a helper that
+    # is sitting right there on disk. Shell helpers ship 100755, where -x is fine.
+    #
+    # The INTERPRETER must match the extension: `bash` on a Python file is a syntax error, and
+    # in a guarded branch that error was never reached to be noticed.
+    retired_marker = "deferred:" + "E8" + ".3"
     for i, ln in enumerate(lines, 1):
-        if "auditor/scripts/" in ln:
-            window = "\n".join(lines[max(0, i - 4):i + 1])
-            if "deferred:E8.3" not in window:
-                v.append(f"line {i}: unguarded auditor/scripts/ reference")
+        m = re.search(r"auditor/scripts/([A-Za-z0-9._-]+)", ln)
+        if not m:
+            continue
+        name = m.group(1)
+        window = "\n".join(lines[max(0, i - 6):i + 1])
+        if retired_marker in window:
+            v.append(f"line {i}: retired deferral marker — every E8.3 helper has landed")
+        if name not in E83_HELPERS:
+            deferred = re.search(r"deferred:(E8\.\d+)", window)
+            if not deferred or deferred.group(1) == "E8" + ".3":
+                v.append(f"line {i}: '{name}' is not one of the declared helpers; mark it "
+                         f"deferred to the epic that delivers it")
+        elif not (SCRIPTS_DIR / name).is_file():
+            v.append(f"line {i}: '{name}' is declared but not delivered")
+        if name.endswith(".py"):
+            if re.search(r"\[\s+(?:!\s+)?-x\s+\"?[^\"]*" + re.escape(name), ln):
+                v.append(f"line {i}: -x guard on '{name}' — Python helpers ship mode 100644, "
+                         f"so this is false forever; use -f")
+            if re.search(r"(?<![-\w])bash\s+\"[^\"]*" + re.escape(name), ln):
+                v.append(f"line {i}: '{name}' invoked with bash")
+        if name.endswith(".sh") and re.search(r"python3?\s+\"[^\"]*" + re.escape(name), ln):
+            v.append(f"line {i}: '{name}' invoked with python")
     return v
 
 
@@ -666,9 +718,27 @@ class TestInventory(unittest.TestCase):
         actual = sorted(p.name for p in WF_DIR.glob("*.yml"))
         self.assertEqual(actual, EXPECTED)
 
-    def test_no_python_under_auditor_and_no_scripts_dir(self):
-        self.assertEqual(list((REPO / "auditor").rglob("*.py")), [])
-        self.assertFalse((REPO / "auditor" / "scripts").exists())
+    def test_auditor_scripts_holds_only_declared_helpers(self):
+        """Replaces E8.2a's `no auditor/scripts/` assertion, which pinned "not yet".
+
+        That assertion became false the moment E8.3 created the directory, so deleting it
+        outright would leave the tree unguarded. It is replaced by the NEW truth: the directory
+        exists and contains only helpers E8.3 has declared. Membership of a named set, not a
+        count — a count of `*.py` reports 21 for the correct 21-py/9-sh library and would pass
+        for the wrong reason.
+
+        The set grows slice by slice as E8.3 lands; the full 30 and their expected modes are
+        asserted by the inventory row when the item completes.
+        """
+        scripts = REPO / "auditor" / "scripts"
+        self.assertTrue(scripts.is_dir(), "auditor/scripts/ must exist once E8.3 has started")
+        # Every entry, not just files: a stray DIRECTORY (a stale `__pycache__`, a nested
+        # tree) is undeclared content too, and filtering to is_file() would let it through
+        # exactly as the inventory rows once let a directory masquerade as a workflow.
+        found = {p.name for p in scripts.iterdir()}
+        self.assertTrue(found <= set(E83_HELPERS),
+                        f"undeclared entr(y/ies) under auditor/scripts/: "
+                        f"{sorted(found - set(E83_HELPERS))}")
 
 
 class TestYamlWellFormed(unittest.TestCase):
@@ -1043,18 +1113,58 @@ class TestMutations(unittest.TestCase):
         self._assert_flagged(self.GOOD.replace(
             "run: echo ok", f"run: echo {self.dated_model_id()}"))
 
-    def test_unguarded_scripts_reference(self):
+    def test_a_retired_deferral_marker_is_flagged(self):
+        """Every E8.3 helper is delivered, so the marker that guarded them now means a seam
+        outlived its reason — and a guarded call can silently skip a helper that exists."""
+        marker = "deferred:" + "E8" + ".3"
         self._assert_flagged(self.GOOD.replace(
-            "run: echo ok", "run: bash auditor/scripts/log-event.sh x"))
-
-    def test_guarded_scripts_reference_is_allowed(self):
-        guarded = self.GOOD.replace(
             "run: echo ok",
-            "run: |\n          # deferred:E8.3 — helper lands with the scripts item\n"
-            "          if [ -x auditor/scripts/log-event.sh ]; then\n"
-            "            bash auditor/scripts/log-event.sh x\n"
-            "          else\n            echo 'REFUSE:helper-missing-until-E8.3' >&2\n          fi")
-        self.assertEqual([x for x in lint(guarded) if "unguarded" in x], [])
+            f"run: |\n          # {marker} - helper lands with the scripts item\n"
+            "          bash auditor/scripts/log-event.sh x"))
+
+    def test_a_delivered_helper_is_called_without_any_guard(self):
+        landed = next(h for h in E83_HELPERS if (SCRIPTS_DIR / h).is_file() and h.endswith(".sh"))
+        self.assertEqual(lint(self.GOOD.replace(
+            "run: echo ok", f"run: bash auditor/scripts/{landed} x")), [])
+
+    def test_a_declared_helper_that_is_not_delivered_is_flagged(self):
+        """The inventory and the disk must agree. A declared name with no file is a call that
+        will fail at runtime, in a workflow, against someone else's repository."""
+        missing = "definitely-not-a-real-helper.sh"
+        self.assertNotIn(missing, E83_HELPERS)
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok", f"run: bash auditor/scripts/{missing} x"))
+
+    def test_a_helper_outside_the_closed_thirty_must_name_another_epic(self):
+        """`apply-rule-citations.sh` is not one of the thirty. Marked for E8.3 it would have
+        gone on refusing after E8.3 completed — and its else-branch exits 1, so the workflow
+        breaks permanently rather than degrading."""
+        stale = "deferred:" + "E8" + ".3"
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok",
+            f"run: |\n          # {stale} - lands with the scripts item\n"
+            "          bash auditor/scripts/apply-rule-citations.sh x"))
+        self.assertEqual([x for x in lint(self.GOOD.replace(
+            "run: echo ok",
+            "run: |\n          # deferred:E8.6 - not an E8.3 helper\n"
+            "          bash auditor/scripts/apply-rule-citations.sh x")) if "declared" in x], [])
+
+    def test_an_x_guard_on_a_python_helper_is_flagged(self):
+        """Python helpers ship mode 100644, so `[ -x helper.py ]` is false forever: the branch
+        reports a deferral for a helper sitting right there and never runs it."""
+        py = next(h for h in E83_HELPERS if h.endswith(".py"))
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok",
+            "run: |\n"
+            f'          if [ -x "auditor/scripts/{py}" ]; then\n'
+            f'            python3 "auditor/scripts/{py}"\n          fi'))
+
+    def test_a_python_helper_invoked_with_bash_is_flagged(self):
+        py = next(h for h in E83_HELPERS if h.endswith(".py"))
+        self._assert_flagged(self.GOOD.replace(
+            "run: echo ok",
+            "run: |\n"
+            f'          bash "auditor/scripts/{py}"'))
 
     # --- absence-of-required-structure. The suite previously only mutated VALUES, so a lint that
     # --- silently skipped anything it did not recognise passed all 26 cases while accepting a
@@ -1403,6 +1513,393 @@ class TestNoCommittedModelIds(unittest.TestCase):
             f"{len(hits)} complete dated model id literal(s) committed under "
             f"{'/, '.join(PIN_FREE_TREES)}/; assemble them at runtime instead:\n  "
             + "\n  ".join(hits))
+
+
+
+class TestE83Complete(unittest.TestCase):
+    """S-5's postcondition: E8.3 is finished, and nothing still says otherwise.
+
+    Every check here is the kind that passes for years while being quietly wrong, because a
+    retired seam and a live one look identical unless you run them.
+    """
+
+    #: Built in pieces so this file does not contain the sentinels it searches for. A test that
+    #: matches itself reports a hit forever and gets "fixed" by weakening the search.
+    NEEDLES = (
+        "deferred:" + "E8" + ".3",
+        "helper-missing-until-" + "E8.3",
+        "SKIP:unit-validator-checks-deferred-until-" + "E8.3",
+        "gallery regeneration deferred until " + "E8.3",
+    )
+    SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "codes"}
+
+    def test_no_deferral_seam_survives_anywhere_in_the_repository(self):
+        hits = []
+        for path in REPO.rglob("*"):
+            if not path.is_file() or self.SKIP_DIRS & set(path.parts):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for needle in self.NEEDLES:
+                if needle in text:
+                    hits.append((path.relative_to(REPO).as_posix(), needle))
+        self.assertEqual(hits, [], "a retired E8.3 seam is still present")
+
+    def test_the_helper_set_is_exactly_the_declared_thirty(self):
+        """Symmetric: an extra file fails as loudly as a missing one. A one-directional check
+        passes for a directory holding the thirty plus somebody's scratch script."""
+        found = {p.name for p in (REPO / "auditor" / "scripts").iterdir()}
+        self.assertEqual(found, set(E83_HELPERS))
+        self.assertEqual(len(E83_HELPERS), 30)
+
+    def test_the_split_is_twenty_one_python_and_nine_shell(self):
+        python = [h for h in E83_HELPERS if h.endswith(".py")]
+        shell = [h for h in E83_HELPERS if h.endswith(".sh")]
+        self.assertEqual((len(python), len(shell)), (21, 9))
+        self.assertEqual(len(python) + len(shell), len(E83_HELPERS), "an unexpected extension")
+
+    def test_modes_match_the_contract(self):
+        """Python 100644, shell 100755. The mode is not cosmetic: `[ -x helper.py ]` is false
+        forever for a 644 file, which is how a guarded call silently skipped a helper that was
+        sitting right there."""
+        for name in sorted(E83_HELPERS):
+            mode = (REPO / "auditor" / "scripts" / name).stat().st_mode & 0o777
+            with self.subTest(helper=name):
+                self.assertEqual(mode, 0o755 if name.endswith(".sh") else 0o644)
+
+    def test_every_helper_carries_an_spdx_header_in_its_first_three_lines(self):
+        for name in sorted(E83_HELPERS):
+            head = (REPO / "auditor" / "scripts" / name).read_text(
+                encoding="utf-8").splitlines()[:3]
+            with self.subTest(helper=name):
+                self.assertTrue(any("SPDX-License-Identifier: ISC" in ln for ln in head))
+
+    def test_no_python_helper_is_gated_by_an_executable_test(self):
+        for path in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            text = path.read_text(encoding="utf-8")
+            for name in (h for h in E83_HELPERS if h.endswith(".py")):
+                with self.subTest(workflow=path.name, helper=name):
+                    self.assertNotRegex(text, r"\[\s+(?:!\s+)?-x\s+\"?[^\"\n]*"
+                                        + re.escape(name))
+
+    def test_every_python_invocation_uses_python3(self):
+        for path in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            text = path.read_text(encoding="utf-8")
+            for name in (h for h in E83_HELPERS if h.endswith(".py")):
+                with self.subTest(workflow=path.name, helper=name):
+                    self.assertNotRegex(text, r"(?<![-\w])bash\s+\"[^\"\n]*"
+                                        + re.escape(name))
+
+    def test_nlpm_21_is_delivered_not_scheduled(self):
+        text = (REPO / "docs" / "disposition.yaml").read_text(encoding="utf-8")
+        row = text[text.index("- row: nlpm:21"):]
+        row = row[:row.index("- row: nlpm:22")]
+        self.assertIn("delivered:", row)
+        self.assertNotIn("scheduled:", row)
+        self.assertNotIn("expected:", row)
+        for name in E83_HELPERS:
+            with self.subTest(helper=name):
+                self.assertIn(f"auditor/scripts/{name}", row)
+
+    def test_the_inventory_row_is_exact_rather_than_pending(self):
+        text = (REPO / "tools" / "inventory-report.py").read_text(encoding="utf-8")
+        i = text.index('"Auditor helper scripts"')
+        self.assertIn("EXACT", text[i:i + 200])
+        self.assertNotIn("PENDING_S8", text[i:i + 200])
+
+
+
+class TestLedgerPaths(unittest.TestCase):
+    """Helpers must read the ledgers the workflows actually write.
+
+    This class exists because they did not. Both renderers read root-level `findings.jsonl`
+    while every workflow writes `ledgers/findings.jsonl`, and the dashboard looked for events
+    under `logs/`. Nothing failed: a wrong path yields no records, and no records renders as a
+    complete, well-formed dashboard reporting zero of everything.
+
+    It survived a grep, too. Searching for the escaped filename pattern matches the bare
+    name and hides the directory it sits in, so the search that was supposed to establish
+    the path confirmed the wrong one.
+    """
+
+    #: SCHEMAS.md section 1. The directory is the part that matters.
+    CANONICAL = {
+        "findings": "ledgers/findings.jsonl",
+        "disagreements": "ledgers/disagreements.jsonl",
+        "vocab-advisories": "ledgers/vocab-advisories.jsonl",
+        "events": "ledgers/events.jsonl",
+        "registry": "registry/repos.json",
+    }
+    #: Written by a workflow but not a SCHEMAS.md ledger: a plain proposals list, consumed and
+    #: rewritten wholesale rather than appended to.
+    NON_LEDGER = ("ledgers/citation-proposals.txt", "feedback/log.json",
+                  "feedback/suppressions.jsonl")
+
+    def test_schemas_md_still_declares_these_paths(self):
+        """Pinned against the document rather than restated from memory: if SCHEMAS.md moves a
+        ledger, this fails here instead of in a renderer that silently reports zero."""
+        schemas = (REPO / "auditor" / "SCHEMAS.md").read_text(encoding="utf-8")
+        for name, path in self.CANONICAL.items():
+            with self.subTest(ledger=name):
+                self.assertIn(path, schemas)
+
+    def test_the_workflows_write_only_canonical_ledger_paths(self):
+        bad = []
+        for wf in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            for i, line in enumerate(wf.read_text(encoding="utf-8").splitlines(), 1):
+                for stem in ("findings.jsonl", "vocab-advisories.jsonl", "events.jsonl"):
+                    for m in re.finditer(r"\$(?:DATA_DIR|\{DATA_DIR\})(/[^\s\"']*?)"
+                                         + re.escape(stem), line):
+                        rel = (m.group(1) + stem).lstrip("/")
+                        # audits/<slug>.findings.jsonl is the per-audit sidecar, section 4.
+                        if rel.startswith("audits/"):
+                            continue
+                        if rel not in self.CANONICAL.values():
+                            bad.append(f"{wf.name}:{i}: {rel}")
+        self.assertEqual(bad, [])
+
+    def test_the_helpers_read_only_canonical_ledger_paths(self):
+        bad = []
+        for helper in sorted((REPO / "auditor" / "scripts").glob("*.py")):
+            text = helper.read_text(encoding="utf-8")
+            for m in re.finditer(r'data_dir\s*/\s*"([^"]+)"\s*/\s*"([^"]+\.jsonl)"', text):
+                rel = f"{m.group(1)}/{m.group(2)}"
+                if (rel.startswith("audits/") or rel in self.CANONICAL.values()
+                        or rel in self.NON_LEDGER):
+                    continue
+                bad.append(f"{helper.name}: {rel} — not a ledger SCHEMAS.md declares")
+            for m in re.finditer(r'data_dir\s*/\s*"([^"/]+\.jsonl)"', text):
+                bad.append(f"{helper.name}: {m.group(1)} (root-level; ledgers live under "
+                           f"ledgers/)")
+        self.assertEqual(bad, [])
+
+
+
+class TestPushCredentials(unittest.TestCase):
+    """A push needs a credential, and these checkouts deliberately have none.
+
+    Every auditor checkout sets `persist-credentials: false`, which is the right posture: a
+    token left in .git/config outlives the step in a working tree the auditor commits from.
+    The consequence is that a bare `git push` has nothing to authenticate with — and it fails
+    at the END, after the branch has been built and the work done.
+    """
+
+    @staticmethod
+    def _logical_lines(text):
+        """Shell lines with `\\` continuations joined.
+
+        Scanning PHYSICAL lines is what made the first version of this test worthless: both
+        repaired workflows write `git \\` then `push origin` on the next line, so a search for
+        "git push" found NOTHING and the test passed while examining zero push commands.
+        Deleting both credential-helper blocks left it green.
+        """
+        joined, buf = [], ""
+        for line in text.splitlines():
+            buf += line.rstrip()
+            if buf.endswith("\\"):
+                buf = buf[:-1] + " "
+                continue
+            joined.append(buf)
+            buf = ""
+        if buf:
+            joined.append(buf)
+        return joined
+
+    def _push_sites_in(self, name, text):
+        """Every line that could reach `git push`, regardless of how it is spelled.
+
+        FAIL-CLOSED, and this is the third approach because the first two were fail-open by
+        construction. Requiring a line to LOOK like a git command means enumerating the ways a
+        command can begin — `if`, `!`, `VAR=`, and then `command`, `env`, `exec`, `nohup`,
+        `sh -c`, backticks, `$( )`. That list has no end, and every omission is a push that
+        sails past unexamined; `command git push origin "$BRANCH"` was the one that proved it.
+
+        So the question is inverted. Any line mentioning both `git` and `push` is a candidate
+        and must carry the helper; nothing has to be recognised first. Prose is excluded by the
+        `- ` bullet skip, and a helper-script invocation by its `.sh`. Both of those are
+        NARROWING rules, so each is a hole by construction — but they are two named holes
+        rather than an open-ended allowlist of prefixes, and a new spelling of `push` fails
+        rather than passing silently.
+        """
+        sites = []
+        for line in self._logical_lines(text):
+            stripped = line.strip()
+            if stripped.startswith(("#", "- ")) or ".sh" in stripped:
+                continue
+            if not (re.search(r"\bgit\b", stripped) and re.search(r"\bpush\b", stripped)):
+                continue
+            sites.append((name, stripped))
+        return sites
+
+    def _push_sites(self):
+        """Every `git push` in a credentials-disabled workflow, as (workflow, command)."""
+        sites = []
+        for wf in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            text = wf.read_text(encoding="utf-8")
+            if "persist-credentials: false" not in text:
+                continue
+            sites.extend(self._push_sites_in(wf.name, text))
+        return sites
+
+    #: The workflows this item repaired. Naming them is the point: a count alone was satisfied
+    #: by the EXEMPTED file's sites while covering neither repair.
+    REPAIRED = {"auditor-cite-exemplars.yml", "auditor-refine-rules.yml"}
+
+
+    #: Spellings of an unauthenticated push that a prefix-enumerating scanner missed. Kept as
+    #: data because the point is not these four — it is that the list has no end, which is why
+    #: the scan stopped trying to recognise commands and now flags anything mentioning both.
+    EVASIONS = ("command git push origin x", "env git push origin x",
+                "exec git push origin x", "nohup git push origin x",
+                "$(git push origin x)", "sh -c 'git push origin x'")
+
+    def test_every_known_evasion_is_still_seen(self):
+        for spelling in self.EVASIONS:
+            with self.subTest(spelling=spelling):
+                found = self._push_sites_in("t", f"  {spelling}\n")
+                self.assertTrue(found, f"{spelling!r} is invisible to the scan")
+                self.assertFalse(self._has_effective_helper(found[0][1]),
+                                 "an unauthenticated push was treated as authenticated")
+
+    def test_the_scan_covers_the_commands_it_was_written_to_protect(self):
+        """The guard on the guard, and it took three attempts to make honest.
+
+        v1 scanned physical lines while both commands use `\\` continuations: zero matches.
+        v2 required the line to start with `git`, but both start with an env assignment: zero.
+        v3 forbade punctuation between `git` and `push` to exclude prose — and the dot in
+        `credential.helper` is punctuation, so again zero. Each version passed, and each would
+        have stayed green with the credential blocks deleted.
+
+        A count is not enough: five sites in the EXEMPTED file satisfied `>= 2` every time.
+        This asserts the repaired files specifically.
+        """
+        covered = {name for name, _ in self._push_sites()}
+        self.assertTrue(self.REPAIRED <= covered,
+                        f"the scan misses {sorted(self.REPAIRED - covered)} — it is vacuous "
+                        f"for exactly the commands it exists to protect")
+
+    #: auditor-contribute.yml is E8.2b's (issue #164) and is not in this item's scope. It has
+    #: several unauthenticated pushes, found by this check once it was repaired. The count is
+    #: deliberately not written here: the last version said "four", the scanner found five, and
+    #: a stale number in a comment is a small lie that outlives whoever can correct it. Recorded here rather than fixed, so the next item inherits a named defect instead
+    #: of an exemption nobody remembers the reason for — and so this check stays honest about
+    #: what it is not covering.
+    OUT_OF_SCOPE = {"auditor-contribute.yml"}
+
+    #: An EFFECTIVE helper: `credential.helper=` with a non-empty value. The commands pass two
+    #: — an empty reset that discards inherited helpers, then the real one — so a substring
+    #: test for "credential.helper" is satisfied by the reset alone. Delete only the effective
+    #: line and the push is unauthenticated while the check stays green.
+    #: THE EXACT HELPER, not a pattern. Five successive regexes were evaded — by continuation
+    #: lines, a leading env assignment, punctuation in `credential.helper`, the empty reset,
+    #: and finally `credential.helper=${UNSET-}`, which looks like a value and expands to
+    #: nothing. That last one is the proof the approach was wrong: a regex over shell SOURCE
+    #: cannot decide what a shell EXPRESSION evaluates to at runtime, and any expression can
+    #: expand to empty.
+    #:
+    #: So this is an allowlist of the one construction the repaired workflows use. A different
+    #: form is not "probably fine" — it fails, and someone reads it. That is the correct
+    #: default for a credential on a push to a third party's repository.
+    HELPER_LITERAL = ('credential.helper=!f() { echo "username=x-access-token"; '
+                      'echo "password=${GIT_AUTH_TOKEN}"; }; f')
+
+    @classmethod
+    def _has_effective_helper(cls, command):
+        return cls.HELPER_LITERAL in command
+
+    def test_no_workflow_pushes_without_supplying_a_credential(self):
+        offenders = [f"{name}: {cmd[:70]}" for name, cmd in self._push_sites()
+                     if name not in self.OUT_OF_SCOPE
+                     and not self._has_effective_helper(cmd)
+                     and not cmd.startswith("git_auth")]
+        self.assertEqual(offenders, [],
+                         "a bare `git push` in a credentials-disabled checkout")
+
+    def test_the_out_of_scope_exemption_still_describes_something_real(self):
+        """An exemption that has quietly become unnecessary is worse than none: it keeps a file
+        excluded from a real check for a reason that no longer exists."""
+        exempt = {name for name, cmd in self._push_sites()
+                  if name in self.OUT_OF_SCOPE and "credential.helper" not in cmd}
+        self.assertEqual(exempt, self.OUT_OF_SCOPE,
+                         "an exempted workflow no longer has an unauthenticated push — "
+                         "drop it from OUT_OF_SCOPE")
+
+    def test_removing_a_credential_helper_is_detected(self):
+        """The mutant: strip the helper from each repaired workflow and confirm the check
+        notices. Without this the assertion above could be vacuously true for a second reason."""
+        for wf in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            text = wf.read_text(encoding="utf-8")
+            if "persist-credentials: false" not in text or "credential.helper" not in text:
+                continue
+            # Remove the EFFECTIVE helper's whole line, newline included. Stripping from `-c`
+            # to end-of-line instead leaves a whitespace-only line that breaks the `\`
+            # continuation, so the push command stops being recognised at all and the mutant
+            # "changes nothing" for a reason that has nothing to do with credentials.
+            mutated = re.sub(r"\n[^\n]*credential\.helper=!f\(\)[^\n]*", "", text)
+            with self.subTest(workflow=wf.name):
+                # Only the PUSH COMMANDS of this workflow, found the same way the real scan
+                # finds them. The previous version searched every line for git-and-push, so
+                # prose and helper-script filenames satisfied it before anything was removed —
+                # the mutation test was itself vacuous.
+                bare = [cmd for name, cmd in self._push_sites_in(wf.name, mutated)
+                        if not self._has_effective_helper(cmd)]
+                self.assertTrue(bare, f"{wf.name}: stripping the helper changed nothing")
+
+    def test_the_token_is_never_written_into_a_url_or_config(self):
+        """Ephemeral means ephemeral: not in a remote URL, not persisted by `git config`."""
+        for wf in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            text = wf.read_text(encoding="utf-8")
+            with self.subTest(workflow=wf.name):
+                self.assertNotIn("@github.com", text, "credentials in a remote URL")
+                self.assertNotIn("git config credential", text, "persisted credential")
+
+
+
+class TestSidecarFingerprintConsumers(unittest.TestCase):
+    """No helper may REQUIRE a fingerprint on a section-4 sidecar finding.
+
+    This class exists because the same defect shipped three times. Section 4 states the
+    per-audit sidecar carries no fingerprint — the aggregation post-step adds it — so a helper
+    that skips rows without one silently discards every finding and exits successfully.
+
+    It was fixed in diff-findings, then found again in backfill-findings, then again in
+    backfill-pr-fingerprints, and a search afterwards turned up rule-health doing the same. Each
+    fix was correct and none was a SEARCH. This is the search, kept as a test.
+    """
+
+    #: Helpers that read the per-audit sidecar. Reading `ledgers/findings.jsonl` is different —
+    #: those rows ARE enriched and a fingerprint is legitimately expected there.
+    SIDECAR_READERS = ("diff-findings.py", "backfill-findings.py",
+                       "backfill-pr-fingerprints.py", "rule-health.py",
+                       "validate-rule-ids.py", "prepare-refinement-input.py",
+                       # found by the completeness check below, not by me
+                       "repair-stale-statuses.py")
+
+    # NO SOURCE-TEXT CHECK HERE, deliberately. Two attempts failed for the same reason: from
+    # the text alone you cannot tell a helper REQUIRING a fingerprint on a raw sidecar from one
+    # legitimately reading it off an enriched ledger row, or from one including it as an
+    # optional key. The first version flagged prepare-refinement-input.py, which is correct;
+    # the second flagged rule-health.py's ledger reader, which is also correct.
+    #
+    # Bending the pattern a third time would repeat this issue's most expensive habit — a guard
+    # reshaped until it stops complaining, which is not the same as a guard that works. The
+    # behavioural proof that each helper handles a RAW section-4 sidecar lives in that helper's
+    # own tests, where a real record can be fed through it.
+    #
+    # What this class still does honestly is the part I got wrong by hand: enumerate the
+    # readers, so a new one cannot be added without someone noticing.
+
+    def test_the_reader_list_covers_every_helper_that_opens_the_audits_directory(self):
+        """The list must not go stale: a new sidecar reader has to join it, or this class stops
+        being the search it claims to be."""
+        opens_audits = {
+            path.name for path in sorted((REPO / "auditor" / "scripts").glob("*.py"))
+            if '"audits"' in path.read_text(encoding="utf-8")
+        }
+        self.assertTrue(opens_audits <= set(self.SIDECAR_READERS),
+                        f"unlisted sidecar readers: {sorted(opens_audits - set(self.SIDECAR_READERS))}")
 
 
 if __name__ == "__main__":

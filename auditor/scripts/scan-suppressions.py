@@ -99,13 +99,23 @@ def search(query):
     """
     payload = []
     for page in range(1, MAX_PAGES + 1):
-        chunk = gh_json(["api", "-X", "GET", "search/code", "-f", f"q={query}",
-                         "-f", f"per_page={PAGE_SIZE}", "-f", f"page={page}",
-                         "--jq", ".items"])
-        if chunk is None:
+        # The WHOLE response, not `.items`. GitHub can answer a code search with HTTP 200 and
+        # `incomplete_results: true` when it times out mid-query — a partial page that looks
+        # exactly like a final one if it holds fewer than PAGE_SIZE results. Projecting to
+        # `.items` threw away the only field that says so, and --apply then recorded an
+        # under-counted corpus as though the search had finished.
+        response = gh_json(["api", "-X", "GET", "search/code", "-f", f"q={query}",
+                            "-f", f"per_page={PAGE_SIZE}", "-f", f"page={page}"])
+        if not isinstance(response, dict):
             # A failed page mid-way is not an empty result: returning what we have would
             # silently narrow the corpus, which is the failure this pagination exists to fix.
-            return None if page == 1 else None
+            return None
+        if response.get("incomplete_results"):
+            print("REFUSE:scan-suppressions:search-incomplete "
+                  "(GitHub returned incomplete_results=true; the corpus would be partial)",
+                  file=sys.stderr)
+            return None
+        chunk = response.get("items")
         if not isinstance(chunk, list) or not chunk:
             break
         payload.extend(chunk)
@@ -123,9 +133,21 @@ def search(query):
     return items
 
 
-def fetch(repo, path):
-    payload = gh_json(["api", f"repos/{repo}/contents/{path}"])
+def fetch(repo, path, sha):
+    """The blob the SEARCH found, addressed by its sha — not whatever that path holds now.
+
+    The record keys dedupe on (repo, sha, path). Fetching `contents/<path>` reads the current
+    default branch, so a file edited between search and fetch is stored under the OLD sha: the
+    ledger then carries content that never existed at that sha, and every later scan dedupes
+    against that false provenance and skips the real version forever.
+
+    A blob is immutable, so addressing it by sha makes the recorded sha true by construction.
+    """
+    payload = gh_json(["api", f"repos/{repo}/git/blobs/{sha}"])
     if not isinstance(payload, dict):
+        return None
+    if payload.get("sha") and str(payload["sha"]) != str(sha):
+        print(f"  skip {repo}:{path}: blob sha mismatch", file=sys.stderr)
         return None
     if payload.get("encoding") == "base64" and payload.get("content"):
         try:
@@ -211,7 +233,7 @@ def main(argv=None):
         if key in seen:
             duplicates += 1
             continue
-        text = fetch(item["repo"], item["path"])
+        text = fetch(item["repo"], item["path"], item["sha"])
         if text is None:
             print(f"  skip {item['repo']}:{item['path']}: unreadable", file=sys.stderr)
             continue

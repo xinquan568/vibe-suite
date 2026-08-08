@@ -708,12 +708,20 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
         import base64
         return {"encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
 
-    def _responses(self, items, contents=None):
-        table = {"search/code": {"items": items} if items is not None else None}
-        # `gh api search/code --jq .items` — the fake ignores --jq, so hand back the list.
-        table["search/code"] = items
-        for repo_path, text in (contents or {}).items():
-            table[f"repos/{repo_path}"] = self._b64(text)
+    def _responses(self, items, contents=None, incomplete=False):
+        """The REAL API shapes: a search envelope, and blobs addressed by sha.
+
+        The old fake handed back a bare `.items` list and served content from
+        `repos/<repo>/contents/<path>`. Both hid a defect: the envelope carries
+        `incomplete_results`, and fetching a path reads the CURRENT default branch rather than
+        the blob the search actually found.
+        """
+        table = {"search/code": ({"items": items or [],
+                                  "total_count": len(items or []),
+                                  "incomplete_results": bool(incomplete)}
+                                 if items is not None else None)}
+        for (repo, sha), text in (contents or {}).items():
+            table[f"repos/{repo}/git/blobs/{sha}"] = dict(self._b64(text), sha=sha)
         return table
 
     def _data_dir(self, ledger=None):
@@ -756,7 +764,7 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
               "sha": "dup"},
              {"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
               "sha": "n1"}],
-            {"acme/new/contents/.vibe-suppressions.yml": self.CONFIG}))
+            {("acme/new", "n1"): self.CONFIG}))
         r = self._run(d, gh)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("1 self", r.stdout)
@@ -771,7 +779,7 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
         d = self._data_dir()
         gh = self.gh(self._responses(
             [{"repository": {"full_name": self.HOST}, "path": "tests/fixture.yml", "sha": "s1"}],
-            {f"{self.HOST}/contents/tests/fixture.yml": self.CONFIG}))
+            {(self.HOST, "s1"): self.CONFIG}))
         self._run(d, gh)
         self.assertEqual(self._ledger(d), [])
 
@@ -780,7 +788,7 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
         gh = self.gh(self._responses(
             [{"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
               "sha": "n1"}],
-            {"acme/new/contents/.vibe-suppressions.yml": self.CONFIG}))
+            {("acme/new", "n1"): self.CONFIG}))
         self._run(d, gh)
         record = self._ledger(d)[0]
         by_rule = {o["rule_id"]: o["override"] for o in record["overrides"]}
@@ -797,7 +805,7 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
         gh = self.gh(self._responses(
             [{"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
               "sha": "new"}],
-            {"acme/new/contents/.vibe-suppressions.yml": self.CONFIG}))
+            {("acme/new", "new"): self.CONFIG}))
         self._run(d, gh)
         self.assertEqual([x["sha"] for x in self._ledger(d)], ["old", "new"])
 
@@ -808,8 +816,7 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
               "sha": "s1"},
              {"repository": {"full_name": "acme/new"}, "path": "b/.vibe-suppressions.yml",
               "sha": "s2"}],
-            {"acme/new/contents/a/.vibe-suppressions.yml": self.CONFIG,
-             "acme/new/contents/b/.vibe-suppressions.yml": self.CONFIG}))
+            {("acme/new", "s1"): self.CONFIG, ("acme/new", "s2"): self.CONFIG}))
         self._run(d, gh)
         self.assertEqual(len(self._ledger(d)), 2, "dedupe on repo alone loses one")
 
@@ -820,7 +827,7 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
         gh = self.gh(self._responses(
             [{"repository": {"full_name": "acme/bad"}, "path": ".vibe-suppressions.yml",
               "sha": "b1"}],
-            {"acme/bad/contents/.vibe-suppressions.yml": "---\nrule_overrides:\n\tbad\n---\n"}))
+            {("acme/bad", "b1"): "---\nrule_overrides:\n\tbad\n---\n"}))
         r = self._run(d, gh)
         self.assertEqual(r.returncode, 0, r.stderr)
         record = self._ledger(d)[0]
@@ -841,12 +848,42 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("REFUSE:scan-suppressions:search-failed", r.stderr)
 
+
+    def test_an_incomplete_search_response_refuses(self):
+        """GitHub answers a timed-out code search with HTTP 200 and `incomplete_results: true`.
+        A partial page holding fewer than a full page of results looks exactly like a final
+        one, so projecting to `.items` threw away the only field that says otherwise — and
+        --apply then recorded an under-counted corpus as a finished search."""
+        d = self._data_dir()
+        gh = self.gh(self._responses(
+            [{"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
+              "sha": "n1"}], {("acme/new", "n1"): self.CONFIG}, incomplete=True))
+        r = self._run(d, gh)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:scan-suppressions:search-incomplete", r.stderr)
+        self.assertEqual(self._ledger(d), [], "a partial corpus was recorded")
+
+    def test_the_blob_is_fetched_by_sha_not_by_path(self):
+        """The record keys dedupe on (repo, sha, path). Reading `contents/<path>` returns the
+        CURRENT default branch, so a file edited between search and fetch is stored under the
+        OLD sha — the ledger then holds content that never existed at that sha, and every later
+        scan dedupes against that false provenance and skips the real version forever."""
+        d = self._data_dir()
+        gh = self.gh(self._responses(
+            [{"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
+              "sha": "n1"}], {("acme/new", "n1"): self.CONFIG}))
+        self._run(d, gh)
+        self.assertEqual(len(self._ledger(d)), 1)
+        calls = " ".join(self.calls(gh))
+        self.assertIn("git/blobs/n1", calls, "the blob was not addressed by its sha")
+        self.assertNotIn("contents/", calls, "the path was read from the default branch")
+
     # --- mutants --------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):
         d = self._data_dir()
         gh = self.gh(self._responses(
             [{"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
-              "sha": "n1"}], {"acme/new/contents/.vibe-suppressions.yml": self.CONFIG}))
+              "sha": "n1"}], {("acme/new", "n1"): self.CONFIG}))
         self._run(d, gh, script_text=NOOP[".py"])
         self.assertEqual(self._ledger(d), [], "sanity: a no-op appends nothing")
 
@@ -865,7 +902,7 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
         gh = self.gh(self._responses(
             [{"repository": {"full_name": "acme/new"}, "path": ".vibe-suppressions.yml",
               "sha": "new"}],
-            {"acme/new/contents/.vibe-suppressions.yml": self.CONFIG}))
+            {("acme/new", "n1"): self.CONFIG}))
         self._run(d, gh, script_text=mutant)
         self.assertEqual([x["sha"] for x in self._ledger(d)], ["old"],
                          "mutation ineffective: the mutant should miss the edit")

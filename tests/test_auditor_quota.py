@@ -19,6 +19,7 @@ derive-context BEFORE any filtering and is contractually immutable. The quota fa
 computed by the filter, so they ride in proposal-manifest.json, which the same step writes.
 """
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -184,3 +185,57 @@ class TestPrNumberGuard(unittest.TestCase):
         self.assertIn("exit 1", seg,
                       "the guard reports but does not stop; a warning does not prevent the "
                       "durable write that follows it")
+
+
+class TestStrictMode(unittest.TestCase):
+    """W7.3 -- `set -euo pipefail` throughout, the issue's fail-loudly clause.
+
+    The file was written under `set -u` only: unset variables aborted, but a failing command
+    did not, and a failing pipeline stage was invisible behind a successful last stage. That
+    is why this wave is LAST -- it changes the exit behaviour of every block the earlier waves
+    touched, so doing it earlier would have made every later failure ambiguous.
+
+    Note `2>/dev/null` protects nothing here: it redirects stderr and leaves exit status
+    untouched. Fifty-one of those in this file were mistaken for protection during planning.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = WF.read_text(encoding="utf-8")
+
+    def _run_blocks(self):
+        """Every run block, with its first non-comment shell line.
+
+        Matches both `run: |` and the bare `- run: |` step form. An earlier version matched
+        only the first, so two blocks were invisible to it -- and stayed invisible until the
+        separate `set -u` assertion disagreed with it. Two checks over the same property,
+        written independently, is what surfaced the gap.
+        """
+        import re
+        out = []
+        lines = self.text.split("\n")
+        for i, ln in enumerate(lines):
+            if re.match(r"\s*-?\s*run: \|\s*$", ln):
+                indent = len(lines[i + 1]) - len(lines[i + 1].lstrip())
+                body = []
+                for nxt in lines[i + 1:]:
+                    if nxt.strip() and (len(nxt) - len(nxt.lstrip())) < indent:
+                        break
+                    body.append(nxt)
+                first = next((b.strip() for b in body
+                              if b.strip() and not b.strip().startswith("#")), "")
+                out.append((i + 1, first, "\n".join(body)))
+        return out
+
+    def test_every_run_block_enables_strict_mode(self):
+        offenders = [(ln, first[:60]) for ln, first, _ in self._run_blocks()
+                     if "set -euo pipefail" not in _]
+        self.assertEqual(
+            [], offenders,
+            f"{len(offenders)} run block(s) do not enable strict mode: {offenders[:5]}")
+
+    def test_no_block_enables_only_set_u(self):
+        weak = [ln for ln, _, body in self._run_blocks()
+                if re.search(r"^\s*set -u\s*$", body, re.M)]
+        self.assertEqual([], weak,
+                         f"blocks still enabling only `set -u` (line numbers): {weak}")

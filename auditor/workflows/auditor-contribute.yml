@@ -53,7 +53,7 @@ jobs:
           # from a real answer. The audited SHA is the sharpest: submit's checkout guard is
           # `[ -n "$AUDITED_SHA" ]`, so an empty default silently skipped the pin and the
           # engine proposed patches against whatever HEAD happened to be.
-          set -u
+          set -euo pipefail
           refuse() { echo "REFUSE:context-$1-unresolvable" >&2; exit 1; }
           DATA_DIR="${DATA_DIR:-${GITHUB_WORKSPACE:-$PWD}/_data}"
           REGISTRY="${REGISTRY:-$DATA_DIR/registry/repos.json}"
@@ -134,6 +134,7 @@ jobs:
       - name: gate security-blocked
         run: |
           # gate:security-blocked
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:security-blocked — an earlier gate already refused"; exit 0
@@ -150,6 +151,7 @@ jobs:
       - name: gate no-external-prs
         run: |
           # gate:no-external-prs
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:no-external-prs — an earlier gate already refused"; exit 0
@@ -169,6 +171,7 @@ jobs:
       - name: gate cla
         run: |
           # gate:cla
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:cla — an earlier gate already refused"; exit 0
@@ -201,6 +204,7 @@ jobs:
       - name: gate pushback
         run: |
           # gate:pushback
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:pushback — an earlier gate already refused"; exit 0
@@ -227,6 +231,7 @@ jobs:
       - name: gate confidence
         run: |
           # gate:confidence
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:confidence — an earlier gate already refused"; exit 0
@@ -252,6 +257,7 @@ jobs:
       - name: gate duplicate-pr
         run: |
           # gate:duplicate-pr
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:duplicate-pr — an earlier gate already refused"; exit 0
@@ -276,6 +282,7 @@ jobs:
       - name: gate pr-caps
         run: |
           # gate:pr-caps
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:pr-caps — an earlier gate already refused"; exit 0
@@ -302,7 +309,7 @@ jobs:
           # E8.2b (vibe-164) W5.1. Read-only: gates holds contents:read and must not create
           # anything. The slug comes from the relay -- $OWNER is the TARGET owner, so a probe
           # built from it inspects the target repository rather than the bot's fork.
-          set -u
+          set -euo pipefail
           CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
           if [ ! -f "$CONTEXT_FILE" ]; then
             echo "REFUSE:context-relay-missing-unresolvable" >&2; exit 1
@@ -329,7 +336,7 @@ jobs:
           # submit applied whatever the model produced. This writes the decision down as an
           # allowlist that submit must validate against. Deterministic filtering becomes
           # ENFORCED rather than printed.
-          set -u
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:emit-manifest — an earlier gate already refused"; exit 0
@@ -395,6 +402,7 @@ jobs:
       - name: gate disclosure-routing
         run: |
           # gate:disclosure-routing
+          set -euo pipefail
           DECISION="${DECISION:-}"
           disc_tmp="$(mktemp)"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
@@ -424,6 +432,7 @@ jobs:
       - name: gate umbrella-backstop
         run: |
           # gate:umbrella-backstop
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:umbrella-backstop — an earlier gate already refused"; exit 0
@@ -438,7 +447,7 @@ jobs:
       - run: |
           # The proposal job runs only while the shared decision still says proceed; GATES_OK is
           # the in-job mirror of that decision and is never armed unconditionally.
-          set -u
+          set -euo pipefail
           DECISION="${DECISION:-decision.json}"
           proceed=$(jq -r '.proceed' "$DECISION" 2>/dev/null || echo false)
           reason=$(jq -r '.reason // ""' "$DECISION" 2>/dev/null || echo "")
@@ -459,7 +468,7 @@ jobs:
       - name: publish the gates outcome
         if: always()
         run: |
-          set -u
+          set -euo pipefail
           OUT="${OUTCOME_DIR:-.}"
           mkdir -p "$OUT"
           DECISION="${DECISION:-decision.json}"
@@ -531,7 +540,7 @@ jobs:
           # stale and the whole evaluation is redone against the new tip (bounded retries). A
           # refusal is confirmed the same way — a rejected no-op push proves the tip we refused
           # from is no longer current, so the refusal is recomputed too.
-          set -u
+          set -euo pipefail
           REPO="${REPO:?}"
           DATA_DIR="${DATA_DIR:-_data}"
           LEDGER="${RESERVATION_LEDGER:-${RESERVATIONS:-$DATA_DIR/ledgers/contact-reservations.jsonl}}"
@@ -696,7 +705,7 @@ jobs:
           # The pin is the point: the audit produced findings against one specific commit, and
           # a model reviewing a later HEAD is reviewing code nobody audited. Falling back to
           # HEAD when the SHA will not resolve would reintroduce exactly that, so it refuses.
-          set -u
+          set -euo pipefail
           refuse() { echo "REFUSE:context-$1-unresolvable" >&2; exit 1; }
           CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
           [ -f "$CONTEXT_FILE" ] || refuse relay-missing
@@ -741,7 +750,7 @@ jobs:
       - name: classify the proposal outcome
         if: always()
         run: |
-          set -u
+          set -euo pipefail
           OUT="${OUTCOME_DIR:-.}"
           mkdir -p "$OUT" "$PATCH_DIR"
           reason=""
@@ -811,7 +820,7 @@ jobs:
           # target at the audited SHA, fork, branch, apply, commit, push, open the PR, THEN write
           # the registry and the prs_submitted event and push them to auditor-data, and only THEN
           # apply the label. The ledger is authoritative; the label is a derived view.
-          set -u
+          set -euo pipefail
           export GH_TOKEN="${GH_TOKEN:-${GH_TOKEN_OVERRIDE:-${PAT_SECRET:-}}}"
           REPO="${REPO:?}"
           OWN_REPO="${OWN_REPO:-xinquan568/vibe-suite}"
@@ -1052,10 +1061,10 @@ jobs:
           fi
           # stage-logic:contribute
           # The contribute stage's terminal transition, shared by the normal and the recovery
-          # path: filter the audited findings, write the registry and the prs_submitted event,
-          # push both to auditor-data, and only then move the issue label. Self-contained, so it
-          # runs identically standalone under the harness.
-          set -u
+          # path: filter the audited findings, write the registry and the contribution_submitted
+          # event, push both to auditor-data, and only then move the issue label. Self-contained,
+          # so it runs identically standalone under the harness.
+          set -euo pipefail
           REPO="${REPO:-}"
           if [ -z "$REPO" ] && [ -n "${FIXTURE:-}" ]; then
             REPO="$(jq -r '.repo.full_name' "$FIXTURE")"
@@ -1259,7 +1268,7 @@ jobs:
           # pre-pr-failure and error do NOT qualify: a run that never reached a PR has no
           # exhausted quota to report, and raising an umbrella there would tell a maintainer
           # we ran out of budget when in fact we broke.
-          set -u
+          set -euo pipefail
           MANIFEST="${MANIFEST:-${GITHUB_WORKSPACE:-$PWD}/_gate/proposal-manifest.json}"
           [ -f "$MANIFEST" ] || { echo "no manifest — nothing to back off"; exit 0; }
           qe="$(jq -r '.quota_exhausted // false' "$MANIFEST" 2>/dev/null || echo false)"
@@ -1294,7 +1303,7 @@ jobs:
           # The outcome row is selected from the stage artifacts — last non-empty in stage order —
           # so an empty patch set, a patch conflict, a pre-PR failure and a partial submission stay
           # distinguishable. The durable record is written AND pushed before any issue transition.
-          set -u
+          set -euo pipefail
           REPO="${REPO:-}"
           OWN_REPO="${OWN_REPO:-xinquan568/vibe-suite}"
           ISSUE="${ISSUE_NUMBER:-${ISSUE:-}}"
@@ -1492,7 +1501,7 @@ jobs:
       - name: publish the finalize outcome
         if: always()
         run: |
-          set -u
+          set -euo pipefail
           mkdir -p _outcomes
           jq -n '{schema_version: 1, job: "finalize", status: "routed", reason: "", ids: {}}' \
             > _outcomes/outcome-finalize.json

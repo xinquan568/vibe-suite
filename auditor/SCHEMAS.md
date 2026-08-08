@@ -241,6 +241,7 @@ Append-only JSONL. Envelope on every record: `timestamp`, `workflow`, `event`, `
 | `finding_amended` | references a prior fingerprint | reserved; no emitter yet |
 | `exemplar_published` | repo, exemplar_path, score | emitted after a successful exemplar commit |
 | `contribution_submitted` | repo, pr_number, kept | emitted by contribute once a PR number is validated; `kept` is the count of findings that survived the confidence, duplicate and cap filters. The registry's `pipeline_prs` is the durable record — this is the event trail for when and with how much |
+| `orphaned_fork` | repo, fork_slug, owner, created_at, invariant_failed | emitted by contribute when a fork has been created but its post-creation invariant check fails. The fork is **never deleted** — deleting a repository under a third-party account is not an action this pipeline takes on its own judgement, so the record exists to hand the fork to a human. `invariant_failed` names which of the four checks failed (`resolves` / `is_fork` / `owner_matches` / `parent_matches`). Distinct from the section-1 `orphaned` repo status, which is about a repo whose PRs became untrackable |
 
 Additional lifecycle events (discovery, drift check, aggregation, completion, disclosure
 filed/pending, report-generated, proposals_prepared, published / no-narrative, skip
@@ -338,3 +339,40 @@ Rule states: `healthy` / `noisy` / `dormant` / `disputed`.
   them.
 - Registry state is excluded from E8.5's migration by design (§1): the human-performed
   bootstrap is the sole origin of an empty registry.
+
+## 14. Contribution gate outputs — `proposal-manifest.json`, `disclosure.json`
+
+Two immutable artifacts written by the contribution engine's `gates` job. Both are written
+**once**, by that job alone, and are never rewritten by a downstream job: a later stage that
+could edit them could widen its own authority after the gate that bounded it had already run.
+
+### `proposal-manifest.json`
+
+The allowlist of what may become a patch. Written after the confidence, duplicate and cap
+filters have run, so it names exactly the findings that survived them.
+
+| Field | Meaning |
+|---|---|
+| version | int, currently `1` |
+| repo | target `owner/name` |
+| findings | array of `{rule_id, fingerprint, file, confidence}` — the surviving set |
+
+Contract point: `submit` MUST validate every patch fingerprint against this allowlist and
+refuse any fingerprint absent from it. Deterministic filtering is thereby *enforced*, not
+merely printed — without the manifest, a patch could reach a PR without any gate having
+admitted the finding behind it.
+
+### `disclosure.json`
+
+The security findings routed away from the public-PR path.
+
+| Field | Meaning |
+|---|---|
+| version | int, currently `1` |
+| repo | target `owner/name` |
+| findings | array of `{rule_id, fingerprint, severity}` — critical/high security findings |
+
+Routing constraint (contractual, not incidental to one workflow): `disclosure.json` is routed
+to `finalize` and is **never** delivered to `propose`. `propose` runs the model, and a model
+job that can read undisclosed security findings can leak them into a public patch body. The
+constraint is a property of the record, so any workflow consuming it inherits it.

@@ -121,10 +121,22 @@ class ReservationBase(unittest.TestCase):
         return sb
 
     def env(self, sb, candidate, extra=None):
+        # E8.2b (vibe-164): the weekly cap is no longer read from the environment. gates
+        # derives it and publishes context.json; reserve consumes that. Passing WEEKLY_CAP
+        # here would be a test supplying a value the graph must derive -- the exact thing
+        # the acceptance clause forbids and the W-scan flags. The cap still has a value in
+        # these tests; it just arrives the way production delivers it.
+        ctx = sb.root / "context.json"
+        ctx.write_text(json.dumps({
+            "version": 1, "repo": candidate, "issue": "42",
+            "expected_fork_slug": "vibe-bot/" + candidate.split("/")[-1],
+            "audited_sha": "cafebabe", "base_branch": "main",
+            "author_name": "vibe-suite auditor bot", "author_email": "auditor@example.invalid",
+            "weekly_cap": 2, "patch_cap": 3}))
         e = {"REPO": candidate, "OWNER": candidate.split("/")[0],
              "RESERVATIONS": str(sb.data / RESERVATIONS),
              "RESERVATION_LEDGER": str(sb.data / RESERVATIONS),
-             "DATA_REMOTE": str(sb.bare), "WEEKLY_CAP": "2",
+             "DATA_REMOTE": str(sb.bare), "CONTEXT_FILE": str(ctx),
              "PUSH_COUNT": str(sb.push_count),
              "FIRST_CONTACT": "true", "PLANNED_COUNT": "2"}
         e.update(GIT_ENV)

@@ -245,6 +245,24 @@ class SubmitSandbox:
         shutil.rmtree(self.calls)
         self.calls.mkdir()
 
+    def _write_context(self):
+        """The relay gates emits, as submit now consumes it.
+
+        E8.2b (vibe-164): AUDITED_SHA, BASE_BRANCH and the author identity used to arrive as
+        loose environment variables, which is a test supplying values the graph must derive --
+        the exact injection the acceptance clause forbids, and what the W-scan flags. They now
+        arrive the way production delivers them. CLA_AUTHOR_* stays: it is a documented CLA
+        override with precedence over the derived identity, not an injected derivation.
+        """
+        p = self.root / "context.json"
+        p.write_text(json.dumps({
+            "version": 1, "repo": TARGET_REPO, "issue": "42",
+            "expected_fork_slug": "vibe-suite-bot/claude-toolkit",
+            "audited_sha": self.audited_sha, "base_branch": "main",
+            "author_name": AUTHOR_NAME, "author_email": AUTHOR_EMAIL,
+            "weekly_cap": 2, "patch_cap": 3}))
+        return p
+
     def run(self, env=None):
         e = dict(os.environ)
         e.update(self.gitenv)
@@ -254,7 +272,7 @@ class SubmitSandbox:
             "GH_TOKEN": "stub-pat", "GH_TOKEN_OVERRIDE": "stub-pat", "PAT_SECRET": "stub-pat",
             "REPO": TARGET_REPO, "OWNER": TARGET_REPO.split("/")[0],
             "ISSUE_NUMBER": "42", "ISSUE": "42",
-            "AUDITED_SHA": self.audited_sha, "HEAD_SHA": self.head_sha,
+            "HEAD_SHA": self.head_sha,
             "TARGET_DIR": str(self.target), "BRANCH": BRANCH,
             "FORK_REMOTE": str(self.fork), "FORK_SLUG": "vibe-suite-bot/claude-toolkit",
             "DATA_REMOTE": str(self.data_remote), "DATA_DIR": str(self.data),
@@ -262,8 +280,8 @@ class SubmitSandbox:
             "REGISTRY": str(self.data / "registry" / "repos.json"),
             "EVENT_LOG": str(self.data / "ledgers" / "events.jsonl"),
             "PATCH_DIR": str(self.patches), "PATCH_META": str(self.patches / "findings.json"),
-            "AUTHOR_NAME": AUTHOR_NAME, "AUTHOR_EMAIL": AUTHOR_EMAIL,
             "CLA_AUTHOR_NAME": AUTHOR_NAME, "CLA_AUTHOR_EMAIL": AUTHOR_EMAIL,
+            "CONTEXT_FILE": str(self._write_context()),
         })
         e.update(env or {})
         sh = self.root / "submit.sh"

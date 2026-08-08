@@ -406,7 +406,11 @@ jobs:
           REPO="${REPO:?}"
           DATA_DIR="${DATA_DIR:-_data}"
           LEDGER="${RESERVATION_LEDGER:-${RESERVATIONS:-$DATA_DIR/ledgers/contact-reservations.jsonl}}"
-          CAP="${WEEKLY_CAP:-2}"
+          refuse() { echo "REFUSE:context-$1-unresolvable" >&2; exit 1; }
+          CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+          [ -f "$CONTEXT_FILE" ] || refuse relay-missing
+          CAP="$(jq -r '.weekly_cap // empty' "$CONTEXT_FILE" 2>/dev/null || true)"
+          [ -n "$CAP" ] || refuse weekly-cap
           WINDOW_DAYS="${RESERVATION_WINDOW_DAYS:-7}"
           ATTEMPTS="${RESERVATION_ATTEMPTS:-4}"
           DATA_REPO="$(cd "$(dirname "$LEDGER")/.." && pwd)"
@@ -547,6 +551,39 @@ jobs:
           ref: auditor-data
           path: _data
           persist-credentials: false
+      - name: clone the target at its audited SHA
+        env:
+          REPO: ${{ needs.reserve.outputs.repo }}
+        run: |
+          # stage-logic:propose-clone
+          # E8.2b (vibe-164) W3.2. propose runs the MODEL, and until now it checked out only
+          # this repository and auditor-data -- never the target. The job described as reading
+          # the audited tree did not have that tree.
+          #
+          # The pin is the point: the audit produced findings against one specific commit, and
+          # a model reviewing a later HEAD is reviewing code nobody audited. Falling back to
+          # HEAD when the SHA will not resolve would reintroduce exactly that, so it refuses.
+          set -u
+          refuse() { echo "REFUSE:context-$1-unresolvable" >&2; exit 1; }
+          CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+          [ -f "$CONTEXT_FILE" ] || refuse relay-missing
+          AUDITED_SHA="$(jq -r '.audited_sha // empty' "$CONTEXT_FILE" 2>/dev/null || true)"
+          [ -n "$AUDITED_SHA" ] || refuse audited-sha
+          TARGET_DIR="${TARGET_DIR:-${GITHUB_WORKSPACE:-$PWD}/_target}"
+          TARGET_REMOTE="${TARGET_REMOTE:-https://github.com/$REPO.git}"
+
+          rm -rf "$TARGET_DIR"
+          if ! git clone --quiet --no-checkout "$TARGET_REMOTE" "$TARGET_DIR"; then
+            echo "REFUSE:target-clone-failed — $REPO could not be cloned" >&2
+            exit 1
+          fi
+          git -C "$TARGET_DIR" fetch --quiet origin "$AUDITED_SHA" 2>/dev/null || true
+          if ! git -C "$TARGET_DIR" checkout --quiet --detach "$AUDITED_SHA" 2>/dev/null; then
+            echo "REFUSE:audited-sha-not-in-target — $AUDITED_SHA is not a commit in $REPO" >&2
+            exit 1
+          fi
+          echo "PINNED:$AUDITED_SHA"
+          # /stage-logic
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -645,8 +682,18 @@ jobs:
           PATCH_DIR="${PATCH_DIR:-_patches}"
           PATCH_META="${PATCH_META:-$PATCH_DIR/findings.json}"
           TARGET_DIR="${TARGET_DIR:-_target}"
-          AUDITED_SHA="${AUDITED_SHA:-}"
-          BASE_BRANCH="${BASE_BRANCH:-main}"
+          # E8.2b (vibe-164) W3: read the relay, refuse what it does not carry. These four
+          # values previously defaulted here -- SHA to empty, branch to main, author to a
+          # literal, cap to 3 -- and a default is indistinguishable downstream from a real
+          # answer. gates derives them; this job consumes them.
+          refuse() { echo "REFUSE:context-$1-unresolvable" >&2; exit 1; }
+          CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+          [ -f "$CONTEXT_FILE" ] || refuse relay-missing
+          ctx() { jq -r --arg k "$1" '.[$k] // empty' "$CONTEXT_FILE" 2>/dev/null || true; }
+          AUDITED_SHA="$(ctx audited_sha)"
+          [ -n "$AUDITED_SHA" ] || refuse audited-sha
+          BASE_BRANCH="$(ctx base_branch)"
+          [ -n "$BASE_BRANCH" ] || refuse default-branch
           BRANCH="${BRANCH:-auditor/vibe-suite-findings}"
           FORK_SLUG="${FORK_SLUG:-}"
           FORK_REMOTE="${FORK_REMOTE:-}"
@@ -655,8 +702,15 @@ jobs:
           EVENT_LOG="${EVENT_LOG:-$DATA_DIR/ledgers/events.jsonl}"
           REGISTRY="${REGISTRY:-$DATA_DIR/registry/repos.json}"
           OUT="${OUTCOME_DIR:-.}"
-          AUTHOR_NAME="${CLA_AUTHOR_NAME:-${AUTHOR_NAME:-vibe-suite auditor}}"
-          AUTHOR_EMAIL="${CLA_AUTHOR_EMAIL:-${AUTHOR_EMAIL:-auditor@users.noreply.github.com}}"
+          AUTHOR_NAME="${CLA_AUTHOR_NAME:-$(ctx author_name)}"
+          AUTHOR_EMAIL="${CLA_AUTHOR_EMAIL:-$(ctx author_email)}"
+          { [ -n "$AUTHOR_NAME" ] && [ -n "$AUTHOR_EMAIL" ]; } || refuse author-identity
+          # Read at ENTRY, not at point of use. The patch cap was previously read after the
+          # target clone, so an absent cap could not refuse -- an unrelated clone failure
+          # fired first and the missing context was never reported. Validating the whole
+          # context up front is what "resolve and validate its own context" means.
+          PATCH_CAP="$(ctx patch_cap)"
+          [ -n "$PATCH_CAP" ] || refuse patch-cap
           export GIT_AUTHOR_NAME="$AUTHOR_NAME"
           export GIT_AUTHOR_EMAIL="$AUTHOR_EMAIL"
           export GIT_COMMITTER_NAME="$AUTHOR_NAME"
@@ -709,7 +763,9 @@ jobs:
               exit 1
             fi
           fi
-          if [ -n "$AUDITED_SHA" ]; then
+          # Unconditional: AUDITED_SHA refused above if unresolvable, so there is no
+          # "no SHA" branch left for the pin to silently skip.
+          if true; then
             git -C "$TARGET_DIR" fetch -q origin "$AUDITED_SHA" 2>/dev/null || true
             if ! git -C "$TARGET_DIR" checkout -q --detach "$AUDITED_SHA" 2>/dev/null; then
               echo "REFUSE:pre-pr-failure — the audited SHA is unreachable in the target" >&2
@@ -717,7 +773,7 @@ jobs:
               exit 1
             fi
           fi
-          cap=$(cat "$PATCH_DIR/CAP" 2>/dev/null || echo 3)
+          cap="$PATCH_CAP"
           applied=0
           conflict=0
           for p in "$PATCH_DIR"/*.patch; do

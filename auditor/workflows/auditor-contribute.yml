@@ -723,15 +723,32 @@ jobs:
               kept=$((kept+1))
             done < "$SIDECAR"
           fi
+          # `contributed` and `pipeline_prs` — the CONTRACT, not this workflow's own vocabulary.
+          # SCHEMAS.md section 1 fixes the status enum
+          # (discovered/audited/contributed/tracked/complete/policy_denied/policy_cla_required/
+          # orphaned) and declares `pipeline_prs` as the PR numbers opened on the target,
+          # written by CONTRIBUTE. This wrote `prs_submitted` and `last_pr` instead — a status
+          # outside the enum and a field nothing reads.
+          #
+          # auditor-track.yml selects on status contributed/tracked/complete and iterates
+          # `pipeline_prs`, in four places. So a successfully opened PR was never tracked,
+          # never classified, and never dispatched for a case study: the entire downstream half
+          # of the pipeline sat idle while this job reported success.
+          #
+          # pipeline_prs ACCUMULATES. A repo can receive several PRs across runs, and each is a
+          # separate outcome to track; `last_pr` kept only the most recent and discarded the
+          # rest. Appended uniquely, so a re-run does not duplicate an entry.
           jq --arg repo "$REPO" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg pr "$PR_NUMBER" \
-            '.repos[$repo] = ((.repos[$repo] // {}) + {status: "prs_submitted", last_contact: $ts}
-               + (if $pr == "" then {} else {last_pr: $pr} end))' "$REGISTRY" > "$REGISTRY.tmp" \
+            '.repos[$repo] = ((.repos[$repo] // {}) + {status: "contributed", last_contact: $ts}
+               + (if $pr == "" then {}
+                  else {pipeline_prs: (((.repos[$repo].pipeline_prs // []) + [($pr | tonumber)])
+                                       | unique)} end))' "$REGISTRY" > "$REGISTRY.tmp" \
             && mv "$REGISTRY.tmp" "$REGISTRY"
           mkdir -p "$(dirname "$EVENT_LOG")" "$OUT"
           jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg repo "$REPO" \
             --argjson pr "${PR_NUMBER:-null}" --argjson kept "$kept" \
             --arg rid "$RUN_ID" --argjson rn "$RUN_NUMBER" \
-            '{timestamp: $ts, workflow: "auditor-contribute", event: "prs_submitted",
+            '{timestamp: $ts, workflow: "auditor-contribute", event: "contribution_submitted",
               run_id: $rid, run_number: $rn,
               data: {repo: $repo, pr_number: $pr, kept: $kept}}' >> "$EVENT_LOG"
           pushed=1
@@ -901,12 +918,12 @@ jobs:
               ;;
             submitted)
               label="prs-submitted"
-              event="prs_submitted"
+              event="contribution_submitted"
               remove_approved=1
               ;;
             error)
               if [ "$job" = "submit" ]; then
-                event="prs_submitted"
+                event="contribution_submitted"
               else
                 label="pipeline-error"
                 event="contribution_error"

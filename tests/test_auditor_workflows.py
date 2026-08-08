@@ -1902,5 +1902,72 @@ class TestSidecarFingerprintConsumers(unittest.TestCase):
                         f"unlisted sidecar readers: {sorted(opens_audits - set(self.SIDECAR_READERS))}")
 
 
+
+class TestContributionHandoff(unittest.TestCase):
+    """auditor-contribute must write what auditor-track reads.
+
+    These two workflows are the seam between opening a PR and tracking its outcome, and they
+    disagreed: contribute wrote `status: "prs_submitted"` with `last_pr`, while track selects on
+    `contributed`/`tracked`/`complete` and iterates `pipeline_prs`. So a successfully opened PR
+    was never tracked, classified, or dispatched for a case study — the whole downstream half of
+    the pipeline sat idle while the contribute job reported success.
+
+    SCHEMAS.md is authoritative over both: section 1 fixes the status enum and declares
+    `pipeline_prs` as CONTRIBUTE's field. `prs_submitted` appears nowhere in it.
+    """
+
+    CONTRIBUTE = REPO / "auditor" / "workflows" / "auditor-contribute.yml"
+
+    @classmethod
+    def registry_statuses(cls):
+        """Statuses written into `.repos[...]` — the pipeline enum, not job-result artifacts."""
+        return set(re.findall(r'\.repos\[\$repo\][^\n]*status:\s*"([a-z_]+)"',
+                              cls.contribute_code()))
+
+    @classmethod
+    def contribute_code(cls):
+        """The workflow with comments stripped.
+
+        Searched against CODE, not prose: the comment explaining why `last_pr` was removed
+        contains the word `last_pr`, so a whole-file search fails on its own documentation.
+        That exact trap cost several rounds on E8.3.
+        """
+        return "\n".join(ln for ln in cls.CONTRIBUTE.read_text().splitlines()
+                          if not ln.lstrip().startswith("#"))
+    TRACK = REPO / "auditor" / "workflows" / "auditor-track.yml"
+    SCHEMAS = REPO / "auditor" / "SCHEMAS.md"
+
+    def test_the_status_written_is_in_the_schema_enum(self):
+        enum_row = next(ln for ln in self.SCHEMAS.read_text().splitlines()
+                        if ln.startswith("| status |"))
+        declared = set(re.findall(r"`([a-z_]+)`", enum_row))
+        # REGISTRY statuses only. A bare `status: "..."` search also matches the job-result
+        # artifacts (`{job: "submit", status: "submitted"}`), which are this workflow's own
+        # vocabulary and not the pipeline enum — two different things sharing a key name.
+        written = self.registry_statuses()
+        self.assertTrue(written, "no registry status write found — the scan is broken")
+        self.assertTrue(written <= declared,
+                        f"contribute writes statuses outside the enum: "
+                        f"{sorted(written - declared)}")
+
+    def test_contribute_writes_the_field_track_reads(self):
+        contribute = self.contribute_code()
+        self.assertIn("pipeline_prs", contribute,
+                      "contribute must record PR numbers where track looks for them")
+        self.assertNotIn("last_pr", contribute,
+                         "last_pr keeps only the most recent PR and nothing reads it")
+
+    def test_track_selects_a_status_contribute_actually_writes(self):
+        """The seam in the other direction: track's selection must include what contribute
+        leaves behind, or the handoff is broken from track's side instead."""
+        written = self.registry_statuses()
+        selected = set(re.findall(r'status\s*(?:==|// "")\s*==?\s*"([a-z_]+)"',
+                                  self.TRACK.read_text()))
+        selected |= set(re.findall(r'\.status == "([a-z_]+)"', self.TRACK.read_text()))
+        self.assertTrue(written & selected,
+                        f"track selects {sorted(selected)} but contribute writes "
+                        f"{sorted(written)} — nothing hands off")
+
+
 if __name__ == "__main__":
     unittest.main()

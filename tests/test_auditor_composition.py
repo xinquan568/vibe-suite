@@ -443,13 +443,13 @@ class TestOutcomeTable(CompositionBase):
 
     def test_row_submit_submitted(self):
         res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77})
-        rec = res.rec("prs_submitted")
-        self.assertIsNotNone(rec, f"(submit,submitted) needs prs_submitted; got {res.names()}")
+        rec = res.rec("contribution_submitted")
+        self.assertIsNotNone(rec, f"(submit,submitted) needs contribution_submitted; got {res.names()}")
         self.assertEqual(payload(rec).get("pr_number"), 77,
-                         "(submit,submitted) prs_submitted must carry pr_number; the current "
+                         "(submit,submitted) contribution_submitted must carry pr_number; the current "
                          "record carries only a `kept` count, so the label is a proxy oracle")
-        self.assertIn("prs_submitted", res.pushed_events(),
-                      "(submit,submitted) prs_submitted was never committed and pushed to the "
+        self.assertIn("contribution_submitted", res.pushed_events(),
+                      "(submit,submitted) contribution_submitted was never committed and pushed to the "
                       "bare auditor-data remote")
         self.assertIn("prs-submitted", res.added, "(submit,submitted) must apply prs-submitted")
         self.assertIn("contribute-approved", res.removed,
@@ -457,7 +457,7 @@ class TestOutcomeTable(CompositionBase):
 
     def test_row_submit_error(self):
         res = self.drive_row("submit", "error", "label-step-failed", ids={"pr_number": 77})
-        self.assertIn("prs_submitted", res.pushed_events(),
+        self.assertIn("contribution_submitted", res.pushed_events(),
                       "(submit,error) the ledger is authoritative and must ALREADY be persisted "
                       "in the bare remote when the label step fails")
         self.assertNotEqual(res.r.returncode, 0,

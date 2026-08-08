@@ -392,10 +392,10 @@ class SubmitEffects(unittest.TestCase):
                       f"the registry write never reached the bare auditor-data remote; the "
                       f"remote gained {written or 'nothing'} beyond the seed commit")
         self.assertIn("ledgers/events.jsonl", written,
-                      f"the prs_submitted event was never committed and pushed to the bare "
+                      f"the contribution_submitted event was never committed and pushed to the bare "
                       f"auditor-data remote; the remote gained {written or 'nothing'}")
-        self.assertIn("prs_submitted", self.sb.data_blob("ledgers/events.jsonl"),
-                      "the pushed events ledger contains no prs_submitted record")
+        self.assertIn("contribution_submitted", self.sb.data_blob("ledgers/events.jsonl"),
+                      "the pushed events ledger contains no contribution_submitted record")
         lines = self.sb.log_lines()
         pushes = [i for i, l in enumerate(lines) if l == "data-push"]
         labels = [i for i, l in enumerate(lines)
@@ -447,8 +447,8 @@ class SubmitEffects(unittest.TestCase):
         self.assertIn("ledgers/events.jsonl", written,
                       "the rerun did not reconcile: no ledger record reached the bare "
                       f"auditor-data remote (it gained {written or 'nothing'})" + self.diag(r))
-        self.assertIn("prs_submitted", self.sb.data_blob("ledgers/events.jsonl"),
-                      "the reconciling rerun wrote no prs_submitted record for the recovered PR")
+        self.assertIn("contribution_submitted", self.sb.data_blob("ledgers/events.jsonl"),
+                      "the reconciling rerun wrote no contribution_submitted record for the recovered PR")
         self.assertTrue(any("--add-label" in l and "prs-submitted" in l
                             for l in self.sb.log_lines()),
                         "the reconciling rerun never applied the prs-submitted label, so the "

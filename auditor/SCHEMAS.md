@@ -240,6 +240,7 @@ Append-only JSONL. Envelope on every record: `timestamp`, `workflow`, `event`, `
 | `finding_introduced` | repo, fingerprint, rule_id, file, pattern, severity, commit_sha | NOT appended to `ledgers/findings.jsonl` — avoids double-counting rule reach |
 | `finding_amended` | references a prior fingerprint | reserved; no emitter yet |
 | `exemplar_published` | repo, exemplar_path, score | emitted after a successful exemplar commit |
+| `contribution_submitted` | repo, pr_number, kept | emitted by contribute once a PR number is validated; `kept` is the count of findings that survived the confidence, duplicate and cap filters. The registry's `pipeline_prs` is the durable record — this is the event trail for when and with how much |
 
 Additional lifecycle events (discovery, drift check, aggregation, completion, disclosure
 filed/pending, report-generated, proposals_prepared, published / no-narrative, skip

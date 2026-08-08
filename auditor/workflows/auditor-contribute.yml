@@ -296,10 +296,74 @@ jobs:
           fi
           echo "PASS"
           # /gate
+      - name: gate emit-manifest
+        run: |
+          # gate:emit-manifest
+          # E8.2b (vibe-164) W4.1. The gates above already decide what survives -- they print
+          # KEEP:/DROP:/DISCLOSE: -- but nothing downstream was bound by those decisions, so
+          # submit applied whatever the model produced. This writes the decision down as an
+          # allowlist that submit must validate against. Deterministic filtering becomes
+          # ENFORCED rather than printed.
+          set -u
+          DECISION="${DECISION:-}"
+          if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
+            echo "NOOP:emit-manifest — an earlier gate already refused"; exit 0
+          fi
+          SIDECAR="${SIDECAR:?}"
+          MANIFEST="${MANIFEST:-${GITHUB_WORKSPACE:-$PWD}/proposal-manifest.json}"
+          CODE_DIR="${CODE_DIR:-${GITHUB_WORKSPACE:-$PWD}}"
+          . "$CODE_DIR/auditor/scripts/compute-fingerprint.sh"
+
+          # The cap is the per-repo patch cap the relay carries; PLANNED_COUNT bounds it.
+          cap="${PATCH_CAP:-${PLANNED_COUNT:-0}}"
+
+          kept="$(mktemp)"
+          n=0
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            # Filter 1 -- confidence. Missing reads as medium (SCHEMAS section 2), so it drops.
+            conf="$(printf '%s' "$line" | jq -r '.confidence // "medium"' 2>/dev/null)" || continue
+            [ "$conf" = "high" ] || continue
+            # Filter 2 -- the disclosure set is routed AWAY from the PR path. A finding on both
+            # lists would be published by submit as a public patch, which is precisely what the
+            # responsible-disclosure path exists to prevent.
+            if printf '%s' "$line" | jq -e 'select(.category=="security")
+                | select(.severity=="critical" or .severity=="high")' >/dev/null 2>&1; then
+              echo "EXCLUDE:$(printf '%s' "$line" | jq -r '.rule_id') — on the disclosure path"
+              continue
+            fi
+            # Filter 3 -- duplicates against open PRs on the target, when that list is
+            # available. Unavailable means fail-open here, matching gate:duplicate-pr.
+            f="$(printf '%s' "$line" | jq -r '.file // ""')"
+            if [ -n "${OPEN_PRS_FILE:-}" ] && [ -f "${OPEN_PRS_FILE}" ] && [ -n "$f" ]; then
+              if jq -e --arg f "$f" '[ .[] | select([.files[].path] | index($f)) ] | length > 0' \
+                   "$OPEN_PRS_FILE" >/dev/null 2>&1; then
+                echo "EXCLUDE:$f — already modified by an open PR on the target"
+                continue
+              fi
+            fi
+            # Filter 4 -- the cap.
+            if [ "$cap" -gt 0 ] && [ "$n" -ge "$cap" ]; then
+              echo "EXCLUDE:$(printf '%s' "$line" | jq -r '.rule_id') — beyond the patch cap of $cap"
+              continue
+            fi
+            fp="$(printf '%s' "$line" | compute_fingerprint "$REPO")" || {
+              echo "REFUSE:fingerprint-failed — a finding could not be keyed" >&2; exit 1; }
+            printf '%s\n' "$line" | jq -c --arg fp "$fp" \
+              '{rule_id: .rule_id, fingerprint: $fp, file: .file, confidence: .confidence}' >> "$kept"
+            n=$((n+1))
+          done < "$SIDECAR"
+
+          jq -s --arg repo "$REPO" '{version: 1, repo: $repo, findings: .}' "$kept" > "$MANIFEST"
+          rm -f "$kept"
+          echo "MANIFEST:$n finding(s) admitted"
+          echo "PASS"
+          # /gate
       - name: gate disclosure-routing
         run: |
           # gate:disclosure-routing
           DECISION="${DECISION:-}"
+          disc_tmp="$(mktemp)"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:disclosure-routing — an earlier gate already refused"; exit 0
           fi
@@ -310,8 +374,18 @@ jobs:
                 | select(.category=="security")
                 | select(.severity=="critical" or .severity=="high")' >/dev/null 2>&1; then
               echo "DISCLOSE:$(printf '%s' "$line" | jq -r '.rule_id') — responsible-disclosure path; never a public PR"
+              printf '%s\n' "$line" >> "$disc_tmp"
             fi
           done < "$SIDECAR"
+          # E8.2b (vibe-164) W4.2: the routing decision becomes an immutable artifact, so the
+          # constraint is enforceable rather than printed. It is delivered to finalize and
+          # never to propose -- propose runs the model, and a model job able to read
+          # undisclosed security findings can leak them into a public patch body.
+          DISCLOSURE="${DISCLOSURE:-${GITHUB_WORKSPACE:-$PWD}/disclosure.json}"
+          jq -s --arg repo "$REPO" '{version: 1, repo: $repo,
+              findings: [ .[] | {rule_id: .rule_id, severity: .severity, file: .file} ]}' \
+            "$disc_tmp" > "$DISCLOSURE"
+          rm -f "$disc_tmp"
           echo "PASS"
           # /gate
       - name: gate umbrella-backstop
@@ -711,6 +785,34 @@ jobs:
           # context up front is what "resolve and validate its own context" means.
           PATCH_CAP="$(ctx patch_cap)"
           [ -n "$PATCH_CAP" ] || refuse patch-cap
+
+          # E8.2b (vibe-164) W4.3: every patch fingerprint must appear in the gate's
+          # allowlist. The gates decide what may be proposed; without this check that
+          # decision bound nothing and submit applied whatever the model produced --
+          # including, potentially, a finding the disclosure gate routed away from the public
+          # PR path. An ABSENT manifest refuses rather than allowing everything: fail-open
+          # here would defeat the allowlist entirely.
+          MANIFEST="${MANIFEST:-${GITHUB_WORKSPACE:-$PWD}/proposal-manifest.json}"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "REFUSE:manifest-missing — no gate allowlist to validate patches against" >&2
+            exit 1
+          fi
+          if [ -f "${PATCH_META:-}" ]; then
+            # No heredoc here on purpose: a heredoc inside a YAML block scalar, carrying a
+            # command substitution, breaks the scalar -- the workflow stops parsing as YAML
+            # and the fail-closed lint reports an unrecognised construct. Fingerprints are
+            # sha256 hex with no whitespace, so word-splitting a single command substitution
+            # is safe and keeps everything inside the block scalar.
+            allow="$(jq -r '.findings[].fingerprint' "$MANIFEST" 2>/dev/null | sort -u)"
+            bad=""
+            for fp in $(jq -r '.[]?.fingerprint // empty' "$PATCH_META" 2>/dev/null); do
+              printf '%s\n' "$allow" | grep -qxF "$fp" || bad="$fp"
+            done
+            if [ -n "$bad" ]; then
+              echo "REFUSE:patch-not-in-manifest — $bad was admitted by no gate" >&2
+              exit 1
+            fi
+          fi
           export GIT_AUTHOR_NAME="$AUTHOR_NAME"
           export GIT_AUTHOR_EMAIL="$AUTHOR_EMAIL"
           export GIT_COMMITTER_NAME="$AUTHOR_NAME"

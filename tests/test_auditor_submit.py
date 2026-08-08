@@ -245,6 +245,31 @@ class SubmitSandbox:
         shutil.rmtree(self.calls)
         self.calls.mkdir()
 
+    def _write_manifest(self):
+        """The gate allowlist, admitting exactly the fingerprints these patches carry.
+
+        E8.2b (vibe-164) W4.3: submit now refuses any patch fingerprint no gate admitted, and
+        refuses outright when the manifest is absent -- failing open there would defeat the
+        allowlist. This harness therefore has to supply one. It mirrors PATCH_META rather than
+        inventing fingerprints, so these tests keep exercising submit's own behaviour instead
+        of the allowlist check.
+        """
+        import json as _json
+        meta = self.patches / "findings.json"
+        fps = []
+        if meta.is_file():
+            try:
+                fps = [f.get("fingerprint") for f in _json.loads(meta.read_text())
+                       if f.get("fingerprint")]
+            except Exception:
+                fps = []
+        p = self.root / "proposal-manifest.json"
+        p.write_text(_json.dumps({
+            "version": 1, "repo": TARGET_REPO,
+            "findings": [{"rule_id": "R", "fingerprint": f, "file": "a.md",
+                          "confidence": "high"} for f in fps]}))
+        return p
+
     def _write_context(self):
         """The relay gates emits, as submit now consumes it.
 
@@ -282,6 +307,7 @@ class SubmitSandbox:
             "PATCH_DIR": str(self.patches), "PATCH_META": str(self.patches / "findings.json"),
             "CLA_AUTHOR_NAME": AUTHOR_NAME, "CLA_AUTHOR_EMAIL": AUTHOR_EMAIL,
             "CONTEXT_FILE": str(self._write_context()),
+            "MANIFEST": str(self._write_manifest()),
         })
         e.update(env or {})
         sh = self.root / "submit.sh"

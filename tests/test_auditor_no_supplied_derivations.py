@@ -53,11 +53,43 @@ TESTS = REPO / "tests"
 FIXTURES = TESTS / "fixtures" / "auditor"
 
 # Values gates derives. A consumer must read these from the relay, never from the environment.
-DERIVED = ["AUDITED_SHA", "BASE_BRANCH", "PATCH_CAP", "EXPECTED_FORK_SLUG"]
+#
+# The first four were the original list, and it was too narrow to catch the thing it was named
+# for: consumers inject FORK_SLUG, while this list checked only EXPECTED_FORK_SLUG -- the name
+# on the PRODUCING side. A scan that watches the producer's vocabulary cannot see the consumer
+# supplying the same answer under its own name.
+DERIVED = ["AUDITED_SHA", "BASE_BRANCH", "PATCH_CAP", "EXPECTED_FORK_SLUG",
+           "FORK_SLUG", "ISSUE", "AUTHOR_NAME", "AUTHOR_EMAIL", "WEEKLY_CAP"]
 
-# Modules allowed to set a given name because they exercise its DERIVATION, not its use.
-# derive-context legitimately supplies the repo variables and trigger inputs gates reads.
-SOURCE_SUITES = {"test_auditor_context.py"}
+# DELIBERATELY NOT IN `DERIVED`: REPO and ISSUE_NUMBER.
+#
+# They are the gates job's TRIGGER INPUTS, and derive-context exports them to $GITHUB_ENV for
+# every later step in that job -- so a gate-block test finding them in the environment is
+# modelling production exactly, not bypassing it. For a consumer in another job they must come
+# from the relay, but that is a per-job distinction this line-based scan cannot draw, and a
+# rule that fires on both would be silenced within a week. The property they need is covered
+# instead by TestTheRealDerivationSatisfiesTheConsumers below, which runs derive-context and
+# feeds its actual output to the consumers with nothing else supplied.
+
+# Per-(module, name) exemptions. This used to be a whole-module pass for
+# test_auditor_context.py, which meant that suite could inject ANY derived value and the scan
+# would say nothing -- an exemption wide enough to hide the class of defect it exists to find.
+# Each entry now names one value in one module and why it is a source rather than an answer.
+ALLOWED = {
+    "test_auditor_context.py": {
+        "WEEKLY_CAP": "a repo variable derive-context reads and validates; this suite drives "
+                      "the derivation itself, so supplying its INPUT is the point",
+        "AUTHOR_NAME": "the AUDITOR_AUTHOR_NAME repo variable under its in-block name; this "
+                       "suite drives the derivation that reads and validates it",
+        "AUTHOR_EMAIL": "the AUDITOR_AUTHOR_EMAIL repo variable under its in-block name; same "
+                        "reason as AUTHOR_NAME above",
+    },
+}
+
+# CLA_AUTHOR_NAME / CLA_AUTHOR_EMAIL need no exemption: they are not in DERIVED, because they
+# are a documented CLA override with precedence over the derived identity (SCHEMAS section 9)
+# — configuration, not an answer the graph must produce. Named here so a future reader does not
+# have to work out whether their absence is deliberate.
 
 # Keys that are answers when they appear in a fixture artifact. commit_sha_at_audit is
 # deliberately absent: it is the registry key the audit stage writes and gates reads, i.e. the
@@ -78,12 +110,13 @@ class TestNoSuppliedDerivations(unittest.TestCase):
         """Channel 1 of 2: environment variables."""
         offenders = []
         for f in _auditor_test_files():
-            if f.name in SOURCE_SUITES:
-                continue
+            exempt = ALLOWED.get(f.name, {})
             for i, line in enumerate(f.read_text(encoding="utf-8").split("\n"), 1):
                 if line.lstrip().startswith("#"):
                     continue
                 for name in DERIVED:
+                    if name in exempt:
+                        continue
                     # a dict entry or kwarg assigning the name as an env var
                     if re.search(rf'["\']{name}["\']\s*:', line):
                         offenders.append(f"{f.name}:{i}: {name} — {line.strip()[:72]}")
@@ -113,3 +146,20 @@ class TestNoSuppliedDerivations(unittest.TestCase):
             len(files), 8,
             f"the scan found only {len(files)} auditor test modules; if the naming convention "
             f"changed it is now scanning almost nothing and will pass regardless")
+
+    def test_no_module_is_exempted_wholesale(self):
+        """The exemption must stay a list of named values, not a list of modules.
+
+        It began as `SOURCE_SUITES = {"test_auditor_context.py"}` -- a whole-module pass, which
+        let that suite inject any derived value at all while the scan reported clean. An
+        exemption wide enough to hide the defect class it guards is worse than none, because it
+        also reports success.
+        """
+        for module, names in ALLOWED.items():
+            self.assertTrue(names, f"{module} is exempted with no named values")
+            for name, reason in names.items():
+                self.assertIn(name, DERIVED,
+                              f"{module} exempts {name}, which the scan does not check anyway")
+                self.assertGreaterEqual(
+                    len(reason), 30,
+                    f"{module}:{name} is exempted without a reason anyone can check")

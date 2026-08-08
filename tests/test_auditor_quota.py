@@ -241,15 +241,112 @@ class TestStrictMode(unittest.TestCase):
                 out.append((i + 1, first, "\n".join(body)))
         return out
 
-    def test_every_run_block_enables_strict_mode(self):
+    def test_every_run_block_enables_strict_mode_as_its_first_command(self):
+        """F11: the helper computed `first` and the assertion then ignored it.
+
+        The old check was `"set -euo pipefail" not in body` -- the marker anywhere in the
+        block. A block that runs five commands and then enables strict mode passes that check
+        while those five commands fail open, which is the whole failure this wave exists to
+        remove. The helper had already computed the first executable command; the assertion
+        just never used it.
+        """
         offenders = [(ln, first[:60]) for ln, first, _ in self._run_blocks()
-                     if "set -euo pipefail" not in _]
+                     if first != "set -euo pipefail"]
         self.assertEqual(
             [], offenders,
-            f"{len(offenders)} run block(s) do not enable strict mode: {offenders[:5]}")
+            f"{len(offenders)} run block(s) do not enable strict mode as their FIRST "
+            f"executable command: {offenders[:5]}")
+
+    def test_the_block_scan_still_sees_the_whole_file(self):
+        """A count, so a scan that quietly stopped matching cannot pass by finding nothing.
+
+        The review measured 20 YAML run blocks against a claim of 22 -- the extra two were
+        `set -euo pipefail` occurrences inside one block, not blocks. An unasserted count is
+        how a shrinking scan stays invisible.
+        """
+        n = len(self._run_blocks())
+        self.assertGreaterEqual(
+            n, 20,
+            f"the strict-mode scan found only {n} run blocks; if the step form changed it is "
+            f"now checking almost nothing and will pass regardless")
 
     def test_no_block_enables_only_set_u(self):
         weak = [ln for ln, _, body in self._run_blocks()
                 if re.search(r"^\s*set -u\s*$", body, re.M)]
         self.assertEqual([], weak,
                          f"blocks still enabling only `set -u` (line numbers): {weak}")
+
+
+class TestStrictModeIsBehavioural(QuotaBase):
+    """W7.2: the failure classes strict mode newly aborts on, executed rather than asserted.
+
+    `test_every_run_block_enables_strict_mode` is structural -- it proves a string is in a
+    position. It cannot show that a command which used to fail open now stops the job, and
+    that is the behavioural change strict mode actually makes. The review's objection was
+    exact: the claim that all 43 newly-aborting commands genuinely should abort was never
+    tested, only asserted.
+
+    One case per failure class, each driving a real block.
+    """
+
+    def _sb(self):
+        sb = Sandbox(registry="registry-audited.json")
+        self.addCleanup(sb.cleanup)
+        return sb
+
+    def _emit_env(self, sb, context_text=None, open_prs="[]"):
+        ctx = sb.root / "context.json"
+        ctx.write_text(context_text if context_text is not None else json.dumps({
+            "version": 1, "repo": TARGET, "issue": "42",
+            "expected_fork_slug": "vibe-bot/claude-toolkit", "audited_sha": "cafebabe",
+            "base_branch": "main", "author_name": "n", "author_email": "e@x.invalid",
+            "weekly_cap": 2, "patch_cap": 3}))
+        prs = sb.root / "open-prs.json"
+        prs.write_text(open_prs)
+        return {"REPO": TARGET, "OWNER": TARGET.split("/")[0],
+                "SIDECAR": str(FIX / "findings-sidecar.jsonl"),
+                "CODE_DIR": str(REPO_ROOT), "CONTEXT_FILE": str(ctx),
+                "MANIFEST": str(sb.root / "proposal-manifest.json"),
+                "OPEN_PRS_FILE": str(prs), "PLANNED_COUNT": "4"}
+
+    def test_malformed_json_input_aborts_rather_than_reading_as_empty(self):
+        # jq on a non-JSON file exits non-zero and prints nothing. Under the old `set -u` the
+        # substitution simply became "", so the cap read as empty and the block carried on.
+        sb = self._sb()
+        r = sb.run(self.block("emit-manifest"),
+                   env=self._emit_env(sb, context_text="<html>502 Bad Gateway</html>"))
+        self.assertNotEqual(0, r.returncode,
+                            "a malformed relay was read as an absent value and the block "
+                            "continued; that is the fail-open strict mode is meant to end")
+        self.assertIn("REFUSE:context-patch-cap-unresolvable", r.stdout + r.stderr)
+
+    def test_a_missing_required_file_aborts(self):
+        sb = self._sb()
+        env = self._emit_env(sb)
+        env["CONTEXT_FILE"] = str(sb.root / "does-not-exist.json")
+        r = sb.run(self.block("emit-manifest"), env=env)
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("REFUSE:context-relay-missing-unresolvable", r.stdout + r.stderr)
+
+    def test_an_api_failure_aborts_rather_than_yielding_an_empty_answer(self):
+        # The open-PR fetch: `gh` exits non-zero. Before F9 this class of failure was
+        # indistinguishable from "no open PRs", which is the strongest form of failing open.
+        sb = self._sb()
+        gh = sb.bin / "gh"
+        gh.write_text("#!/usr/bin/env bash\necho 'HTTP 403' >&2\nexit 1\n")
+        gh.chmod(0o755)
+        r = sb.run(self.block("open-prs", marker="stage-logic"),
+                   env={"REPO": TARGET, "GITHUB_ENV": str(sb.root / "gh.env")})
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("REFUSE:open-prs-unavailable", r.stdout + r.stderr)
+
+    def test_a_failing_early_pipeline_stage_is_not_hidden_by_a_successful_last_one(self):
+        # `pipefail` is the half of the flag set with no structural evidence at all: a block
+        # can carry `set -euo pipefail` and still never run a pipeline whose FIRST stage
+        # fails. This drives one directly, in the same shell dialect the blocks use.
+        script = "set -euo pipefail\nfalse | cat\necho REACHED\n"
+        r = self._sb().run(script)
+        self.assertNotEqual(0, r.returncode,
+                            "a failing first pipeline stage was masked by a successful last "
+                            "stage; pipefail is not in effect")
+        self.assertNotIn("REACHED", r.stdout)

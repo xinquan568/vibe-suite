@@ -347,10 +347,13 @@ class SubmitSandbox:
             "GH_LOG": str(self.log), "GH_CALLS": str(self.calls),
             "GH_TOKEN": "stub-pat", "GH_TOKEN_OVERRIDE": "stub-pat", "PAT_SECRET": "stub-pat",
             "REPO": TARGET_REPO, "OWNER": TARGET_REPO.split("/")[0],
-            "ISSUE_NUMBER": "42", "ISSUE": "42",
+            "ISSUE_NUMBER": "42",
             "HEAD_SHA": self.head_sha,
             "TARGET_DIR": str(self.target), "BRANCH": BRANCH,
-            "FORK_REMOTE": str(self.fork), "FORK_SLUG": "vibe-suite-bot/claude-toolkit",
+            # ISSUE and FORK_SLUG are NOT supplied: context.json carries `issue` and
+            # `expected_fork_slug`, and submit is contracted to read them from there. Handing
+            # them over as loose env vars is the injection the acceptance clause forbids (F10).
+            "FORK_REMOTE": str(self.fork),
             "DATA_REMOTE": str(self.data_remote), "DATA_DIR": str(self.data),
             "DATA_BRANCH": "auditor-data",
             "REGISTRY": str(self.data / "registry" / "repos.json"),

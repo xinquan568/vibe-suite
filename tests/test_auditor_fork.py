@@ -305,7 +305,10 @@ class TestPatIdentityIsProvenBeforeCreation(unittest.TestCase):
         (patches / "findings.json").write_text("[]")
         return sb.run(self.block(), env={
             "REPO": TARGET, "CONTEXT_FILE": str(ctx), "MANIFEST": str(man),
-            "FORK_SLUG": f"{BOT}/claude-toolkit", "PAT_SECRET": "stub-pat",
+            # FORK_SLUG is NOT supplied: submit reads expected_fork_slug from the relay it is
+            # contracted to read. Injecting it here handed the graph its own answer and made
+            # the entry validation untestable (F10).
+            "PAT_SECRET": "stub-pat",
             "GH_CANNED_API_USER": str(u),
             "PATCH_DIR": str(patches), "PATCH_META": str(patches / "findings.json"),
             "TARGET_DIR": str(sb.root / "_target")}), sb

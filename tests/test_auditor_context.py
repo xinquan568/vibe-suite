@@ -250,6 +250,66 @@ class TestTheRealTriggersReachTheGraph(TriggerBase):
         self.assertIn("REFUSE:context-repo-ambiguous", r.stdout + r.stderr)
 
 
+class TestTheRealDerivationSatisfiesTheConsumers(TriggerBase):
+    """F10's composition case: derive-context → the captured context.json → the consumers.
+
+    Every consumer test in this file (and in the manifest, quota, submit and fork suites)
+    hand-writes a context.json "shaped like the one gates emits". That is legitimate for the
+    refusal cases -- proving a consumer refuses when the relay omits `audited_sha` needs a
+    relay with `audited_sha` omitted, which only a crafted file can provide. But if every
+    relay in the suite is hand-written, nothing ever checks that the shape the producer
+    actually writes is the shape the consumers actually read. The two could drift apart key by
+    key and the suite would stay green.
+
+    So this runs the REAL derivation through the REAL trigger wiring and feeds its output,
+    byte for byte, to the consumers -- with no derived value supplied anywhere.
+    """
+
+    def produced_context(self):
+        r, sb = self.run_trigger("issues", event={"number": 901, "labels": ["contribute-approved"]})
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        p = sb.root / "context.json"
+        self.assertTrue(p.is_file(), "derive-context produced no relay to compose over")
+        return p, sb
+
+    def test_the_produced_relay_carries_every_key_the_consumers_read(self):
+        p, sb = self.produced_context()
+        produced = json.loads(p.read_text())
+        # The keys consumers actually `jq` out of the relay, read from the workflow rather
+        # than from memory -- a list written by hand is a list that drifts.
+        text = WF.read_text(encoding="utf-8")
+        read = set(re.findall(r"jq -r '\.([a-z_]+) // empty' \"\$\{?CONTEXT_FILE", text))
+        read |= set(re.findall(r"ctx ([a-z_]+)\)", text))
+        self.assertTrue(read, "found no relay reads to check against; the pattern changed")
+        missing = sorted(k for k in read if k not in produced)
+        self.assertEqual(
+            [], missing,
+            f"the consumers read {missing} from the relay and derive-context does not write "
+            f"them. Every hand-written context.json in the suite supplies them, so no other "
+            f"test can see this.")
+
+    def test_a_consumer_accepts_the_produced_relay_unchanged(self):
+        p, sb = self.produced_context()
+        # submit's entry validation, given ONLY the produced file and the API boundary stubs.
+        # No AUDITED_SHA, no BASE_BRANCH, no FORK_SLUG, no author, no cap.
+        u = sb.root / "canned-user"
+        u.write_text("vibe-bot\n")
+        block = extract(WF, "logic", "submit-entry") or extract(WF, "logic", "submit")
+        if block is None:
+            self.skipTest("submit's entry block is not separately extractable")
+        r = sb.run(block, env={"CONTEXT_FILE": str(p), "PAT_SECRET": "stub-pat",
+                               "GH_CANNED_API_USER": str(u),
+                               "TARGET_DIR": str(sb.root / "_target")})
+        for name in ("relay-missing", "audited-sha-unresolvable", "base-branch-unresolvable",
+                     "author-identity-unresolvable", "patch-cap-unresolvable",
+                     "issue-unresolvable", "fork-slug-unresolvable"):
+            self.assertNotIn(
+                f"REFUSE:context-{name}", r.stdout + r.stderr,
+                f"the consumer refused '{name}' against a relay the real derivation produced. "
+                f"The producer and the consumer disagree about the relay's shape, and every "
+                f"hand-written context.json in the suite hides it.")
+
+
 class TestTheStepBindsEveryValueItReads(TriggerBase):
     """A value the block reads from the environment must be bound by the step's `env:`.
 

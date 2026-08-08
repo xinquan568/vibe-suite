@@ -289,7 +289,8 @@ class TestSubmitValidatesAgainstTheAllowlist(unittest.TestCase):
                "PATCH_DIR": str(patches), "PATCH_META": str(patches / "findings.json"),
                "TARGET_DIR": str(sb.root / "_target"),
                # F2/F3: submit validates issue, fork slug and PAT identity at ENTRY now.
-               "FORK_SLUG": "vibe-bot/claude-toolkit", "PAT_SECRET": "stub-pat",
+               # The slug comes from the relay, not from here -- see F10.
+               "PAT_SECRET": "stub-pat",
                "GH_CANNED_API_USER": str(u)}
         return sb.run(self.block(), env=env)
 
@@ -317,7 +318,7 @@ class TestSubmitValidatesAgainstTheAllowlist(unittest.TestCase):
             "weekly_cap": 2, "patch_cap": 3}))
         r = sb.run(self.block(), env={
             "REPO": TARGET, "CONTEXT_FILE": str(ctx),
-            "FORK_SLUG": "vibe-bot/claude-toolkit", "PAT_SECRET": "stub-pat",
+            "PAT_SECRET": "stub-pat",
             "GH_CANNED_API_USER": str(_pat_user(sb)),
             "MANIFEST": str(sb.root / "absent.json"),
             "PATCH_DIR": str(patches), "PATCH_META": str(patches / "findings.json"),
@@ -358,7 +359,7 @@ class TestProducerFeedsConsumerUnchanged(ManifestBase):
             "weekly_cap": 2, "patch_cap": 3}))
         r2 = sb.run(self.submit_block(), env={
             "REPO": TARGET, "CONTEXT_FILE": str(ctx),
-            "FORK_SLUG": "vibe-bot/claude-toolkit", "PAT_SECRET": "stub-pat",
+            "PAT_SECRET": "stub-pat",
             "GH_CANNED_API_USER": str(_pat_user(sb)),
             "MANIFEST": str(sb.root / "proposal-manifest.json"),
             "PATCH_DIR": str(patches), "PATCH_META": str(patches / "findings.json"),
@@ -411,7 +412,7 @@ class TestProducerFeedsConsumerUnchanged(ManifestBase):
             "weekly_cap": 2, "patch_cap": 3}))
         r2 = sb.run(self.submit_block(), env={
             "REPO": TARGET, "CONTEXT_FILE": str(ctx),
-            "FORK_SLUG": "vibe-bot/claude-toolkit", "PAT_SECRET": "stub-pat",
+            "PAT_SECRET": "stub-pat",
             "GH_CANNED_API_USER": str(_pat_user(sb)),
             "MANIFEST": str(sb.root / "proposal-manifest.json"),
             "PATCH_DIR": str(patches), "PATCH_META": str(patches / "findings.json"),

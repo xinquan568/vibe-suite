@@ -6,6 +6,7 @@ the harness extracts and executes each with fixture inputs. This IS the "gate lo
 where scriptable" acceptance clause (the exhaustive combination matrix stays with E8.7).
 """
 import json
+import shutil
 import unittest
 from pathlib import Path
 
@@ -76,17 +77,38 @@ class TestNoExternalPRs(GateBase):
 class TestCla(GateBase):
     name = "cla"
 
+    def relay(self, author=None):
+        """A context.json, the way production delivers the author identity to this gate.
+
+        These tests used to set AUTHOR_NAME/AUTHOR_EMAIL directly in the environment. F3 moved
+        the gate to read them from the relay, so the env injection was handing the gate an
+        answer it is contracted to look up -- and the derived-value scan could not see it,
+        because the scan only watched the producer-side names (F10).
+        """
+        import tempfile
+        d = tempfile.mkdtemp(prefix="auditor-cla-")
+        self.addCleanup(shutil.rmtree, d, True)
+        ctx = {"version": 1, "repo": "acme/claude-toolkit", "issue": "42",
+               "expected_fork_slug": "vibe-bot/claude-toolkit", "audited_sha": "cafebabe",
+               "base_branch": "main", "weekly_cap": 2, "patch_cap": 3}
+        if author:
+            ctx["author_name"], ctx["author_email"] = author
+        p = Path(d) / "context.json"
+        p.write_text(json.dumps(ctx))
+        return str(p)
+
     def test_cla_org_without_attestation_skips_with_template(self):
-        r, _, sb = self.run_gate({"OWNER": "google", "CLA_SIGNED": "", "AUTHOR_NAME": "",
-                                  "AUTHOR_EMAIL": ""})
+        r, _, sb = self.run_gate({"OWNER": "google", "CLA_SIGNED": "",
+                                  "CONTEXT_FILE": self.relay(author=None)})
         self.assertEqual(r.returncode, 0)
         self.assertIn("SKIP:cla", r.stdout)
         self.assertIn("cla-gate-messages", r.stdout)
         sb.cleanup()
 
     def test_attested_cla_org_passes(self):
-        r, _, sb = self.run_gate({"OWNER": "google", "CLA_SIGNED": "true",
-                                  "AUTHOR_NAME": "Jane Dev", "AUTHOR_EMAIL": "jane@example.com"})
+        r, _, sb = self.run_gate({
+            "OWNER": "google", "CLA_SIGNED": "true",
+            "CONTEXT_FILE": self.relay(author=("Jane Dev", "jane@example.com"))})
         self.assertIn("PASS", r.stdout)
         sb.cleanup()
 

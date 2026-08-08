@@ -48,11 +48,20 @@ class ManifestBase(unittest.TestCase):
             "expected_fork_slug": "vibe-bot/claude-toolkit", "audited_sha": "cafebabe",
             "base_branch": "main", "author_name": "n", "author_email": "e@x.invalid",
             "weekly_cap": 2, "patch_cap": patch_cap}))
+        # The open-PR list is an API ANSWER, not a derived value -- the same class as the
+        # canned `gh api` responses elsewhere. It is supplied because the block now REFUSES
+        # without it (F9): the duplicate filter's input was bound nowhere in the workflow, so
+        # filter 3 was skipped on every run while the manifest reported itself complete.
+        # An empty list is the honest default here: these fixtures assert what the OTHER
+        # filters do, and nothing in them should be dropped as a duplicate.
+        open_prs = sb.root / "open-prs.json"
+        open_prs.write_text("[]")
         base = {"REPO": TARGET, "OWNER": TARGET.split("/")[0],
                 "SIDECAR": str(FIX / sidecar),
                 "CODE_DIR": str(REPO_ROOT), "CONTEXT_FILE": str(ctx),
                 "MANIFEST": str(sb.root / "proposal-manifest.json"),
                 "DISCLOSURE": str(sb.root / "disclosure.json"),
+                "OPEN_PRS_FILE": str(open_prs),
                 "PLANNED_COUNT": "4", "FIRST_CONTACT": "true"}
         base.update(env or {})
         r = sb.run(self.block(name), env=base)
@@ -291,11 +300,14 @@ class TestProducerFeedsConsumerUnchanged(ManifestBase):
             "expected_fork_slug": "vibe-bot/claude-toolkit", "audited_sha": "cafebabe",
             "base_branch": "main", "author_name": "n", "author_email": "e@x.invalid",
             "weekly_cap": 2, "patch_cap": 3}))
+        open_prs = sb.root / "open-prs.json"
+        open_prs.write_text("[]")  # a real empty answer; see run_emit on why it is supplied
         env = {"REPO": TARGET, "OWNER": TARGET.split("/")[0],
                "SIDECAR": str(FIX / "findings-sidecar.jsonl"),
                "CODE_DIR": str(REPO_ROOT), "CONTEXT_FILE": str(ctx),
                "MANIFEST": str(sb.root / "proposal-manifest.json"),
                "DISCLOSURE": str(sb.root / "disclosure.json"),
+               "OPEN_PRS_FILE": str(open_prs),
                "PLANNED_COUNT": "4", "FIRST_CONTACT": "true"}
         rd = sb.run(self.block("disclosure-routing"), env=env)
         self.assertEqual(0, rd.returncode, rd.stdout + rd.stderr)

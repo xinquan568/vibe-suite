@@ -173,6 +173,43 @@ jobs:
           WEEKLY_CAP: ${{ vars.WEEKLY_CAP }}
           GH_TOKEN: ${{ github.token }}
           # /env-for
+      - name: fetch the target's open pull requests
+        run: |
+          # stage-logic:open-prs
+          set -euo pipefail
+          # F9: this file is the duplicate filter's ONLY input, and nothing in the workflow
+          # ever created it. Both `gate:duplicate-pr` and `emit-manifest` read OPEN_PRS_FILE
+          # and both documented a fail-open branch for when it is missing — and it was missing
+          # on every run, so the filter never once ran. A filter whose input is never bound is
+          # not lenient, it is absent, and the gate ladder was counting it as present.
+          #
+          # This job holds `contents: read` and no PAT: listing pull requests is a read.
+          REPO="${REPO:?}"
+          OPEN_PRS_FILE="${OPEN_PRS_FILE:-${GITHUB_WORKSPACE:-$PWD}/open-prs.json}"
+          refuse_prs() { echo "REFUSE:open-prs-unavailable — $1" >&2; exit 1; }
+          raw=""
+          # The status is taken from the command ITSELF, never through a pipe: `gh … | jq`
+          # records jq's status, so a 403 would read as success and the fabricated empty list
+          # would sail into the filters.
+          if ! raw="$(gh pr list --repo "$REPO" --state open --limit 100 \
+                        --json number,files 2>&1)"; then
+            refuse_prs "gh pr list failed: $(printf '%s' "$raw" | head -c 200)"
+          fi
+          # An unparseable body — a 502 HTML page, a truncated response — is a failure too.
+          # An empty ARRAY is not: that is the target genuinely having no open pull requests,
+          # and it must reach the filters as a real answer. Conflating the two is precisely
+          # what made this defect invisible.
+          if ! printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            refuse_prs "response is not a JSON array: $(printf '%s' "$raw" | head -c 200)"
+          fi
+          printf '%s' "$raw" > "$OPEN_PRS_FILE"
+          echo "OPEN_PRS_FILE=$OPEN_PRS_FILE" >> "${GITHUB_ENV:-/dev/null}"
+          echo "open-prs: $(jq 'length' "$OPEN_PRS_FILE") open pull request(s) on $REPO"
+          # /stage-logic
+        # env-for:open-prs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # /env-for
       - name: gate security-blocked
         run: |
           # gate:security-blocked
@@ -316,9 +353,14 @@ jobs:
           fi
           SIDECAR="${SIDECAR:?}"
           OPEN_PRS_FILE="${OPEN_PRS_FILE:-}"
+          # F9: this used to PASS with a fail-open note. It was never a lenient path — the
+          # variable was bound nowhere, so this branch was the ONLY branch, and the gate did
+          # nothing while reporting PASS. Failing open here means opening a second pull request
+          # against a file an open PR already touches, on somebody else's repository. The list
+          # being unavailable is a reason to stop, not to proceed blind.
           if [ -z "$OPEN_PRS_FILE" ] || [ ! -r "$OPEN_PRS_FILE" ]; then
-            echo "PASS (fail-open: the open-PR list is unavailable; keeping every finding rather than silently dropping)"
-            exit 0
+            echo "REFUSE:open-prs-unavailable — the open-PR list is missing, so the duplicate filter cannot run" >&2
+            exit 1
           fi
           while IFS= read -r line; do
             if [ -z "$line" ]; then continue; fi
@@ -412,6 +454,17 @@ jobs:
           cap="$(jq -r '.patch_cap // empty' "$CONTEXT_FILE" 2>/dev/null || true)"
           [ -n "$cap" ] || { echo "REFUSE:context-patch-cap-unresolvable" >&2; exit 1; }
 
+          # F9: filter 3 below is the duplicate check, and its input was bound nowhere, so the
+          # per-item guard `[ -f "$OPEN_PRS_FILE" ]` was false for every item on every run. The
+          # check is hoisted here and made fatal: an absent list means the manifest cannot be
+          # trusted to exclude duplicates, and a manifest that silently admits them is worse
+          # than no manifest, because submit treats it as an allowlist.
+          OPEN_PRS_FILE="${OPEN_PRS_FILE:-}"
+          if [ -z "$OPEN_PRS_FILE" ] || [ ! -r "$OPEN_PRS_FILE" ]; then
+            echo "REFUSE:open-prs-unavailable — the manifest cannot exclude duplicates without the open-PR list" >&2
+            exit 1
+          fi
+
           kept="$(mktemp)"
           n=0
           remaining=0
@@ -428,10 +481,10 @@ jobs:
               echo "EXCLUDE:$(printf '%s' "$line" | jq -r '.rule_id') — on the disclosure path"
               continue
             fi
-            # Filter 3 -- duplicates against open PRs on the target, when that list is
-            # available. Unavailable means fail-open here, matching gate:duplicate-pr.
+            # Filter 3 -- duplicates against open PRs on the target. The list's availability
+            # was checked once, fatally, before this loop (F9); reaching here means it is real.
             f="$(printf '%s' "$line" | jq -r '.file // ""')"
-            if [ -n "${OPEN_PRS_FILE:-}" ] && [ -f "${OPEN_PRS_FILE}" ] && [ -n "$f" ]; then
+            if [ -n "$f" ]; then
               if jq -e --arg f "$f" '[ .[] | select([.files[].path] | index($f)) ] | length > 0' \
                    "$OPEN_PRS_FILE" >/dev/null 2>&1; then
                 echo "EXCLUDE:$f — already modified by an open PR on the target"

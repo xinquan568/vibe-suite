@@ -161,11 +161,114 @@ class TestDuplicatePR(GateBase):
         self.assertIn("DROP:", r.stdout)  # commands/deploy.md overlaps open PR 44
         sb.cleanup()
 
-    def test_api_error_fails_open(self):
+    def test_an_unavailable_list_refuses_instead_of_failing_open(self):
+        """This test previously asserted the opposite, and that was the defect.
+
+        `OPEN_PRS_FILE` was bound nowhere in the workflow, so on every real run the gate took
+        this branch and the duplicate filter did nothing at all -- while a test named
+        `test_api_error_fails_open` certified the behaviour as intended. Fail-open here means
+        opening a second pull request against a file an open PR already touches, on somebody
+        else's repository. The list being unavailable is a reason to stop, not to proceed
+        blind. Step-8 finding 9.
+        """
         r, _, sb = self.run_gate({"OPEN_PRS_FILE": "/nonexistent/prs.json"})
-        self.assertEqual(r.returncode, 0)
+        self.assertNotEqual(r.returncode, 0,
+                            "an unreadable open-PR list passed the gate; duplicates ship")
+        self.assertIn("REFUSE:open-prs-unavailable", r.stdout + r.stderr)
+        sb.cleanup()
+
+    def test_an_empty_list_is_a_real_answer_and_drops_nothing(self):
+        # Distinct from unavailable: the target genuinely has no open PRs, so nothing is a
+        # duplicate. Conflating the two is what made the failure mode invisible.
+        sb0 = Sandbox()
+        empty = sb0.root / "empty-prs.json"
+        empty.write_text("[]")
+        r, _, sb = self.run_gate({"OPEN_PRS_FILE": str(empty)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("DROP:", r.stdout)
         self.assertIn("PASS", r.stdout)
+        sb.cleanup()
+        sb0.cleanup()
+
+
+class TestTheOpenPrListIsActuallyProduced(unittest.TestCase):
+    """F9's headline: the filter's input was never created.
+
+    Both `gate:duplicate-pr` and `emit-manifest` read OPEN_PRS_FILE, and no step in the
+    workflow ever set it. Both therefore took their documented fail-open branch on every
+    single run, permanently. A filter whose input is never bound is not a lenient filter --
+    it is an absent one, and the gate ladder counted it as present.
+    """
+
+    def block(self):
+        b = extract(WF, "stage-logic", "open-prs")
+        self.assertIsNotNone(
+            b, "no `# stage-logic:open-prs` block. Something must FETCH the target's open "
+               "pull requests and bind OPEN_PRS_FILE, or the duplicate filters are inert.")
+        return b
+
+    def _gh(self, sb, payload):
+        f = sb.root / "canned-prs"
+        f.write_text(payload)
+        m = sb.root / "canned-map"
+        m.write_text("pr list\t" + str(f) + "\n")
+        return {"GH_CANNED_MAP": str(m)}
+
+    def test_the_workflow_binds_open_prs_file(self):
+        text = WF.read_text(encoding="utf-8")
+        self.assertRegex(
+            text, r"OPEN_PRS_FILE=\S",
+            "OPEN_PRS_FILE is read but never assigned anywhere in the workflow")
+
+    def test_a_successful_fetch_writes_the_list_and_exports_the_path(self):
+        sb = Sandbox()
+        env = {"REPO": "acme/claude-toolkit", "GITHUB_ENV": str(sb.root / "gh.env")}
+        env.update(self._gh(sb, '[{"number":44,"files":[{"path":"commands/deploy.md"}]}]'))
+        r = sb.run(self.block(), env=env)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        exported = (sb.root / "gh.env").read_text()
+        self.assertIn("OPEN_PRS_FILE=", exported,
+                      "the path was not exported to $GITHUB_ENV, so the later steps in this "
+                      "job -- gate:duplicate-pr and emit-manifest -- still see nothing")
+        path = [l.split("=", 1)[1] for l in exported.splitlines()
+                if l.startswith("OPEN_PRS_FILE=")][0]
+        self.assertEqual(44, json.loads(Path(path).read_text())[0]["number"])
+        sb.cleanup()
+
+    def test_an_empty_result_is_written_rather_than_treated_as_a_failure(self):
+        sb = Sandbox()
+        env = {"REPO": "acme/claude-toolkit", "GITHUB_ENV": str(sb.root / "gh.env")}
+        env.update(self._gh(sb, "[]"))
+        r = sb.run(self.block(), env=env)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        path = [l.split("=", 1)[1] for l in (sb.root / "gh.env").read_text().splitlines()
+                if l.startswith("OPEN_PRS_FILE=")][0]
+        self.assertEqual([], json.loads(Path(path).read_text()))
+        sb.cleanup()
+
+    def test_a_transport_failure_refuses_rather_than_writing_an_empty_list(self):
+        # The whole point of finding 9: a rate-limited or unauthenticated call must not read
+        # as "this repo has no open PRs". Writing [] there is indistinguishable downstream
+        # from a genuine empty answer, and every duplicate ships.
+        sb = Sandbox()
+        failing = sb.bin / "gh"
+        failing.write_text("#!/usr/bin/env bash\necho 'HTTP 403: rate limit exceeded' >&2\nexit 1\n")
+        failing.chmod(0o755)
+        r = sb.run(self.block(), env={"REPO": "acme/claude-toolkit",
+                                      "GITHUB_ENV": str(sb.root / "gh.env")})
+        self.assertNotEqual(0, r.returncode,
+                            "a failed API call was treated as success; the duplicate filter "
+                            "would run against a fabricated empty list")
+        self.assertIn("REFUSE:open-prs-unavailable", r.stdout + r.stderr)
+        sb.cleanup()
+
+    def test_unparseable_output_refuses_too(self):
+        sb = Sandbox()
+        env = {"REPO": "acme/claude-toolkit", "GITHUB_ENV": str(sb.root / "gh.env")}
+        env.update(self._gh(sb, "<html>502 Bad Gateway</html>"))
+        r = sb.run(self.block(), env=env)
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("REFUSE:open-prs-unavailable", r.stdout + r.stderr)
         sb.cleanup()
 
 

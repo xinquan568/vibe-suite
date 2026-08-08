@@ -20,6 +20,7 @@ import unittest
 from pathlib import Path
 
 from tests.test_auditor_state_machine import Sandbox, extract, FIX
+from tests.test_auditor_composition import GIT_ENV, make_data_repo, remote_file
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WF = REPO_ROOT / "auditor" / "workflows" / "auditor-contribute.yml"
@@ -171,6 +172,80 @@ class TestOrphanedForkIsRecordedAndNeverDeleted(ForkBase):
         ev = [e for e in sb.events() if e.get("event") == "orphaned_fork"][0]
         self.assertEqual("owner_matches", ev["data"]["invariant_failed"])
         self.assertEqual(f"{BOT}/claude-toolkit", ev["data"]["fork_slug"])
+
+
+class TestTheOrphanRecordSurvivesTheRunner(ForkBase):
+    """F7, round 2: durability means a BARE REMOTE, not the runner's working copy.
+
+    The tests above read `Sandbox.events()`, which is the local checkout -- and the sandbox's
+    data dir is not a git repository at all, so the commit-and-push branch never executed in
+    any of them. They therefore proved the append and nothing about the durability the
+    never-delete policy actually depends on: a fork left under the bot's account with no
+    record anywhere is exactly the state a human cannot clean up.
+
+    And on the real failure path a failed push only warned. A warning scrolls past in a job
+    log nobody reads; the fork stays forever.
+    """
+
+    def data_repo(self, sb):
+        return make_data_repo(sb)
+
+    def run_failed_invariant(self, block_push=False, extra=None):
+        sb = Sandbox(registry="registry-audited.json")
+        self.addCleanup(sb.cleanup)
+        bare = self.data_repo(sb)
+        if block_push:
+            # A pre-receive hook that always rejects: a remote that will not take the write,
+            # which is what a permissions failure or a protected branch looks like from here.
+            hook = Path(bare) / "hooks" / "pre-receive"
+            hook.write_text("#!/bin/sh\necho 'remote rejected' >&2\nexit 1\n")
+            hook.chmod(0o755)
+        m = sb.root / "map"
+        f = canned(sb, "fork", {"full_name": "someone-else/claude-toolkit", "fork": True,
+                                "parent": {"full_name": TARGET}})
+        m.write_text(f"api repos/{BOT}/claude-toolkit\t{f}\n")
+        env = {"REPO": TARGET, "OWNER": TARGET.split("/")[0],
+               "CONTEXT_FILE": str(self.ctx(sb)), "GH_CANNED_MAP": str(m),
+               "EVENT_LOG": str(sb.data / "ledgers" / "events.jsonl"),
+               "OUTCOME_DIR": str(sb.root / "_outcomes"),
+               "DATA_DIR": str(sb.data)}
+        env.update(GIT_ENV)
+        env.update(extra or {})
+        r = sb.run(self.block("verify-fork", marker="stage-logic"), env=env)
+        return r, sb, bare
+
+    def test_the_record_reaches_the_bare_remote(self):
+        r, sb, bare = self.run_failed_invariant()
+        pushed = remote_file(bare, "ledgers/events.jsonl")
+        self.assertIn("orphaned_fork", pushed,
+                      "the orphan record never left the runner. The fork exists under the "
+                      "bot account and auditor-data records nothing about it.")
+
+    def test_an_unpushable_record_is_relayed_rather_than_warned_about(self):
+        r, sb, bare = self.run_failed_invariant(block_push=True)
+        relay = Path(sb.root) / "_outcomes" / "orphaned-fork.json"
+        self.assertTrue(
+            relay.is_file(),
+            "the push failed and the run printed a warning. A warning in a job log is not a "
+            "record: finalize is the job that persists outcomes, so hand it one.")
+        doc = json.loads(relay.read_text())
+        self.assertEqual(f"{BOT}/claude-toolkit", doc["data"]["fork_slug"])
+        self.assertEqual("orphaned_fork", doc["event"])
+
+    def test_the_push_is_retried_before_it_is_given_up_on(self):
+        # A non-force push most often fails because a concurrent writer moved the branch.
+        # One attempt turns a routine race into a permanently unrecorded orphan.
+        r, sb, bare = self.run_failed_invariant(block_push=True)
+        self.assertGreaterEqual(
+            (r.stdout + r.stderr).count("retry"), 1,
+            "no retry was attempted before giving up on the durable record")
+
+    def test_it_still_refuses_and_still_deletes_nothing(self):
+        r, sb, bare = self.run_failed_invariant(block_push=True)
+        self.assertNotEqual(0, r.returncode)
+        calls = " ".join(sb.gh_calls())
+        for destructive in ("repo delete", "-X DELETE", "--method DELETE"):
+            self.assertNotIn(destructive, calls)
 
 
 class TestForkSlugNeverFallsBackToTheTarget(unittest.TestCase):

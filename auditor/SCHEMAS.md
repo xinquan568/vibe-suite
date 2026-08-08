@@ -356,6 +356,15 @@ filters have run, so it names exactly the findings that survived them.
 | version | int, currently `1` |
 | repo | target `owner/name` |
 | findings | array of `{rule_id, fingerprint, file, confidence}` — the surviving set |
+| quota_exhausted | bool — `true` when the cap filter dropped at least one admitted finding |
+| remaining_count | int — how many admitted findings the cap dropped; `0` when it dropped none |
+
+The quota pair rides here rather than in `context.json` because `context.json` is written once
+by `derive-context`, *before* any filtering, and is contractually immutable — while the quota is
+a result the filter computes. `finalize` reads the pair to decide whether to raise an umbrella
+issue for work that was real and admitted but exceeded the budget. Findings dropped by the
+disclosure or duplicate filters are deliberately **not** counted: they are never going to be
+pull requests, so an umbrella about them would describe work nobody is waiting for.
 
 Contract point: `submit` MUST validate every patch fingerprint against this allowlist and
 refuse any fingerprint absent from it. Deterministic filtering is thereby *enforced*, not

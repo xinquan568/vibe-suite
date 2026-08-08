@@ -14,6 +14,7 @@ the manifest. If it were, submit would open a public PR carrying the very vulner
 disclosure path exists to keep private.
 """
 import json
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -129,6 +130,80 @@ class TestDisclosureArtifact(ManifestBase):
         self.assertNotIn("BUG-BROKEN-REF", rules)
 
 
+class TestTheContractAndTheEmitterAgree(ManifestBase):
+    """F13: SCHEMAS.md is the contract, so it must describe what is actually written.
+
+    The two halves drifted in opposite directions. The disclosure emitter wrote
+    `{rule_id, severity, file}` while SCHEMAS declared `{rule_id, fingerprint, severity}` --
+    fixed in round 1. And `quota_exhausted` / `remaining_count` were added to
+    proposal-manifest.json as a declared plan deviation and never written down, which is the
+    half that came back `partially_closed`.
+
+    Both directions are drift, and a substring test cannot see either: `assertIn("findings")`
+    passes whatever the emitter does. These compare the documented field SET against the
+    emitted one, so an undocumented addition fails as loudly as a missing one.
+    """
+
+    SCHEMAS = REPO_ROOT / "auditor" / "SCHEMAS.md"
+
+    def documented_fields(self, heading):
+        """The first column of the markdown table under `### <heading>` in section 14."""
+        text = self.SCHEMAS.read_text(encoding="utf-8")
+        m = re.search(rf"^### `{re.escape(heading)}`\s*$(.*?)(?=^### |^## |\Z)",
+                      text, re.M | re.S)
+        self.assertIsNotNone(m, f"SCHEMAS.md has no `### {heading}` subsection")
+        fields = []
+        for line in m.group(1).split("\n"):
+            line = line.strip()
+            if not line.startswith("|") or line.startswith("|---"):
+                continue
+            cell = line.strip("|").split("|")[0].strip().strip("`")
+            if cell and cell.lower() != "field":
+                fields.append(cell)
+        self.assertTrue(fields, f"no field table under `### {heading}`")
+        return set(fields)
+
+    def documented_member_shape(self, heading, field):
+        """The `{a, b, c}` shape named in that field's Meaning cell."""
+        text = self.SCHEMAS.read_text(encoding="utf-8")
+        m = re.search(rf"^### `{re.escape(heading)}`\s*$(.*?)(?=^### |^## |\Z)",
+                      text, re.M | re.S)
+        row = re.search(rf"^\|\s*{re.escape(field)}\s*\|(.*)$", m.group(1), re.M)
+        self.assertIsNotNone(row, f"`{heading}` documents no `{field}` row")
+        shape = re.search(r"\{([^}]*)\}", row.group(1))
+        self.assertIsNotNone(shape, f"`{field}` names no member shape")
+        return {p.strip().strip("`") for p in shape.group(1).split(",") if p.strip()}
+
+    def test_the_manifest_top_level_matches_the_contract(self):
+        r, sb = self.run_emit()
+        emitted = set(self.manifest(sb))
+        documented = self.documented_fields("proposal-manifest.json")
+        self.assertEqual(
+            documented, emitted,
+            f"SCHEMAS §14 and the emitter disagree.\n"
+            f"  documented but not emitted: {sorted(documented - emitted)}\n"
+            f"  emitted but not documented: {sorted(emitted - documented)}")
+
+    def test_the_manifest_finding_shape_matches_the_contract(self):
+        r, sb = self.run_emit()
+        findings = self.manifest(sb)["findings"]
+        self.assertTrue(findings, "no findings survived; the shape assertion proves nothing")
+        self.assertEqual(self.documented_member_shape("proposal-manifest.json", "findings"),
+                         set(findings[0]))
+
+    def test_the_disclosure_top_level_matches_the_contract(self):
+        r, sb = self.run_emit(name="disclosure-routing")
+        emitted = set(json.loads((sb.root / "disclosure.json").read_text()))
+        self.assertEqual(self.documented_fields("disclosure.json"), emitted)
+
+    def test_the_disclosure_finding_shape_matches_the_contract(self):
+        r, sb = self.run_emit(name="disclosure-routing")
+        findings = json.loads((sb.root / "disclosure.json").read_text())["findings"]
+        self.assertTrue(findings, "nothing was routed; the shape assertion proves nothing")
+        self.assertEqual(self.documented_member_shape("disclosure.json", "findings"),
+                         set(findings[0]))
+
+
 class TestDisclosureNeverReachesPropose(unittest.TestCase):
     """W4.2's prohibited half, made live.
 
@@ -197,6 +272,12 @@ class TestSubmitValidatesAgainstTheAllowlist(unittest.TestCase):
         patches = sb.root / "_patches"; patches.mkdir()
         (patches / "findings.json").write_text(json.dumps(
             [{"rule_id": "R", "fingerprint": f} for f in patch_fps]))
+        # One patch file per metadata entry, as the propose prompt asks the model for. The
+        # fixture used to carry metadata with no patch files at all -- a state the pipeline
+        # cannot reach -- and F6's arity check now (correctly) refuses it before the allowlist
+        # comparison this test is about.
+        for i, _ in enumerate(patch_fps, start=1):
+            (patches / f"{i:04d}-fix.patch").write_text("")
         ctx = sb.root / "context.json"
         ctx.write_text(json.dumps({
             "version": 1, "repo": TARGET, "issue": "42",
@@ -319,6 +400,9 @@ class TestProducerFeedsConsumerUnchanged(ManifestBase):
         patches = sb.root / "_patches"; patches.mkdir(exist_ok=True)
         (patches / "findings.json").write_text(json.dumps(
             [{"rule_id": disclosed[0]["rule_id"], "fingerprint": "sha256:forged"}]))
+        # One patch per entry (F6's arity rule); the forged fingerprint is what this test is
+        # about, and it must be the reason submit refuses.
+        (patches / "0001-fix.patch").write_text("")
         ctx = sb.root / "context.json"
         ctx.write_text(json.dumps({
             "version": 1, "repo": TARGET, "issue": "42",

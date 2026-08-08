@@ -82,6 +82,16 @@ GOOD_PATCH = """diff --git a/README.md b/README.md
 -old line
 +new line
 """
+# The second finding's patch. It adds a file rather than editing README.md, so it applies
+# cleanly whichever variant 0001 is -- including the conflict fixture, where the run must still
+# take the conflict branch on the strength of 0001 alone.
+SECOND_PATCH = """diff --git a/NOTES.md b/NOTES.md
+new file mode 100644
+--- /dev/null
++++ b/NOTES.md
+@@ -0,0 +1 @@
++second finding
+"""
 CONFLICT_PATCH = """diff --git a/README.md b/README.md
 --- a/README.md
 +++ b/README.md
@@ -220,6 +230,11 @@ class SubmitSandbox:
         self.patches = self.root / "_patches"
         self.patches.mkdir()
         (self.patches / "0001-fix.patch").write_text(patch)
+        # One patch file per finding, which is what the propose prompt asks the model for.
+        # This fixture used to carry two metadata entries and a single patch, so it modelled
+        # a contract violation as the normal case -- and the count check that catches a stray
+        # unvalidated patch file (F6) had nothing to anchor against.
+        (self.patches / "0002-fix.patch").write_text(SECOND_PATCH)
         (self.patches / "CAP").write_text("3\n")
         (self.patches / "findings.json").write_text(json.dumps(
             [{"rule_id": "R7", "fingerprint": FINGERPRINTS[0]},
@@ -563,6 +578,64 @@ class SubmitConflict(unittest.TestCase):
 
     def diag_text(self, r):
         return f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+
+class SubmitAllowlistFailsClosed(unittest.TestCase):
+    """F6, round 2: the allowlist's guards did not cover the cases where it iterates zero times.
+
+    `type == "array"` admits `[]`, and `.[]?.fingerprint // empty` silently skips an entry that
+    carries no fingerprint. In both cases the validation loop runs over nothing, `bad` stays
+    empty, and every patch file reaches `git apply` unvalidated -- on a third party's
+    repository. The first round closed the absent/non-array cases and left these, which is why
+    the closure came back `partially_closed`.
+
+    The propose prompt's contract is one patch file per surviving finding, so a patch file with
+    no metadata entry is content that nothing validated.
+    """
+
+    def setUp(self):
+        self.sb = SubmitSandbox(patch=GOOD_PATCH)
+        self.addCleanup(self.sb.cleanup)
+        self.meta = self.sb.patches / "findings.json"
+
+    def _run_with_meta(self, doc):
+        self.meta.write_text(json.dumps(doc) + "\n")
+        return self.sb.run()
+
+    def _assert_nothing_shipped(self, r, needle):
+        self.assertNotEqual(0, r.returncode,
+                            f"submit proceeded with {needle}; the allowlist bound nothing")
+        self.assertIn(needle, r.stdout + r.stderr)
+        self.assertEqual(self.sb.gh_verbs("pr", "create"), [],
+                         "a pull request was opened from unvalidated patches")
+        self.assertEqual(self.sb.fork_log().strip(), "",
+                         "a branch was pushed to the fork from unvalidated patches")
+
+    def test_an_empty_metadata_array_refuses_instead_of_admitting_everything(self):
+        r = self._run_with_meta([])
+        self._assert_nothing_shipped(r, "REFUSE:patch-meta-empty")
+
+    def test_an_entry_without_a_fingerprint_refuses(self):
+        r = self._run_with_meta([{"rule_id": "R7", "fingerprint": FINGERPRINTS[0]},
+                                 {"rule_id": "R12"}])
+        self._assert_nothing_shipped(r, "REFUSE:patch-meta-unfingerprinted")
+
+    def test_an_empty_string_fingerprint_is_not_a_fingerprint(self):
+        r = self._run_with_meta([{"rule_id": "R7", "fingerprint": FINGERPRINTS[0]},
+                                 {"rule_id": "R12", "fingerprint": ""}])
+        self._assert_nothing_shipped(r, "REFUSE:patch-meta-unfingerprinted")
+
+    def test_a_duplicated_fingerprint_refuses(self):
+        # Two entries claiming one fingerprint inflates the count to match the patch files
+        # while leaving one patch unaccounted for -- the mismatch check alone would pass it.
+        r = self._run_with_meta([{"rule_id": "R7", "fingerprint": FINGERPRINTS[0]},
+                                 {"rule_id": "R12", "fingerprint": FINGERPRINTS[0]}])
+        self._assert_nothing_shipped(r, "REFUSE:patch-meta-duplicate")
+
+    def test_a_patch_file_with_no_metadata_entry_refuses(self):
+        (self.sb.patches / "0003-stray.patch").write_text(GOOD_PATCH)
+        r = self.sb.run()
+        self._assert_nothing_shipped(r, "REFUSE:patch-meta-mismatch")
 
 
 if __name__ == "__main__":

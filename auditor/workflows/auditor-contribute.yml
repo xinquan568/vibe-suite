@@ -1041,21 +1041,49 @@ jobs:
             echo "REFUSE:patch-meta-malformed — patch metadata is not a JSON array" >&2
             exit 1
           fi
-          if [ -f "${PATCH_META:-}" ]; then
-            # No heredoc here on purpose: a heredoc inside a YAML block scalar, carrying a
-            # command substitution, breaks the scalar -- the workflow stops parsing as YAML
-            # and the fail-closed lint reports an unrecognised construct. Fingerprints are
-            # sha256 hex with no whitespace, so word-splitting a single command substitution
-            # is safe and keeps everything inside the block scalar.
-            allow="$(jq -r '.findings[].fingerprint' "$MANIFEST" 2>/dev/null | sort -u)"
-            bad=""
-            for fp in $(jq -r '.[]?.fingerprint // empty' "$PATCH_META" 2>/dev/null); do
-              printf '%s\n' "$allow" | grep -qxF "$fp" || bad="$fp"
-            done
-            if [ -n "$bad" ]; then
-              echo "REFUSE:patch-not-in-manifest — $bad was admitted by no gate" >&2
-              exit 1
-            fi
+          # F6, round 2. The checks above closed the absent and non-array cases and left the
+          # ones where the validation loop below iterates ZERO times, which fails open just as
+          # completely: `type == "array"` admits `[]`, and `.[]?.fingerprint // empty` silently
+          # skips an entry carrying no fingerprint. In both cases `bad` stays empty and every
+          # patch reaches `git apply` unvalidated — on a third party's repository. A loop
+          # cannot detect what it never iterates over, so the arity is checked before it runs.
+          meta_n="$(jq 'length' "$PATCH_META")"
+          if [ "$meta_n" -eq 0 ]; then
+            echo "REFUSE:patch-meta-empty — patches exist but the metadata admits none of them" >&2
+            exit 1
+          fi
+          fp_n="$(jq '[.[] | .fingerprint | select(type == "string" and length > 0)] | length' \
+            "$PATCH_META")"
+          if [ "$fp_n" -ne "$meta_n" ]; then
+            echo "REFUSE:patch-meta-unfingerprinted — $((meta_n - fp_n)) of $meta_n metadata entries carry no fingerprint" >&2
+            exit 1
+          fi
+          uniq_n="$(jq '[.[].fingerprint] | unique | length' "$PATCH_META")"
+          if [ "$uniq_n" -ne "$meta_n" ]; then
+            echo "REFUSE:patch-meta-duplicate — one fingerprint is claimed by more than one entry" >&2
+            exit 1
+          fi
+          # The propose prompt's contract is one patch file per surviving finding. A patch file
+          # with no metadata entry is content that nothing validated, and it would be applied
+          # to somebody else's repository on the strength of nothing at all.
+          patch_n="$(ls -1 "$PATCH_DIR"/*.patch 2>/dev/null | wc -l | tr -d '[:space:]')"
+          if [ "${patch_n:-0}" -ne "$meta_n" ]; then
+            echo "REFUSE:patch-meta-mismatch — ${patch_n:-0} patch file(s) against $meta_n metadata entr(ies); the contract is one patch per finding" >&2
+            exit 1
+          fi
+          # No heredoc here on purpose: a heredoc inside a YAML block scalar, carrying a
+          # command substitution, breaks the scalar -- the workflow stops parsing as YAML
+          # and the fail-closed lint reports an unrecognised construct. Fingerprints are
+          # sha256 hex with no whitespace, so word-splitting a single command substitution
+          # is safe and keeps everything inside the block scalar.
+          allow="$(jq -r '.findings[].fingerprint' "$MANIFEST" 2>/dev/null | sort -u)"
+          bad=""
+          for fp in $(jq -r '.[].fingerprint' "$PATCH_META"); do
+            printf '%s\n' "$allow" | grep -qxF "$fp" || bad="$fp"
+          done
+          if [ -n "$bad" ]; then
+            echo "REFUSE:patch-not-in-manifest — $bad was admitted by no gate" >&2
+            exit 1
           fi
           export GIT_AUTHOR_NAME="$AUTHOR_NAME"
           export GIT_AUTHOR_EMAIL="$AUTHOR_EMAIL"
@@ -1174,14 +1202,15 @@ jobs:
             if [ -n "$vf_fail" ]; then
               EVENT_LOG="${EVENT_LOG:-${DATA_DIR:-_data}/ledgers/events.jsonl}"
               mkdir -p "$(dirname "$EVENT_LOG")"
-              jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              vf_row="$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                 --arg rid "${GITHUB_RUN_ID:-local}" --argjson rn "${GITHUB_RUN_NUMBER:-0}" \
                 --arg repo "$VF_REPO" --arg slug "$VF_SLUG" --arg who "${VF_SLUG%%/*}" \
                 --arg failed "$vf_fail" \
                 '{timestamp: $ts, workflow: "auditor-contribute", event: "orphaned_fork",
                   run_id: $rid, run_number: $rn,
                   data: {repo: $repo, fork_slug: $slug, owner: $who, created_at: $ts,
-                         invariant_failed: $failed}}' >> "$EVENT_LOG"
+                         invariant_failed: $failed}}')"
+              printf '%s\n' "$vf_row" >> "$EVENT_LOG"
               # F7: DURABILITY. The append above lands in this runner's auditor-data
               # checkout, which is discarded when the job ends -- so the record the
               # never-delete policy exists to leave behind was being lost, and the test only
@@ -1212,9 +1241,37 @@ jobs:
                     fi ;;
                   *) : ;;
                 esac
-                if ! GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
-                     git -C "$vf_data" "${CRED_ARGS[@]}" push -q origin HEAD 2>/dev/null; then
-                  echo "WARN:orphan-record-unpushed — $VF_SLUG is orphaned AND its ledger record did not reach auditor-data; record it by hand (auditor/README.md)" >&2
+                # F7, round 2. One attempt and a warning was not durability. A non-force push
+                # most often loses a race with a concurrent writer, so a single failure turned
+                # a routine race into a permanently unrecorded orphan — and a warning in a job
+                # log is not a record. Retry against a re-read branch, then relay.
+                vf_pushed=0
+                vf_try=1
+                while [ "$vf_try" -le 3 ]; do
+                  if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+                       git -C "$vf_data" "${CRED_ARGS[@]}" push -q origin HEAD 2>/dev/null; then
+                    vf_pushed=1
+                    break
+                  fi
+                  echo "WARN:orphan-record-push-failed — attempt $vf_try; re-reading auditor-data and retrying" >&2
+                  # Replay the append on top of whatever landed. Never force: the ledger is
+                  # append-only and somebody else's row is not ours to discard.
+                  if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+                       git -C "$vf_data" "${CRED_ARGS[@]}" fetch -q origin 2>/dev/null; then
+                    git -C "$vf_data" rebase -q FETCH_HEAD >/dev/null 2>&1 \
+                      || git -C "$vf_data" rebase --abort >/dev/null 2>&1 || true
+                  fi
+                  vf_try=$((vf_try+1))
+                done
+                if [ "$vf_pushed" != "1" ]; then
+                  # Hand the row to finalize, which downloads every outcome-* artifact and
+                  # owns the durable write. The fork exists under the bot account either way;
+                  # what must not happen is that nothing records it.
+                  VF_OUT="${OUTCOME_DIR:-${GITHUB_WORKSPACE:-$PWD}/_outcomes}"
+                  mkdir -p "$VF_OUT"
+                  printf '%s\n' "$vf_row" > "$VF_OUT/orphaned-fork.json"
+                  echo "RELAY:orphaned-fork — the record could not be pushed from this job; finalize will persist it"
+                  echo "WARN:orphan-record-unpushed — $VF_SLUG is orphaned AND its ledger record did not reach auditor-data from here; if finalize also fails, record it by hand (auditor/README.md)" >&2
                 fi
               fi
               echo "REFUSE:fork-invariant:$vf_fail — $VF_SLUG recorded as orphaned_fork; NOT deleted, hand it to a human" >&2
@@ -1432,6 +1489,16 @@ jobs:
           name: outcome-submit
           path: _outcomes/outcome-submit.json
           if-no-files-found: warn
+      # F7: the orphan record's second chance. verify-fork writes this only when it could not
+      # push the row itself; finalize downloads every outcome-* artifact and persists it. A
+      # fork left under the bot account with no record anywhere is the state a human cannot
+      # clean up, so one unlucky push must not be the end of it.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: outcome-orphaned-fork
+          path: _outcomes/orphaned-fork.json
+          if-no-files-found: ignore
   finalize:
     needs: [gates, reserve, propose, submit]
     if: always()
@@ -1658,6 +1725,63 @@ jobs:
             --argjson d "$data" \
             '{timestamp: $ts, workflow: "auditor-contribute", event: $ev, run_id: $rid,
               run_number: $rn, data: $d}' >> "$EVENT_LOG"
+
+          # F5: the disclosure set is DOWNLOADED here — and downloading it is not acting on
+          # it. Its outcome was inferred from `reason: security-*` above, which only fires
+          # when the whole run was BLOCKED. So the ordinary case — a run producing both
+          # patchable findings and critical security ones — completed, opened its public PR,
+          # and the disclosure set vanished with no durable record anywhere.
+          #
+          # A contribution outcome and a disclosure outcome are independent facts about one
+          # run, so they get independent rows. This is appended BEFORE the push below, so it
+          # is committed by the same commit that carries the contribution row.
+          # F7: an orphan record that submit could not push itself. It arrives as an
+          # outcome-* artifact and is replayed into the ledger here, ahead of the commit and
+          # push below, so the never-delete policy still leaves something behind.
+          ORPHAN_RELAY="${ORPHAN_RELAY:-$OUTCOME_DIR/orphaned-fork.json}"
+          if [ -s "$ORPHAN_RELAY" ]; then
+            if jq -e '.event == "orphaned_fork"' "$ORPHAN_RELAY" >/dev/null 2>&1; then
+              if ! grep -qF "$(jq -r '.data.fork_slug' "$ORPHAN_RELAY")" "$EVENT_LOG" 2>/dev/null
+              then
+                jq -c . "$ORPHAN_RELAY" >> "$EVENT_LOG"
+                echo "ORPHAN:$(jq -r '.data.fork_slug' "$ORPHAN_RELAY") — relayed record persisted here; the fork is NOT deleted"
+              fi
+            else
+              echo "REFUSE:orphan-relay-malformed — an orphaned-fork relay arrived that does not parse; refusing to drop it silently" >&2
+              exit 1
+            fi
+          fi
+
+          DISCLOSURE="${DISCLOSURE:-${GITHUB_WORKSPACE:-$PWD}/disclosure.json}"
+          disclosed=0
+          if [ -f "$DISCLOSURE" ]; then
+            # Refuse rather than drop. An unreadable artifact on the security path is the one
+            # case where "carry on and hope" is least acceptable.
+            if ! jq -e 'type == "object" and (.findings | type) == "array"' \
+                 "$DISCLOSURE" >/dev/null 2>&1; then
+              echo "REFUSE:disclosure-malformed — the disclosure artifact does not parse; refusing to drop the security path silently" >&2
+              exit 1
+            fi
+            disclosed="$(jq '.findings | length' "$DISCLOSURE")"
+          fi
+          if [ "${disclosed:-0}" -gt 0 ]; then
+            if [ -n "${DISCLOSURE_CONTACT:-}" ]; then
+              disc_event="disclosure_filed"
+            else
+              disc_event="disclosure_pending"
+            fi
+            # Carry the fingerprints: without them the row records that something was
+            # disclosed but not what, and cannot be joined back to the findings.
+            disc_data="$(jq -c --arg repo "$REPO" --arg stage "$job" \
+              '{repo: $repo, stage: $stage, disclosed_count: (.findings | length),
+                fingerprints: [.findings[].fingerprint]}' "$DISCLOSURE")"
+            jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg ev "$disc_event" \
+              --arg rid "${GITHUB_RUN_ID:-local}" --argjson rn "${GITHUB_RUN_NUMBER:-0}" \
+              --argjson d "$disc_data" \
+              '{timestamp: $ts, workflow: "auditor-contribute", event: $ev, run_id: $rid,
+                run_number: $rn, data: $d}' >> "$EVENT_LOG"
+            echo "DISCLOSE:$REPO — $disclosed finding(s) on the responsible-disclosure path; never a public PR"
+          fi
           pushed=0
           if git -C "$DATA_DIR" rev-parse --git-dir >/dev/null 2>&1; then
             git -C "$DATA_DIR" add -A

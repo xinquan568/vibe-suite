@@ -344,6 +344,7 @@ jobs:
 
           kept="$(mktemp)"
           n=0
+          remaining=0
           while IFS= read -r line; do
             [ -z "$line" ] && continue
             # Filter 1 -- confidence. Missing reads as medium (SCHEMAS section 2), so it drops.
@@ -367,9 +368,13 @@ jobs:
                 continue
               fi
             fi
-            # Filter 4 -- the cap.
+            # Filter 4 -- the cap. Findings dropped HERE are the ones an umbrella issue is
+            # for: real, admitted work we ran out of quota to propose. Findings dropped by the
+            # disclosure or duplicate filters are deliberately never going to be PRs, so
+            # counting them would raise an umbrella about work nobody is waiting for.
             if [ "$cap" -gt 0 ] && [ "$n" -ge "$cap" ]; then
               echo "EXCLUDE:$(printf '%s' "$line" | jq -r '.rule_id') — beyond the patch cap of $cap"
+              remaining=$((remaining+1))
               continue
             fi
             fp="$(printf '%s' "$line" | compute_fingerprint "$REPO")" || {
@@ -379,7 +384,10 @@ jobs:
             n=$((n+1))
           done < "$SIDECAR"
 
-          jq -s --arg repo "$REPO" '{version: 1, repo: $repo, findings: .}' "$kept" > "$MANIFEST"
+          if [ "$remaining" -gt 0 ]; then quota_exhausted=true; else quota_exhausted=false; fi
+          jq -s --arg repo "$REPO" --argjson qe "$quota_exhausted" --argjson rem "$remaining" \
+            '{version: 1, repo: $repo, findings: ., quota_exhausted: $qe, remaining_count: $rem}' \
+            "$kept" > "$MANIFEST"
           rm -f "$kept"
           echo "MANIFEST:$n finding(s) admitted"
           echo "PASS"
@@ -420,14 +428,11 @@ jobs:
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:umbrella-backstop — an earlier gate already refused"; exit 0
           fi
-          QUOTA_EXHAUSTED="${QUOTA_EXHAUSTED:-false}"
-          REMAINING_COUNT="${REMAINING_COUNT:-0}"
-          REPO="${REPO:-}"
-          if [ "$QUOTA_EXHAUSTED" = "true" ] && [ "$REMAINING_COUNT" -gt 0 ]; then
-            gh issue create --repo xinquan568/vibe-suite \
-              --title "Umbrella: $REMAINING_COUNT remaining findings for $REPO" \
-              --body "PR quota exhausted with verified findings remaining. Tracked here on our own repo — never as issues on the target."
-          fi
+          # E8.2b (vibe-164) W6.2: the umbrella issue is CREATED BY finalize, not here.
+          # gates is specified read-only and holds only contents:read, so `gh issue create`
+          # was a mutation from a job with no authority for it. The quota facts this backstop
+          # needs are produced by gate:emit-manifest and travel in proposal-manifest.json;
+          # finalize holds issues:write and reads them there.
           echo "PASS"
           # /gate
       - run: |
@@ -471,6 +476,27 @@ jobs:
             '{schema_version: 1, job: "gates", status: $s, reason: $r, ids: {}}' \
             > "$OUT/outcome-gates.json"
           echo "OUTCOME:gates:$status"
+      # E8.2b (vibe-164) W2.2/W4: the relay, actually wired. gates writes these into ITS
+      # runner's workspace; every consumer runs on a fresh runner, so without an upload the
+      # files simply do not exist downstream and every consumer refuses relay-missing.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-context
+          path: ${{ github.workspace }}/context.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proposal-manifest
+          path: ${{ github.workspace }}/proposal-manifest.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-disclosure
+          path: ${{ github.workspace }}/disclosure.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -489,6 +515,10 @@ jobs:
       reason: ${{ steps.cas.outputs.reason }}
       repo: ${{ steps.cas.outputs.repo }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gate-context
+          path: ${{ github.workspace }}
       - uses: actions/checkout@v4
         with:
           ref: auditor-data
@@ -642,6 +672,10 @@ jobs:
     outputs:
       status: ${{ steps.classify.outputs.status }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gate-context
+          path: ${{ github.workspace }}
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -756,6 +790,10 @@ jobs:
       status: ${{ steps.lifecycle.outputs.status }}
       pr_number: ${{ steps.lifecycle.outputs.pr_number }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gate-context
+          path: ${{ github.workspace }}
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
@@ -817,6 +855,9 @@ jobs:
           # including, potentially, a finding the disclosure gate routed away from the public
           # PR path. An ABSENT manifest refuses rather than allowing everything: fail-open
           # here would defeat the allowlist entirely.
+          # E8.2b (vibe-164) W6.3: nothing durable is keyed on an empty PR number. A registry
+          # write, ledger append or label transition carrying "" records a contribution that
+          # cannot be found again, and the record is append-only -- it cannot be taken back.
           MANIFEST="${MANIFEST:-${GITHUB_WORKSPACE:-$PWD}/proposal-manifest.json}"
           if [ ! -f "$MANIFEST" ]; then
             echo "REFUSE:manifest-missing — no gate allowlist to validate patches against" >&2
@@ -1035,6 +1076,24 @@ jobs:
           slug=$(printf '%s' "$REPO" | tr '/' '-')
           SIDECAR="${SIDECAR:-$DATA_DIR/audits/$slug.findings.jsonl}"
           PR_NUMBER="${pr_number:-${PR_NUMBER:-}}"
+          # W6.3: validate the PR number before the durable writes below -- the registry
+          # write (status contributed + pipeline_prs), the append-only contribution_submitted
+          # record, and the label transition.
+          #
+          # Scoped to runs that ACTUALLY OPENED A PR. `applied` counts patches that landed,
+          # and the registry write already carries a deliberate `if $pr == ""` branch for
+          # runs that legitimately produced none (nothing applied, or a conflict) -- those
+          # record a contact without a PR reference and predate this issue. Refusing there
+          # would break a real path rather than protect one.
+          #
+          # The dangerous case is the narrow one: patches were applied and pushed, so a PR
+          # exists upstream, but no number came back. Recording that as a contribution keyed
+          # on "" writes an append-only row nobody can resolve to the PR it describes, and
+          # append-only means it cannot be taken back.
+          if [ "${applied:-0}" -gt 0 ] && [ -z "$PR_NUMBER" ]; then
+            echo "REFUSE:pr-number-empty — $applied patch(es) were applied but no PR number came back; refusing the registry write, ledger append and label transition" >&2
+            exit 1
+          fi
           RUN_ID="${GITHUB_RUN_ID:-local}"
           RUN_NUMBER="${GITHUB_RUN_NUMBER:-0}"
           kept=0
@@ -1159,6 +1218,10 @@ jobs:
       contents: write
       issues: write
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gate-context
+          path: ${{ github.workspace }}
       - uses: actions/checkout@v4
         with:
           ref: auditor-data
@@ -1168,6 +1231,63 @@ jobs:
           path: _outcomes
           pattern: outcome-*
           merge-multiple: true
+      # E8.2b (vibe-164) W6.3: the existing download matches only outcome-*, so the quota
+      # facts the umbrella backstop needs never reached this job. The manifest carries them.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: proposal-manifest
+          path: _gate
+      - name: umbrella backstop for remaining findings
+        env:
+          REPO: ${{ needs.reserve.outputs.repo }}
+          SUBMIT_RESULT: ${{ needs.submit.result }}
+          TERMINAL_STATUS: ${{ needs.submit.outputs.status }}
+        run: |
+          # stage-logic:umbrella
+          # Moved here from gates (W6.2): gates is read-only and held no issues: write.
+          #
+          # finalize runs `always()`, so "the job got here" says nothing about whether the run
+          # succeeded. The trigger is therefore stated POSITIVELY and every condition is
+          # checked, rather than inherited from job status:
+          #
+          #   quota_exhausted == true      the filter actually dropped work for the cap
+          #   remaining_count  >  0        there is something left to track
+          #   submit result == success     the run reached a terminal submit
+          #   status in {submitted, conflict, partial-persisted}
+          #
+          # pre-pr-failure and error do NOT qualify: a run that never reached a PR has no
+          # exhausted quota to report, and raising an umbrella there would tell a maintainer
+          # we ran out of budget when in fact we broke.
+          set -u
+          MANIFEST="${MANIFEST:-${GITHUB_WORKSPACE:-$PWD}/_gate/proposal-manifest.json}"
+          [ -f "$MANIFEST" ] || { echo "no manifest — nothing to back off"; exit 0; }
+          qe="$(jq -r '.quota_exhausted // false' "$MANIFEST" 2>/dev/null || echo false)"
+          rem="$(jq -r '.remaining_count // 0' "$MANIFEST" 2>/dev/null || echo 0)"
+          sr="${SUBMIT_RESULT:-}"
+          st="${TERMINAL_STATUS:-}"
+          if [ "$qe" != "true" ] || [ "${rem:-0}" -le 0 ]; then
+            echo "umbrella: not triggered (quota_exhausted=$qe remaining=$rem)"; exit 0
+          fi
+          if [ "$sr" != "success" ]; then
+            echo "umbrella: not triggered (submit result '$sr' is not success)"; exit 0
+          fi
+          case "$st" in
+            submitted|conflict|partial-persisted) : ;;
+            *) echo "umbrella: not triggered (terminal status '$st' never reached a PR)"; exit 0 ;;
+          esac
+          # Idempotency: a rerun of the same run must not open a second issue. The run id is
+          # in the title precisely so this lookup can be exact.
+          title="Umbrella: $rem remaining findings for $REPO (${GITHUB_RUN_ID:-local})"
+          existing="$(gh issue list --repo xinquan568/vibe-suite --state open --json number,title 2>/dev/null || echo '[]')"
+          if printf '%s' "$existing" | jq -e --arg t "$title" '.[]? | select(.title == $t)' >/dev/null 2>&1; then
+            echo "umbrella: already open for this run; not duplicating"; exit 0
+          fi
+          gh issue create --repo xinquan568/vibe-suite \
+            --title "$title" \
+            --body "PR quota exhausted with verified findings remaining for $REPO. Tracked here on our own repository — never as issues on the target."
+          echo "umbrella: created"
+          # /stage-logic
       - name: route the terminal outcome
         run: |
           # logic:finalize

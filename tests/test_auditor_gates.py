@@ -202,13 +202,19 @@ class TestDisclosureRouting(GateBase):
 class TestUmbrellaBackstop(GateBase):
     name = "umbrella-backstop"
 
-    def test_quota_exhausted_with_remainder_files_umbrella_on_own_repo(self):
+    def test_the_gate_creates_no_issue_even_under_quota_pressure(self):
+        """E8.2b (vibe-164) W6.2 relocated this behaviour, it was not deleted.
+
+        This gate used to call `gh issue create` -- a mutation from a job holding only
+        contents: read, with no issues: write. The umbrella backstop now lives in finalize,
+        which does hold that permission, and fires on an explicit predicate rather than on
+        `always()` having been reached. Its coverage is tests/test_auditor_quota.py
+        TestUmbrellaPredicate; what belongs HERE is that gates stays read-only.
+        """
         r, calls, sb = self.run_gate({"QUOTA_EXHAUSTED": "true", "REMAINING_COUNT": "4"})
         self.assertEqual(r.returncode, 0)
-        umbrella = [c for c in calls if "issue create" in c]
-        self.assertTrue(umbrella)
-        self.assertTrue(all("xinquan568/vibe-suite" in c for c in umbrella),
-                        f"umbrella must target the own repo: {umbrella}")
+        self.assertFalse([c for c in calls if "issue create" in c],
+                         "gates created an issue; it is specified read-only")
         sb.cleanup()
 
     def test_no_quota_pressure_is_a_noop(self):

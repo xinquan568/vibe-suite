@@ -129,11 +129,18 @@ class TestDisclosureNeverReachesPropose(unittest.TestCase):
             "the propose job references disclosure.json. propose runs the MODEL; a model job "
             "able to read undisclosed security findings can leak them into a public patch body "
             "(SCHEMAS section 14 routing constraint)")
-        for marker in ("DISCLOSURE:", "download-artifact"):
-            if marker == "download-artifact" and marker in propose:
-                self.assertNotIn(
-                    "disclosure", propose[propose.index(marker):],
-                    "propose downloads an artifact whose name mentions disclosure")
+        # Check what the download steps NAME, not what text follows them. An earlier version
+        # scanned everything after the first download-artifact, which meant that simply
+        # giving propose a legitimate download (gate-context) made it trip over the model
+        # prompt's prose further down. That is the second time this assertion caught its own
+        # documentation rather than a violation.
+        import re
+        names = re.findall(r"name:\s*(\S+)", propose)
+        for n in names:
+            self.assertNotIn(
+                "disclosure", n.lower(),
+                f"propose downloads or references an artifact named '{n}'. propose runs the "
+                f"MODEL; the disclosure set must never reach it.")
 
     def test_the_finalize_job_does_receive_it(self):
         text = WF.read_text(encoding="utf-8")

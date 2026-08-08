@@ -255,3 +255,63 @@ class TestReserveReadsTheRelay(ConsumerBase):
     # that passes because an earlier `data-branch-unreachable` refusal fires, never because
     # the cap governed anything. That suite now delivers the cap through context.json, so it
     # covers the relay end to end; this suite keeps the refusal contract only.
+
+
+class TestTheRelayIsActuallyTransported(unittest.TestCase):
+    """The relay must cross JOB boundaries, not just exist in gates' workspace.
+
+    Every test above sets CONTEXT_FILE to a local path, so all of them pass whether or not
+    the file is ever transported between jobs. It was not: gates wrote context.json into its
+    own runner's workspace, every consumer runs on a fresh runner, and nothing uploaded or
+    downloaded it -- so on a real run every consumer would have refused relay-missing while
+    the entire suite stayed green. Only an existing topology test noticed, and only for the
+    manifest, because finalize happened to download that one by name.
+
+    A test that supplies the file location can never observe its absence. These assertions
+    read the workflow's own artifact wiring instead.
+    """
+
+    PRODUCED = {
+        "gate-context": "context.json",
+        "proposal-manifest": "proposal-manifest.json",
+        "gate-disclosure": "disclosure.json",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = WF.read_text(encoding="utf-8")
+
+    def _jobs(self):
+        import re
+        names = [m.group(1) for m in re.finditer(r"^  ([a-z][a-z-]*):$", self.text, re.M)]
+        out = {}
+        for i, n in enumerate(names):
+            start = self.text.index(f"\n  {n}:")
+            end = (self.text.index(f"\n  {names[i+1]}:") if i + 1 < len(names) else len(self.text))
+            out[n] = self.text[start:end]
+        return out
+
+    def test_every_gate_output_is_uploaded_by_its_producer(self):
+        gates = self._jobs()["gates"]
+        for artifact in self.PRODUCED:
+            self.assertIn(
+                f"name: {artifact}", gates,
+                f"gates writes {self.PRODUCED[artifact]} but never uploads it as "
+                f"'{artifact}'. On a real run the file dies with the runner and every "
+                f"consumer refuses relay-missing.")
+
+    def test_every_consumer_of_the_context_downloads_it(self):
+        jobs = self._jobs()
+        for job in ("reserve", "propose", "submit", "finalize"):
+            self.assertIn(
+                "name: gate-context", jobs[job],
+                f"the {job} job reads CONTEXT_FILE but never downloads gate-context")
+
+    def test_finalize_downloads_the_manifest_it_reads(self):
+        self.assertIn("name: proposal-manifest", self._jobs()["finalize"],
+                      "finalize reads quota facts from the manifest but never downloads it")
+
+    def test_propose_still_downloads_no_disclosure(self):
+        # The transport must not accidentally hand the model job the disclosure artifact.
+        self.assertNotIn("gate-disclosure", self._jobs()["propose"],
+                         "wiring the relay handed propose the disclosure artifact")

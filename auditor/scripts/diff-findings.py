@@ -298,6 +298,13 @@ def render_report(repo, sha_before, sha_after, identical, shifted, fixed, introd
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Diff an audit against its re-audit.")
+    parser.add_argument("--generated-at", default=None)
+    # Section 8 carries the two scores, parsed by the CALLER from the reports' labelled score
+    # lines. Optional here and defaulting to null: "the score was not supplied" and "the score
+    # is zero" are different facts, and inventing one would put a number in a contract field
+    # that nothing measured.
+    parser.add_argument("--original-score", default=None, type=int)
+    parser.add_argument("--reaudit-score", default=None, type=int)
     for flag in ("--repo", "--original-sidecar", "--reaudit-sidecar", "--registry",
                  "--commit-sha-before", "--commit-sha-after", "--events-out",
                  "--diff-report-out", "--summary-out"):
@@ -330,16 +337,41 @@ def main(argv=None):
     reaudit, bad_reaudit = read_sidecar(Path(args.reaudit_sidecar), "reaudit-sidecar")
 
     identical, shifted, fixed, introduced = classify(original, reaudit, args.repo)
+    pr_for, outcome_for = pr_attribution(repos.get(args.repo))
+
+    # SECTION 8, field for field. The previous shape (counts/malformed_lines/fixed/introduced)
+    # was invented here, so every consumer of a re-audit summary received a contract-invalid
+    # document — one that parses, reads plausibly, and answers none of the questions section 8
+    # says it answers.
+    verified_counts = {
+        "fixed_and_merged": 0, "fixed_applied_separately": 0,
+        "fixed_upstream_not_merged": 0,
+        "persists_identically": len(identical), "persists_line_shifted": len(shifted),
+    }
+    for finding in fixed:
+        outcome = FIXED_OUTCOME.get(outcome_for.get(fingerprint_of(args.repo, finding)),
+                                    "fixed_upstream_not_merged")
+        verified_counts[outcome] += 1
+
     summary = {
         "repo": args.repo,
+        "date": args.generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "original_score": args.original_score,
+        "reaudit_score": args.reaudit_score,
         "commit_sha_before": sha_before,
         "commit_sha_after": sha_after,
-        "counts": {"fixed": len(fixed), "identical": len(identical),
-                   "shifted": len(shifted), "introduced": len(introduced),
-                   "original_total": len(original), "reaudit_total": len(reaudit)},
-        "malformed_lines": {"original": bad_original, "reaudit": bad_reaudit},
-        "fixed": sorted(fingerprint_of(args.repo, f) for f in fixed),
-        "introduced": sorted(fingerprint_of(args.repo, f) for f in introduced),
+        "original_findings_count": len(original),
+        "reaudit_findings_count": len(reaudit),
+        # Nonzero means the fixed/introduced tallies may UNDER-count, which section 8 says
+        # explicitly — so the two are reported separately rather than summed away.
+        "original_malformed_count": bad_original,
+        "reaudit_malformed_count": bad_reaudit,
+        "verified": verified_counts,
+        "introduced_count": len(introduced),
+        "fixed_total": sum(verified_counts[k] for k in
+                           ("fixed_and_merged", "fixed_applied_separately",
+                            "fixed_upstream_not_merged")),
+        "persists_total": len(identical) + len(shifted),
     }
 
     # --- report and summary first; the ledger is append-only and cannot be taken back ----
@@ -366,8 +398,6 @@ def main(argv=None):
     # A fix is attributed to the PR that carried it, and the PR's registry outcome decides
     # which `fixed_*` value applies. Without that attribution every fix reads the same, and a
     # fix the maintainer made themselves is indistinguishable from one we merged.
-    pr_for, outcome_for = pr_attribution(repos.get(args.repo))
-
     pending = []
     for finding in fixed:
         fingerprint = fingerprint_of(args.repo, finding)

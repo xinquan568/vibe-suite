@@ -84,11 +84,37 @@ def gh_json(args):
         return None
 
 
+#: GitHub's code search caps a page at 100 and the whole result set at 1000.
+PAGE_SIZE = 100
+MAX_PAGES = 10
+
+
 def search(query):
-    payload = gh_json(["api", "-X", "GET", "search/code", "-f", f"q={query}",
-                       "--jq", ".items"])
-    if payload is None:
-        return None
+    """Every page, not just the first.
+
+    A single page silently truncates the corpus at the default page size, and the truncation is
+    invisible: the scan reports a tidy count and the missing repositories simply never appear
+    in the rule-health evidence. "We found no suppressions for that rule" and "we stopped
+    looking" are indistinguishable afterwards.
+    """
+    payload = []
+    for page in range(1, MAX_PAGES + 1):
+        chunk = gh_json(["api", "-X", "GET", "search/code", "-f", f"q={query}",
+                         "-f", f"per_page={PAGE_SIZE}", "-f", f"page={page}",
+                         "--jq", ".items"])
+        if chunk is None:
+            # A failed page mid-way is not an empty result: returning what we have would
+            # silently narrow the corpus, which is the failure this pagination exists to fix.
+            return None if page == 1 else None
+        if not isinstance(chunk, list) or not chunk:
+            break
+        payload.extend(chunk)
+        if len(chunk) < PAGE_SIZE:
+            break
+    else:
+        print(f"WARN search truncated at {MAX_PAGES * PAGE_SIZE} results; "
+              f"narrow the query", file=sys.stderr)
+
     items = []
     for item in payload if isinstance(payload, list) else []:
         repo = ((item.get("repository") or {}).get("full_name"))

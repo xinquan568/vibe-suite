@@ -956,11 +956,14 @@ class Test_diff_findings(unittest.TestCase):
         d = self._fixture()
         r = self._run(d)
         self.assertEqual(r.returncode, 0, r.stderr)
-        counts = self._summary(d)["counts"]
-        self.assertEqual(counts["identical"], 1)
-        self.assertEqual(counts["shifted"], 1)
-        self.assertEqual(counts["fixed"], 1)
-        self.assertEqual(counts["introduced"], 1)
+        s = self._summary(d)
+        # SECTION 8 field names. The previous shape was invented in the helper, so these
+        # assertions were checking a document no consumer is entitled to expect.
+        self.assertEqual(s["verified"]["persists_identically"], 1)
+        self.assertEqual(s["verified"]["persists_line_shifted"], 1)
+        self.assertEqual(s["fixed_total"], 1)
+        self.assertEqual(s["introduced_count"], 1)
+        self.assertEqual(s["persists_total"], 2)
 
     def test_a_line_shift_is_not_a_fix(self):
         """The line is IN the fingerprint, so a fingerprint comparison reports every finding
@@ -969,9 +972,13 @@ class Test_diff_findings(unittest.TestCase):
         for introducing forty more."""
         d = self._fixture()
         self._run(d)
-        summary = self._summary(d)
-        self.assertEqual(summary["fixed"], ["fp-fixed"], "the shifted finding was called fixed")
-        self.assertEqual(summary["introduced"], ["fp-intro"])
+        # Fingerprint-level detail lives in the EVENTS; section 8 is counts.
+        verified = {e["data"]["fingerprint"]: e["data"]["outcome"]
+                    for e in self._events(d) if e["event"] == "finding_verified"}
+        self.assertTrue(verified["fp-fixed"].startswith("fixed_"),
+                        "the shifted finding was called fixed")
+        self.assertEqual(verified["fp-old"], "persists_line_shifted")
+        self.assertEqual(self._summary(d)["fixed_total"], 1)
 
     def test_a_whole_file_shifting_produces_no_fixes(self):
         """The realistic case: a paragraph added at the top moves everything down."""
@@ -981,8 +988,9 @@ class Test_diff_findings(unittest.TestCase):
                    for i, f in enumerate(original, 1)]
         d = self._fixture(original=original, reaudit=reaudit)
         self._run(d)
-        counts = self._summary(d)["counts"]
-        self.assertEqual((counts["fixed"], counts["introduced"], counts["shifted"]), (0, 0, 20))
+        s = self._summary(d)
+        self.assertEqual((s["fixed_total"], s["introduced_count"],
+                          s["verified"]["persists_line_shifted"]), (0, 0, 20))
 
     def test_verified_records_both_results_with_the_outcome_saying_which(self):
         """SCHEMAS.md puts fixes AND persistence under one event name, distinguished by
@@ -1052,10 +1060,12 @@ class Test_diff_findings(unittest.TestCase):
                     "fingerprint": f"fp-new-{n}"} for n in (10, 20, 30)]
         d = self._fixture(original=original, reaudit=reaudit)
         self._run(d)
-        summary = self._summary(d)
-        self.assertEqual(summary["counts"]["introduced"], 1)
-        self.assertEqual(summary["counts"]["fixed"], 0)
-        self.assertEqual(summary["introduced"], ["fp-new-20"],
+        s = self._summary(d)
+        self.assertEqual(s["introduced_count"], 1)
+        self.assertEqual(s["fixed_total"], 0)
+        introduced = [e["data"]["fingerprint"] for e in self._events(d)
+                      if e["event"] == "finding_introduced"]
+        self.assertEqual(introduced, ["fp-new-20"],
                          "the wrong occurrence was reported as introduced")
 
     def test_a_removed_middle_occurrence_is_the_one_reported_fixed(self):
@@ -1066,10 +1076,12 @@ class Test_diff_findings(unittest.TestCase):
                     "fingerprint": f"fp-{n}"} for n in (10, 30)]
         d = self._fixture(original=original, reaudit=reaudit)
         self._run(d)
-        summary = self._summary(d)
-        self.assertEqual(summary["counts"]["fixed"], 1)
-        self.assertEqual(summary["fixed"], ["fp-20"],
-                         "the wrong occurrence was reported as fixed")
+        s = self._summary(d)
+        self.assertEqual(s["fixed_total"], 1)
+        fixed = [e["data"]["fingerprint"] for e in self._events(d)
+                 if e["event"] == "finding_verified"
+                 and e["data"]["outcome"].startswith("fixed_")]
+        self.assertEqual(fixed, ["fp-20"], "the wrong occurrence was reported as fixed")
 
 
     def test_raw_section_4_sidecars_produce_events(self):
@@ -1113,7 +1125,9 @@ class Test_diff_findings(unittest.TestCase):
 
         d = self._fixture(original=[record], reaudit=[])
         self._run(d, **{"--repo": "acme/widget"})
-        self.assertIn(shell.stdout.strip(), self._summary(d)["fixed"],
+        fixed = [e["data"]["fingerprint"] for e in self._events(d)
+                 if e["event"] == "finding_verified"]
+        self.assertIn(shell.stdout.strip(), fixed,
                       "the computed digest disagrees with compute-fingerprint.sh")
 
     # --- refusals -------------------------------------------------------------------------
@@ -1222,10 +1236,10 @@ class Test_diff_findings(unittest.TestCase):
         d = self._fixture()
         r = self._run(d, script_text=src.replace(self.SHIFT_ANCHOR, self.SHIFT_MUTANT, 1))
         self.assertEqual(r.returncode, 0, "the mutant runs clean — that is the danger")
-        counts = self._summary(d)["counts"]
-        self.assertEqual(counts["fixed"], 2,
+        s = self._summary(d)
+        self.assertEqual(s["fixed_total"], 2,
                          "mutation ineffective: the mutant should count the shift as a fix")
-        self.assertEqual(counts["shifted"], 0)
+        self.assertEqual(s["verified"]["persists_line_shifted"], 0)
 
 
 if __name__ == "__main__":

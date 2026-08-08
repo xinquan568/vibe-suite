@@ -78,7 +78,14 @@ UNIVERSAL_PREFIX = "All types"
 #: Namespaced and non-R identifiers the schema allows (`rule_id` is "a namespaced rule
 #: identifier"). They are not in this rubric's tables, so they cannot be checked against it —
 #: but reporting them as UNKNOWN says the id is wrong, which is a different and false claim.
-FOREIGN_ID = re.compile(r"^(?:[a-z][a-z0-9]*:)?(?:SEC|BUG|CC)-[A-Za-z0-9_-]+$|^[a-z][a-z0-9]*:R\d{1,2}$")
+FOREIGN_ID = re.compile(
+    r"^(?:[a-z][a-z0-9]*:)?(?:SEC|BUG|CC)-[A-Za-z0-9_-]+$"
+    r"|^[a-z][a-z0-9]*:R\d{1,2}$"
+    # UNCLASSIFIED is what the synthesizer and the renderers emit for a finding
+    # carrying no id. Rejecting it fails the audit step on the pipeline's own
+    # output — and I had already accepted it in synthesize-sidecar, so the two
+    # helpers disagreed about the same value.
+    r"|^UNCLASSIFIED$")
 
 
 def refuse(reason: str) -> None:

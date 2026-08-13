@@ -91,13 +91,17 @@ class FixtureCensus(unittest.TestCase):
         skill = (FIXTURE / "skills" / "helper-skill" / "SKILL.md").read_text()
         self.assertIn("name: mismatched-name", skill,
                       "the skill's name↔directory mismatch (a '--' row) was fixed")
+        for needle in ("various", "reasonable"):
+            self.assertIn(needle, skill,
+                          f"the skill body lost its R01 vague term {needle!r}")
+        # R04's planted form is pinned VERBATIM: any rewording is a conscious
+        # re-census, not a judgment call about what still counts as a summary
         desc = next(l for l in skill.splitlines() if l.startswith("description:"))
-        self.assertLess(len(desc), 90,
-                        "the skill description grew — the R04 summary-not-trigger "
-                        "defect may have been fixed; re-plant or re-census")
-        self.assertNotIn(",", desc,
-                         "the skill description lists phrases — R04 requires the "
-                         "planted form to stay a bare summary")
+        self.assertEqual(
+            desc,
+            "description: A skill whose declared name does not match its directory.",
+            "the skill description changed — the R04 summary-not-trigger defect is "
+            "pinned verbatim; edit fixture and census together")
 
         cleanup = (FIXTURE / "commands" / "cleanup.md").read_text()
         self.assertNotIn("description:", cleanup,
@@ -108,6 +112,26 @@ class FixtureCensus(unittest.TestCase):
         self.assertEqual(frontmatter.count('"') % 2, 1,
                          "broken-front.md's quote is balanced — its '--' defect "
                          "(unparseable frontmatter) was fixed")
+
+    def test_fixture_bytes_are_pinned(self):
+        """The census names WHAT is planted; this pins the bytes it is planted in.
+        Any fixture edit — repair, rewording, addition — must arrive together with a
+        recomputed pin, making silent oracle weakening impossible."""
+        import hashlib
+        expected = {
+            "README.md": "7177b617d9d0d4627d274eed0ece1b97a89557b7a88e5cd726dc8d607323eb45",
+            "agents/broken-front.md": "290256e6a604ff8c85bcc26e8fc15b1c31c71bebccda91da810efda5f54bda24",
+            "agents/watcher.md": "f196a85f5e215c13476f6b6789e14714eccec064310f216a03d53eb29735a912",
+            "commands/cleanup.md": "12571962fc5773dbdb42a105d264423a9d5275d1f1a6aa58ed62b6b7b1e74c92",
+            "commands/deploy.md": "8e3d37cfe0357f41262a6ed83306e03e5eff5e0f6491be72dfbdf46e1efd57d5",
+            "skills/helper-skill/SKILL.md": "2312d82af936e9e7802b64c9c901517c9570a81299cfe91fb27ecf586b130db9",
+        }
+        actual = {p.relative_to(FIXTURE).as_posix():
+                  hashlib.sha256(p.read_bytes()).hexdigest()
+                  for p in FIXTURE.rglob("*.md")}
+        self.assertEqual(actual, expected,
+                         "fixture bytes drifted from the pin — re-plant deliberately "
+                         "and update census + pin together")
 
     def test_the_detection_floor_is_achievable_and_meaningful(self):
         c = self.census()
@@ -239,6 +263,14 @@ class CoverFallbackWithoutKey(unittest.TestCase):
                       (self.root / "out.env").read_text(),
                       "the article-publish path did not proceed")
 
+    def test_the_block_carries_its_own_strict_mode(self):
+        # run_block deliberately prepends nothing, so strictness must travel INSIDE
+        # the marker pair — this pin is what makes that claim executable
+        first = next(l for l in self.block.splitlines()
+                     if l.strip() and not l.lstrip().startswith("#"))
+        self.assertEqual(first.strip(), "set -euo pipefail",
+                         "the extracted cover block lost its own strict mode")
+
     def test_a_missing_draft_still_refuses_by_name(self):
         (self.root / "data" / "articles" / "fixture-slug.md").unlink()
         r = run_block(self.block, self.env, self.root)
@@ -282,6 +314,9 @@ class FullTierOracle(unittest.TestCase):
         clone_fixture.mkdir(parents=True)
         shutil.copy(CENSUS, clone_fixture / "census.json")
         (clone_fixture / "artifact.md").write_text("# audited artifact\n")
+        # the real self-clone carries the repo's .gitignore; the ignored-addition
+        # test depends on an ignore rule existing, exactly as in production
+        (self.clone / ".gitignore").write_text("__pycache__/\n")
         subprocess.run(["git", "init", "-q"], cwd=self.clone, check=True)
         subprocess.run(["git", *self.GIT_ID, "add", "-A"], cwd=self.clone, check=True)
         subprocess.run(["git", *self.GIT_ID, "commit", "-q", "-m", "clone state"],
@@ -363,6 +398,26 @@ class FullTierOracle(unittest.TestCase):
         r = run_block(self.block, self.env, self.repo)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("not a git checkout", r.stdout)
+
+    def test_an_ignored_addition_inside_the_clone_fails(self):
+        """`--untracked-files=all` alone leaves IGNORED paths invisible — a
+        `__pycache__/` dropped inside the audited tree stayed status-clean. The
+        oracle must ask for ignored entries too."""
+        self.write_report(self.good_report())
+        cache = self.clone / "auditor" / "test-fixture" / "__pycache__"
+        cache.mkdir()
+        (cache / "x.pyc").write_bytes(b"\x00planted\x00")
+        r = run_block(self.block, self.env, self.repo)
+        self.assertNotEqual(r.returncode, 0,
+                            "an ignored-path addition inside the clone passed the "
+                            "oracle — ignored entries must count as mutations")
+        self.assertIn("mutated the audited fixture clone", r.stdout)
+
+    def test_the_block_carries_its_own_strict_mode(self):
+        first = next(l for l in self.block.splitlines()
+                     if l.strip() and not l.lstrip().startswith("#"))
+        self.assertEqual(first.strip(), "set -euo pipefail",
+                         "the extracted oracle block lost its own strict mode")
 
 
 class SecurityChecklistSignOff(unittest.TestCase):
@@ -458,3 +513,25 @@ class SecurityChecklistSignOff(unittest.TestCase):
         r = self.run_check(copy)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("'Rotation doc' is not attested", r.stdout)
+
+    def test_prose_mentions_of_the_rows_do_not_attest(self):
+        """The verify pass's bypass: with an UNANCHORED count, five prose lines each
+        containing a row's checked text mid-line (plus a valid signature) passed.
+        Attestation rows must be matched at line start."""
+        copy = self.root / "prose.md"
+        rows = ("PAT scope", "Rotation doc", "Injection separation",
+                "Audit token scope", "No secret egress")
+        body = "".join(f"we discussed whether - [x] **{r}** applies here\n"
+                       for r in rows)
+        copy.write_text(body + "Signed-off-by: Eric Liu 2026-08-13\n")
+        r = self.run_check(copy)
+        self.assertNotEqual(r.returncode, 0,
+                            "prose mentions of the checked rows were counted as "
+                            "attestations — the row match is not anchored")
+        self.assertIn("not attested", r.stdout)
+
+    def test_the_block_carries_its_own_strict_mode(self):
+        first = next(l for l in self.block.splitlines()
+                     if l.strip() and not l.lstrip().startswith("#"))
+        self.assertEqual(first.strip(), "set -euo pipefail",
+                         "the extracted checklist block lost its own strict mode")

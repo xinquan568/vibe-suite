@@ -81,7 +81,7 @@ jobs:
             exit 1
           fi
           for row in "PAT scope" "Rotation doc" "Injection separation" "Audit token scope" "No secret egress"; do
-            N="$(grep -cF -- "- [x] **$row**" "$CHECKLIST")" || true
+            N="$(grep -cE -- "^- \[x\] \*\*$row\*\*" "$CHECKLIST")" || true
             if [ "${N:-0}" -ne 1 ]; then
               echo "FAIL security checklist row '$row' is not attested exactly once (found ${N:-0})"
               exit 1
@@ -288,7 +288,12 @@ jobs:
             echo "FAIL fixture-clone is not a git checkout — clone cleanliness cannot be verified"
             exit 1
           fi
-          CLONE_DIRTY="$(git -C fixture-clone status --porcelain --untracked-files=all)"
+          # --ignored=matching: an addition under an ignored path (a __pycache__/,
+          # an editor swap file) is still a mutation of the audited tree. Boundary,
+          # stated: git status cannot see .git internals — acceptable because the
+          # report is already produced and nothing after this step reads the clone,
+          # so the guarantee covers everything the audit consumed: the worktree.
+          CLONE_DIRTY="$(git -C fixture-clone status --porcelain --ignored=matching --untracked-files=all)"
           if [ -n "$CLONE_DIRTY" ]; then
             echo "FAIL the model step mutated the audited fixture clone:"
             printf '%s\n' "$CLONE_DIRTY"

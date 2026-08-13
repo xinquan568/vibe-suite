@@ -2021,6 +2021,8 @@ jobs:
           fi
           echo "PASS"
           # /logic
+        # env-for:finalize-route — the route step's real wiring, testable by the declared
+        # mapping the way derive-context's is.
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ needs.gates.outputs.repo }}
@@ -2031,9 +2033,11 @@ jobs:
           DECISION: ${{ github.workspace }}/decision.json
           # F1: gates refusing inside derive-context never reaches the guard step, so its
           # outputs are empty precisely on the runs that need routing. The `issues` payload
-          # carries the number directly — fall back to it so an early refusal still labels
-          # and comments on the tracking issue instead of failing in silence.
-          ISSUE_NUMBER: ${{ needs.gates.outputs.issue || github.event.issue.number }}
+          # carries the number on labeled events; on workflow_dispatch the event carries
+          # nothing and the INPUT does — without that third leg, a gate refusal on a
+          # dispatch run (the label-read failure path above all) transported its decision
+          # and then silently skipped the issue edit, so pipeline-error was never applied.
+          ISSUE_NUMBER: ${{ needs.gates.outputs.issue || github.event.issue.number || inputs.issue_number }}
           # F10 (round 3), found by the generalised job-binding check rather than by reading:
           # this was read twice and bound nowhere, so `disclosure_filed` was unreachable and
           # EVERY disclosure recorded as `disclosure_pending` — the same shape as F9's
@@ -2043,6 +2047,7 @@ jobs:
           DISCLOSURE_CONTACT: ${{ vars.DISCLOSURE_CONTACT }}
           DATA_DIR: _data
           OUTCOME_DIR: _outcomes
+          # /env-for
       - name: publish the finalize outcome
         if: always()
         run: |

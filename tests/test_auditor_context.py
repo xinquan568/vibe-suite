@@ -333,10 +333,13 @@ class TestSecurityGateReadsLiveLabels(TriggerBase):
             run_env["GH_FAIL"] = f"api:{endpoint}"
             run_env.pop("GH_CANNED_MAP", None)
         else:
-            # The stub serves the file verbatim, so it carries the --jq'd shape the block
-            # reads: the comma-joined label names.
+            # RAW issue JSON, as the API returns it: the stub applies the block's own --jq
+            # expression, so these tests exercise the production extraction — a broken
+            # expression that reads as empty must fail the bypass test, not pass on a
+            # pre-joined fixture (Step-8 finding 2).
             f = sb.root / "canned-labels"
-            f.write_text(("" if labels is None else ",".join(labels)) + "\n")
+            f.write_text(json.dumps(
+                {"labels": [{"name": l} for l in (labels or [])]}) + "\n")
             m = sb.root / "canned-labels-map"
             m.write_text(f"api {endpoint}\t{f}\n")
             run_env["GH_CANNED_MAP"] = str(m)
@@ -366,6 +369,15 @@ class TestSecurityGateReadsLiveLabels(TriggerBase):
         r, _, _ = self._derive_then_gate(
             event={"number": 901, "labels": ["contribute-approved"]},
             labels=["contribute-approved"])
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("PASS", r.stdout)
+
+    def test_an_unlabeled_issue_passes(self):
+        # The production jq expression against a raw `labels: []` response: join yields the
+        # empty string, which is a real "no hold" answer, distinct from a FAILED read (the
+        # test above). Regression-pins the extraction on the empty case.
+        r, _, _ = self._derive_then_gate(
+            event={"number": 901, "labels": ["contribute-approved"]}, labels=[])
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
         self.assertIn("PASS", r.stdout)
 

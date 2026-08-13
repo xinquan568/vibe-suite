@@ -370,6 +370,82 @@ class TestOutcomeTable(CompositionBase):
                          "(gates,error) contribution_error must carry stage=gates")
         self.assertNotEqual(res.r.returncode, 0, "(gates,error) must fail the run loudly")
 
+    def test_a_dispatch_refusal_still_labels_the_input_issue(self):
+        """Step-8 finding 1 (round 2): the guard never ran, and the issue must still label.
+
+        On workflow_dispatch, a label-read failure exits the gates job before the guard step
+        publishes outputs — so `needs.gates.outputs.issue` is empty AND
+        `github.event.issue.number` is empty, and without the `inputs.issue_number` leg the
+        route step had no issue to edit: the decision document transported and the
+        pipeline-error label silently never applied. This test resolves finalize's DECLARED
+        env mapping (the env-for:finalize-route markers) under exactly that shape — guard
+        outputs absent, no event payload, only the dispatch input — and runs the block with
+        what the mapping actually delivers. Injecting ISSUE_NUMBER directly is what masked
+        the loss.
+        """
+        sb = self.sandbox()
+        for name, doc in stage_outcomes("gates", "skip", "issue-labels-unresolvable",
+                                        {}).items():
+            (sb.outcomes / f"outcome-{name}.json").write_text(json.dumps(doc) + "\n")
+        sb.decision.write_text(json.dumps({
+            "proceed": False, "reason": "issue-labels-unresolvable",
+            "side_exit_label": "pipeline-error"}) + "\n")
+
+        m = re.search(r"# env-for:finalize-route.*?^\s*env:\s*$(.*?)^\s*# /env-for",
+                      WF.read_text(), re.M | re.S)
+        self.assertIsNotNone(m, "no env-for:finalize-route markers in the workflow")
+        env = {}
+        for line in m.group(1).splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            k, _, v = line.partition(":")
+            k, v = k.strip(), v.strip()
+            if v.startswith("${{") and v.endswith("}}"):
+                out = ""
+                for alt in v[3:-2].split("||"):
+                    alt = alt.strip()
+                    if alt.startswith("needs.") or alt.startswith("github.event."):
+                        cand = ""  # the guard never ran; dispatch has no issue payload
+                    elif alt.startswith("inputs."):
+                        cand = {"issue_number": "901"}.get(alt.split(".", 1)[1], "")
+                    elif alt == "github.token":
+                        cand = "stub-token"
+                    elif alt.startswith("vars."):
+                        cand = ""
+                    else:
+                        self.fail(f"unmodelled expression atom {alt!r} in the "
+                                  f"finalize-route env; model it rather than letting it "
+                                  f"read as empty")
+                    if cand:
+                        out = cand
+                        break
+                env[k] = out
+            elif "${{ github.workspace }}" in v:
+                env[k] = v.replace("${{ github.workspace }}", str(sb.root))
+            else:
+                env[k] = v
+        self.assertEqual("901", env.get("ISSUE_NUMBER"),
+                         "the declared mapping loses the input issue number when the guard "
+                         "output and the event are both absent — the dispatch failure path "
+                         "labels nothing")
+        # Sandbox plumbing the literal workspace-relative paths cannot reach; the wiring
+        # under test (ISSUE_NUMBER, DECISION) keeps its mapping-resolved values.
+        env.update({"OUTCOME_DIR": str(sb.outcomes), "DATA_REMOTE": str(sb.bare),
+                    "LABEL_SNAPSHOT": str(sb.label_snapshot),
+                    "SIDECAR": str(FIX / "findings-sidecar.jsonl")})
+        env.pop("DATA_DIR", None)  # the harness's checkout, not the literal _data
+        env.update(GIT_ENV)
+        res = Res(sb.run(terminal_block(), env=env), sb, sb.bare)
+        self.assertEqual(0, res.r.returncode, res.out)
+        self.assertIn("pipeline-error", res.added,
+                      f"the transported decision did not label the input issue; applied "
+                      f"{res.added}")
+        self.assertTrue(any("901" in c for c in sb.gh_calls() if "edit" in c),
+                        f"no issue edit reached #901; gh calls: {sb.gh_calls()}")
+        self.assertIn("contribution_refused", res.names(),
+                      f"the refusal row must reach the ledger; got {res.names()}")
+
     def test_row_gates_label_read_failure_routes_as_infrastructure(self):
         """F10.a (round 2): the reason lives OUTSIDE security-*, and the routing proves it.
 

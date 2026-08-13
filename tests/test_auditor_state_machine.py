@@ -23,6 +23,11 @@ FIX = Path(__file__).resolve().parent / "fixtures" / "auditor"
 GH_STUB = """#!/usr/bin/env bash
 # records every invocation; returns canned output when GH_CANNED_<verb> is set
 echo "gh $*" >> "$GH_LOG"
+# Forced failures FIRST: GH_FAIL holds space-separated "<verb>:<arg>" keys (e.g.
+# "api:repos/o/r/issues/9"). A canned success must never shadow an explicitly forced
+# failure -- the fail-closed tests are only authoritative if this wins. Same mechanism as
+# the submit-suite stub; a caller that sets nothing behaves exactly as before.
+case " ${GH_FAIL:-} " in *" ${1:-}:${2:-} "*) exit 1 ;; esac
 key="GH_CANNED_$(echo "$1_$2" | tr ' -' '__' | tr '[:lower:]' '[:upper:]')"
 if [ -n "${!key:-}" ]; then cat "${!key}"; exit 0; fi
 # Path-shaped endpoints (gh api repos/<owner>/<name>) cannot form a legal variable name,
@@ -37,12 +42,24 @@ if [ -n "${GH_CANNED_MAP:-}" ] && [ -f "${GH_CANNED_MAP}" ]; then
       "$prefix"*) if [ "${#prefix}" -gt "$bestlen" ]; then best="$file"; bestlen="${#prefix}"; fi ;;
     esac
   done < "$GH_CANNED_MAP"
-  if [ -n "$best" ] && [ -f "$best" ]; then cat "$best"; exit 0; fi
+  if [ -n "$best" ] && [ -f "$best" ]; then
+    # A canned RAW payload (valid JSON) is served through the caller's own --jq expression,
+    # so tests exercise the production extraction rather than a pre-processed answer -- a
+    # broken expression must fail the test, not be papered over by the fixture. Legacy
+    # pre-processed fixtures (non-JSON text like a bare branch name) are served verbatim.
+    jqexpr=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--jq" ]; then jqexpr="$a"; fi
+      prev="$a"
+    done
+    if [ -n "$jqexpr" ] && jq -e . < "$best" >/dev/null 2>&1; then
+      jq -r "$jqexpr" < "$best"
+    else
+      cat "$best"
+    fi
+    exit 0
+  fi
 fi
-# Forced failures for fail-closed paths: GH_FAIL holds space-separated "<verb>:<arg>" keys
-# (e.g. "api:repos/o/r/issues/9"). Same mechanism as the submit-suite stub; a caller that
-# sets nothing behaves exactly as before.
-case " ${GH_FAIL:-} " in *" ${1:-}:${2:-} "*) exit 1 ;; esac
 exit 0
 """
 

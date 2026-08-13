@@ -109,9 +109,12 @@ jobs:
             count="$(printf '%s\n' "$matches" | grep -c . || true)"
             # Two repositories claiming one tracking issue is a registry defect. Picking the
             # first would contribute to an arbitrary third-party repository, silently.
+            # F1 (round 4): this branch used to exit inline, so DECISION kept no named
+            # reason and the always-publisher reported an empty one. It routes through
+            # refuse() like every other refusal here; the detail stays on stderr.
             if [ "${count:-0}" -gt 1 ]; then
-              echo "REFUSE:context-repo-ambiguous — issue #$ISSUE maps to ${count} repositories" >&2
-              exit 1
+              echo "AMBIGUOUS — issue #$ISSUE maps to ${count} repositories" >&2
+              refuse repo-ambiguous
             fi
             if [ "${count:-0}" -eq 1 ]; then REPO="$matches"; fi
           fi
@@ -614,7 +617,11 @@ jobs:
             echo "reason=$reason"
             echo "side_exit_label=$side_exit"
             echo "repo=${REPO:-}"
-            echo "issue=${ISSUE:-${ISSUE_NUMBER:-}}"
+            # ISSUE arrives via $GITHUB_ENV from derive-context, which must have succeeded
+            # for this step to run at all. A ${ISSUE_NUMBER:-} fallback here implied a second
+            # source this step does not have -- ISSUE_NUMBER is bound only in derive-context's
+            # step env -- and finalize already falls back to the event number itself.
+            echo "issue=${ISSUE:-}"
           } >> "${GITHUB_OUTPUT:-/dev/null}"
         id: guard
       - name: publish the gates outcome
@@ -898,8 +905,9 @@ jobs:
             call sites, or cite the unambiguous convention line); drop anything you cannot
             reproduce and every style-only or authorial-choice item. Write one patch file per
             surviving finding under _patches/, each with a three-line summary (Bug / Evidence /
-            Fix), and write _patches/findings.json as an array of {rule_id, fingerprint} for the
-            patches you kept. Honor a discuss-first contributing rule by stopping and writing
+            Fix), and write _patches/findings.json as an array of {rule_id, fingerprint, patch}
+            for the patches you kept, where patch is the bare filename of that finding's own
+            patch file under _patches/. Honor a discuss-first contributing rule by stopping and writing
             _patches/REFUSED with the reason. Never open issues or PRs yourself; the submit job
             holds that authority. Produce nothing for critical or high security findings — those
             take the disclosure path.
@@ -1115,20 +1123,31 @@ jobs:
             echo "REFUSE:patch-not-in-manifest — $bad was admitted by no gate" >&2
             exit 1
           fi
-          # F6, round 3. Everything above COUNTS; none of it BINDS. N patch files, N metadata
-          # entries and N allowlisted fingerprints leave patch #k and fingerprint #k unrelated,
-          # so a stray patch cannot be added but one can be swapped in — and `git apply` then
-          # writes arbitrary content to a third party's repository under a pull request that
-          # claims gate approval.
-          #
-          # The binding is taken from the patch BYTES: the paths `git apply --numstat` reports,
-          # checked against the `file` each admitted manifest entry names. It is deliberately
-          # NOT taken from a filename declared in findings.json. `propose` runs a model over
-          # third-party repository content that this workflow's own prompt treats as hostile,
-          # and that model writes both the patches and their metadata, so a declared filename
-          # is the untrusted party describing its own output — a compromised proposer would
-          # simply name its files correctly. SCHEMAS section 14 records what this establishes
-          # and, as importantly, what it does not.
+          # F6, round 4 — Option A (operator decision, 2026-08-13). Everything above COUNTS.
+          # The union binding below is the floor — no patch may reach outside the admitted
+          # file set — but it cannot see a patch swapped for ANOTHER admitted finding's file:
+          # the union still holds while patch k no longer fixes finding k. So findings.json
+          # now declares each finding's own `patch` filename, validated here as a set against
+          # the files on disk, and each patch's bytes are then scoped (inside the loop below)
+          # to the one file its finding's manifest entry admits. The touched paths are still
+          # taken from the patch BYTES via `git apply --numstat` — the declaration says only
+          # which finding a patch belongs to, never what it contains. Against a MALICIOUS
+          # proposer this proves nothing (it names its files correctly); against the sloppy
+          # one this control is written for, the association catches accidental and partial
+          # swaps the union cannot. SCHEMAS section 14 records both halves of that claim.
+          decl_n="$(jq '[.[] | .patch
+                         | select(type == "string" and length > 0 and (contains("/") | not))]
+                        | length' "$PATCH_META")"
+          if [ "$decl_n" -ne "$meta_n" ]; then
+            echo "REFUSE:patch-meta-unassociated — $((meta_n - decl_n)) of $meta_n metadata entries declare no usable patch filename" >&2
+            exit 1
+          fi
+          declared="$(jq -r '.[].patch' "$PATCH_META" | sort -u)"
+          on_disk="$(cd "$PATCH_DIR" && ls -1 -- *.patch | sort -u)"
+          if [ "$declared" != "$on_disk" ]; then
+            echo "REFUSE:patch-set-mismatch — the declared patch set and the files on disk are not the same set" >&2
+            exit 1
+          fi
           #
           # This runs BEFORE the fork is created. A binding validated afterwards has already
           # made a repository under the bot account for a patch set that was never admissible.
@@ -1160,6 +1179,25 @@ jobs:
               fi
               if ! printf '%s\n' "$admitted_files" | grep -qxF "$path"; then
                 echo "REFUSE:patch-touches-unadmitted-file — $(basename "$p") edits $path, which no admitted finding is about" >&2
+                exit 1
+              fi
+            done < "$numstat_tmp"
+            # Association (F6 round 4): this patch belongs to exactly one finding — the entry
+            # declaring its filename (guaranteed unique by the set check above) — and its
+            # bytes may touch only the file the manifest admits for that finding's
+            # fingerprint. An entry whose manifest row names no file refuses rather than
+            # matching nothing.
+            p_base="$(basename "$p")"
+            p_fp="$(jq -r --arg b "$p_base" \
+              '[.[] | select(.patch == $b) | .fingerprint] | first // empty' "$PATCH_META")"
+            p_file="$(jq -r --arg fp "$p_fp" \
+              '[.findings[] | select(.fingerprint == $fp) | .file // empty] | first // empty' \
+              "$MANIFEST")"
+            while IFS= read -r row; do
+              [ -z "$row" ] && continue
+              path="$(printf '%s' "$row" | cut -f3-)"
+              if [ -z "$p_file" ] || [ "$path" != "$p_file" ]; then
+                echo "REFUSE:patch-file-mismatch — $p_base edits $path but its finding admits only ${p_file:-nothing}" >&2
                 exit 1
               fi
             done < "$numstat_tmp"
@@ -1849,7 +1887,13 @@ jobs:
             # finding it is about; one carrying a null records that something was disclosed and
             # destroys the only means of finding out what. SCHEMAS section 14 declares the
             # shape as {rule_id, fingerprint, severity} — this is that declaration enforced.
-            disc_fp="$(jq '[.findings[] | .fingerprint | select(type == "string" and length > 0)] | length' \
+            # F5 (round 4): select objects FIRST. A primitive entry (a bare string or
+            # number) made `.fingerprint` raise inside the substitution, so the run died
+            # closed but anonymous — a jq error where this contract promises a named
+            # refusal. A primitive carries no fingerprint by construction, so it counts
+            # against disc_fp and takes the same refusal as any other unjoinable entry.
+            disc_fp="$(jq '[.findings[] | select(type == "object") | .fingerprint
+                            | select(type == "string" and length > 0)] | length' \
               "$DISCLOSURE")"
             if [ "$disc_fp" -ne "${disclosed:-0}" ]; then
               echo "REFUSE:disclosure-unfingerprinted — $(( disclosed - disc_fp )) of $disclosed disclosure finding(s) carry no fingerprint; the record could not be joined back to them" >&2

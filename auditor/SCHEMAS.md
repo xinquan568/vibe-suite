@@ -379,15 +379,24 @@ fingerprint *k* unrelated, so a patch can be swapped for arbitrary content and s
 Renames and binary diffs refuse — `--numstat` reports only a rename's destination, so a rename
 would move a file no gate considered while the reported path looked admitted.
 
-**What this establishes, and what it does not.** The binding is deliberately not a filename
-declared in `findings.json`. `propose` runs a model over third-party repository content that
-its own prompt treats as hostile, and that model writes both the patches and their metadata —
-so any self-declared mapping is the untrusted party describing its own output, and a
-compromised proposer would simply name its files correctly.
+Third contract point (operator decision, 2026-08-13): each `findings.json` entry MUST declare
+its finding's own patch file in a `patch` field (a bare filename under `_patches/`), and
+`submit` MUST require the declared set to equal the patch files on disk and then scope the
+bytes-derived path check per patch — patch *k* may touch only the `file` the manifest admits
+for fingerprint *k*. The union check bounds the set; the association catches a patch swapped
+for **another admitted finding's** file, which the union cannot see.
+
+**What this establishes, and what it does not.** The declaration says only which finding a
+patch belongs to; what the patch touches is still read from its bytes, never trusted from the
+metadata. Against a compromised proposer the declaration proves nothing — it writes both the
+patches and the metadata, so it can simply name its files correctly — and the association is
+therefore no authorization. What it adds against the sloppy or partially-broken proposer this
+control is written for is exactly the accidental and partial swap: association with the
+independently-produced manifest detects a patch that drifted onto the wrong admitted file.
 
 So this is an **integrity** control against a sloppy or partially-compromised proposer, not an
 **authorization** control against an adversarial one. It bounds the blast radius from "any path
-in the target repository" to "paths the gates already admitted work on". It does **not** show
+in the target repository" to "the file each admitted finding names". It does **not** show
 that a patch does what its finding claims; that is not mechanically checkable, and the residual
 controls are that `disclosure.json` never reaches `propose` and that a human reads the PR.
 

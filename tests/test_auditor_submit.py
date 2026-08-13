@@ -236,9 +236,14 @@ class SubmitSandbox:
         # unvalidated patch file (F6) had nothing to anchor against.
         (self.patches / "0002-fix.patch").write_text(SECOND_PATCH)
         (self.patches / "CAP").write_text("3\n")
+        # `patch` names each finding's own patch file (F6, round 4 -- Option A): the declared
+        # set must equal the files on disk, and each patch's bytes must touch only the file
+        # its finding admits. See SubmitAssociatesEachPatchWithItsFinding.
         (self.patches / "findings.json").write_text(json.dumps(
-            [{"rule_id": "R7", "fingerprint": FINGERPRINTS[0], "file": "README.md"},
-             {"rule_id": "R12", "fingerprint": FINGERPRINTS[1], "file": "NOTES.md"}]) + "\n")
+            [{"rule_id": "R7", "fingerprint": FINGERPRINTS[0], "file": "README.md",
+              "patch": "0001-fix.patch"},
+             {"rule_id": "R12", "fingerprint": FINGERPRINTS[1], "file": "NOTES.md",
+              "patch": "0002-fix.patch"}]) + "\n")
 
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -661,12 +666,13 @@ class SubmitBindsPatchesToAdmittedFiles(unittest.TestCase):
     file #k and fingerprint #k. `git apply` then writes arbitrary content to a third party's
     repository under a pull request that claims gate approval.
 
-    The binding is taken from the patch BYTES -- the paths `git apply --numstat` reports --
-    against the `file` each admitted manifest entry names. It is deliberately NOT taken from a
-    filename declared in findings.json: `propose` runs a model over third-party repository
-    content that the prompt itself treats as hostile, and that model writes both the patches
-    and the metadata. Asking it to name its own patch files is the untrusted party describing
-    its own output, and a compromised proposer would simply name them correctly.
+    The binding here is taken from the patch BYTES -- the paths `git apply --numstat` reports
+    -- against the union of `file` values the admitted manifest entries name. It is the floor:
+    no patch may reach outside the admitted file set. What it cannot see is a swap WITHIN that
+    set -- a patch substituted for another admitted finding's file still passes the union.
+    That case is SubmitAssociatesEachPatchWithItsFinding below (F6, round 4 -- Option A),
+    which associates each patch with its own finding via the declared `patch` filename and
+    scopes this same bytes-derived check to that finding's file.
 
     What this does and does not establish is written down in auditor/SCHEMAS.md section 14.
     """
@@ -708,6 +714,85 @@ class SubmitBindsPatchesToAdmittedFiles(unittest.TestCase):
             "rename from NOTES.md\nrename to README.md\n")
         r = self.sb.run()
         self._assert_refused(r, "REFUSE:patch-renames-a-file")
+
+
+class SubmitAssociatesEachPatchWithItsFinding(unittest.TestCase):
+    """F6, round 4 -- Option A, decided by the operator on 2026-08-13.
+
+    Round 3 bound the patch set to the UNION of admitted files and recorded why a declared
+    filename was rejected. The verify pass rebutted the rejection: the argument -- "a
+    compromised proposer would name its files correctly" -- is about the ADVERSARIAL case,
+    which this control never claimed to cover, while against the sloppy proposer it is
+    written for, association with the independently-produced manifest catches accidental and
+    partial swaps that union membership cannot. Round 3's own binding passes a patch
+    substituted for another admitted finding's file; that is the gap this class closes.
+
+    So findings.json now declares each finding's `patch` filename, and submit requires:
+    (a) every entry to declare one, as a bare filename; (b) the declared set to equal the
+    patch files on disk; and (c) each patch's touched paths -- still taken from the patch
+    BYTES via `git apply --numstat`, never trusted from the declaration -- to be exactly the
+    file the manifest entry carrying that finding's fingerprint admits.
+
+    This stays an INTEGRITY control against a sloppy proposer, not authorization against a
+    malicious one -- a compromised proposer can declare correctly, and SCHEMAS section 14
+    keeps saying so.
+    """
+
+    def setUp(self):
+        self.sb = SubmitSandbox(patch=GOOD_PATCH)
+        self.addCleanup(self.sb.cleanup)
+        self.meta = self.sb.patches / "findings.json"
+
+    def _rewrite_meta(self, mutate):
+        doc = json.loads(self.meta.read_text())
+        mutate(doc)
+        self.meta.write_text(json.dumps(doc) + "\n")
+
+    def _assert_refused(self, r, needle):
+        self.assertNotEqual(0, r.returncode, f"submit proceeded despite {needle}")
+        self.assertIn(needle, r.stdout + r.stderr)
+        self.assertEqual(self.sb.gh_verbs("pr", "create"), [],
+                         "a pull request was opened from an unassociated patch")
+        self.assertEqual(self.sb.fork_log().strip(), "",
+                         "a branch was pushed to the fork from an unassociated patch")
+
+    def test_the_associated_patch_set_proceeds(self):
+        # The control: the fixture declares each patch truthfully, so none of the three
+        # association refusals may fire. Without this, the tests below could pass because
+        # the check refuses everything.
+        r = self.sb.run()
+        out = r.stdout + r.stderr
+        for needle in ("REFUSE:patch-meta-unassociated", "REFUSE:patch-set-mismatch",
+                       "REFUSE:patch-file-mismatch"):
+            self.assertNotIn(needle, out)
+
+    def test_an_entry_with_no_declared_patch_refuses(self):
+        self._rewrite_meta(lambda d: d[1].pop("patch"))
+        self._assert_refused(self.sb.run(), "REFUSE:patch-meta-unassociated")
+
+    def test_a_declaration_that_is_not_a_bare_filename_refuses(self):
+        # A path-shaped declaration reaches outside $PATCH_DIR when joined; refuse the shape
+        # rather than trusting the join.
+        self._rewrite_meta(lambda d: d[0].__setitem__("patch", "../0001-fix.patch"))
+        self._assert_refused(self.sb.run(), "REFUSE:patch-meta-unassociated")
+
+    def test_a_declared_set_that_is_not_the_disk_set_refuses(self):
+        self._rewrite_meta(lambda d: d[1].__setitem__("patch", "0009-elsewhere.patch"))
+        self._assert_refused(self.sb.run(), "REFUSE:patch-set-mismatch")
+
+    def test_two_entries_claiming_one_patch_refuse(self):
+        # Count equality holds (two entries, two files); the declared SET has one member, so
+        # set equality is what catches it -- one patch on disk is claimed twice and the other
+        # is accounted for by nobody.
+        self._rewrite_meta(lambda d: d[1].__setitem__("patch", d[0]["patch"]))
+        self._assert_refused(self.sb.run(), "REFUSE:patch-set-mismatch")
+
+    def test_a_swap_between_two_admitted_files_refuses(self):
+        # The rebuttal's case, verbatim: 0001-fix.patch is declared for the README.md finding
+        # but its bytes now edit NOTES.md -- the OTHER admitted file. The round-3 union
+        # binding passes it (NOTES.md is admitted); the association must not.
+        (self.sb.patches / "0001-fix.patch").write_text(SECOND_PATCH)
+        self._assert_refused(self.sb.run(), "REFUSE:patch-file-mismatch")
 
     def test_a_binary_patch_refuses(self):
         (self.sb.patches / "0002-fix.patch").write_text(

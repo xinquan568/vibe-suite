@@ -610,6 +610,27 @@ class TestTheDisclosureSetGetsItsOwnDurableOutcome(CompositionBase):
         self.assertNotEqual(0, res.r.returncode)
         self.assertIn("REFUSE:disclosure-unfingerprinted", res.out)
 
+    def test_a_primitive_entry_still_gets_the_named_refusal(self):
+        """F5, round 4: fail closed AND by name.
+
+        A bare string (or number) in `.findings` made jq raise while indexing `.fingerprint`,
+        so the block died on the command substitution under `set -e` -- closed, but anonymous:
+        the promised REFUSE:disclosure-unfingerprinted never printed, and the log showed a jq
+        error where the contract names a reason. A primitive entry carries no fingerprint by
+        construction, so it belongs to the same refusal class, not to a crash.
+        """
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(
+                                 [{"rule_id": "SEC-A", "fingerprint": "sha256:abc",
+                                   "severity": "critical"},
+                                  "not-an-object"])})
+        self.assertNotEqual(0, res.r.returncode)
+        self.assertIn("REFUSE:disclosure-unfingerprinted", res.out,
+                      "the block failed closed without its named refusal -- a jq stack trace "
+                      "is not a contract")
+        self.assertNotIn("disclosure_pending", res.pushed_events(),
+                         "an unjoinable disclosure row was committed and pushed anyway")
+
 
 if __name__ == "__main__":
     unittest.main()

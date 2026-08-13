@@ -256,9 +256,24 @@ class TestTheRealTriggersReachTheGraph(TriggerBase):
                               "AUDITOR_FORK_OWNER": "vibe-bot", "WEEKLY_CAP": "2"})
                for k, v in self.step_env().items()}
         env["FIXTURE"] = ""
+        env["DECISION"] = str(sb.root / "decision.json")
         env.update(self.canned(sb, login=None, default_branch="main"))
         r = sb.run(self.block(), env=env)
         self.assertIn("REFUSE:context-repo-ambiguous", r.stdout + r.stderr)
+        # F1, round 4: stderr is not where the outcome publisher reads. Every other refusal
+        # in this block routes through refuse(), which records the named reason in the
+        # decision file; this branch exited inline, so the publisher reported status=error
+        # with an EMPTY reason while the name sat only in the log. The refusal must land in
+        # the decision file like the rest.
+        decision_file = sb.root / "decision.json"
+        self.assertTrue(decision_file.is_file(),
+                        "the ambiguous refusal wrote no decision file, so the outcome "
+                        "publisher has no named reason to report")
+        decision = json.loads(decision_file.read_text())
+        self.assertFalse(decision.get("proceed", True))
+        self.assertIn("context-repo-ambiguous", decision.get("reason", ""),
+                      f"the decision file carries reason {decision.get('reason')!r}; the "
+                      f"publisher would report this refusal without its name")
 
 
 class TestTheRealDerivationSatisfiesTheConsumers(TriggerBase):
@@ -467,6 +482,76 @@ def _publisher_block():
     return "\n".join(l[indent:] if len(l) >= indent else l for l in lines)
 
 
+def _steps(job_body):
+    """Split a job body into (text before/around the steps list, [one text per step]).
+
+    Step items sit at the 6-space list indent under `steps:`. A 4-space key after the list
+    ends it. Everything outside the list (the job's own `env:`, `needs:`, …) is job-level.
+    """
+    pre, steps, cur, in_steps = [], [], None, False
+    for ln in job_body.split("\n"):
+        if re.match(r"^    steps:\s*$", ln):
+            in_steps = True
+            pre.append(ln)
+            continue
+        if in_steps and re.match(r"^    \S", ln):
+            in_steps = False
+            if cur is not None:
+                steps.append("\n".join(cur))
+                cur = None
+        if in_steps and re.match(r"^      - ", ln):
+            if cur is not None:
+                steps.append("\n".join(cur))
+            cur = [ln]
+            continue
+        if cur is not None:
+            cur.append(ln)
+        else:
+            pre.append(ln)
+    if cur is not None:
+        steps.append("\n".join(cur))
+    return "\n".join(pre), steps
+
+
+def _unbound_names(job_body, runtime=frozenset(), optional=frozenset()):
+    """Names a job's steps read that nothing available AT THAT POINT binds.
+
+    Availability is scoped per step, in order: the runtime set, the job-level `env:`, the
+    step's own `env:`, names EXPORTED to $GITHUB_ENV by an EARLIER step, and names assigned
+    inside the step's own block. A binding that only exists in a LATER step does not satisfy
+    an earlier read — that is the ordering the round-3 scan aggregated away.
+
+    A read needs a binding when it has no default (`$X`, `${X}`), an explicitly empty default
+    (`${X:-}`), or is required (`${X:?}`). The bare unbraced form is a read like any other;
+    the round-3 scan did not match it, so a name read only as `$X` escaped entirely. A read
+    with a NON-EMPTY default (`${DATA_DIR:-_data}`) is self-sufficient and is not flagged.
+    """
+    def code_of(text):
+        return "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("#"))
+
+    def needs(code):
+        return (set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):\?[^}]*\}", code))
+                | set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):-\}", code))
+                | set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)\}", code))
+                | set(re.findall(r"\$(?!\{)([A-Z][A-Z0-9_]*)", code)))
+
+    def env_bound(text, indent=8):
+        return set(re.findall(r"^\s{%d,}([A-Z][A-Z0-9_]*):\s*\S" % indent, text, re.M))
+
+    pre, steps = _steps(job_body)
+    # Job-level `env:` entries sit at the 6-space indent; step-level ones at 10.
+    job_env = env_bound(pre, indent=6)
+    offenders, exported_by_earlier = [], set()
+    for step in steps:
+        code = code_of(step)
+        assigned = set(re.findall(r"(?:^|\s|\()([A-Z][A-Z0-9_]*)=", code, re.M))
+        avail = (set(runtime) | set(optional) | job_env | env_bound(step)
+                 | exported_by_earlier | assigned)
+        offenders.extend(sorted(needs(code) - avail))
+        exported_by_earlier |= set(re.findall(r'echo "([A-Z][A-Z0-9_]*)=', code))
+    return offenders
+
+
 class TestEveryJobBindsWhatItReads(unittest.TestCase):
     """The general form of finding 1, applied to every job rather than to one step.
 
@@ -479,9 +564,13 @@ class TestEveryJobBindsWhatItReads(unittest.TestCase):
     fails on the production defect directly, instead of inferring it from test hygiene. The
     lexical scan in test_auditor_no_supplied_derivations.py is the backstop, not the guarantee.
 
-    A read needs a binding when it has no default (`$X`, `${X}`), an explicitly empty default
-    (`${X:-}`), or is required (`${X:?}`). A read with a NON-EMPTY default is self-sufficient
-    and is not flagged — `${DATA_DIR:-_data}` needs nothing from anybody.
+    F10, round 4: the scan itself is now `_unbound_names` above, and it is stricter in the
+    two ways the review showed it could certify an unbound consumer — it matches the bare
+    unbraced read (`$X`), which the round-3 regexes never saw, and it scopes availability by
+    step and order, where round 3 pooled every binding and assignment in the job so a name
+    assigned in step 5 excused a read in step 3. `TestTheBindingScanItselfCatches` below runs
+    the scan against synthetic jobs that hold each defect, so a regression here fails a test
+    rather than quietly narrowing the guarantee.
     """
 
     #: Provided by the Actions runner, or by the harness that executes a block.
@@ -517,23 +606,13 @@ class TestEveryJobBindsWhatItReads(unittest.TestCase):
         for job, body in self.jobs.items():
             if job == "issues":  # the `on:` trigger block, not a job
                 continue
-            code = "\n".join(l for l in body.split("\n") if not l.lstrip().startswith("#"))
-            need = (set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):\?[^}]*\}", code))
-                    | set(re.findall(r"\$\{([A-Z][A-Z0-9_]*):-\}", code))
-                    | set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)\}", code)))
-            bound = set(re.findall(r"^\s{8,}([A-Z][A-Z0-9_]*):\s*\S", code, re.M))
-            # Exported to $GITHUB_ENV by an earlier step of the SAME job, or assigned inside
-            # the block that reads it -- both make the name the job's own to produce.
-            exported = set(re.findall(r'echo "([A-Z][A-Z0-9_]*)=', code))
-            assigned = set(re.findall(r"(?:^|\s|\()([A-Z][A-Z0-9_]*)=", code))
-            for name in sorted(need - self.RUNTIME - set(self.OPTIONAL)
-                               - bound - exported - assigned):
+            for name in _unbound_names(body, self.RUNTIME, set(self.OPTIONAL)):
                 offenders.append(f"{job}: {name}")
         self.assertEqual(
             [], offenders,
-            "a job reads a name nothing binds, exports or assigns, so on a real run it is "
-            "empty — the shape of finding 1, and of finding 9 before it:\n  "
-            + "\n  ".join(offenders))
+            "a step reads a name nothing available at that point binds, exports or assigns, "
+            "so on a real run it is empty — the shape of finding 1, and of finding 9 before "
+            "it:\n  " + "\n  ".join(offenders))
 
     def test_the_optional_list_stays_a_list_of_names_with_reasons(self):
         for name, reason in self.OPTIONAL.items():
@@ -547,6 +626,51 @@ class TestEveryJobBindsWhatItReads(unittest.TestCase):
             self.assertIn(expected, found,
                           f"the job scan lost {expected}; it is now checking less than the "
                           f"whole workflow and would pass regardless")
+
+
+class TestTheBindingScanItselfCatches(unittest.TestCase):
+    """Mutation anchors for `_unbound_names` — each defect the round-4 rework exists to see.
+
+    The round-3 scan passed both synthetic jobs below. If a later edit relaxes the scan, the
+    guarantee narrows silently and every suite that leans on it keeps passing; these fail
+    instead.
+    """
+
+    def _job(self, *steps, pre=""):
+        body = "  job:\n" + (pre + "\n" if pre else "") + "    steps:\n"
+        for s in steps:
+            body += "      - run: |\n"
+            for line in s.split("\n"):
+                body += "          " + line + "\n"
+        return body
+
+    def test_a_bare_unbraced_read_is_a_read(self):
+        job = self._job('echo "$MYSTERY_VALUE"')
+        self.assertIn("MYSTERY_VALUE", _unbound_names(job),
+                      "a name read only as bare $X escaped the scan; the round-3 regexes "
+                      "matched braces only and this is the regression back to that")
+
+    def test_a_later_assignment_does_not_excuse_an_earlier_read(self):
+        job = self._job('echo "${LATE_VALUE}"', "LATE_VALUE=set-too-late")
+        self.assertIn("LATE_VALUE", _unbound_names(job),
+                      "a name assigned only in a LATER step excused a read in an earlier "
+                      "one; the scan is pooling bindings across the job again")
+
+    def test_an_earlier_export_satisfies_a_later_read(self):
+        job = self._job('EARLY_VALUE=x\necho "EARLY_VALUE=$EARLY_VALUE" >> "$GITHUB_ENV"',
+                        'echo "${EARLY_VALUE}"')
+        self.assertEqual([], _unbound_names(job, runtime={"GITHUB_ENV"}),
+                         "an export to $GITHUB_ENV from an earlier step is how jobs hand "
+                         "values forward; flagging it makes the scan unusable")
+
+    def test_a_same_step_assignment_satisfies_its_own_read(self):
+        job = self._job('LOCAL_VALUE=1\necho "$LOCAL_VALUE"')
+        self.assertEqual([], _unbound_names(job))
+
+    def test_a_step_env_binding_satisfies_that_step(self):
+        body = ("  job:\n    steps:\n      - env:\n          BOUND_VALUE: yes\n"
+                "        run: |\n          echo \"$BOUND_VALUE\"\n")
+        self.assertEqual([], _unbound_names(body))
 
 
 class TestTheStepBindsEveryValueItReads(TriggerBase):

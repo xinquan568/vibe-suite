@@ -364,7 +364,7 @@ def _without_strict_mode(block):
 
 
 class TestStrictModeChangesBehaviour(QuotaBase):
-    """F11, round 3: prove the difference by executing both sides of it.
+    """F11, round 4: prove the difference by executing both sides of it.
 
     The structural assertion shows a string sits in a position. The refusal tests above show
     the guards fire. Neither can show what strict mode itself buys, because a block whose
@@ -375,9 +375,19 @@ class TestStrictModeChangesBehaviour(QuotaBase):
     pipefail` stripped, and requires the two to differ. If a case cannot tell them apart it is
     not evidence about strict mode, and it fails rather than passing quietly.
 
-    The two failure classes below were found by trying candidates and keeping the ones that
-    actually differed; `${SIDECAR:?}` was tried and REJECTED, because the explicit `:?` does
-    that work and `set -u` adds nothing to it.
+    What strict mode demonstrably buys this workflow is ONE failure class: a failed output
+    redirection under `set -e`, shown below at two independent sites (the open-PR export and
+    the manifest write). Round 3 called those two classes, which overstated the coverage --
+    both abort by the same mechanism. The other two strict-mode flags have no workflow-level
+    differential to show, and that is by construction rather than omission: `set -u` needs an
+    unguarded read of an unset name, and every read is bound, defaulted or `:?`-guarded --
+    enforced structurally by TestEveryJobBindsWhatItReads (bare reads included since round
+    4); `pipefail` needs a pipeline whose early stage can fail while the last succeeds, and
+    the workflow's pipelines start from `printf` of in-memory values, with command status
+    never taken through a pipe (the discipline recorded at the open-prs block). `${SIDECAR:?}`
+    was tried as a set-u candidate and REJECTED for exactly this reason: the explicit `:?`
+    does the work and `set -u` adds nothing to it. The synthetic pipefail case in
+    TestTheRefusalBranchesWork covers the primitive and says it is not workflow evidence.
     """
 
     def _both(self, block, env_builder):

@@ -569,6 +569,7 @@ jobs:
                                         run: |
 
                                           set -euo pipefail
+                                          # cover-logic:case-study
                                           # date the article and attach a cover. OPENAI_API_KEY is scoped to this one
                                           # deterministic step: absent key, or a failing image API, never fails the
                                           # article - a templated SVG stands in and the article still publishes.
@@ -610,6 +611,7 @@ jobs:
                                           awk -v ref="$REF" 'NR == 1 {print; print ""; print "![cover](" ref ")"; next} {print}' "$ARTICLE" > "$ARTICLE.tmp"
                                           mv "$ARTICLE.tmp" "$ARTICLE"
                                           echo "article_path=articles/$DATE-$SLUG.md" >> "$GITHUB_OUTPUT"
+                                          # /cover-logic
       -                                   name: Publish the article
                                           uses: actions/upload-artifact@v4
                                           with:

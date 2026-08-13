@@ -51,6 +51,13 @@ PIPELINE_WORKFLOWS = (
 SITE_RELEASE_WORKFLOWS = ("deploy-site", "self-check", "site-preview", "site-preview-cleanup",
                           "site-validate", "pre-release-quality-gate")
 
+#: Staged pipeline workflows E8.7 ACTIVATED: each may (and must, to be dispatchable) also
+#: exist under `.github/workflows/`, byte-identical to its staged source — the one
+#: sanctioned exception to the live-copy anomaly, recorded in the auditor runbook and
+#: pinned by tests/test_auditor_fixture.py.
+ACTIVATED_WORKFLOWS = ("auditor-integration-test",)
+assert set(ACTIVATED_WORKFLOWS) <= set(PIPELINE_WORKFLOWS), "activated set must be staged"
+
 # The partition claim, asserted at import rather than asserted in prose.
 assert not set(PIPELINE_WORKFLOWS) & set(SITE_RELEASE_WORKFLOWS), "auditor row sets overlap"
 assert len(set(PIPELINE_WORKFLOWS) | set(SITE_RELEASE_WORKFLOWS)) == 24, "union is not SS5.0's 24"
@@ -138,6 +145,21 @@ def _pipeline_count(r):
                 return -1
             staged_bodies.add(body)
     for f in _workflow_entries(r / ".github"):
+        if f.stem in ACTIVATED_WORKFLOWS:
+            # E8.7 activation: for THIS stem the live copy is the sanctioned state, and
+            # the byte rule inverts — identical to its staged source is REQUIRED (the
+            # staged file stays the edited, lint-covered source); any divergence, a
+            # non-.yml shape, or a missing staged source is the hidden-executable hazard.
+            staged = r / "auditor" / "workflows" / (f.stem + ".yml")
+            if f.suffix != ".yml" or not f.is_file() or f.is_symlink() \
+                    or not staged.is_file() or staged.is_symlink():
+                return -1
+            try:
+                if f.read_bytes() != staged.read_bytes():
+                    return -1
+            except OSError:
+                return -1
+            continue
         if f.stem in PIPELINE_WORKFLOWS:
             return -1
         if f.stem.startswith("auditor-") and f.stem not in SITE_RELEASE_WORKFLOWS:

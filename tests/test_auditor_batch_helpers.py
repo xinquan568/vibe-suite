@@ -230,6 +230,36 @@ class Test_propose_rule_citations(unittest.TestCase):
                       "<!-- vibe-exemplar-citation:begin R01 -->", text)
         self.assertIn(f"]({self.PREFIX}/acme-widget.md)", text)
 
+    def test_a_crowded_rule_renders_a_capped_single_line(self):
+        """E8.6 (vibe-63): the real corpus broke the rulebook's own R05 size cap.
+
+        Applied to the migrated corpus, one-bullet-per-exemplar rendering pushed
+        skills/rules/SKILL.md from 337 to 973 lines — past R05's sub-500 line cap and
+        under the release-score floor. The rulebook's decoration must respect the
+        rulebook's constitution: at most three exemplars per rule, strongest first
+        (score descending, then filename for determinism), rendered as ONE links line
+        between the markers.
+        """
+        exemplars = {}
+        for i in range(8):
+            exemplars[f"repo-{i:02d}.md"] = (
+                f"---\nslug: repo-{i:02d}\nrepo: acme/repo-{i:02d}\n"
+                f"audited: 2026-08-01\ncommit_sha: abc\nscore: {60 + i}\n"
+                f"exemplifies: [R01]\n---\nbody\n")
+        d, rules = self._fixture(exemplars=exemplars)
+        r = self._run(d, rules)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        block = rules.read_text().split("begin R01 -->")[1].split(
+            "<!-- vibe-exemplar-citation:end R01")[0]
+        inner = [l for l in block.splitlines() if l.strip()]
+        self.assertEqual(1, len(inner),
+                         f"the citation block is not a single line: {inner}")
+        self.assertEqual(3, inner[0].count("]("),
+                         f"the per-rule cap of three is not applied: {inner[0]}")
+        for kept in ("repo-07", "repo-06", "repo-05"):
+            self.assertIn(kept, inner[0], "the strongest exemplars were not the ones kept")
+        self.assertNotIn("repo-00", inner[0], "a weakest exemplar displaced a stronger one")
+
     def test_both_frontmatter_shapes_are_read(self):
         """The exemplar workflow documents an inline sequence AND a block list."""
         d, rules = self._fixture()
@@ -244,7 +274,7 @@ class Test_propose_rule_citations(unittest.TestCase):
         d, rules = self._fixture()
         self._run(d, rules)
         for line in rules.read_text().splitlines():
-            if line.startswith("- ["):
+            if "](" in line and "vibe-exemplar-citation" not in line and "https" in line:
                 with self.subTest(line=line):
                     self.assertIn("](https://", line)
 

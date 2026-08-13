@@ -253,6 +253,15 @@ jobs:
           fi
           exit 1
       - run: |
+          # E8.6 (vibe-63): rule-id drift BLOCKS, and it blocks HERE — before the
+          # aggregation step below appends ledgers, updates the registry, or transitions
+          # labels. The old call site ran after those mutations with its failure swallowed
+          # ("warn-only"), so an audit keyed on rule ids the rulebook does not carry
+          # published anyway, and a refusal could only ever fire after externally visible
+          # success. The earlier telemetry reading is superseded by E8.6's acceptance.
+          set -euo pipefail
+          python3 "$CODE_DIR/auditor/scripts/validate-rule-ids.py" "$DATA_DIR/audits/$SLUG.findings.jsonl"
+      - run: |
           # Deterministic aggregation core. The surrounding steps set SCORE,
           # SECURITY and FIXTURE from real context before this block runs, so
           # the block is identical in prod and in the test harness. Every
@@ -325,15 +334,6 @@ jobs:
           jq -cn --arg repo "$REPO_FULL" --argjson a "$APPENDED" --argjson d "$DROPPED" --argjson sc "$SCORE" --arg sec "$SECURITY" --arg sha "$SHA" '{repo: $repo, appended: $a, dropped: $d, score: $sc, security: $sec, commit_sha: $sha}' | envelope audit_complete >> "$EVENT_LOG"
           echo "PASS"
           # /stage-logic
-      - run: |
-          # Rule-id drift is warn-only BY DESIGN and stays that way: a drifted id is telemetry
-          # about the rulebook, not a defect in the audit that just ran.
-          #
-          # The guard is -f, not -x. Python helpers ship mode 100644 by contract, so `-x` can
-          # never be true for one — the branch would take the else forever and report a
-          # deferral that had already been delivered, with the helper silently switched off.
-          set -euo pipefail
-          python3 "$CODE_DIR/auditor/scripts/validate-rule-ids.py" "$DATA_DIR/audits/$SLUG.findings.jsonl" || echo "rule-id drift check failed (warn-only)"
       - run: |
           # The per-repo report render is FAIL-CLOSED. It was previously guarded and its failure
           # swallowed by `|| echo ... (warn-only)`, which meant an audit could be published,

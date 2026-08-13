@@ -281,9 +281,9 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-rules/SKILL.md",
-      "mirror_sha256": "71438dac513a74da68ac98a875d848d6ab482a16dee2d37a8121cc427dcc0881",
+      "mirror_sha256": "dbf733761642b121d7f6f5bdc73c8ac906e8e394cf9d5b2e96878e3c2a99e915",
       "source": "skills/rules/SKILL.md",
-      "source_sha256": "3772bc3890bca2f72c30f408e622f3c5e593e6b7d936df27e437bc70e5f151c4",
+      "source_sha256": "d71f7ad2c321debc8f09802c98a2c4bac9e2cbffe37f572852edc8155ca746f4",
       "transform": "markdown"
     },
     {

@@ -573,28 +573,26 @@ class TestConsumerClassify(BlockBase):
 
 
 class TestConsumerRefineRules(unittest.TestCase):
-    """refine-rules proposes rule changes from the disagreements ledger's rule ids."""
+    """refine-rules consumes the ledgers through the rulebook-group helpers (E8.6).
 
-    def test_refine_rules_reads_envelope(self):
-        sb = Sandbox(ledgers={"disagreements.jsonl": [
-            envelope("maintainer_rejected",
-                     {"pr": 17, "rule_id": "R07", "quote": "we do this on purpose",
-                      "dissent_type": "intentional_pattern"},
-                     workflow="auditor-classify"),
-        ]})
-        try:
-            prog = jq_program("auditor-refine-rules.yml", "sort_by(-.hits)")
-            self.assertIsNotNone(prog, "refine-rules no longer ranks disagreements by rule")
-            out = run_jq(prog, sb.data / "ledgers" / "disagreements.jsonl", raw=False)
-            self.assertEqual(out.returncode, 0, out.stderr)
-            proposals = json.loads(out.stdout)["proposals"]
-            self.assertEqual(
-                [p["rule_id"] for p in proposals], ["R07"],
-                "refine-rules sees no candidate rule in an enveloped disagreements ledger: it "
-                "selects on a top-level `.rule_id`, which §7 places at `.data.rule_id`, so the "
-                f"proposal set is empty and no rule ever gets refined. program: {prog.strip()}")
-        finally:
-            sb.cleanup()
+    The envelope-awareness property this class used to pin lived in an inline jq
+    aggregation the workflow no longer carries: the pipeline is now rule-health.py →
+    validate-feedback.sh → prepare-refinement-input.py, and the §7-envelope reading is
+    those helpers' own tested behavior (the rule-health suite drives enveloped events and
+    disagreements directly). What remains pinned HERE is that the workflow has not grown a
+    second, envelope-blind inline reader beside the helpers.
+    """
+
+    def test_the_workflow_carries_no_inline_ledger_aggregation(self):
+        text = (WF_DIR / "auditor-refine-rules.yml").read_text(encoding="utf-8")
+        block = text[text.index("# logic:refine-rules"):text.index("# /logic")]
+        self.assertIn("rule-health.py", block,
+                      "the pipeline lost its rebuild step")
+        self.assertIn("prepare-refinement-input.py", block,
+                      "the pipeline lost its selection step")
+        self.assertNotIn("group_by(.data.rule_id)", block,
+                         "an inline disagreement aggregation reappeared beside the helpers "
+                         "— two readers of one ledger drift apart silently")
 
 
 class TestConsumerSuppressions(unittest.TestCase):

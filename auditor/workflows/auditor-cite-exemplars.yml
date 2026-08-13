@@ -130,6 +130,12 @@ jobs:
             --data-dir "$DATA_DIR" \
             --rules-path "$CODE_DIR/skills/rules/SKILL.md" \
             --exemplar-url-prefix "$VIBE_EXEMPLAR_URL_PREFIX"
+          # E8.6 (vibe-63): skills/rules/SKILL.md is a MIRRORED source
+          # (codex/skills/vibe-rules/SKILL.md via codex/MIRROR-MANIFEST.json), and the
+          # --mirrors release gate fails a stale mirror. Regeneration sits BETWEEN the
+          # source edit and the commit; `commit -am` then stages source, mirror and
+          # manifest together.
+          python3 "$CODE_DIR/scripts/mirror-sync.py" generate
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -am "auditor-cite-exemplars refresh rule citations for $DATE"

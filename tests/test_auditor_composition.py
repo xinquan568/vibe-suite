@@ -174,11 +174,20 @@ class CompositionBase(unittest.TestCase):
         return sb
 
     def base_env(self, sb, extra=None):
+        # DECISION here models the gate-context artifact: since F10.b the decision document
+        # travels in that artifact and finalize's route step binds DECISION to the
+        # downloaded path, so injecting it is modelling production, not papering over a
+        # missing transport. ISSUE models derive-context's $GITHUB_ENV export to every later
+        # gates step (the per-module exemption in the no-supplied-derivations scan records
+        # this). GITHUB_REPOSITORY is runner-provided, like GITHUB_WORKSPACE. LABELS is
+        # deliberately NOT here: the security gate derives it from the canned API or not at
+        # all (F10.a).
         e = {"REPO": "acme/claude-toolkit", "OWNER": "acme",
              "SIDECAR": str(FIX / "findings-sidecar.jsonl"),
              "DECISION": str(sb.decision), "OUTCOME_DIR": str(sb.outcomes),
              "DATA_REMOTE": str(sb.bare), "LABEL_SNAPSHOT": str(sb.label_snapshot),
-             "ISSUE_NUMBER": "42", "LABELS": "contribute-approved"}
+             "ISSUE_NUMBER": "42", "ISSUE": "42",
+             "GITHUB_REPOSITORY": "example/auditor-repo"}
         e.update(GIT_ENV)
         e.update(extra or {})
         return e
@@ -205,13 +214,14 @@ class CompositionBase(unittest.TestCase):
         emitted = [l for l in lines if l.startswith(ACTION_PREFIXES)]
         return emitted or (len(after_calls) > len(before_calls))
 
-    def drive_row(self, job, status, reason="", ids=None, extra=None, registry="registry.json"):
+    def drive_row(self, job, status, reason="", ids=None, extra=None, registry="registry.json",
+                  side_exit=""):
         sb = self.sandbox(registry=registry)
         for name, doc in stage_outcomes(job, status, reason, ids or {}).items():
             (sb.outcomes / f"outcome-{name}.json").write_text(json.dumps(doc) + "\n")
         sb.decision.write_text(json.dumps({
             "proceed": job == "submit" and status == "submitted",
-            "reason": reason, "side_exit_label": ""}) + "\n")
+            "reason": reason, "side_exit_label": side_exit}) + "\n")
         block = terminal_block()
         self.assertIsNotNone(block, "neither a finalize logic block nor stage-logic:contribute")
         env = self.base_env(sb, {"OUTCOME_JOB": job, "OUTCOME_STATUS": status,
@@ -339,8 +349,9 @@ class TestOutcomeTable(CompositionBase):
         self.assertEqual(res.pr_creates, [], "(gates,skip/non-security) must open no PR")
 
     def test_row_gates_skip_security_disclosure(self):
-        res = self.drive_row("gates", "skip", "security-disclosure",
-                             extra={"LABELS": "contribute-approved,security-blocked"})
+        # No LABELS override: the terminal block never reads it, and the security routing
+        # branches on the REASON prefix — the old extra was a fixture with no reader.
+        res = self.drive_row("gates", "skip", "security-disclosure")
         self.assertNotIn("security-blocked", res.removed,
                          "(gates,skip/security) must RETAIN security-blocked")
         self.assertTrue({"disclosure_filed", "disclosure_pending"} & set(res.names()),
@@ -358,6 +369,26 @@ class TestOutcomeTable(CompositionBase):
         self.assertEqual(payload(rec).get("stage"), "gates",
                          "(gates,error) contribution_error must carry stage=gates")
         self.assertNotEqual(res.r.returncode, 0, "(gates,error) must fail the run loudly")
+
+    def test_row_gates_label_read_failure_routes_as_infrastructure(self):
+        """F10.a (round 2): the reason lives OUTSIDE security-*, and the routing proves it.
+
+        A failed label read refuses `issue-labels-unresolvable` with `side_exit_label:
+        pipeline-error`. Finalize's skip routing sends `security-*` reasons to the
+        disclosure branch (retain the label, no contribution_refused); everything else
+        applies the transported side-exit label. If the failure reason ever drifts into the
+        security namespace, an API outage would masquerade as a security hold — this pins
+        the routing end to end through the transported decision document.
+        """
+        res = self.drive_row("gates", "skip", "issue-labels-unresolvable",
+                             side_exit="pipeline-error")
+        self.assertIn("pipeline-error", res.added,
+                      f"(gates,skip/issue-labels-unresolvable) must apply the transported "
+                      f"side-exit label pipeline-error; applied {res.added}")
+        self.assertNotIn("security-blocked", res.added,
+                         "an infrastructure failure was routed into the security branch")
+        self.assertIn("contribution_refused", res.names(),
+                      f"the refusal row must reach the ledger; got {res.names()}")
 
     def test_row_reserve_capped(self):
         res = self.drive_row("reserve", "capped", "weekly-cap")

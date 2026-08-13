@@ -220,7 +220,9 @@ EMITTERS = [
     ("audit", "stage-logic", {"SCORE": "64", "SECURITY": "REVIEW"}, "registry.json",
      _copy_findings_sidecar),
     ("contribute", "stage-logic",
-     {"FIRST_CONTACT": "true", "WEEK_CONTACT_COUNT": "0", "LABELS": "contribute-approved"},
+     # No LABELS: the terminal-transition block never reads it (the security gate derives
+     # labels from the API since F10.a, and no other reader exists).
+     {"FIRST_CONTACT": "true", "WEEK_CONTACT_COUNT": "0"},
      "registry.json", _copy_findings_sidecar),
     ("track", "stage-logic", {}, "registry-tracked.json", None),
     ("case-study", "stage-logic",

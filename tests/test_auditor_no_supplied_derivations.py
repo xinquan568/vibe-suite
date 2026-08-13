@@ -59,7 +59,12 @@ FIXTURES = TESTS / "fixtures" / "auditor"
 # on the PRODUCING side. A scan that watches the producer's vocabulary cannot see the consumer
 # supplying the same answer under its own name.
 DERIVED = ["AUDITED_SHA", "BASE_BRANCH", "PATCH_CAP", "EXPECTED_FORK_SLUG",
-           "FORK_SLUG", "ISSUE", "AUTHOR_NAME", "AUTHOR_EMAIL", "WEEKLY_CAP"]
+           "FORK_SLUG", "ISSUE", "AUTHOR_NAME", "AUTHOR_EMAIL", "WEEKLY_CAP",
+           # F10.a (round 2): the security gate derives LABELS from the tracking issue via
+           # the API. Handing it in through the environment is supplying the very answer the
+           # gate must fetch — the dispatch-bypass defect survived precisely because tests
+           # did exactly that.
+           "LABELS"]
 
 # DELIBERATELY NOT IN `DERIVED`: REPO and ISSUE_NUMBER.
 #
@@ -96,6 +101,12 @@ ALLOWED = {
                        "suite drives the derivation that reads and validates it",
         "AUTHOR_EMAIL": "the AUDITOR_AUTHOR_EMAIL repo variable under its in-block name; same "
                         "reason as AUTHOR_NAME above",
+    },
+    "test_auditor_composition.py": {
+        "ISSUE": "derive-context exports ISSUE to $GITHUB_ENV for every later step of the "
+                 "gates job; a gate-sequence test binding it models that export exactly, the "
+                 "same way the scan already treats REPO and ISSUE_NUMBER. The trigger-shaped "
+                 "suite in test_auditor_context.py proves the export itself is real.",
     },
 }
 

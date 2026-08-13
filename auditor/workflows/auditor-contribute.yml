@@ -22,8 +22,12 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'contribute-approved'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # F10.a (round 2): issues: read exists for the security-blocked gate's live label read —
+    # an explicit permissions block sets unlisted scopes to none, so the read must be
+    # granted here. test_auditor_graph pins this map exactly.
     permissions:
       contents: read
+      issues: read
     outputs:
       proceed: ${{ steps.guard.outputs.proceed }}
       reason: ${{ steps.guard.outputs.reason }}
@@ -193,7 +197,6 @@ jobs:
           INPUT_REPO: ${{ inputs.repo }}
           INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
           AUDITOR_AUTHOR_NAME: ${{ vars.AUDITOR_AUTHOR_NAME }}
           AUDITOR_AUTHOR_EMAIL: ${{ vars.AUDITOR_AUTHOR_EMAIL }}
           AUDITOR_FORK_OWNER: ${{ vars.AUDITOR_FORK_OWNER }}
@@ -238,11 +241,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # /env-for
       - name: gate security-blocked
-        # F10 (round 5): LABELS was bound only in derive-context's step env, so THIS step
-        # read an empty string on every real run and the security-blocked label could never
-        # block. The strict per-step binding scan is what surfaced it.
+        # env-for:security-blocked — the step's real wiring, testable by the trigger
+        # harness. The label set is NOT bound here: an env binding carries the event
+        # payload, which workflow_dispatch does not have — the round-5 verify showed a
+        # dispatch run comparing an empty string and bypassing an existing hold. The block
+        # reads the tracking issue's CURRENT labels through the API instead.
         env:
-          LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
+          GH_TOKEN: ${{ github.token }}
+          # /env-for
         run: |
           # gate:security-blocked
           set -euo pipefail
@@ -250,7 +256,20 @@ jobs:
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:security-blocked — an earlier gate already refused"; exit 0
           fi
-          LABELS="${LABELS:-}"
+          # F10.a (round 2): the security hold is a fact about the tracking issue NOW, so
+          # the labels come from the issue itself — in the WORKFLOW'S OWN repository, where
+          # the tracking issue lives; $REPO is the audited target and would be the wrong
+          # repository. Authenticated by this step's token (the job grants issues: read).
+          # Any failure refuses by name, with a side exit OUTSIDE the security-* reason
+          # namespace — an unreadable label set must never read as "no labels", and an
+          # infrastructure failure must never route as a disclosure.
+          LABELS="$(gh api "repos/${GITHUB_REPOSITORY:?}/issues/${ISSUE:?}" \
+              --jq '[.labels[].name] | join(",")' 2>/dev/null)" || {
+            printf '{"proceed":false,"reason":"issue-labels-unresolvable","side_exit_label":"pipeline-error"}\n' \
+              > "${DECISION:-/dev/null}"
+            echo "REFUSE:issue-labels-unresolvable — the tracking issue's labels could not be read; refusing rather than passing on an unverified hold" >&2
+            exit 1
+          }
           if printf '%s' "$LABELS" | tr ',' '\n' | grep -qx 'security-blocked'; then
             printf '{"proceed":false,"reason":"security-blocked","side_exit_label":"security-blocked"}\n' \
               > "${DECISION:-/dev/null}"
@@ -661,7 +680,16 @@ jobs:
         if: always()
         with:
           name: gate-context
-          path: ${{ github.workspace }}/context.json
+          # F10.b (round 2): the decision document travels WITH the context. refuse()
+          # writes the named reason and side-exit label into decision.json, and finalize
+          # routes on that document — an artifact that does not carry it delivers nothing,
+          # and production finalize degraded to policy-<reason>. A run that dies before
+          # derive-context leaves neither file (aggregate empty: the action warns, uploads
+          # nothing); one that dies between the two uploads context.json alone, silently —
+          # finalize's [ -f ] guard covers both.
+          path: |
+            ${{ github.workspace }}/context.json
+            ${{ github.workspace }}/decision.json
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         if: always()
@@ -1996,6 +2024,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ needs.gates.outputs.repo }}
+          # F10.b (round 2): the decision document arrives in the gate-context artifact,
+          # downloaded to the workspace above. Binding it here is what carries the side-exit
+          # labels across the job boundary; the block's [ -f ] guard covers runs whose
+          # artifact has no decision file.
+          DECISION: ${{ github.workspace }}/decision.json
           # F1: gates refusing inside derive-context never reaches the guard step, so its
           # outputs are empty precisely on the runs that need routing. The `issues` payload
           # carries the number directly — fall back to it so an early refusal still labels

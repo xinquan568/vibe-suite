@@ -170,15 +170,15 @@ class TriggerBase(ContextBase):
             f"{expr!r}. Model it here rather than letting it resolve to empty -- an unmodelled "
             f"expression reading as '' is how finding 1 stayed invisible.")
 
-    def step_env(self):
-        """The `env:` mapping of the derive-context step, as declared in the YAML."""
+    def step_env(self, marker="derive-context"):
+        """The `env:` mapping of the named step, as declared in the YAML."""
         text = WF.read_text()
-        m = re.search(r"^\s*# env-for:derive-context.*?^\s*env:\s*$(.*?)^\s*# /env-for\s*$",
-                      text, re.M | re.S)
+        m = re.search(r"^\s*# env-for:%s.*?^\s*env:\s*$(.*?)^\s*# /env-for\s*$"
+                      % re.escape(marker), text, re.M | re.S)
         self.assertIsNotNone(
-            m, "no `# env-for:derive-context` ... `# /env-for` mapping in the workflow. The "
+            m, f"no `# env-for:{marker}` ... `# /env-for` mapping in the workflow. The "
                "marker pair exists so the step's real trigger wiring is testable; the shell "
-               "block's own `# /stage-logic` must close BEFORE it, or the YAML lands in the "
+               "block's own closing marker must come BEFORE it, or the YAML lands in the "
                "extracted script.")
         mapping = {}
         for line in m.group(1).split("\n"):
@@ -274,6 +274,118 @@ class TestTheRealTriggersReachTheGraph(TriggerBase):
         self.assertIn("context-repo-ambiguous", decision.get("reason", ""),
                       f"the decision file carries reason {decision.get('reason')!r}; the "
                       f"publisher would report this refusal without its name")
+
+
+class TestSecurityGateReadsLiveLabels(TriggerBase):
+    """F10.a (round 2): the security hold is a fact about the tracking issue NOW.
+
+    The gate used to read labels from the event payload, which `workflow_dispatch` does not
+    carry — so a dispatch run compared an empty string and an existing `security-blocked`
+    label never blocked. The gate now reads the issue's current labels through the API,
+    authenticated by the step's token against the workflow's own repository (never $REPO,
+    the audited target), and any failure refuses by name with `side_exit_label:
+    pipeline-error` — outside the `security-*` reason namespace, so an infrastructure
+    failure cannot route as a disclosure.
+
+    The harness is production-shaped: derive-context runs first with the workflow's own
+    trigger wiring, and the gate consumes its real `$GITHUB_ENV` exports — `ISSUE` is never
+    injected (it is on the no-supplied-derivations DERIVED list).
+    """
+
+    WORKFLOW_REPO = "example/auditor-repo"
+
+    def gate_block(self):
+        b = extract(WF, "gate", "security-blocked")
+        self.assertIsNotNone(b, "no gate:security-blocked block")
+        return b
+
+    def _derive_then_gate(self, event=None, inputs=None, labels=None, api_fails=False):
+        variables = {
+            "AUDITOR_AUTHOR_NAME": "vibe-suite auditor bot",
+            "AUDITOR_AUTHOR_EMAIL": "auditor@example.invalid",
+            "AUDITOR_FORK_OWNER": "vibe-bot",
+            "WEEKLY_CAP": "2",
+        }
+        sb = Sandbox(registry="registry-audited.json")
+        genv = sb.root / "github.env"
+        env = {k: self._eval(v, event or {}, inputs or {}, variables)
+               for k, v in self.step_env().items()}
+        env["FIXTURE"] = ""
+        env["GITHUB_ENV"] = str(genv)
+        env.update(self.canned(sb, login=None, default_branch="main"))
+        r1 = sb.run(self.block(), env=env)
+        self.assertEqual(0, r1.returncode,
+                         f"derive-context refused; the gate never runs on such a run:\n"
+                         f"{r1.stdout}\n{r1.stderr}")
+        exports = {}
+        for line in genv.read_text().splitlines():
+            k, _, v = line.partition("=")
+            exports[k] = v
+        self.assertIn("ISSUE", exports, "derive-context exported no ISSUE")
+        gate_env = {k: self._eval(v, event or {}, inputs or {}, variables)
+                    for k, v in self.step_env(marker="security-blocked").items()}
+        endpoint = f"repos/{self.WORKFLOW_REPO}/issues/{exports['ISSUE']}"
+        run_env = dict(exports)
+        run_env.update(gate_env)
+        run_env["GITHUB_REPOSITORY"] = self.WORKFLOW_REPO
+        run_env["GITHUB_ENV"] = str(genv)
+        if api_fails:
+            run_env["GH_FAIL"] = f"api:{endpoint}"
+            run_env.pop("GH_CANNED_MAP", None)
+        else:
+            # The stub serves the file verbatim, so it carries the --jq'd shape the block
+            # reads: the comma-joined label names.
+            f = sb.root / "canned-labels"
+            f.write_text(("" if labels is None else ",".join(labels)) + "\n")
+            m = sb.root / "canned-labels-map"
+            m.write_text(f"api {endpoint}\t{f}\n")
+            run_env["GH_CANNED_MAP"] = str(m)
+        r2 = sb.run(self.gate_block(), env=run_env)
+        return r2, sb, exports
+
+    def test_a_dispatch_run_cannot_bypass_a_security_hold(self):
+        # The round-5 finding, verbatim: no github.event.issue on dispatch, so an env
+        # binding is empty and the hold never blocks. The live read must block.
+        r, sb, _ = self._derive_then_gate(
+            inputs={"repo": "acme/claude-toolkit", "issue_number": "901"},
+            labels=["contribute-approved", "security-blocked"])
+        self.assertNotEqual(0, r.returncode,
+                            "a dispatch run passed the security gate while the tracking "
+                            "issue carries security-blocked — the bypass the round-5 verify "
+                            "named" + f"\n{r.stdout}\n{r.stderr}")
+        self.assertIn("REFUSE:security-blocked", r.stdout + r.stderr)
+
+    def test_a_labeled_event_run_still_refuses(self):
+        r, _, _ = self._derive_then_gate(
+            event={"number": 901, "labels": ["contribute-approved", "security-blocked"]},
+            labels=["contribute-approved", "security-blocked"])
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("REFUSE:security-blocked", r.stdout + r.stderr)
+
+    def test_clean_labels_pass(self):
+        r, _, _ = self._derive_then_gate(
+            event={"number": 901, "labels": ["contribute-approved"]},
+            labels=["contribute-approved"])
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("PASS", r.stdout)
+
+    def test_an_unreachable_label_read_refuses_by_name(self):
+        # Fail closed: an unreadable label set must never read as "no labels" — that would
+        # reopen the bypass through every transient API failure.
+        r, sb, exports = self._derive_then_gate(
+            event={"number": 901, "labels": ["contribute-approved"]}, api_fails=True)
+        self.assertNotEqual(0, r.returncode,
+                            "the gate passed while the label read failed; an unverified "
+                            "hold was treated as no hold")
+        self.assertIn("REFUSE:issue-labels-unresolvable", r.stdout + r.stderr)
+        decision = json.loads(Path(exports["DECISION"]).read_text())
+        self.assertFalse(decision.get("proceed", True))
+        self.assertEqual("issue-labels-unresolvable", decision.get("reason"),
+                         "the refusal must publish its name where the outcome publisher "
+                         "reads it")
+        self.assertEqual("pipeline-error", decision.get("side_exit_label"),
+                         "an infrastructure failure must route as pipeline-error, never "
+                         "into the security-*/disclosure branch")
 
 
 class TestTheRealDerivationSatisfiesTheConsumers(TriggerBase):
@@ -589,7 +701,8 @@ class TestEveryJobBindsWhatItReads(unittest.TestCase):
 
     #: Provided by the Actions runner, or by the harness that executes a block.
     RUNTIME = {"GITHUB_WORKSPACE", "GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_RUN_ID",
-               "GITHUB_RUN_NUMBER", "PWD", "PATH", "HOME", "CI", "RUNNER_TEMP", "FIXTURE"}
+               "GITHUB_RUN_NUMBER", "GITHUB_REPOSITORY", "PWD", "PATH", "HOME", "CI",
+               "RUNNER_TEMP", "FIXTURE"}
 
     #: Names that are genuinely optional, each with the reason. Not a list of jobs -- the same
     #: discipline the derived-value scan's exemptions carry, for the same reason.
@@ -619,11 +732,10 @@ class TestEveryJobBindsWhatItReads(unittest.TestCase):
         "PR_NUMBER": "a harness seam (test_auditor_state_machine drives outcome rows with "
                      "it); production takes pr_number from the create/recovery paths and "
                      "the empty env fallback is the correct no-PR reading",
-        "DECISION": "in finalize only, a harness seam: block tests hand finalize a decision "
-                    "document, while production routes from the outcome artifacts and the "
-                    "label falls back to policy-<reason>, which the gate writers keep equal "
-                    "to their side-exit label. Gates steps get DECISION from derive-context's "
-                    "$GITHUB_ENV export, so the exemption is inert there",
+        # DECISION needs no exemption since F10.b: finalize's route step binds it to the
+        # decision document downloaded in the gate-context artifact, and gates steps get it
+        # from derive-context's $GITHUB_ENV export. The old exemption claimed production
+        # label routing survived without the document; the round-2 review showed it did not.
     }
 
     @classmethod

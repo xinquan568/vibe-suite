@@ -44,19 +44,12 @@ class GateBase(unittest.TestCase):
             pass  # caller cleans via sb
 
 
-class TestSecurityBlocked(GateBase):
-    name = "security-blocked"
-
-    def test_blocked_label_hard_fails(self):
-        r, _, sb = self.run_gate({"LABELS": "contribute-approved,security-blocked"})
-        self.assertNotEqual(r.returncode, 0)
-        sb.cleanup()
-
-    def test_clean_labels_pass(self):
-        r, _, sb = self.run_gate({"LABELS": "contribute-approved"})
-        self.assertEqual(r.returncode, 0)
-        self.assertIn("PASS", r.stdout)
-        sb.cleanup()
+# The security-blocked gate's tests moved to
+# tests/test_auditor_context.py::TestSecurityGateReadsLiveLabels (F10.a, round 2). The gate
+# now derives LABELS from the tracking issue through the API, which needs derive-context's
+# real $GITHUB_ENV exports — a production-shaped harness this file's direct-block runner
+# does not provide, and supplying LABELS through the environment is an injected derivation
+# the no-supplied-derivations scan forbids.
 
 
 class TestNoExternalPRs(GateBase):

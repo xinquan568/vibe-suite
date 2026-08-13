@@ -385,13 +385,17 @@ class TestStrictModeChangesBehaviour(QuotaBase):
     exists but does not parse fails jq behind a successful sort. That differential lives with
     its sandbox in tests/test_auditor_submit.py::SubmitPipefailChangesBehaviour.
 
-    `set -u` alone still has no workflow-level differential to show, and that is by
-    construction rather than omission: it needs an unguarded read of an unset name, and every
-    read is bound, defaulted or `:?`-guarded -- enforced structurally, per step and in order,
-    by TestEveryJobBindsWhatItReads. `${SIDECAR:?}` was tried as a set-u candidate and
-    REJECTED for exactly this reason: the explicit `:?` does the work and `set -u` adds
-    nothing to it. The synthetic pipefail case in TestTheRefusalBranchesWork covers the
-    primitive and says it is not workflow evidence.
+    `set -u` alone still has no DEMONSTRATED workflow-level differential, and the claim is
+    empirical, not structural: candidates were searched and every failing read found was
+    already bound, defaulted or `:?`-guarded. The binding scan
+    (TestEveryJobBindsWhatItReads) enforces that discipline for the uppercase
+    configuration-name surface, per step and in order — its lexical limits (lowercase
+    names, reachability, heredocs, quoted literals) are recorded in its own docstring and
+    tracked in vibe-165, so a set-u differential outside the scanned surface is possible in
+    principle and simply has no known instance in this workflow. `${SIDECAR:?}` was tried
+    as a set-u candidate and REJECTED because the explicit `:?` does the work and `set -u`
+    adds nothing to it. The synthetic pipefail case in TestTheRefusalBranchesWork covers
+    the primitive and says it is not workflow evidence.
     """
 
     def _both(self, block, env_builder):

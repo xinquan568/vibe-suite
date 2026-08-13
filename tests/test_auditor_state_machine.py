@@ -39,6 +39,10 @@ if [ -n "${GH_CANNED_MAP:-}" ] && [ -f "${GH_CANNED_MAP}" ]; then
   done < "$GH_CANNED_MAP"
   if [ -n "$best" ] && [ -f "$best" ]; then cat "$best"; exit 0; fi
 fi
+# Forced failures for fail-closed paths: GH_FAIL holds space-separated "<verb>:<arg>" keys
+# (e.g. "api:repos/o/r/issues/9"). Same mechanism as the submit-suite stub; a caller that
+# sets nothing behaves exactly as before.
+case " ${GH_FAIL:-} " in *" ${1:-}:${2:-} "*) exit 1 ;; esac
 exit 0
 """
 
@@ -242,7 +246,7 @@ class TestContribute(StageBase):
             # so this test was asserting a label transition on a run that had no PR. Model the
             # creation response rather than relaxing the contract.
             r = sb.run(self.block(), env={
-                "FIRST_CONTACT": "true", "WEEK_CONTACT_COUNT": "0", "LABELS": "contribute-approved",
+                "FIRST_CONTACT": "true", "WEEK_CONTACT_COUNT": "0",
                 # This block does not open the PR -- `gh pr create` lives in logic:submit and
                 # hands the number down. Supplying it models "a PR was opened upstream", which
                 # is what a run reaching the durable transition means. Not a derived value the
@@ -264,7 +268,7 @@ class TestContribute(StageBase):
         sb = Sandbox(registry=None)
         try:
             (sb.data / "registry" / "repos.json").unlink(missing_ok=True)
-            r = sb.run(self.block(), env={"LABELS": "contribute-approved"})
+            r = sb.run(self.block(), env={})
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("REFUSE:registry-missing", r.stdout + r.stderr)
         finally:

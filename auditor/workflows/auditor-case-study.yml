@@ -568,8 +568,8 @@ jobs:
                                           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
                                         run: |
 
-                                          set -euo pipefail
                                           # cover-logic:case-study
+                                          set -euo pipefail
                                           # date the article and attach a cover. OPENAI_API_KEY is scoped to this one
                                           # deterministic step: absent key, or a failing image API, never fails the
                                           # article - a templated SVG stands in and the article still publishes.

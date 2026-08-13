@@ -32,8 +32,8 @@ env:
 jobs:
   unit:
     runs-on: ubuntu-latest
-    # E8.7: the ten-module suite measured 3m57s locally (511 tests); 5 minutes left
-    # under a minute for checkout and the live provisioning calls, so the budget is 10.
+    # E8.7: the eleven-module suite measured just under 4 minutes locally; 5 minutes
+    # left too little for checkout and the live provisioning calls, so the budget is 10.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -68,8 +68,8 @@ jobs:
           # external audit. The pipeline can only verify the durable record; producing it
           # is a human act. Refuses by name until every row is checked and the sign-off
           # line carries a name and an ISO date.
-          set -euo pipefail
           # checklist-logic:integration
+          set -euo pipefail
           CHECKLIST="${CHECKLIST:-auditor/SECURITY-CHECKLIST.md}"
           if [ ! -f "$CHECKLIST" ]; then
             echo "FAIL security checklist missing at $CHECKLIST"
@@ -80,6 +80,13 @@ jobs:
             grep -n '^- \[ \]' "$CHECKLIST" | head -5
             exit 1
           fi
+          for row in "PAT scope" "Rotation doc" "Injection separation" "Audit token scope" "No secret egress"; do
+            N="$(grep -cF -- "- [x] **$row**" "$CHECKLIST")" || true
+            if [ "${N:-0}" -ne 1 ]; then
+              echo "FAIL security checklist row '$row' is not attested exactly once (found ${N:-0})"
+              exit 1
+            fi
+          done
           if ! grep -qE '^Signed-off-by: .+ [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$CHECKLIST"; then
             echo "FAIL security checklist carries no dated sign-off line"
             exit 1
@@ -104,8 +111,9 @@ jobs:
             tests.test_auditor_gates \
             tests.test_auditor_composition \
             tests.test_auditor_reservation \
-            tests.test_auditor_quota
-          echo "auditor unit suite green — helpers plus the seven contribution-gate scenarios"
+            tests.test_auditor_quota \
+            tests.test_auditor_fixture
+          echo "auditor unit suite green — helpers, the seven contribution-gate scenarios, and the ladder's own contract pins"
   smoke:
     needs: unit
     if: ${{ inputs.test_level == 'smoke' || inputs.test_level == 'full' }}
@@ -135,6 +143,13 @@ jobs:
           echo "fixture artifacts counted $TOTAL (census says $EXPECTED)"
           if [ "$TOTAL" -ne "$EXPECTED" ]; then
             echo "FAIL fixture census mismatch — the tree and census.json drifted"
+            exit 1
+          fi
+          # the count alone cannot see a reassigned census; run the full census
+          # validator (exact planted inventory + semantic defect predicates)
+          # against the CLONE, exactly as the local suite runs it against the tree
+          if ! (cd fixture-clone && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -q tests.test_auditor_fixture.FixtureCensus); then
+            echo "FAIL the cloned fixture fails its own census validator"
             exit 1
           fi
           if [ "$TOTAL" -le 20 ]; then
@@ -212,6 +227,15 @@ jobs:
             echo "FAIL the article did not publish its path"
             exit 1
           fi
+          DATED="$WORKDIR/data/articles/$(date -u +%Y-%m-%d)-fixture-slug.md"
+          if [ ! -f "$DATED" ]; then
+            echo "FAIL the draft was not dated into place"
+            exit 1
+          fi
+          if ! grep -qF '![cover](' "$DATED"; then
+            echo "FAIL the published article carries no cover reference"
+            exit 1
+          fi
           echo "optional-secret case green — absence passes, SVG produced, article published"
       - uses: anthropics/claude-code-action@v1
         with:
@@ -234,7 +258,9 @@ jobs:
           # must be byte-unchanged after the model step.
           set -euo pipefail
           REPORT="audit-out/fixture-report.md"
-          CENSUS="fixture-clone/${FIXTURE_PATH:-auditor/test-fixture}/census.json"
+          # the census is read from the CHECKED-OUT tree, never from the clone the
+          # model step touched — a mutated clone census could lower its own floor
+          CENSUS="${FIXTURE_PATH:-auditor/test-fixture}/census.json"
           if [ ! -f "$REPORT" ]; then
             echo "FAIL report missing at $REPORT"
             exit 1
@@ -253,6 +279,19 @@ jobs:
           done
           if [ "$FOUND" -lt "$FLOOR" ]; then
             echo "FAIL the audit detected $FOUND of the planted rule ids; the census floor is $FLOOR"
+            exit 1
+          fi
+          # the audited clone is read-only for the model: the outer status collapses
+          # everything under it to one '?? fixture-clone/' line, so its own git
+          # status must be checked separately or mutations inside it stay hidden
+          if [ ! -d fixture-clone/.git ]; then
+            echo "FAIL fixture-clone is not a git checkout — clone cleanliness cannot be verified"
+            exit 1
+          fi
+          CLONE_DIRTY="$(git -C fixture-clone status --porcelain --untracked-files=all)"
+          if [ -n "$CLONE_DIRTY" ]; then
+            echo "FAIL the model step mutated the audited fixture clone:"
+            printf '%s\n' "$CLONE_DIRTY"
             exit 1
           fi
           DIRTY="$(git status --porcelain | grep -v '^?? audit-out/' | grep -v '^?? fixture-clone/' || true)"

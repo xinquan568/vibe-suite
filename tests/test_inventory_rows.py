@@ -326,6 +326,8 @@ class AuditorRowSplit(RowBase):
         self.assertTrue(self.ok(PIPELINE_ROW),
                         "the activated workflow's byte-identical live copy is the "
                         "documented activation state, not a hidden executable")
+        self.assertEqual(self.count(PIPELINE_ROW), 18,
+                         "the activated live copy must not perturb the staged count")
 
     def test_a_diverged_activated_live_copy_reddens_the_row(self):
         """Divergence is exactly the hazard the detector exists for: a live file GitHub
@@ -339,14 +341,28 @@ class AuditorRowSplit(RowBase):
                          "a diverged live copy of the activated workflow must redden")
 
     def test_an_activated_live_copy_without_a_staged_source_reddens(self):
-        self.seed_workflows("auditor/workflows",
-                            *(w for w in PIPELINE_WORKFLOWS
-                              if w != "auditor-integration-test"))
+        """The FULL staged set is present, so a mere short count cannot mask the
+        verdict — only the orphan arm itself can produce the -1 sentinel here."""
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
         self.seed_workflows(".github/workflows", *SITE_WORKFLOWS,
                             "auditor-integration-test")
-        self.assertFalse(self.ok(PIPELINE_ROW),
+        (self.tmp / "auditor" / "workflows" / "auditor-integration-test.yml").unlink()
+        self.assertEqual(self.count(PIPELINE_ROW), -1,
                          "live-but-not-staged is not activation; it is an orphan "
-                         "executable (and the staged set is short a workflow)")
+                         "executable and must hit the anomaly sentinel")
+
+    def test_an_activated_live_copy_under_the_yaml_extension_reddens(self):
+        """The activation contract is `.yml` exactly — the staged source's own
+        extension. A `.yaml` twin is seen by the census and must be an anomaly, not
+        an alternate spelling of activation."""
+        self.seed_workflows("auditor/workflows", *PIPELINE_WORKFLOWS)
+        self.seed_workflows(".github/workflows", *SITE_WORKFLOWS)
+        staged = self.tmp / "auditor" / "workflows" / "auditor-integration-test.yml"
+        live = self.tmp / ".github" / "workflows" / "auditor-integration-test.yaml"
+        live.write_bytes(staged.read_bytes())
+        self.assertEqual(self.count(PIPELINE_ROW), -1,
+                         "a .yaml live twin of the activated workflow must hit the "
+                         "anomaly sentinel")
 
     def test_workflows_parked_outside_the_workflow_home_do_not_count(self):
         """GitHub runs workflows from a workflow directory; elsewhere they are inert files.

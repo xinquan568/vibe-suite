@@ -23,12 +23,29 @@ CENSUS = FIXTURE / "census.json"
 
 
 def run_block(block, env, cwd):
-    """Execute an extracted workflow block the way its step would run it."""
+    """Execute an extracted workflow block EXACTLY as production does: plain bash, no
+    prepended strictness — every marker pair carries its own `set -euo pipefail`, so a
+    block that lost it fails these tests rather than borrowing rigor from the harness."""
     import os
     full = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", str(cwd))}
     full.update(env)
-    return subprocess.run(["bash", "-c", "set -euo pipefail\n" + block],
+    return subprocess.run(["bash", "-c", block],
                           env=full, cwd=cwd, capture_output=True, text=True)
+
+
+#: The exact planted inventory (path, rule_id) — a multiset, matched exactly. A bare
+#: count or shape check accepts a reassigned census; this pin does not.
+EXPECTED_PLANTED = (
+    ("agents/broken-front.md", "--"),
+    ("agents/watcher.md", "R01"),
+    ("agents/watcher.md", "R09"),
+    ("commands/cleanup.md", "--"),
+    ("commands/deploy.md", "R01"),
+    ("commands/deploy.md", "R18"),
+    ("skills/helper-skill/SKILL.md", "--"),
+    ("skills/helper-skill/SKILL.md", "R01"),
+    ("skills/helper-skill/SKILL.md", "R04"),
+)
 
 
 class FixtureCensus(unittest.TestCase):
@@ -46,16 +63,51 @@ class FixtureCensus(unittest.TestCase):
                          f"census says {c['files']} .md files; disk has {len(actual)}: "
                          f"{actual}")
 
-    def test_every_planted_defect_names_a_real_file_and_rule(self):
+    def test_the_planted_inventory_matches_exactly(self):
         c = self.census()
-        self.assertGreaterEqual(len(c["planted"]), 5,
-                                "fewer than five planted defects makes the oracle floor "
-                                "meaningless")
-        for row in c["planted"]:
-            self.assertTrue((FIXTURE / row["path"]).is_file(),
-                            f"planted defect names a missing file: {row['path']}")
-            self.assertRegex(row["rule_id"], r"^(R\d\d|--)$",
-                             f"planted rule id is not rubric-shaped: {row['rule_id']}")
+        actual = sorted((row["path"], row["rule_id"]) for row in c["planted"])
+        self.assertEqual(actual, sorted(EXPECTED_PLANTED),
+                         "the census's planted inventory drifted from the pinned "
+                         "multiset — fixture and census must change together")
+        for path, _ in EXPECTED_PLANTED:
+            self.assertTrue((FIXTURE / path).is_file(),
+                            f"planted defect names a missing file: {path}")
+
+    def test_each_planted_defect_is_still_planted(self):
+        """Semantic predicates: a well-meaning 'fix' to a fixture file must fail here,
+        not silently weaken the oracle. One mechanical check per planted row."""
+        deploy = (FIXTURE / "commands" / "deploy.md").read_text()
+        self.assertIn("$ARGUMENTS", deploy, "deploy.md no longer takes input — R18 gone")
+        self.assertNotIn("argument-hint", deploy,
+                         "deploy.md declares argument-hint — the R18 defect was fixed")
+        for needle in ("as needed", "appropriate"):
+            self.assertIn(needle, deploy, f"deploy.md lost its R01 vague term {needle!r}")
+
+        watcher = (FIXTURE / "agents" / "watcher.md").read_text()
+        self.assertNotIn("<example>", watcher,
+                         "watcher.md gained <example> blocks — the R09 defect was fixed")
+        self.assertIn("appropriate", watcher, "watcher.md lost its R01 vague term")
+
+        skill = (FIXTURE / "skills" / "helper-skill" / "SKILL.md").read_text()
+        self.assertIn("name: mismatched-name", skill,
+                      "the skill's name↔directory mismatch (a '--' row) was fixed")
+        desc = next(l for l in skill.splitlines() if l.startswith("description:"))
+        self.assertLess(len(desc), 90,
+                        "the skill description grew — the R04 summary-not-trigger "
+                        "defect may have been fixed; re-plant or re-census")
+        self.assertNotIn(",", desc,
+                         "the skill description lists phrases — R04 requires the "
+                         "planted form to stay a bare summary")
+
+        cleanup = (FIXTURE / "commands" / "cleanup.md").read_text()
+        self.assertNotIn("description:", cleanup,
+                         "cleanup.md gained a description — its '--' defect was fixed")
+
+        front = (FIXTURE / "agents" / "broken-front.md").read_text()
+        frontmatter = front.split("---")[1]
+        self.assertEqual(frontmatter.count('"') % 2, 1,
+                         "broken-front.md's quote is balanced — its '--' defect "
+                         "(unparseable frontmatter) was fixed")
 
     def test_the_detection_floor_is_achievable_and_meaningful(self):
         c = self.census()
@@ -90,13 +142,15 @@ class IntegrationLadderContract(unittest.TestCase):
               "prs-submitted", "case-study-ready", "complete")
     #: The exact unit-tier suite list: six helper suites + the four modules carrying the
     #: seven contribution-gate scenarios (gates, composition, reservation's weekly cap,
-    #: quota's umbrella predicate).
+    #: quota's umbrella predicate) + this module itself, so the dispatched tier runs the
+    #: ladder's own contract pins (census, equality pin, extracted-block contracts).
     UNIT_SUITES = (
         "tests.test_auditor_workflows", "tests.test_auditor_scripts",
         "tests.test_auditor_findings_helpers", "tests.test_auditor_reporting_helpers",
         "tests.test_auditor_rulebook_helpers", "tests.test_auditor_batch_helpers",
         "tests.test_auditor_gates", "tests.test_auditor_composition",
         "tests.test_auditor_reservation", "tests.test_auditor_quota",
+        "tests.test_auditor_fixture",
     )
 
     def text(self):
@@ -199,6 +253,8 @@ class FullTierOracle(unittest.TestCase):
 
     STAGED = REPO / "auditor" / "workflows" / "auditor-integration-test.yml"
 
+    GIT_ID = ("-c", "user.name=oracle-test", "-c", "user.email=oracle@test")
+
     def setUp(self):
         self.block = extract(self.STAGED, "oracle-logic", "integration")
         self.assertIsNotNone(
@@ -209,9 +265,27 @@ class FullTierOracle(unittest.TestCase):
         self.repo = self.outer / "checkout"
         self.repo.mkdir()
         subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
-        clone_fixture = self.repo / "fixture-clone" / "auditor" / "test-fixture"
+        # the TRUSTED census lives in the checked-out tree — the oracle must never
+        # read it from the clone the model step touched
+        trusted = self.repo / "auditor" / "test-fixture"
+        trusted.mkdir(parents=True)
+        shutil.copy(CENSUS, trusted / "census.json")
+        # the checkout's own content is committed, as actions/checkout leaves it —
+        # only what the MODEL step adds may appear in the outer status
+        subprocess.run(["git", *self.GIT_ID, "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", *self.GIT_ID, "commit", "-q", "-m", "checkout state"],
+                       cwd=self.repo, check=True)
+        # the clone is a real git checkout in a CLEAN state, as a fresh
+        # `git clone --depth 1` leaves it — its own status is part of the oracle
+        self.clone = self.repo / "fixture-clone"
+        clone_fixture = self.clone / "auditor" / "test-fixture"
         clone_fixture.mkdir(parents=True)
         shutil.copy(CENSUS, clone_fixture / "census.json")
+        (clone_fixture / "artifact.md").write_text("# audited artifact\n")
+        subprocess.run(["git", "init", "-q"], cwd=self.clone, check=True)
+        subprocess.run(["git", *self.GIT_ID, "add", "-A"], cwd=self.clone, check=True)
+        subprocess.run(["git", *self.GIT_ID, "commit", "-q", "-m", "clone state"],
+                       cwd=self.clone, check=True)
         (self.repo / "audit-out").mkdir()
         self.census = json.loads(CENSUS.read_text())
         # the step summary lives OUTSIDE the checkout — it must not dirty the tree
@@ -260,6 +334,35 @@ class FullTierOracle(unittest.TestCase):
         r = run_block(self.block, self.env, self.repo)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("outside audit-out", r.stdout)
+
+    def test_a_tracked_mutation_inside_the_clone_fails(self):
+        """The outer status collapses the clone to one '?? fixture-clone/' line, so a
+        model edit to an audited file — including the clone's own census — was
+        invisible to the outer check. The oracle must inspect the clone's own git."""
+        self.write_report(self.good_report())
+        clone_census = self.clone / "auditor" / "test-fixture" / "census.json"
+        clone_census.write_text(clone_census.read_text().replace(
+            '"detection_floor": 2', '"detection_floor": 0'))
+        r = run_block(self.block, self.env, self.repo)
+        self.assertNotEqual(r.returncode, 0,
+                            "the model lowered the clone census's floor and the oracle "
+                            "did not notice — clone mutations must fail")
+        self.assertIn("mutated the audited fixture clone", r.stdout)
+
+    def test_an_untracked_file_inside_the_clone_fails(self):
+        self.write_report(self.good_report())
+        (self.clone / "auditor" / "test-fixture" / "planted-by-model.md").write_text(
+            "a file the model step added inside the audited tree\n")
+        r = run_block(self.block, self.env, self.repo)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("mutated the audited fixture clone", r.stdout)
+
+    def test_a_clone_without_git_metadata_fails(self):
+        shutil.rmtree(self.clone / ".git")
+        self.write_report(self.good_report())
+        r = run_block(self.block, self.env, self.repo)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not a git checkout", r.stdout)
 
 
 class SecurityChecklistSignOff(unittest.TestCase):
@@ -314,14 +417,44 @@ class SecurityChecklistSignOff(unittest.TestCase):
                             "placeholder — the check must demand a name and an ISO date")
         self.assertIn("sign-off", r.stdout)
 
-    def test_a_signed_record_passes(self):
-        copy = self.root / "signed.md"
-        signed = self.CHECKLIST.read_text().replace("- [ ]", "- [x]").replace(
+    def signed_text(self):
+        return self.CHECKLIST.read_text().replace("- [ ]", "- [x]").replace(
             "Signed-off-by: <operator name> <YYYY-MM-DD>",
             "Signed-off-by: Eric Liu 2026-08-13")
-        copy.write_text(signed)
+
+    def test_a_signed_record_passes(self):
+        copy = self.root / "signed.md"
+        copy.write_text(self.signed_text())
         r = self.run_check(copy)
         self.assertEqual(r.returncode, 0,
                          f"a fully attested, dated sign-off was refused:\n"
                          f"{r.stdout}\n{r.stderr}")
         self.assertIn("signed off", r.stdout)
+
+    def test_a_signature_without_the_rows_refuses(self):
+        """The bypass the step-8 review named: a file containing ONLY a well-formed
+        signature line must not pass — every named row has to be attested."""
+        copy = self.root / "bare-signature.md"
+        copy.write_text("Signed-off-by: Eric Liu 2026-08-13\n")
+        r = self.run_check(copy)
+        self.assertNotEqual(r.returncode, 0,
+                            "a signature with zero attestation rows passed — the "
+                            "verifier checks the signature but not the attestations")
+        self.assertIn("not attested", r.stdout)
+
+    def test_a_deleted_row_refuses_by_name(self):
+        copy = self.root / "row-deleted.md"
+        lines = [l for l in self.signed_text().splitlines(keepends=True)
+                 if "**PAT scope**" not in l]
+        copy.write_text("".join(lines))
+        r = self.run_check(copy)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("'PAT scope' is not attested", r.stdout)
+
+    def test_a_malformed_row_refuses(self):
+        copy = self.root / "row-malformed.md"
+        copy.write_text(self.signed_text().replace("- [x] **Rotation doc**",
+                                                   "* [x] **Rotation doc**"))
+        r = self.run_check(copy)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("'Rotation doc' is not attested", r.stdout)

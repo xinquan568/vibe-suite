@@ -22,8 +22,12 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'contribute-approved'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # F10.a (round 2): issues: read exists for the security-blocked gate's live label read —
+    # an explicit permissions block sets unlisted scopes to none, so the read must be
+    # granted here. test_auditor_graph pins this map exactly.
     permissions:
       contents: read
+      issues: read
     outputs:
       proceed: ${{ steps.guard.outputs.proceed }}
       reason: ${{ steps.guard.outputs.reason }}
@@ -41,21 +45,134 @@ jobs:
           persist-credentials: false
       - name: derive the run context
         run: |
-          # Derived context is published twice: to $GITHUB_ENV for the gate steps of this job,
-          # and to $DECISION — the one file the nine gates compose over. Every marked block
-          # below is self-contained and identical under the test harness.
-          set -u
+          # stage-logic:derive-context
+          # Derived context is published three ways: to $GITHUB_ENV for the gate steps of this
+          # job, to $DECISION — the one file the nine gates compose over — and to
+          # $CONTEXT_FILE, the immutable artifact the downstream jobs read (W2.2). Every marked
+          # block below is self-contained and identical under the test harness.
+          #
+          # E8.2b (vibe-164): every value below is DERIVED or REFUSED BY NAME. It previously
+          # defaulted -- the audited SHA to empty, the base branch to main, the author to a
+          # literal, the caps to constants -- and a default is indistinguishable downstream
+          # from a real answer. The audited SHA is the sharpest: submit's checkout guard is
+          # `[ -n "$AUDITED_SHA" ]`, so an empty default silently skipped the pin and the
+          # engine proposed patches against whatever HEAD happened to be.
+          set -euo pipefail
+          # F1 (round 3). A refusal used to be a bare message on stderr, and the paths the
+          # reporting steps need were exported at the END of this block — after every value
+          # that can refuse. So on exactly the runs that need reporting, the always-publisher
+          # found no DECISION and no OUTCOME_DIR: it wrote `./outcome-gates.json`, read a
+          # decision file that did not exist, and reported `status=error` with an empty reason
+          # while a perfectly good named refusal sat in the log. The job that reports the
+          # failure was disabled by the failure — the same shape as finalize's, closed in the
+          # previous iteration.
+          #
+          # So: record the NAMED reason where the publisher reads it, and publish the paths
+          # before anything can refuse.
+          refuse() {
+            printf '{"proceed":false,"reason":"context-%s-unresolvable","side_exit_label":"pipeline-error"}\n' \
+              "$1" > "${DECISION:-/dev/null}"
+            echo "REFUSE:context-$1-unresolvable" >&2
+            exit 1
+          }
           DATA_DIR="${DATA_DIR:-${GITHUB_WORKSPACE:-$PWD}/_data}"
           REGISTRY="${REGISTRY:-$DATA_DIR/registry/repos.json}"
           EVENT_LOG="${EVENT_LOG:-$DATA_DIR/ledgers/events.jsonl}"
           DECISION="${DECISION:-${GITHUB_WORKSPACE:-$PWD}/decision.json}"
           OUTCOME_DIR="${OUTCOME_DIR:-${GITHUB_WORKSPACE:-$PWD}/_outcomes}"
+          mkdir -p "$OUTCOME_DIR"
+          {
+            echo "DATA_DIR=$DATA_DIR"
+            echo "REGISTRY=$REGISTRY"
+            echo "EVENT_LOG=$EVENT_LOG"
+            echo "DECISION=$DECISION"
+            echo "OUTCOME_DIR=$OUTCOME_DIR"
+          } >> "${GITHUB_ENV:-/dev/null}"
+          # ISSUE resolves FIRST, because on the `issues` trigger it is the only handle the
+          # payload carries and the repository is looked up from it. F1.
+          # Both triggers carry it directly -- `github.event.issue.number` on `issues`,
+          # `inputs.issue_number` on dispatch -- so there is no third source to fall back to,
+          # and inventing one would let an unresolvable issue proceed under another run's number.
+          ISSUE="${ISSUE_NUMBER:-${INPUT_ISSUE_NUMBER:-}}"
+          ISSUE="$(printf '%s' "$ISSUE" | tr -d '[:space:]')"
+          [ -n "$ISSUE" ] || refuse issue
+          case "$ISSUE" in ''|*[!0-9]*) refuse issue ;; esac
+
           REPO="${REPO:-${INPUT_REPO:-}}"
+          # `issues` is the ordinary production trigger and carries NO dispatch input, so
+          # INPUT_REPO is empty on every labelled-issue run. Nothing resolved the repository
+          # from the tracking issue, so the job refused `context-repo-unresolvable` before a
+          # single gate executed -- the graph could not complete on its main trigger, and the
+          # whole suite was green because every test handed the block a REPO. F1.
+          #
+          # The registry is the mapping: `discover` writes .repos[<slug>].audit_issue.
+          if [ -z "$REPO" ] && [ -r "$REGISTRY" ]; then
+            matches="$(jq -r --argjson n "$ISSUE" \
+              '[(.repos // {}) | to_entries[] | select((.value.audit_issue // null) == $n) | .key] | .[]' \
+              "$REGISTRY" 2>/dev/null || true)"
+            count="$(printf '%s\n' "$matches" | grep -c . || true)"
+            # Two repositories claiming one tracking issue is a registry defect. Picking the
+            # first would contribute to an arbitrary third-party repository, silently.
+            # F1 (round 4): this branch used to exit inline, so DECISION kept no named
+            # reason and the always-publisher reported an empty one. It routes through
+            # refuse() like every other refusal here; the detail stays on stderr.
+            if [ "${count:-0}" -gt 1 ]; then
+              echo "AMBIGUOUS — issue #$ISSUE maps to ${count} repositories" >&2
+              refuse repo-ambiguous
+            fi
+            if [ "${count:-0}" -eq 1 ]; then REPO="$matches"; fi
+          fi
           if [ -z "$REPO" ] && [ -n "${FIXTURE:-}" ]; then
             REPO="$(jq -r '.repo.full_name' "$FIXTURE")"
           fi
           OWNER="${OWNER:-${REPO%%/*}}"
-          ISSUE="${ISSUE_NUMBER:-${INPUT_ISSUE_NUMBER:-}}"
+          CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+
+          # --- the eight derived values -------------------------------------------------
+          [ -n "$REPO" ] || refuse repo
+
+          # Fork identity. gates is read-only and holds NO PAT, so `gh api user` here proves
+          # nothing about who owns the fork: unauthenticated it fails, and with github.token
+          # it identifies the Actions installation rather than the PAT account. F2.
+          #
+          # The expected owner is therefore a non-secret repository variable, and the claim is
+          # VERIFIED in submit, where PAT_TOKEN actually lives, before any fork is created.
+          # $OWNER is the TARGET owner and must never be used for this.
+          BOT_LOGIN="${AUDITOR_FORK_OWNER:-}"
+          BOT_LOGIN="$(printf '%s' "$BOT_LOGIN" | tr -d '[:space:]')"
+          [ -n "$BOT_LOGIN" ] || refuse fork-owner
+          EXPECTED_FORK_SLUG="$BOT_LOGIN/${REPO##*/}"
+
+          # Audited SHA: the canonical registry key the audit writer populates.
+          AUDITED_SHA="$(jq -r --arg r "$REPO" '.repos[$r].commit_sha_at_audit // empty' "$REGISTRY" 2>/dev/null || true)"
+          [ -n "$AUDITED_SHA" ] || refuse audited-sha
+
+          BASE_BRANCH="$(gh api "repos/$REPO" --jq .default_branch 2>/dev/null || true)"
+          BASE_BRANCH="$(printf '%s' "$BASE_BRANCH" | tr -d '[:space:]')"
+          [ -n "$BASE_BRANCH" ] || refuse default-branch
+
+          AUTHOR_NAME="${AUDITOR_AUTHOR_NAME:-}"
+          AUTHOR_EMAIL="${AUDITOR_AUTHOR_EMAIL:-}"
+          { [ -n "$AUTHOR_NAME" ] && [ -n "$AUTHOR_EMAIL" ]; } || refuse author-identity
+
+          WEEKLY_CAP_V="${WEEKLY_CAP:-}"
+          [ -n "$WEEKLY_CAP_V" ] || refuse weekly-cap
+
+          # Patch cap follows F10.1's first-contact rule, read from the registry rather than
+          # constant: 3 on first contact, 5 once this repo has received a PR before.
+          if ! jq -e --arg r "$REPO" '.repos[$r]' "$REGISTRY" >/dev/null 2>&1; then
+            refuse patch-cap
+          fi
+          prior="$(jq -r --arg r "$REPO" '(.repos[$r].pipeline_prs // []) | length' "$REGISTRY" 2>/dev/null || echo 0)"
+          if [ "${prior:-0}" -gt 0 ]; then PATCH_CAP=5; else PATCH_CAP=3; fi
+
+          jq -nc --arg repo "$REPO" --arg issue "$ISSUE" --arg fork "$EXPECTED_FORK_SLUG" \
+            --arg sha "$AUDITED_SHA" --arg base "$BASE_BRANCH" --arg an "$AUTHOR_NAME" \
+            --arg ae "$AUTHOR_EMAIL" --argjson wc "$WEEKLY_CAP_V" --argjson pc "$PATCH_CAP" \
+            '{version: 1, repo: $repo, issue: $issue, expected_fork_slug: $fork,
+              audited_sha: $sha, base_branch: $base, author_name: $an, author_email: $ae,
+              weekly_cap: $wc, patch_cap: $pc}' > "$CONTEXT_FILE"
+
           slug=$(printf '%s' "$REPO" | tr '/' '-')
           SIDECAR="${SIDECAR:-$DATA_DIR/audits/$slug.findings.jsonl}"
           mkdir -p "$OUTCOME_DIR"
@@ -72,19 +189,87 @@ jobs:
             echo "SIDECAR=$SIDECAR"
           } >> "${GITHUB_ENV:-/dev/null}"
           echo "context: repo=$REPO owner=$OWNER issue=$ISSUE"
+          # /stage-logic
+        # env-for:derive-context — the step's real trigger wiring. Everything the block reads
+        # from the environment is bound HERE; a read with no binding here is empty on a real
+        # run, which is what finding 1 was. tests/test_auditor_context.py enforces the pairing.
         env:
           INPUT_REPO: ${{ inputs.repo }}
           INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
+          AUDITOR_AUTHOR_NAME: ${{ vars.AUDITOR_AUTHOR_NAME }}
+          AUDITOR_AUTHOR_EMAIL: ${{ vars.AUDITOR_AUTHOR_EMAIL }}
+          AUDITOR_FORK_OWNER: ${{ vars.AUDITOR_FORK_OWNER }}
+          WEEKLY_CAP: ${{ vars.WEEKLY_CAP }}
+          GH_TOKEN: ${{ github.token }}
+          # /env-for
+      - name: fetch the target's open pull requests
+        run: |
+          # stage-logic:open-prs
+          set -euo pipefail
+          # F9: this file is the duplicate filter's ONLY input, and nothing in the workflow
+          # ever created it. Both `gate:duplicate-pr` and `emit-manifest` read OPEN_PRS_FILE
+          # and both documented a fail-open branch for when it is missing — and it was missing
+          # on every run, so the filter never once ran. A filter whose input is never bound is
+          # not lenient, it is absent, and the gate ladder was counting it as present.
+          #
+          # This job holds `contents: read` and no PAT: listing pull requests is a read.
+          REPO="${REPO:?}"
+          OPEN_PRS_FILE="${OPEN_PRS_FILE:-${GITHUB_WORKSPACE:-$PWD}/open-prs.json}"
+          refuse_prs() { echo "REFUSE:open-prs-unavailable — $1" >&2; exit 1; }
+          raw=""
+          # The status is taken from the command ITSELF, never through a pipe: `gh … | jq`
+          # records jq's status, so a 403 would read as success and the fabricated empty list
+          # would sail into the filters.
+          if ! raw="$(gh pr list --repo "$REPO" --state open --limit 100 \
+                        --json number,files 2>&1)"; then
+            refuse_prs "gh pr list failed: $(printf '%s' "$raw" | head -c 200)"
+          fi
+          # An unparseable body — a 502 HTML page, a truncated response — is a failure too.
+          # An empty ARRAY is not: that is the target genuinely having no open pull requests,
+          # and it must reach the filters as a real answer. Conflating the two is precisely
+          # what made this defect invisible.
+          if ! printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            refuse_prs "response is not a JSON array: $(printf '%s' "$raw" | head -c 200)"
+          fi
+          printf '%s' "$raw" > "$OPEN_PRS_FILE"
+          echo "OPEN_PRS_FILE=$OPEN_PRS_FILE" >> "${GITHUB_ENV:-/dev/null}"
+          echo "open-prs: $(jq 'length' "$OPEN_PRS_FILE") open pull request(s) on $REPO"
+          # /stage-logic
+        # env-for:open-prs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # /env-for
       - name: gate security-blocked
+        # env-for:security-blocked — the step's real wiring, testable by the trigger
+        # harness. The label set is NOT bound here: an env binding carries the event
+        # payload, which workflow_dispatch does not have — the round-5 verify showed a
+        # dispatch run comparing an empty string and bypassing an existing hold. The block
+        # reads the tracking issue's CURRENT labels through the API instead.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # /env-for
         run: |
           # gate:security-blocked
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:security-blocked — an earlier gate already refused"; exit 0
           fi
-          LABELS="${LABELS:-}"
+          # F10.a (round 2): the security hold is a fact about the tracking issue NOW, so
+          # the labels come from the issue itself — in the WORKFLOW'S OWN repository, where
+          # the tracking issue lives; $REPO is the audited target and would be the wrong
+          # repository. Authenticated by this step's token (the job grants issues: read).
+          # Any failure refuses by name, with a side exit OUTSIDE the security-* reason
+          # namespace — an unreadable label set must never read as "no labels", and an
+          # infrastructure failure must never route as a disclosure.
+          LABELS="$(gh api "repos/${GITHUB_REPOSITORY:?}/issues/${ISSUE:?}" \
+              --jq '[.labels[].name] | join(",")' 2>/dev/null)" || {
+            printf '{"proceed":false,"reason":"issue-labels-unresolvable","side_exit_label":"pipeline-error"}\n' \
+              > "${DECISION:-/dev/null}"
+            echo "REFUSE:issue-labels-unresolvable — the tracking issue's labels could not be read; refusing rather than passing on an unverified hold" >&2
+            exit 1
+          }
           if printf '%s' "$LABELS" | tr ',' '\n' | grep -qx 'security-blocked'; then
             printf '{"proceed":false,"reason":"security-blocked","side_exit_label":"security-blocked"}\n' \
               > "${DECISION:-/dev/null}"
@@ -96,6 +281,7 @@ jobs:
       - name: gate no-external-prs
         run: |
           # gate:no-external-prs
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:no-external-prs — an earlier gate already refused"; exit 0
@@ -113,9 +299,25 @@ jobs:
           echo "PASS"
           # /gate
       - name: gate cla
+        # F10 (round 5): CLA_SIGNED is the operator's attestation and arrives as a repo
+        # variable, but no step env bound it — so an attested CLA was ignored and every
+        # CLA-gated org skipped as unsigned, even after the operator signed.
+        env:
+          CLA_SIGNED: ${{ vars.CLA_SIGNED }}
         run: |
           # gate:cla
+          set -euo pipefail
           DECISION="${DECISION:-}"
+          # F3: author identity comes from the RELAY. derive-context computes it and writes
+          # context.json; it does not export AUTHOR_NAME/AUTHOR_EMAIL to $GITHUB_ENV, so
+          # reading them here meant an attested CLA repo refused despite valid author data.
+          # Third occurrence of this class -- a consumer reading a derived value from the
+          # environment that nothing exports.
+          CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+          if [ -f "$CONTEXT_FILE" ]; then
+            AUTHOR_NAME="${AUTHOR_NAME:-$(jq -r '.author_name // empty' "$CONTEXT_FILE" 2>/dev/null || true)}"
+            AUTHOR_EMAIL="${AUTHOR_EMAIL:-$(jq -r '.author_email // empty' "$CONTEXT_FILE" 2>/dev/null || true)}"
+          fi
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:cla — an earlier gate already refused"; exit 0
           fi
@@ -147,6 +349,7 @@ jobs:
       - name: gate pushback
         run: |
           # gate:pushback
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:pushback — an earlier gate already refused"; exit 0
@@ -173,6 +376,7 @@ jobs:
       - name: gate confidence
         run: |
           # gate:confidence
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:confidence — an earlier gate already refused"; exit 0
@@ -198,15 +402,21 @@ jobs:
       - name: gate duplicate-pr
         run: |
           # gate:duplicate-pr
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:duplicate-pr — an earlier gate already refused"; exit 0
           fi
           SIDECAR="${SIDECAR:?}"
           OPEN_PRS_FILE="${OPEN_PRS_FILE:-}"
+          # F9: this used to PASS with a fail-open note. It was never a lenient path — the
+          # variable was bound nowhere, so this branch was the ONLY branch, and the gate did
+          # nothing while reporting PASS. Failing open here means opening a second pull request
+          # against a file an open PR already touches, on somebody else's repository. The list
+          # being unavailable is a reason to stop, not to proceed blind.
           if [ -z "$OPEN_PRS_FILE" ] || [ ! -r "$OPEN_PRS_FILE" ]; then
-            echo "PASS (fail-open: the open-PR list is unavailable; keeping every finding rather than silently dropping)"
-            exit 0
+            echo "REFUSE:open-prs-unavailable — the open-PR list is missing, so the duplicate filter cannot run" >&2
+            exit 1
           fi
           while IFS= read -r line; do
             if [ -z "$line" ]; then continue; fi
@@ -222,6 +432,7 @@ jobs:
       - name: gate pr-caps
         run: |
           # gate:pr-caps
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:pr-caps — an earlier gate already refused"; exit 0
@@ -242,10 +453,130 @@ jobs:
           fi
           echo "PASS"
           # /gate
+      - name: gate fork-probe
+        run: |
+          # gate:fork-probe
+          # E8.2b (vibe-164) W5.1. Read-only: gates holds contents:read and must not create
+          # anything. The slug comes from the relay -- $OWNER is the TARGET owner, so a probe
+          # built from it inspects the target repository rather than the bot's fork.
+          set -euo pipefail
+          CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+          if [ ! -f "$CONTEXT_FILE" ]; then
+            echo "REFUSE:context-relay-missing-unresolvable" >&2; exit 1
+          fi
+          SLUG="$(jq -r '.expected_fork_slug // empty' "$CONTEXT_FILE" 2>/dev/null || true)"
+          [ -n "$SLUG" ] || { echo "REFUSE:context-fork-slug-unresolvable" >&2; exit 1; }
+          # Keyed on OUTPUT, not exit status: the test harness's gh stub always exits 0, so
+          # an exit-status check reports every fork present and the absent branch would never
+          # be exercised. Empty output means no such repository in production too.
+          if [ -n "$(gh api "repos/$SLUG" 2>/dev/null || true)" ]; then
+            echo "FORK:present — $SLUG"
+          else
+            # Absence is information, not failure: submit creates it later, after every gate
+            # has approved. Refusing here would block the first contribution to every repo.
+            echo "FORK:absent — $SLUG"
+          fi
+          echo "PASS"
+          # /gate
+      - name: gate emit-manifest
+        run: |
+          # gate:emit-manifest
+          # E8.2b (vibe-164) W4.1. The gates above already decide what survives -- they print
+          # KEEP:/DROP:/DISCLOSE: -- but nothing downstream was bound by those decisions, so
+          # submit applied whatever the model produced. This writes the decision down as an
+          # allowlist that submit must validate against. Deterministic filtering becomes
+          # ENFORCED rather than printed.
+          set -euo pipefail
+          DECISION="${DECISION:-}"
+          if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
+            echo "NOOP:emit-manifest — an earlier gate already refused"; exit 0
+          fi
+          SIDECAR="${SIDECAR:?}"
+          MANIFEST="${MANIFEST:-${GITHUB_WORKSPACE:-$PWD}/proposal-manifest.json}"
+          CODE_DIR="${CODE_DIR:-${GITHUB_WORKSPACE:-$PWD}}"
+          . "$CODE_DIR/auditor/scripts/compute-fingerprint.sh"
+
+          # The cap comes from the RELAY, not the environment. derive-context computes it
+          # from F10.1's first-contact rule (3 on first contact, 5 thereafter) and writes it
+          # to context.json -- but it does not export PATCH_CAP to $GITHUB_ENV, so reading
+          # ${PATCH_CAP:-${PLANNED_COUNT:-0}} here silently fell back to PLANNED_COUNT: a
+          # different quantity, and the first-contact rule was bypassed entirely. Found by
+          # tests/test_auditor_no_supplied_derivations.py, which flagged the tests that were
+          # hiding it by setting PATCH_CAP directly.
+          CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+          if [ ! -f "$CONTEXT_FILE" ]; then
+            echo "REFUSE:context-relay-missing-unresolvable" >&2; exit 1
+          fi
+          cap="$(jq -r '.patch_cap // empty' "$CONTEXT_FILE" 2>/dev/null || true)"
+          [ -n "$cap" ] || { echo "REFUSE:context-patch-cap-unresolvable" >&2; exit 1; }
+
+          # F9: filter 3 below is the duplicate check, and its input was bound nowhere, so the
+          # per-item guard `[ -f "$OPEN_PRS_FILE" ]` was false for every item on every run. The
+          # check is hoisted here and made fatal: an absent list means the manifest cannot be
+          # trusted to exclude duplicates, and a manifest that silently admits them is worse
+          # than no manifest, because submit treats it as an allowlist.
+          OPEN_PRS_FILE="${OPEN_PRS_FILE:-}"
+          if [ -z "$OPEN_PRS_FILE" ] || [ ! -r "$OPEN_PRS_FILE" ]; then
+            echo "REFUSE:open-prs-unavailable — the manifest cannot exclude duplicates without the open-PR list" >&2
+            exit 1
+          fi
+
+          kept="$(mktemp)"
+          n=0
+          remaining=0
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            # Filter 1 -- confidence. Missing reads as medium (SCHEMAS section 2), so it drops.
+            conf="$(printf '%s' "$line" | jq -r '.confidence // "medium"' 2>/dev/null)" || continue
+            [ "$conf" = "high" ] || continue
+            # Filter 2 -- the disclosure set is routed AWAY from the PR path. A finding on both
+            # lists would be published by submit as a public patch, which is precisely what the
+            # responsible-disclosure path exists to prevent.
+            if printf '%s' "$line" | jq -e 'select(.category=="security")
+                | select(.severity=="critical" or .severity=="high")' >/dev/null 2>&1; then
+              echo "EXCLUDE:$(printf '%s' "$line" | jq -r '.rule_id') — on the disclosure path"
+              continue
+            fi
+            # Filter 3 -- duplicates against open PRs on the target. The list's availability
+            # was checked once, fatally, before this loop (F9); reaching here means it is real.
+            f="$(printf '%s' "$line" | jq -r '.file // ""')"
+            if [ -n "$f" ]; then
+              if jq -e --arg f "$f" '[ .[] | select([.files[].path] | index($f)) ] | length > 0' \
+                   "$OPEN_PRS_FILE" >/dev/null 2>&1; then
+                echo "EXCLUDE:$f — already modified by an open PR on the target"
+                continue
+              fi
+            fi
+            # Filter 4 -- the cap. Findings dropped HERE are the ones an umbrella issue is
+            # for: real, admitted work we ran out of quota to propose. Findings dropped by the
+            # disclosure or duplicate filters are deliberately never going to be PRs, so
+            # counting them would raise an umbrella about work nobody is waiting for.
+            if [ "$cap" -gt 0 ] && [ "$n" -ge "$cap" ]; then
+              echo "EXCLUDE:$(printf '%s' "$line" | jq -r '.rule_id') — beyond the patch cap of $cap"
+              remaining=$((remaining+1))
+              continue
+            fi
+            fp="$(printf '%s' "$line" | compute_fingerprint "$REPO")" || {
+              echo "REFUSE:fingerprint-failed — a finding could not be keyed" >&2; exit 1; }
+            printf '%s\n' "$line" | jq -c --arg fp "$fp" \
+              '{rule_id: .rule_id, fingerprint: $fp, file: .file, confidence: .confidence}' >> "$kept"
+            n=$((n+1))
+          done < "$SIDECAR"
+
+          if [ "$remaining" -gt 0 ]; then quota_exhausted=true; else quota_exhausted=false; fi
+          jq -s --arg repo "$REPO" --argjson qe "$quota_exhausted" --argjson rem "$remaining" \
+            '{version: 1, repo: $repo, findings: ., quota_exhausted: $qe, remaining_count: $rem}' \
+            "$kept" > "$MANIFEST"
+          rm -f "$kept"
+          echo "MANIFEST:$n finding(s) admitted"
+          echo "PASS"
+          # /gate
       - name: gate disclosure-routing
         run: |
           # gate:disclosure-routing
+          set -euo pipefail
           DECISION="${DECISION:-}"
+          disc_tmp="$(mktemp)"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:disclosure-routing — an earlier gate already refused"; exit 0
           fi
@@ -256,31 +587,51 @@ jobs:
                 | select(.category=="security")
                 | select(.severity=="critical" or .severity=="high")' >/dev/null 2>&1; then
               echo "DISCLOSE:$(printf '%s' "$line" | jq -r '.rule_id') — responsible-disclosure path; never a public PR"
+              printf '%s\n' "$line" >> "$disc_tmp"
             fi
           done < "$SIDECAR"
+          # E8.2b (vibe-164) W4.2: the routing decision becomes an immutable artifact, so the
+          # constraint is enforceable rather than printed. It is delivered to finalize and
+          # never to propose -- propose runs the model, and a model job able to read
+          # undisclosed security findings can leak them into a public patch body.
+          DISCLOSURE="${DISCLOSURE:-${GITHUB_WORKSPACE:-$PWD}/disclosure.json}"
+          # F13: shape per SCHEMAS section 14 -- {rule_id, fingerprint, severity}. The emitter
+          # previously wrote {rule_id, severity, file} with no fingerprint, so the contract and
+          # the emitter disagreed and nothing could join a disclosure back to its finding.
+          . "${CODE_DIR:-${GITHUB_WORKSPACE:-$PWD}}/auditor/scripts/compute-fingerprint.sh"
+          disc_out="$(mktemp)"
+          while IFS= read -r dline; do
+            [ -z "$dline" ] && continue
+            dfp="$(printf '%s' "$dline" | compute_fingerprint "$REPO")" || {
+              echo "REFUSE:fingerprint-failed — a disclosure finding could not be keyed" >&2; exit 1; }
+            printf '%s\n' "$dline" | jq -c --arg fp "$dfp" \
+              '{rule_id: .rule_id, fingerprint: $fp, severity: .severity}' >> "$disc_out"
+          done < "$disc_tmp"
+          jq -s --arg repo "$REPO" '{version: 1, repo: $repo, findings: .}' \
+            "$disc_out" > "$DISCLOSURE"
+          rm -f "$disc_out"
+          rm -f "$disc_tmp"
           echo "PASS"
           # /gate
       - name: gate umbrella-backstop
         run: |
           # gate:umbrella-backstop
+          set -euo pipefail
           DECISION="${DECISION:-}"
           if [ -f "$DECISION" ] && [ "$(jq -r '.proceed' "$DECISION" 2>/dev/null)" = "false" ]; then
             echo "NOOP:umbrella-backstop — an earlier gate already refused"; exit 0
           fi
-          QUOTA_EXHAUSTED="${QUOTA_EXHAUSTED:-false}"
-          REMAINING_COUNT="${REMAINING_COUNT:-0}"
-          REPO="${REPO:-}"
-          if [ "$QUOTA_EXHAUSTED" = "true" ] && [ "$REMAINING_COUNT" -gt 0 ]; then
-            gh issue create --repo xinquan568/vibe-suite \
-              --title "Umbrella: $REMAINING_COUNT remaining findings for $REPO" \
-              --body "PR quota exhausted with verified findings remaining. Tracked here on our own repo — never as issues on the target."
-          fi
+          # E8.2b (vibe-164) W6.2: the umbrella issue is CREATED BY finalize, not here.
+          # gates is specified read-only and holds only contents:read, so `gh issue create`
+          # was a mutation from a job with no authority for it. The quota facts this backstop
+          # needs are produced by gate:emit-manifest and travel in proposal-manifest.json;
+          # finalize holds issues:write and reads them there.
           echo "PASS"
           # /gate
       - run: |
           # The proposal job runs only while the shared decision still says proceed; GATES_OK is
           # the in-job mirror of that decision and is never armed unconditionally.
-          set -u
+          set -euo pipefail
           DECISION="${DECISION:-decision.json}"
           proceed=$(jq -r '.proceed' "$DECISION" 2>/dev/null || echo false)
           reason=$(jq -r '.reason // ""' "$DECISION" 2>/dev/null || echo "")
@@ -295,13 +646,17 @@ jobs:
             echo "reason=$reason"
             echo "side_exit_label=$side_exit"
             echo "repo=${REPO:-}"
-            echo "issue=${ISSUE:-${ISSUE_NUMBER:-}}"
+            # ISSUE arrives via $GITHUB_ENV from derive-context, which must have succeeded
+            # for this step to run at all. A ${ISSUE_NUMBER:-} fallback here implied a second
+            # source this step does not have -- ISSUE_NUMBER is bound only in derive-context's
+            # step env -- and finalize already falls back to the event number itself.
+            echo "issue=${ISSUE:-}"
           } >> "${GITHUB_OUTPUT:-/dev/null}"
         id: guard
       - name: publish the gates outcome
         if: always()
         run: |
-          set -u
+          set -euo pipefail
           OUT="${OUTCOME_DIR:-.}"
           mkdir -p "$OUT"
           DECISION="${DECISION:-decision.json}"
@@ -318,11 +673,45 @@ jobs:
             '{schema_version: 1, job: "gates", status: $s, reason: $r, ids: {}}' \
             > "$OUT/outcome-gates.json"
           echo "OUTCOME:gates:$status"
+      # E8.2b (vibe-164) W2.2/W4: the relay, actually wired. gates writes these into ITS
+      # runner's workspace; every consumer runs on a fresh runner, so without an upload the
+      # files simply do not exist downstream and every consumer refuses relay-missing.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-context
+          # F10.b (round 2): the decision document travels WITH the context. refuse()
+          # writes the named reason and side-exit label into decision.json, and finalize
+          # routes on that document — an artifact that does not carry it delivers nothing,
+          # and production finalize degraded to policy-<reason>. A run that dies before
+          # derive-context leaves neither file (aggregate empty: the action warns, uploads
+          # nothing); one that dies between the two uploads context.json alone, silently —
+          # finalize's [ -f ] guard covers both.
+          path: |
+            ${{ github.workspace }}/context.json
+            ${{ github.workspace }}/decision.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proposal-manifest
+          path: ${{ github.workspace }}/proposal-manifest.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-disclosure
+          path: ${{ github.workspace }}/disclosure.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: outcome-gates
-          path: ${{ env.OUTCOME_DIR }}/outcome-gates.json
+          # F1: a literal path, not ${{ env.OUTCOME_DIR }}. The step that sets that variable
+          # is the step that can refuse, so on a refusal the path resolved to
+          # `/outcome-gates.json` and the upload found nothing — losing the outcome exactly
+          # when there was an outcome worth having.
+          path: ${{ github.workspace }}/_outcomes/outcome-gates.json
           if-no-files-found: warn
   reserve:
     needs: gates
@@ -336,6 +725,10 @@ jobs:
       reason: ${{ steps.cas.outputs.reason }}
       repo: ${{ steps.cas.outputs.repo }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gate-context
+          path: ${{ github.workspace }}
       - uses: actions/checkout@v4
         with:
           ref: auditor-data
@@ -348,11 +741,15 @@ jobs:
           # stale and the whole evaluation is redone against the new tip (bounded retries). A
           # refusal is confirmed the same way — a rejected no-op push proves the tip we refused
           # from is no longer current, so the refusal is recomputed too.
-          set -u
+          set -euo pipefail
           REPO="${REPO:?}"
           DATA_DIR="${DATA_DIR:-_data}"
           LEDGER="${RESERVATION_LEDGER:-${RESERVATIONS:-$DATA_DIR/ledgers/contact-reservations.jsonl}}"
-          CAP="${WEEKLY_CAP:-2}"
+          refuse() { echo "REFUSE:context-$1-unresolvable" >&2; exit 1; }
+          CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+          [ -f "$CONTEXT_FILE" ] || refuse relay-missing
+          CAP="$(jq -r '.weekly_cap // empty' "$CONTEXT_FILE" 2>/dev/null || true)"
+          [ -n "$CAP" ] || refuse weekly-cap
           WINDOW_DAYS="${RESERVATION_WINDOW_DAYS:-7}"
           ATTEMPTS="${RESERVATION_ATTEMPTS:-4}"
           DATA_REPO="$(cd "$(dirname "$LEDGER")/.." && pwd)"
@@ -393,7 +790,23 @@ jobs:
             if [ "${distinct:-0}" -ge "$CAP" ]; then
               reason="weekly-cap"
               echo "SKIP:weekly-cap — $distinct distinct repos already reserved in the trailing ${WINDOW_DAYS}d (cap $CAP)"
-              if git -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null; then
+              # The credential is meaningful only for an https remote. A local or file://
+              # remote — what the harnesses and any bare fork use — needs none, and forcing
+              # an empty helper onto one makes git prompt for a password nobody can supply.
+              # Discriminating on the TOKEN was wrong: a harness can hold a token and still
+              # push locally.
+              CRED_ARGS=()
+              case "${PUSH_REMOTE_URL:-$(git -C "${PUSH_DIR:-.}" remote get-url origin 2>/dev/null)}" in
+                https://*) : ;;
+                *) PAT_SECRET="" ;;
+              esac
+              if [ -n "${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}" ]; then
+                CRED_ARGS=(-c 'credential.helper=' \
+                  -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
+              fi
+              if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+                 git "${CRED_ARGS[@]}" -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null
+              then
                 break
               fi
               echo "the tip advanced while the refusal was computed; re-reading and re-evaluating"
@@ -408,7 +821,23 @@ jobs:
             git -C "$DATA_REPO" -c "user.name=${GIT_AUTHOR_NAME:-vibe-suite auditor}" \
               -c "user.email=${GIT_AUTHOR_EMAIL:-auditor@users.noreply.github.com}" \
               commit -q -m "auditor: reserve a contact slot for $REPO"
-            if git -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null; then
+            # The credential is meaningful only for an https remote. A local or file://
+            # remote — what the harnesses and any bare fork use — needs none, and forcing
+            # an empty helper onto one makes git prompt for a password nobody can supply.
+            # Discriminating on the TOKEN was wrong: a harness can hold a token and still
+            # push locally.
+            CRED_ARGS=()
+            case "${PUSH_REMOTE_URL:-$(git -C "${PUSH_DIR:-.}" remote get-url origin 2>/dev/null)}" in
+              https://*) : ;;
+              *) PAT_SECRET="" ;;
+            esac
+            if [ -n "${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}" ]; then
+              CRED_ARGS=(-c 'credential.helper=' \
+                -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
+            fi
+            if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+               git "${CRED_ARGS[@]}" -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null
+            then
               reserved=true
               echo "RESERVED:$REPO — reservation appended and pushed to auditor-data"
               break
@@ -453,6 +882,10 @@ jobs:
     outputs:
       status: ${{ steps.classify.outputs.status }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gate-context
+          path: ${{ github.workspace }}
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -461,6 +894,39 @@ jobs:
           ref: auditor-data
           path: _data
           persist-credentials: false
+      - name: clone the target at its audited SHA
+        env:
+          REPO: ${{ needs.reserve.outputs.repo }}
+        run: |
+          # stage-logic:propose-clone
+          # E8.2b (vibe-164) W3.2. propose runs the MODEL, and until now it checked out only
+          # this repository and auditor-data -- never the target. The job described as reading
+          # the audited tree did not have that tree.
+          #
+          # The pin is the point: the audit produced findings against one specific commit, and
+          # a model reviewing a later HEAD is reviewing code nobody audited. Falling back to
+          # HEAD when the SHA will not resolve would reintroduce exactly that, so it refuses.
+          set -euo pipefail
+          refuse() { echo "REFUSE:context-$1-unresolvable" >&2; exit 1; }
+          CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+          [ -f "$CONTEXT_FILE" ] || refuse relay-missing
+          AUDITED_SHA="$(jq -r '.audited_sha // empty' "$CONTEXT_FILE" 2>/dev/null || true)"
+          [ -n "$AUDITED_SHA" ] || refuse audited-sha
+          TARGET_DIR="${TARGET_DIR:-${GITHUB_WORKSPACE:-$PWD}/_target}"
+          TARGET_REMOTE="${TARGET_REMOTE:-https://github.com/$REPO.git}"
+
+          rm -rf "$TARGET_DIR"
+          if ! git clone --quiet --no-checkout "$TARGET_REMOTE" "$TARGET_DIR"; then
+            echo "REFUSE:target-clone-failed — $REPO could not be cloned" >&2
+            exit 1
+          fi
+          git -C "$TARGET_DIR" fetch --quiet origin "$AUDITED_SHA" 2>/dev/null || true
+          if ! git -C "$TARGET_DIR" checkout --quiet --detach "$AUDITED_SHA" 2>/dev/null; then
+            echo "REFUSE:audited-sha-not-in-target — $AUDITED_SHA is not a commit in $REPO" >&2
+            exit 1
+          fi
+          echo "PINNED:$AUDITED_SHA"
+          # /stage-logic
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -477,15 +943,16 @@ jobs:
             call sites, or cite the unambiguous convention line); drop anything you cannot
             reproduce and every style-only or authorial-choice item. Write one patch file per
             surviving finding under _patches/, each with a three-line summary (Bug / Evidence /
-            Fix), and write _patches/findings.json as an array of {rule_id, fingerprint} for the
-            patches you kept. Honor a discuss-first contributing rule by stopping and writing
+            Fix), and write _patches/findings.json as an array of {rule_id, fingerprint, patch}
+            for the patches you kept, where patch is the bare filename of that finding's own
+            patch file under _patches/. Honor a discuss-first contributing rule by stopping and writing
             _patches/REFUSED with the reason. Never open issues or PRs yourself; the submit job
             holds that authority. Produce nothing for critical or high security findings — those
             take the disclosure path.
       - name: classify the proposal outcome
         if: always()
         run: |
-          set -u
+          set -euo pipefail
           OUT="${OUTCOME_DIR:-.}"
           mkdir -p "$OUT" "$PATCH_DIR"
           reason=""
@@ -534,6 +1001,17 @@ jobs:
       status: ${{ steps.lifecycle.outputs.status }}
       pr_number: ${{ steps.lifecycle.outputs.pr_number }}
     steps:
+      # F4: submit READS proposal-manifest.json to validate patch fingerprints. Without
+      # this download every real run reached REFUSE:manifest-missing; the tests concealed it
+      # by pointing MANIFEST at a local file.
+      - uses: actions/download-artifact@v4
+        with:
+          name: proposal-manifest
+          path: ${{ github.workspace }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: gate-context
+          path: ${{ github.workspace }}
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
@@ -551,26 +1029,220 @@ jobs:
           # target at the audited SHA, fork, branch, apply, commit, push, open the PR, THEN write
           # the registry and the prs_submitted event and push them to auditor-data, and only THEN
           # apply the label. The ledger is authoritative; the label is a derived view.
-          set -u
+          set -euo pipefail
           export GH_TOKEN="${GH_TOKEN:-${GH_TOKEN_OVERRIDE:-${PAT_SECRET:-}}}"
           REPO="${REPO:?}"
           OWN_REPO="${OWN_REPO:-xinquan568/vibe-suite}"
-          ISSUE="${ISSUE_NUMBER:-${ISSUE:-}}"
+          # No ISSUE pre-read here (F10 round 5): neither ISSUE nor ISSUE_NUMBER is bound in
+          # this job, so the old `ISSUE="${ISSUE_NUMBER:-${ISSUE:-}}"` could only ever assign
+          # empty. The relay is the contracted source; the ctx read below resolves it.
           PATCH_DIR="${PATCH_DIR:-_patches}"
           PATCH_META="${PATCH_META:-$PATCH_DIR/findings.json}"
           TARGET_DIR="${TARGET_DIR:-_target}"
-          AUDITED_SHA="${AUDITED_SHA:-}"
-          BASE_BRANCH="${BASE_BRANCH:-main}"
+          # E8.2b (vibe-164) W3: read the relay, refuse what it does not carry. These four
+          # values previously defaulted here -- SHA to empty, branch to main, author to a
+          # literal, cap to 3 -- and a default is indistinguishable downstream from a real
+          # answer. gates derives them; this job consumes them.
+          refuse() { echo "REFUSE:context-$1-unresolvable" >&2; exit 1; }
+          CONTEXT_FILE="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+          [ -f "$CONTEXT_FILE" ] || refuse relay-missing
+          ctx() { jq -r --arg k "$1" '.[$k] // empty' "$CONTEXT_FILE" 2>/dev/null || true; }
+          AUDITED_SHA="$(ctx audited_sha)"
+          [ -n "$AUDITED_SHA" ] || refuse audited-sha
+          BASE_BRANCH="$(ctx base_branch)"
+          [ -n "$BASE_BRANCH" ] || refuse default-branch
           BRANCH="${BRANCH:-auditor/vibe-suite-findings}"
-          FORK_SLUG="${FORK_SLUG:-}"
+          FORK_SLUG="${FORK_SLUG:-$(jq -r '.expected_fork_slug // empty' "${CONTEXT_FILE:-/dev/null}" 2>/dev/null || true)}"
           FORK_REMOTE="${FORK_REMOTE:-}"
           DATA_DIR="${DATA_DIR:-_data}"
           DATA_BRANCH="${DATA_BRANCH:-$(git -C "$DATA_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo auditor-data)}"
           EVENT_LOG="${EVENT_LOG:-$DATA_DIR/ledgers/events.jsonl}"
           REGISTRY="${REGISTRY:-$DATA_DIR/registry/repos.json}"
           OUT="${OUTCOME_DIR:-.}"
-          AUTHOR_NAME="${CLA_AUTHOR_NAME:-${AUTHOR_NAME:-vibe-suite auditor}}"
-          AUTHOR_EMAIL="${CLA_AUTHOR_EMAIL:-${AUTHOR_EMAIL:-auditor@users.noreply.github.com}}"
+          AUTHOR_NAME="${CLA_AUTHOR_NAME:-$(ctx author_name)}"
+          AUTHOR_EMAIL="${CLA_AUTHOR_EMAIL:-$(ctx author_email)}"
+          { [ -n "$AUTHOR_NAME" ] && [ -n "$AUTHOR_EMAIL" ]; } || refuse author-identity
+          # Read at ENTRY, not at point of use. The patch cap was previously read after the
+          # target clone, so an absent cap could not refuse -- an unrelated clone failure
+          # fired first and the missing context was never reported. Validating the whole
+          # context up front is what "resolve and validate its own context" means.
+          PATCH_CAP="$(ctx patch_cap)"
+          [ -n "$PATCH_CAP" ] || refuse patch-cap
+          # F3: issue and fork slug are context too, and validating them at ENTRY is the point
+          # -- a check placed later never runs, because the target clone fails first and the
+          # run exits as pre-pr-failure with the real cause unreported.
+          ISSUE="${ISSUE:-${ISSUE_NUMBER:-$(ctx issue)}}"
+          [ -n "$ISSUE" ] || refuse issue
+          FORK_SLUG="${FORK_SLUG:-$(ctx expected_fork_slug)}"
+          [ -n "$FORK_SLUG" ] || refuse fork-slug
+          # F2: prove the identity claim HERE, where PAT_SECRET is bound and before anything
+          # is cloned, forked or pushed. gates could not prove it -- it holds no PAT. A fork
+          # created under an account the PAT does not own could not then be removed, because
+          # the never-delete policy forbids it.
+          vf_expected_owner="${FORK_SLUG%%/*}"
+          vf_pat_login="$(GH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" gh api user --jq .login 2>/dev/null || true)"
+          vf_pat_login="$(printf '%s' "$vf_pat_login" | tr -d '[:space:]')"
+          if [ -z "$vf_pat_login" ]; then
+            echo "REFUSE:pat-identity-unresolvable — the PAT could not identify itself; refusing before any fork operation" >&2
+            exit 1
+          fi
+          if [ "$vf_pat_login" != "$vf_expected_owner" ]; then
+            echo "REFUSE:pat-identity-mismatch — PAT is '$vf_pat_login' but the expected fork owner is '$vf_expected_owner'; refusing before any fork operation" >&2
+            exit 1
+          fi
+
+          # E8.2b (vibe-164) W4.3: every patch fingerprint must appear in the gate's
+          # allowlist. The gates decide what may be proposed; without this check that
+          # decision bound nothing and submit applied whatever the model produced --
+          # including, potentially, a finding the disclosure gate routed away from the public
+          # PR path. An ABSENT manifest refuses rather than allowing everything: fail-open
+          # here would defeat the allowlist entirely.
+          # E8.2b (vibe-164) W6.3: nothing durable is keyed on an empty PR number. A registry
+          # write, ledger append or label transition carrying "" records a contribution that
+          # cannot be found again, and the record is append-only -- it cannot be taken back.
+          MANIFEST="${MANIFEST:-${GITHUB_WORKSPACE:-$PWD}/proposal-manifest.json}"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "REFUSE:manifest-missing — no gate allowlist to validate patches against" >&2
+            exit 1
+          fi
+          # F6: FAIL CLOSED. Validation used to be conditional on PATCH_META existing, and a
+          # jq failure inside `for fp in $(...)` does not abort under set -e -- so an absent
+          # or malformed metadata file let every patch through to `git apply` unvalidated.
+          # An allowlist that is skipped when its input is missing is not an allowlist.
+          if [ ! -f "${PATCH_META:-}" ]; then
+            echo "REFUSE:patch-meta-missing — no patch metadata to validate against the allowlist" >&2
+            exit 1
+          fi
+          if ! jq -e 'type == "array"' "$PATCH_META" >/dev/null 2>&1; then
+            echo "REFUSE:patch-meta-malformed — patch metadata is not a JSON array" >&2
+            exit 1
+          fi
+          # F6, round 2. The checks above closed the absent and non-array cases and left the
+          # ones where the validation loop below iterates ZERO times, which fails open just as
+          # completely: `type == "array"` admits `[]`, and `.[]?.fingerprint // empty` silently
+          # skips an entry carrying no fingerprint. In both cases `bad` stays empty and every
+          # patch reaches `git apply` unvalidated — on a third party's repository. A loop
+          # cannot detect what it never iterates over, so the arity is checked before it runs.
+          meta_n="$(jq 'length' "$PATCH_META")"
+          if [ "$meta_n" -eq 0 ]; then
+            echo "REFUSE:patch-meta-empty — patches exist but the metadata admits none of them" >&2
+            exit 1
+          fi
+          fp_n="$(jq '[.[] | .fingerprint | select(type == "string" and length > 0)] | length' \
+            "$PATCH_META")"
+          if [ "$fp_n" -ne "$meta_n" ]; then
+            echo "REFUSE:patch-meta-unfingerprinted — $((meta_n - fp_n)) of $meta_n metadata entries carry no fingerprint" >&2
+            exit 1
+          fi
+          uniq_n="$(jq '[.[].fingerprint] | unique | length' "$PATCH_META")"
+          if [ "$uniq_n" -ne "$meta_n" ]; then
+            echo "REFUSE:patch-meta-duplicate — one fingerprint is claimed by more than one entry" >&2
+            exit 1
+          fi
+          # The propose prompt's contract is one patch file per surviving finding, so a count
+          # mismatch means a patch nothing accounted for. This is a cheap ADDITIVE check and
+          # explicitly NOT the binding — it cannot see a patch being swapped for another, since
+          # the counts still match. The binding is the file check below, taken from the patch
+          # bytes; this comment used to imply otherwise and that was the gap the review found.
+          patch_n="$(ls -1 "$PATCH_DIR"/*.patch 2>/dev/null | wc -l | tr -d '[:space:]')"
+          if [ "${patch_n:-0}" -ne "$meta_n" ]; then
+            echo "REFUSE:patch-meta-mismatch — ${patch_n:-0} patch file(s) against $meta_n metadata entr(ies); the contract is one patch per finding" >&2
+            exit 1
+          fi
+          # No heredoc here on purpose: a heredoc inside a YAML block scalar, carrying a
+          # command substitution, breaks the scalar -- the workflow stops parsing as YAML
+          # and the fail-closed lint reports an unrecognised construct. Fingerprints are
+          # sha256 hex with no whitespace, so word-splitting a single command substitution
+          # is safe and keeps everything inside the block scalar.
+          allow="$(jq -r '.findings[].fingerprint' "$MANIFEST" 2>/dev/null | sort -u)"
+          bad=""
+          for fp in $(jq -r '.[].fingerprint' "$PATCH_META"); do
+            printf '%s\n' "$allow" | grep -qxF "$fp" || bad="$fp"
+          done
+          if [ -n "$bad" ]; then
+            echo "REFUSE:patch-not-in-manifest — $bad was admitted by no gate" >&2
+            exit 1
+          fi
+          # F6, round 4 — Option A (operator decision, 2026-08-13). Everything above COUNTS.
+          # The union binding below is the floor — no patch may reach outside the admitted
+          # file set — but it cannot see a patch swapped for ANOTHER admitted finding's file:
+          # the union still holds while patch k no longer fixes finding k. So findings.json
+          # now declares each finding's own `patch` filename, validated here as a set against
+          # the files on disk, and each patch's bytes are then scoped (inside the loop below)
+          # to the one file its finding's manifest entry admits. The touched paths are still
+          # taken from the patch BYTES via `git apply --numstat` — the declaration says only
+          # which finding a patch belongs to, never what it contains. Against a MALICIOUS
+          # proposer this proves nothing (it names its files correctly); against the sloppy
+          # one this control is written for, the association catches accidental and partial
+          # swaps the union cannot. SCHEMAS section 14 records both halves of that claim.
+          decl_n="$(jq '[.[] | .patch
+                         | select(type == "string" and length > 0 and (contains("/") | not))]
+                        | length' "$PATCH_META")"
+          if [ "$decl_n" -ne "$meta_n" ]; then
+            echo "REFUSE:patch-meta-unassociated — $((meta_n - decl_n)) of $meta_n metadata entries declare no usable patch filename" >&2
+            exit 1
+          fi
+          declared="$(jq -r '.[].patch' "$PATCH_META" | sort -u)"
+          on_disk="$(cd "$PATCH_DIR" && ls -1 -- *.patch | sort -u)"
+          if [ "$declared" != "$on_disk" ]; then
+            echo "REFUSE:patch-set-mismatch — the declared patch set and the files on disk are not the same set" >&2
+            exit 1
+          fi
+          #
+          # This runs BEFORE the fork is created. A binding validated afterwards has already
+          # made a repository under the bot account for a patch set that was never admissible.
+          admitted_files="$(jq -r '.findings[].file // empty' "$MANIFEST" 2>/dev/null | sort -u)"
+          numstat_tmp="$(mktemp)"
+          for p in "$PATCH_DIR"/*.patch; do
+            [ -e "$p" ] || break
+            # --numstat reports only a rename's DESTINATION, so a rename could move a file no
+            # gate ever considered while the reported path looks admitted. A finding is about
+            # a file's content; renaming is not a fix for one.
+            if grep -qE '^rename (from|to) ' "$p"; then
+              echo "REFUSE:patch-renames-a-file — $(basename "$p") renames a file; --numstat reports only the destination, so the source would pass unexamined" >&2
+              exit 1
+            fi
+            if ! stat_out="$(git apply --numstat "$p" 2>&1)"; then
+              echo "REFUSE:patch-unreadable — $(basename "$p") is not a patch git can read: $(printf '%s' "$stat_out" | head -c 160)" >&2
+              exit 1
+            fi
+            printf '%s\n' "$stat_out" > "$numstat_tmp"
+            while IFS= read -r row; do
+              [ -z "$row" ] && continue
+              added="$(printf '%s' "$row" | cut -f1)"
+              path="$(printf '%s' "$row" | cut -f3-)"
+              # `-` in the numeric columns is how --numstat reports a binary diff. A binary
+              # blob is not a fix for an NL-artifact finding and is not applied on trust.
+              if [ "$added" = "-" ]; then
+                echo "REFUSE:patch-is-binary — $(basename "$p") carries a binary diff for $path" >&2
+                exit 1
+              fi
+              if ! printf '%s\n' "$admitted_files" | grep -qxF "$path"; then
+                echo "REFUSE:patch-touches-unadmitted-file — $(basename "$p") edits $path, which no admitted finding is about" >&2
+                exit 1
+              fi
+            done < "$numstat_tmp"
+            # Association (F6 round 4): this patch belongs to exactly one finding — the entry
+            # declaring its filename (guaranteed unique by the set check above) — and its
+            # bytes may touch only the file the manifest admits for that finding's
+            # fingerprint. An entry whose manifest row names no file refuses rather than
+            # matching nothing.
+            p_base="$(basename "$p")"
+            p_fp="$(jq -r --arg b "$p_base" \
+              '[.[] | select(.patch == $b) | .fingerprint] | first // empty' "$PATCH_META")"
+            p_file="$(jq -r --arg fp "$p_fp" \
+              '[.findings[] | select(.fingerprint == $fp) | .file // empty] | first // empty' \
+              "$MANIFEST")"
+            while IFS= read -r row; do
+              [ -z "$row" ] && continue
+              path="$(printf '%s' "$row" | cut -f3-)"
+              if [ -z "$p_file" ] || [ "$path" != "$p_file" ]; then
+                echo "REFUSE:patch-file-mismatch — $p_base edits $path but its finding admits only ${p_file:-nothing}" >&2
+                exit 1
+              fi
+            done < "$numstat_tmp"
+          done
+          rm -f "$numstat_tmp"
           export GIT_AUTHOR_NAME="$AUTHOR_NAME"
           export GIT_AUTHOR_EMAIL="$AUTHOR_EMAIL"
           export GIT_COMMITTER_NAME="$AUTHOR_NAME"
@@ -623,7 +1295,9 @@ jobs:
               exit 1
             fi
           fi
-          if [ -n "$AUDITED_SHA" ]; then
+          # Unconditional: AUDITED_SHA refused above if unresolvable, so there is no
+          # "no SHA" branch left for the pin to silently skip.
+          if true; then
             git -C "$TARGET_DIR" fetch -q origin "$AUDITED_SHA" 2>/dev/null || true
             if ! git -C "$TARGET_DIR" checkout -q --detach "$AUDITED_SHA" 2>/dev/null; then
               echo "REFUSE:pre-pr-failure — the audited SHA is unreachable in the target" >&2
@@ -631,7 +1305,7 @@ jobs:
               exit 1
             fi
           fi
-          cap=$(cat "$PATCH_DIR/CAP" 2>/dev/null || echo 3)
+          cap="$PATCH_CAP"
           applied=0
           conflict=0
           for p in "$PATCH_DIR"/*.patch; do
@@ -660,10 +1334,134 @@ jobs:
           git -C "$TARGET_DIR" branch -f "$BRANCH" "$commit"
           gh repo fork "$REPO" --clone=false --remote=false >/dev/null 2>&1 \
             || echo "the fork already exists; continuing with ${FORK_SLUG:-the configured fork}"
-          if [ -z "$FORK_REMOTE" ]; then
-            FORK_REMOTE="https://github.com/${FORK_SLUG:-$REPO}.git"
+          # stage-logic:verify-fork
+          # E8.2b (vibe-164) W5.2/W5.3. The COMPLETE invariant, re-confirmed after creation
+          # and before any remote is configured. All four parts, each refusing by name.
+          #
+          # A failed check NEVER deletes the fork. Deleting a repository under a third-party
+          # account is not an action this pipeline takes on its own judgement (operator
+          # policy, 2026-08-07), so the failure is recorded as an orphaned_fork ledger entry
+          # and handed to a human. SCHEMAS.md section 7 declares the record; this writes it.
+          VF_CTX="${CONTEXT_FILE:-${GITHUB_WORKSPACE:-$PWD}/context.json}"
+          VF_SLUG="$(jq -r '.expected_fork_slug // empty' "$VF_CTX" 2>/dev/null || true)"
+          VF_REPO="${REPO:-$(jq -r '.repo // empty' "$VF_CTX" 2>/dev/null || true)}"
+          if [ -n "$VF_SLUG" ]; then
+            vf_fail=""
+            vf_json="$(gh api "repos/$VF_SLUG" 2>/dev/null || true)"
+            if [ -z "$vf_json" ]; then
+              vf_fail="resolves"
+            elif [ "$(printf '%s' "$vf_json" | jq -r '.fork // false')" != "true" ]; then
+              vf_fail="is_fork"
+            elif [ "$(printf '%s' "$vf_json" | jq -r '.full_name // ""')" != "$VF_SLUG" ]; then
+              vf_fail="owner_matches"
+            elif [ "$(printf '%s' "$vf_json" | jq -r '.parent.full_name // ""')" != "$VF_REPO" ]; then
+              vf_fail="parent_matches"
+            fi
+            if [ -n "$vf_fail" ]; then
+              EVENT_LOG="${EVENT_LOG:-${DATA_DIR:-_data}/ledgers/events.jsonl}"
+              mkdir -p "$(dirname "$EVENT_LOG")"
+              vf_row="$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --arg rid "${GITHUB_RUN_ID:-local}" --argjson rn "${GITHUB_RUN_NUMBER:-0}" \
+                --arg repo "$VF_REPO" --arg slug "$VF_SLUG" --arg who "${VF_SLUG%%/*}" \
+                --arg failed "$vf_fail" \
+                '{timestamp: $ts, workflow: "auditor-contribute", event: "orphaned_fork",
+                  run_id: $rid, run_number: $rn,
+                  data: {repo: $repo, fork_slug: $slug, owner: $who, created_at: $ts,
+                         invariant_failed: $failed}}')"
+              printf '%s\n' "$vf_row" >> "$EVENT_LOG"
+              # F7: DURABILITY. The append above lands in this runner's auditor-data
+              # checkout, which is discarded when the job ends -- so the record the
+              # never-delete policy exists to leave behind was being lost, and the test only
+              # read the local working copy. Commit and non-force-push it before refusing.
+              # If the push cannot land, say so loudly: a silent failure here means a fork
+              # exists under the bot account that nothing records.
+              vf_data="$(dirname "$(dirname "$EVENT_LOG")")"
+              if git -C "$vf_data" rev-parse --git-dir >/dev/null 2>&1; then
+                git -C "$vf_data" add -A ledgers/events.jsonl >/dev/null 2>&1 || true
+                git -C "$vf_data" \
+                  -c "user.name=${GIT_AUTHOR_NAME:-vibe-suite auditor}" \
+                  -c "user.email=${GIT_AUTHOR_EMAIL:-auditor@users.noreply.github.com}" \
+                  commit -q -m "chore(auditor): record orphaned fork $VF_SLUG ($vf_fail)" >/dev/null 2>&1 || true
+                # The credential goes through the same ephemeral helper every other push in
+                # this file uses -- never a remote URL, never `git config`. A bare push here
+                # broke the invariant df38c1e established, and TestPushCredentials caught it.
+                # Same array NAME as every other push in this file, deliberately: the
+                # credential check credits `${CRED_ARGS[@]}` paired with a `CRED_ARGS=(-c`
+                # definition. Inventing a new name left this push uncredited -- which is the
+                # check working, since a reviewer reading for the convention would miss it too.
+                vf_url="$(git -C "$vf_data" remote get-url origin 2>/dev/null || echo '')"
+                CRED_ARGS=()
+                case "$vf_url" in
+                  https://*)
+                    if [ -n "${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}" ]; then
+                      CRED_ARGS=(-c 'credential.helper=' \
+                        -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
+                    fi ;;
+                  *) : ;;
+                esac
+                # F7, round 2. One attempt and a warning was not durability. A non-force push
+                # most often loses a race with a concurrent writer, so a single failure turned
+                # a routine race into a permanently unrecorded orphan — and a warning in a job
+                # log is not a record. Retry against a re-read branch, then relay.
+                vf_pushed=0
+                vf_try=1
+                while [ "$vf_try" -le 3 ]; do
+                  if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+                       git -C "$vf_data" "${CRED_ARGS[@]}" push -q origin HEAD 2>/dev/null; then
+                    vf_pushed=1
+                    break
+                  fi
+                  echo "WARN:orphan-record-push-failed — attempt $vf_try; re-reading auditor-data and retrying" >&2
+                  # Replay the append on top of whatever landed. Never force: the ledger is
+                  # append-only and somebody else's row is not ours to discard.
+                  if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+                       git -C "$vf_data" "${CRED_ARGS[@]}" fetch -q origin 2>/dev/null; then
+                    git -C "$vf_data" rebase -q FETCH_HEAD >/dev/null 2>&1 \
+                      || git -C "$vf_data" rebase --abort >/dev/null 2>&1 || true
+                  fi
+                  vf_try=$((vf_try+1))
+                done
+                if [ "$vf_pushed" != "1" ]; then
+                  # Hand the row to finalize, which downloads every outcome-* artifact and
+                  # owns the durable write. The fork exists under the bot account either way;
+                  # what must not happen is that nothing records it.
+                  VF_OUT="${OUTCOME_DIR:-${GITHUB_WORKSPACE:-$PWD}/_outcomes}"
+                  mkdir -p "$VF_OUT"
+                  printf '%s\n' "$vf_row" > "$VF_OUT/orphaned-fork.json"
+                  echo "RELAY:orphaned-fork — the record could not be pushed from this job; finalize will persist it"
+                  echo "WARN:orphan-record-unpushed — $VF_SLUG is orphaned AND its ledger record did not reach auditor-data from here; if finalize also fails, record it by hand (auditor/README.md)" >&2
+                fi
+              fi
+              echo "REFUSE:fork-invariant:$vf_fail — $VF_SLUG recorded as orphaned_fork; NOT deleted, hand it to a human" >&2
+              exit 1
+            fi
+            echo "FORK:verified — $VF_SLUG"
           fi
-          if ! git -C "$TARGET_DIR" push -q "$FORK_REMOTE" \
+          # /stage-logic
+          if [ -z "$FORK_REMOTE" ]; then
+            # NEVER ${FORK_SLUG:-$REPO}: an empty slug there points the push remote at the
+            # TARGET repository, so the submission branch would be pushed to the repo being
+            # audited instead of the bot's fork. The slug is derived, so absence refuses.
+            [ -n "${FORK_SLUG:-}" ] || { echo "REFUSE:context-fork-slug-unresolvable" >&2; exit 1; }
+            FORK_REMOTE="https://github.com/${FORK_SLUG}.git"
+          fi
+          # The credential is meaningful only for an https remote. A local or file://
+          # remote — what the harnesses and any bare fork use — needs none, and forcing
+          # an empty helper onto one makes git prompt for a password nobody can supply.
+          # Discriminating on the TOKEN was wrong: a harness can hold a token and still
+          # push locally.
+          PUSH_REMOTE_URL="$FORK_REMOTE"
+          CRED_ARGS=()
+          case "${PUSH_REMOTE_URL:-$(git -C "${PUSH_DIR:-.}" remote get-url origin 2>/dev/null)}" in
+            https://*) : ;;
+            *) PAT_SECRET="" ;;
+          esac
+          if [ -n "${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}" ]; then
+            CRED_ARGS=(-c 'credential.helper=' \
+              -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
+          fi
+          if ! GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+             git "${CRED_ARGS[@]}" -C "$TARGET_DIR" push -q "$FORK_REMOTE" \
               "refs/heads/$BRANCH:refs/heads/$BRANCH" 2>/dev/null; then
             echo "REFUSE:pre-pr-failure — the submission branch did not reach the fork" >&2
             outcome pre-pr-failure fork-push-failed ""
@@ -682,10 +1480,10 @@ jobs:
           fi
           # stage-logic:contribute
           # The contribute stage's terminal transition, shared by the normal and the recovery
-          # path: filter the audited findings, write the registry and the prs_submitted event,
-          # push both to auditor-data, and only then move the issue label. Self-contained, so it
-          # runs identically standalone under the harness.
-          set -u
+          # path: filter the audited findings, write the registry and the contribution_submitted
+          # event, push both to auditor-data, and only then move the issue label. Self-contained,
+          # so it runs identically standalone under the harness.
+          set -euo pipefail
           REPO="${REPO:-}"
           if [ -z "$REPO" ] && [ -n "${FIXTURE:-}" ]; then
             REPO="$(jq -r '.repo.full_name' "$FIXTURE")"
@@ -723,15 +1521,60 @@ jobs:
               kept=$((kept+1))
             done < "$SIDECAR"
           fi
+          # `contributed` and `pipeline_prs` — the CONTRACT, not this workflow's own vocabulary.
+          # SCHEMAS.md section 1 fixes the status enum
+          # (discovered/audited/contributed/tracked/complete/policy_denied/policy_cla_required/
+          # orphaned) and declares `pipeline_prs` as the PR numbers opened on the target,
+          # written by CONTRIBUTE. This wrote `prs_submitted` and `last_pr` instead — a status
+          # outside the enum and a field nothing reads.
+          #
+          # auditor-track.yml selects on status contributed/tracked/complete and iterates
+          # `pipeline_prs`, in four places. So a successfully opened PR was never tracked,
+          # never classified, and never dispatched for a case study: the entire downstream half
+          # of the pipeline sat idle while this job reported success.
+          #
+          # pipeline_prs ACCUMULATES. A repo can receive several PRs across runs, and each is a
+          # separate outcome to track; `last_pr` kept only the most recent and discarded the
+          # rest. Appended uniquely, so a re-run does not duplicate an entry.
+          # W6.3/F8: immediately before the FIRST durable act. Placed at the top of the
+          # block it short-circuited the filtering that emits KEEP:/DISCLOSE:, so a
+          # no-PR run produced no analysis output at all -- the guard has to sit
+          # where the durable writes begin, not where PR_NUMBER is first read -- the registry
+          # write (status contributed + pipeline_prs), the append-only contribution_submitted
+          # record, and the label transition.
+          #
+          # Scoped to runs that ACTUALLY OPENED A PR. `applied` counts patches that landed,
+          # and the registry write already carries a deliberate `if $pr == ""` branch for
+          # F8: UNCONDITIONAL, and numeric. Scoping this to `applied > 0` was wrong: with
+          # applied zero or unset, execution could still write status contributed, append
+          # contribution_submitted with a null PR, and move the label. The issue's contract is
+          # that a non-empty PR number is validated before ANY of those, so the no-PR paths
+          # (no patches, conflict) must terminate before this transition rather than be
+          # excused inside it.
+          # The other half of F8: a run that legitimately opened no PR must LEAVE before the
+          # transition rather than be excused inside it. Nothing applied, or a conflict, is a
+          # real terminal outcome -- it just is not a contribution, so it records no
+          # contribution and moves no label.
+          if [ -z "${PR_NUMBER:-}" ] && [ "${applied:-0}" -eq 0 ]; then
+            echo "NOOP:no-contribution — no patches were applied, so there is no PR to record"
+            exit 0
+          fi
+          case "${PR_NUMBER:-}" in
+            ''|*[!0-9]*)
+              echo "REFUSE:pr-number-empty — refusing the registry write, ledger append and label transition without a numeric PR number (got '${PR_NUMBER:-}')" >&2
+              exit 1 ;;
+          esac
           jq --arg repo "$REPO" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg pr "$PR_NUMBER" \
-            '.repos[$repo] = ((.repos[$repo] // {}) + {status: "prs_submitted", last_contact: $ts}
-               + (if $pr == "" then {} else {last_pr: $pr} end))' "$REGISTRY" > "$REGISTRY.tmp" \
+            '.repos[$repo] = ((.repos[$repo] // {}) + {status: "contributed", last_contact: $ts}
+               + (if $pr == "" then {}
+                  else {pipeline_prs: (((.repos[$repo].pipeline_prs // []) + [($pr | tonumber)])
+                                       | unique)} end))' "$REGISTRY" > "$REGISTRY.tmp" \
             && mv "$REGISTRY.tmp" "$REGISTRY"
           mkdir -p "$(dirname "$EVENT_LOG")" "$OUT"
           jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg repo "$REPO" \
             --argjson pr "${PR_NUMBER:-null}" --argjson kept "$kept" \
             --arg rid "$RUN_ID" --argjson rn "$RUN_NUMBER" \
-            '{timestamp: $ts, workflow: "auditor-contribute", event: "prs_submitted",
+            '{timestamp: $ts, workflow: "auditor-contribute", event: "contribution_submitted",
               run_id: $rid, run_number: $rn,
               data: {repo: $repo, pr_number: $pr, kept: $kept}}' >> "$EVENT_LOG"
           pushed=1
@@ -742,7 +1585,23 @@ jobs:
                 || git -C "$DATA_DIR" -c "user.name=${GIT_AUTHOR_NAME:-vibe-suite auditor}" \
                      -c "user.email=${GIT_AUTHOR_EMAIL:-auditor@users.noreply.github.com}" \
                      commit -q -m "auditor: record the PR submission for $REPO"; then
-              if git -C "$DATA_DIR" push -q origin "HEAD:${DATA_BRANCH:-auditor-data}" 2>/dev/null; then
+              # The credential is meaningful only for an https remote. A local or file://
+              # remote — what the harnesses and any bare fork use — needs none, and forcing
+              # an empty helper onto one makes git prompt for a password nobody can supply.
+              # Discriminating on the TOKEN was wrong: a harness can hold a token and still
+              # push locally.
+              CRED_ARGS=()
+              case "${PUSH_REMOTE_URL:-$(git -C "${PUSH_DIR:-.}" remote get-url origin 2>/dev/null)}" in
+                https://*) : ;;
+                *) PAT_SECRET="" ;;
+              esac
+              if [ -n "${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}" ]; then
+                CRED_ARGS=(-c 'credential.helper=' \
+                  -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
+              fi
+              if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+                 git "${CRED_ARGS[@]}" -C "$DATA_DIR" push -q origin "HEAD:${DATA_BRANCH:-auditor-data}" 2>/dev/null
+              then
                 pushed=1
               fi
             fi
@@ -788,6 +1647,16 @@ jobs:
           name: outcome-submit
           path: _outcomes/outcome-submit.json
           if-no-files-found: warn
+      # F7: the orphan record's second chance. verify-fork writes this only when it could not
+      # push the row itself; finalize downloads every outcome-* artifact and persists it. A
+      # fork left under the bot account with no record anywhere is the state a human cannot
+      # clean up, so one unlucky push must not be the end of it.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: outcome-orphaned-fork
+          path: _outcomes/orphaned-fork.json
+          if-no-files-found: ignore
   finalize:
     needs: [gates, reserve, propose, submit]
     if: always()
@@ -797,6 +1666,23 @@ jobs:
       contents: write
       issues: write
     steps:
+      # F5: the disclosure set reaches finalize and nowhere else. It was uploaded and
+      # never downloaded, so critical/high security findings could vanish while an ordinary
+      # contribution proceeded.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: gate-disclosure
+          path: ${{ github.workspace }}
+      # F1: NOT mandatory. gates refusing inside derive-context uploads no context at all, and
+      # finalize is the only job that can route that refusal — label the tracking issue, write
+      # the ledger row. A required download meant the reporting job died exactly when there was
+      # something to report, and the named refusal reached nobody.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: gate-context
+          path: ${{ github.workspace }}
       - uses: actions/checkout@v4
         with:
           ref: auditor-data
@@ -806,16 +1692,75 @@ jobs:
           path: _outcomes
           pattern: outcome-*
           merge-multiple: true
+      # E8.2b (vibe-164) W6.3: the existing download matches only outcome-*, so the quota
+      # facts the umbrella backstop needs never reached this job. The manifest carries them.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: proposal-manifest
+          path: _gate
+      - name: umbrella backstop for remaining findings
+        env:
+          REPO: ${{ needs.reserve.outputs.repo }}
+          SUBMIT_RESULT: ${{ needs.submit.result }}
+          TERMINAL_STATUS: ${{ needs.submit.outputs.status }}
+        run: |
+          # stage-logic:umbrella
+          # Moved here from gates (W6.2): gates is read-only and held no issues: write.
+          #
+          # finalize runs `always()`, so "the job got here" says nothing about whether the run
+          # succeeded. The trigger is therefore stated POSITIVELY and every condition is
+          # checked, rather than inherited from job status:
+          #
+          #   quota_exhausted == true      the filter actually dropped work for the cap
+          #   remaining_count  >  0        there is something left to track
+          #   submit result == success     the run reached a terminal submit
+          #   status in {submitted, conflict, partial-persisted}
+          #
+          # pre-pr-failure and error do NOT qualify: a run that never reached a PR has no
+          # exhausted quota to report, and raising an umbrella there would tell a maintainer
+          # we ran out of budget when in fact we broke.
+          set -euo pipefail
+          MANIFEST="${MANIFEST:-${GITHUB_WORKSPACE:-$PWD}/_gate/proposal-manifest.json}"
+          [ -f "$MANIFEST" ] || { echo "no manifest — nothing to back off"; exit 0; }
+          qe="$(jq -r '.quota_exhausted // false' "$MANIFEST" 2>/dev/null || echo false)"
+          rem="$(jq -r '.remaining_count // 0' "$MANIFEST" 2>/dev/null || echo 0)"
+          sr="${SUBMIT_RESULT:-}"
+          st="${TERMINAL_STATUS:-}"
+          if [ "$qe" != "true" ] || [ "${rem:-0}" -le 0 ]; then
+            echo "umbrella: not triggered (quota_exhausted=$qe remaining=$rem)"; exit 0
+          fi
+          if [ "$sr" != "success" ]; then
+            echo "umbrella: not triggered (submit result '$sr' is not success)"; exit 0
+          fi
+          case "$st" in
+            submitted|conflict|partial-persisted) : ;;
+            *) echo "umbrella: not triggered (terminal status '$st' never reached a PR)"; exit 0 ;;
+          esac
+          # Idempotency: a rerun of the same run must not open a second issue. The run id is
+          # in the title precisely so this lookup can be exact.
+          title="Umbrella: $rem remaining findings for $REPO (${GITHUB_RUN_ID:-local})"
+          existing="$(gh issue list --repo xinquan568/vibe-suite --state open --json number,title 2>/dev/null || echo '[]')"
+          if printf '%s' "$existing" | jq -e --arg t "$title" '.[]? | select(.title == $t)' >/dev/null 2>&1; then
+            echo "umbrella: already open for this run; not duplicating"; exit 0
+          fi
+          gh issue create --repo xinquan568/vibe-suite \
+            --title "$title" \
+            --body "PR quota exhausted with verified findings remaining for $REPO. Tracked here on our own repository — never as issues on the target."
+          echo "umbrella: created"
+          # /stage-logic
       - name: route the terminal outcome
         run: |
           # logic:finalize
           # The outcome row is selected from the stage artifacts — last non-empty in stage order —
           # so an empty patch set, a patch conflict, a pre-PR failure and a partial submission stay
           # distinguishable. The durable record is written AND pushed before any issue transition.
-          set -u
+          set -euo pipefail
           REPO="${REPO:-}"
           OWN_REPO="${OWN_REPO:-xinquan568/vibe-suite}"
-          ISSUE="${ISSUE_NUMBER:-${ISSUE:-}}"
+          # ISSUE_NUMBER is bound in this job's env (gates output || the event); the old
+          # inner ${ISSUE:-} fallback read a name nothing in this job binds (F10 round 5).
+          ISSUE="${ISSUE_NUMBER:-}"
           DATA_DIR="${DATA_DIR:-_data}"
           DATA_BRANCH="${DATA_BRANCH:-$(git -C "$DATA_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo auditor-data)}"
           EVENT_LOG="${EVENT_LOG:-$DATA_DIR/ledgers/events.jsonl}"
@@ -901,12 +1846,12 @@ jobs:
               ;;
             submitted)
               label="prs-submitted"
-              event="prs_submitted"
+              event="contribution_submitted"
               remove_approved=1
               ;;
             error)
               if [ "$job" = "submit" ]; then
-                event="prs_submitted"
+                event="contribution_submitted"
               else
                 label="pipeline-error"
                 event="contribution_error"
@@ -940,6 +1885,81 @@ jobs:
             --argjson d "$data" \
             '{timestamp: $ts, workflow: "auditor-contribute", event: $ev, run_id: $rid,
               run_number: $rn, data: $d}' >> "$EVENT_LOG"
+
+          # F5: the disclosure set is DOWNLOADED here — and downloading it is not acting on
+          # it. Its outcome was inferred from `reason: security-*` above, which only fires
+          # when the whole run was BLOCKED. So the ordinary case — a run producing both
+          # patchable findings and critical security ones — completed, opened its public PR,
+          # and the disclosure set vanished with no durable record anywhere.
+          #
+          # A contribution outcome and a disclosure outcome are independent facts about one
+          # run, so they get independent rows. This is appended BEFORE the push below, so it
+          # is committed by the same commit that carries the contribution row.
+          # F7: an orphan record that submit could not push itself. It arrives as an
+          # outcome-* artifact and is replayed into the ledger here, ahead of the commit and
+          # push below, so the never-delete policy still leaves something behind.
+          ORPHAN_RELAY="${ORPHAN_RELAY:-$OUTCOME_DIR/orphaned-fork.json}"
+          if [ -s "$ORPHAN_RELAY" ]; then
+            if jq -e '.event == "orphaned_fork"' "$ORPHAN_RELAY" >/dev/null 2>&1; then
+              if ! grep -qF "$(jq -r '.data.fork_slug' "$ORPHAN_RELAY")" "$EVENT_LOG" 2>/dev/null
+              then
+                jq -c . "$ORPHAN_RELAY" >> "$EVENT_LOG"
+                echo "ORPHAN:$(jq -r '.data.fork_slug' "$ORPHAN_RELAY") — relayed record persisted here; the fork is NOT deleted"
+              fi
+            else
+              echo "REFUSE:orphan-relay-malformed — an orphaned-fork relay arrived that does not parse; refusing to drop it silently" >&2
+              exit 1
+            fi
+          fi
+
+          DISCLOSURE="${DISCLOSURE:-${GITHUB_WORKSPACE:-$PWD}/disclosure.json}"
+          disclosed=0
+          if [ -f "$DISCLOSURE" ]; then
+            # Refuse rather than drop. An unreadable artifact on the security path is the one
+            # case where "carry on and hope" is least acceptable.
+            if ! jq -e 'type == "object" and (.findings | type) == "array"' \
+                 "$DISCLOSURE" >/dev/null 2>&1; then
+              echo "REFUSE:disclosure-malformed — the disclosure artifact does not parse; refusing to drop the security path silently" >&2
+              exit 1
+            fi
+            disclosed="$(jq '.findings | length' "$DISCLOSURE")"
+            # The check above validates the CONTAINER and says nothing about its contents, so
+            # an entry with no fingerprint passed and was persisted with a null in the
+            # fingerprints array below. A disclosure row exists to be joined back to the
+            # finding it is about; one carrying a null records that something was disclosed and
+            # destroys the only means of finding out what. SCHEMAS section 14 declares the
+            # shape as {rule_id, fingerprint, severity} — this is that declaration enforced.
+            # F5 (round 4): select objects FIRST. A primitive entry (a bare string or
+            # number) made `.fingerprint` raise inside the substitution, so the run died
+            # closed but anonymous — a jq error where this contract promises a named
+            # refusal. A primitive carries no fingerprint by construction, so it counts
+            # against disc_fp and takes the same refusal as any other unjoinable entry.
+            disc_fp="$(jq '[.findings[] | select(type == "object") | .fingerprint
+                            | select(type == "string" and length > 0)] | length' \
+              "$DISCLOSURE")"
+            if [ "$disc_fp" -ne "${disclosed:-0}" ]; then
+              echo "REFUSE:disclosure-unfingerprinted — $(( disclosed - disc_fp )) of $disclosed disclosure finding(s) carry no fingerprint; the record could not be joined back to them" >&2
+              exit 1
+            fi
+          fi
+          if [ "${disclosed:-0}" -gt 0 ]; then
+            if [ -n "${DISCLOSURE_CONTACT:-}" ]; then
+              disc_event="disclosure_filed"
+            else
+              disc_event="disclosure_pending"
+            fi
+            # Carry the fingerprints: without them the row records that something was
+            # disclosed but not what, and cannot be joined back to the findings.
+            disc_data="$(jq -c --arg repo "$REPO" --arg stage "$job" \
+              '{repo: $repo, stage: $stage, disclosed_count: (.findings | length),
+                fingerprints: [.findings[].fingerprint]}' "$DISCLOSURE")"
+            jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg ev "$disc_event" \
+              --arg rid "${GITHUB_RUN_ID:-local}" --argjson rn "${GITHUB_RUN_NUMBER:-0}" \
+              --argjson d "$disc_data" \
+              '{timestamp: $ts, workflow: "auditor-contribute", event: $ev, run_id: $rid,
+                run_number: $rn, data: $d}' >> "$EVENT_LOG"
+            echo "DISCLOSE:$REPO — $disclosed finding(s) on the responsible-disclosure path; never a public PR"
+          fi
           pushed=0
           if git -C "$DATA_DIR" rev-parse --git-dir >/dev/null 2>&1; then
             git -C "$DATA_DIR" add -A
@@ -948,7 +1968,33 @@ jobs:
                 -c "user.email=${GIT_AUTHOR_EMAIL:-auditor@users.noreply.github.com}" \
                 commit -q -m "auditor: record $event for ${REPO:-the audited repo}"
             fi
-            if git -C "$DATA_DIR" push -q origin "HEAD:$DATA_BRANCH" 2>/dev/null; then pushed=1; fi
+            # The credential is supplied ONLY when a token exists. Three constraints meet at
+            # this line: it must authenticate against GitHub (the checkouts set
+            # `persist-credentials: false`, so a bare push fails at the end, after the work);
+            # it must still work against a LOCAL BARE remote, which needs no auth and where an
+            # empty helper makes git prompt for a password nobody can supply; and it must be
+            # self-contained, because the composition tests extract this marked block alone —
+            # a helper function defined elsewhere in the job is not in scope here.
+            #
+            # Hence the arg ARRAY: empty when there is no token, so the command degrades to a
+            # plain push rather than to a broken one.
+            # The credential is meaningful only for an https remote. A local or file://
+            # remote — what the harnesses and any bare fork use — needs none, and forcing
+            # an empty helper onto one makes git prompt for a password nobody can supply.
+            # Discriminating on the TOKEN was wrong: a harness can hold a token and still
+            # push locally.
+            CRED_ARGS=()
+            case "${PUSH_REMOTE_URL:-$(git -C "${PUSH_DIR:-.}" remote get-url origin 2>/dev/null)}" in
+              https://*) : ;;
+              *) PAT_SECRET="" ;;
+            esac
+            if [ -n "${PAT_SECRET:-${GH_TOKEN_HTTPS:-}}" ]; then
+              CRED_ARGS=(-c 'credential.helper=' \
+                -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
+            fi
+            if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
+               git "${CRED_ARGS[@]}" -C "$DATA_DIR" push -q origin "HEAD:$DATA_BRANCH" 2>/dev/null
+            then pushed=1; fi
           fi
           if [ "$pushed" != "1" ]; then
             echo "REFUSE:ledger-unreachable — the durable record could not be pushed; no issue transition is performed" >&2
@@ -975,16 +2021,37 @@ jobs:
           fi
           echo "PASS"
           # /logic
+        # env-for:finalize-route — the route step's real wiring, testable by the declared
+        # mapping the way derive-context's is.
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ needs.gates.outputs.repo }}
-          ISSUE_NUMBER: ${{ needs.gates.outputs.issue }}
+          # F10.b (round 2): the decision document arrives in the gate-context artifact,
+          # downloaded to the workspace above. Binding it here is what carries the side-exit
+          # labels across the job boundary; the block's [ -f ] guard covers runs whose
+          # artifact has no decision file.
+          DECISION: ${{ github.workspace }}/decision.json
+          # F1: gates refusing inside derive-context never reaches the guard step, so its
+          # outputs are empty precisely on the runs that need routing. The `issues` payload
+          # carries the number on labeled events; on workflow_dispatch the event carries
+          # nothing and the INPUT does — without that third leg, a gate refusal on a
+          # dispatch run (the label-read failure path above all) transported its decision
+          # and then silently skipped the issue edit, so pipeline-error was never applied.
+          ISSUE_NUMBER: ${{ needs.gates.outputs.issue || github.event.issue.number || inputs.issue_number }}
+          # F10 (round 3), found by the generalised job-binding check rather than by reading:
+          # this was read twice and bound nowhere, so `disclosure_filed` was unreachable and
+          # EVERY disclosure recorded as `disclosure_pending` — the same shape as F9's
+          # OPEN_PRS_FILE, in the branch that decides whether a security finding was actually
+          # handed to anybody. Unset is still legitimate (no contact configured yet); what was
+          # wrong is that it could never be set.
+          DISCLOSURE_CONTACT: ${{ vars.DISCLOSURE_CONTACT }}
           DATA_DIR: _data
           OUTCOME_DIR: _outcomes
+          # /env-for
       - name: publish the finalize outcome
         if: always()
         run: |
-          set -u
+          set -euo pipefail
           mkdir -p _outcomes
           jq -n '{schema_version: 1, job: "finalize", status: "routed", reason: "", ids: {}}' \
             > _outcomes/outcome-finalize.json

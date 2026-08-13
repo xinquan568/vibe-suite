@@ -174,11 +174,20 @@ class CompositionBase(unittest.TestCase):
         return sb
 
     def base_env(self, sb, extra=None):
+        # DECISION here models the gate-context artifact: since F10.b the decision document
+        # travels in that artifact and finalize's route step binds DECISION to the
+        # downloaded path, so injecting it is modelling production, not papering over a
+        # missing transport. ISSUE models derive-context's $GITHUB_ENV export to every later
+        # gates step (the per-module exemption in the no-supplied-derivations scan records
+        # this). GITHUB_REPOSITORY is runner-provided, like GITHUB_WORKSPACE. LABELS is
+        # deliberately NOT here: the security gate derives it from the canned API or not at
+        # all (F10.a).
         e = {"REPO": "acme/claude-toolkit", "OWNER": "acme",
              "SIDECAR": str(FIX / "findings-sidecar.jsonl"),
              "DECISION": str(sb.decision), "OUTCOME_DIR": str(sb.outcomes),
              "DATA_REMOTE": str(sb.bare), "LABEL_SNAPSHOT": str(sb.label_snapshot),
-             "ISSUE_NUMBER": "42", "LABELS": "contribute-approved"}
+             "ISSUE_NUMBER": "42", "ISSUE": "42",
+             "GITHUB_REPOSITORY": "example/auditor-repo"}
         e.update(GIT_ENV)
         e.update(extra or {})
         return e
@@ -205,13 +214,14 @@ class CompositionBase(unittest.TestCase):
         emitted = [l for l in lines if l.startswith(ACTION_PREFIXES)]
         return emitted or (len(after_calls) > len(before_calls))
 
-    def drive_row(self, job, status, reason="", ids=None, extra=None, registry="registry.json"):
+    def drive_row(self, job, status, reason="", ids=None, extra=None, registry="registry.json",
+                  side_exit=""):
         sb = self.sandbox(registry=registry)
         for name, doc in stage_outcomes(job, status, reason, ids or {}).items():
             (sb.outcomes / f"outcome-{name}.json").write_text(json.dumps(doc) + "\n")
         sb.decision.write_text(json.dumps({
             "proceed": job == "submit" and status == "submitted",
-            "reason": reason, "side_exit_label": ""}) + "\n")
+            "reason": reason, "side_exit_label": side_exit}) + "\n")
         block = terminal_block()
         self.assertIsNotNone(block, "neither a finalize logic block nor stage-logic:contribute")
         env = self.base_env(sb, {"OUTCOME_JOB": job, "OUTCOME_STATUS": status,
@@ -339,8 +349,9 @@ class TestOutcomeTable(CompositionBase):
         self.assertEqual(res.pr_creates, [], "(gates,skip/non-security) must open no PR")
 
     def test_row_gates_skip_security_disclosure(self):
-        res = self.drive_row("gates", "skip", "security-disclosure",
-                             extra={"LABELS": "contribute-approved,security-blocked"})
+        # No LABELS override: the terminal block never reads it, and the security routing
+        # branches on the REASON prefix — the old extra was a fixture with no reader.
+        res = self.drive_row("gates", "skip", "security-disclosure")
         self.assertNotIn("security-blocked", res.removed,
                          "(gates,skip/security) must RETAIN security-blocked")
         self.assertTrue({"disclosure_filed", "disclosure_pending"} & set(res.names()),
@@ -358,6 +369,102 @@ class TestOutcomeTable(CompositionBase):
         self.assertEqual(payload(rec).get("stage"), "gates",
                          "(gates,error) contribution_error must carry stage=gates")
         self.assertNotEqual(res.r.returncode, 0, "(gates,error) must fail the run loudly")
+
+    def test_a_dispatch_refusal_still_labels_the_input_issue(self):
+        """Step-8 finding 1 (round 2): the guard never ran, and the issue must still label.
+
+        On workflow_dispatch, a label-read failure exits the gates job before the guard step
+        publishes outputs — so `needs.gates.outputs.issue` is empty AND
+        `github.event.issue.number` is empty, and without the `inputs.issue_number` leg the
+        route step had no issue to edit: the decision document transported and the
+        pipeline-error label silently never applied. This test resolves finalize's DECLARED
+        env mapping (the env-for:finalize-route markers) under exactly that shape — guard
+        outputs absent, no event payload, only the dispatch input — and runs the block with
+        what the mapping actually delivers. Injecting ISSUE_NUMBER directly is what masked
+        the loss.
+        """
+        sb = self.sandbox()
+        for name, doc in stage_outcomes("gates", "skip", "issue-labels-unresolvable",
+                                        {}).items():
+            (sb.outcomes / f"outcome-{name}.json").write_text(json.dumps(doc) + "\n")
+        sb.decision.write_text(json.dumps({
+            "proceed": False, "reason": "issue-labels-unresolvable",
+            "side_exit_label": "pipeline-error"}) + "\n")
+
+        m = re.search(r"# env-for:finalize-route.*?^\s*env:\s*$(.*?)^\s*# /env-for",
+                      WF.read_text(), re.M | re.S)
+        self.assertIsNotNone(m, "no env-for:finalize-route markers in the workflow")
+        env = {}
+        for line in m.group(1).splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            k, _, v = line.partition(":")
+            k, v = k.strip(), v.strip()
+            if v.startswith("${{") and v.endswith("}}"):
+                out = ""
+                for alt in v[3:-2].split("||"):
+                    alt = alt.strip()
+                    if alt.startswith("needs.") or alt.startswith("github.event."):
+                        cand = ""  # the guard never ran; dispatch has no issue payload
+                    elif alt.startswith("inputs."):
+                        cand = {"issue_number": "901"}.get(alt.split(".", 1)[1], "")
+                    elif alt == "github.token":
+                        cand = "stub-token"
+                    elif alt.startswith("vars."):
+                        cand = ""
+                    else:
+                        self.fail(f"unmodelled expression atom {alt!r} in the "
+                                  f"finalize-route env; model it rather than letting it "
+                                  f"read as empty")
+                    if cand:
+                        out = cand
+                        break
+                env[k] = out
+            elif "${{ github.workspace }}" in v:
+                env[k] = v.replace("${{ github.workspace }}", str(sb.root))
+            else:
+                env[k] = v
+        self.assertEqual("901", env.get("ISSUE_NUMBER"),
+                         "the declared mapping loses the input issue number when the guard "
+                         "output and the event are both absent — the dispatch failure path "
+                         "labels nothing")
+        # Sandbox plumbing the literal workspace-relative paths cannot reach; the wiring
+        # under test (ISSUE_NUMBER, DECISION) keeps its mapping-resolved values.
+        env.update({"OUTCOME_DIR": str(sb.outcomes), "DATA_REMOTE": str(sb.bare),
+                    "LABEL_SNAPSHOT": str(sb.label_snapshot),
+                    "SIDECAR": str(FIX / "findings-sidecar.jsonl")})
+        env.pop("DATA_DIR", None)  # the harness's checkout, not the literal _data
+        env.update(GIT_ENV)
+        res = Res(sb.run(terminal_block(), env=env), sb, sb.bare)
+        self.assertEqual(0, res.r.returncode, res.out)
+        self.assertIn("pipeline-error", res.added,
+                      f"the transported decision did not label the input issue; applied "
+                      f"{res.added}")
+        self.assertTrue(any("901" in c for c in sb.gh_calls() if "edit" in c),
+                        f"no issue edit reached #901; gh calls: {sb.gh_calls()}")
+        self.assertIn("contribution_refused", res.names(),
+                      f"the refusal row must reach the ledger; got {res.names()}")
+
+    def test_row_gates_label_read_failure_routes_as_infrastructure(self):
+        """F10.a (round 2): the reason lives OUTSIDE security-*, and the routing proves it.
+
+        A failed label read refuses `issue-labels-unresolvable` with `side_exit_label:
+        pipeline-error`. Finalize's skip routing sends `security-*` reasons to the
+        disclosure branch (retain the label, no contribution_refused); everything else
+        applies the transported side-exit label. If the failure reason ever drifts into the
+        security namespace, an API outage would masquerade as a security hold — this pins
+        the routing end to end through the transported decision document.
+        """
+        res = self.drive_row("gates", "skip", "issue-labels-unresolvable",
+                             side_exit="pipeline-error")
+        self.assertIn("pipeline-error", res.added,
+                      f"(gates,skip/issue-labels-unresolvable) must apply the transported "
+                      f"side-exit label pipeline-error; applied {res.added}")
+        self.assertNotIn("security-blocked", res.added,
+                         "an infrastructure failure was routed into the security branch")
+        self.assertIn("contribution_refused", res.names(),
+                      f"the refusal row must reach the ledger; got {res.names()}")
 
     def test_row_reserve_capped(self):
         res = self.drive_row("reserve", "capped", "weekly-cap")
@@ -443,13 +550,13 @@ class TestOutcomeTable(CompositionBase):
 
     def test_row_submit_submitted(self):
         res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77})
-        rec = res.rec("prs_submitted")
-        self.assertIsNotNone(rec, f"(submit,submitted) needs prs_submitted; got {res.names()}")
+        rec = res.rec("contribution_submitted")
+        self.assertIsNotNone(rec, f"(submit,submitted) needs contribution_submitted; got {res.names()}")
         self.assertEqual(payload(rec).get("pr_number"), 77,
-                         "(submit,submitted) prs_submitted must carry pr_number; the current "
+                         "(submit,submitted) contribution_submitted must carry pr_number; the current "
                          "record carries only a `kept` count, so the label is a proxy oracle")
-        self.assertIn("prs_submitted", res.pushed_events(),
-                      "(submit,submitted) prs_submitted was never committed and pushed to the "
+        self.assertIn("contribution_submitted", res.pushed_events(),
+                      "(submit,submitted) contribution_submitted was never committed and pushed to the "
                       "bare auditor-data remote")
         self.assertIn("prs-submitted", res.added, "(submit,submitted) must apply prs-submitted")
         self.assertIn("contribute-approved", res.removed,
@@ -457,12 +564,179 @@ class TestOutcomeTable(CompositionBase):
 
     def test_row_submit_error(self):
         res = self.drive_row("submit", "error", "label-step-failed", ids={"pr_number": 77})
-        self.assertIn("prs_submitted", res.pushed_events(),
+        self.assertIn("contribution_submitted", res.pushed_events(),
                       "(submit,error) the ledger is authoritative and must ALREADY be persisted "
                       "in the bare remote when the label step fails")
         self.assertNotEqual(res.r.returncode, 0,
                             "(submit,error) must fail the run loudly so a rerun re-derives "
                             "the label")
+
+
+class TestFinalizePersistsARelayedOrphanRecord(CompositionBase):
+    """The other end of F7's relay: submit could not push the row, so finalize must.
+
+    `verify-fork` refuses and exits, and its runner's auditor-data checkout dies with the job.
+    Retrying helps with a lost race; it does not help when the remote refuses outright. In that
+    case the row travels as an outcome-* artifact and lands here, where the durable write
+    already happens. Without this end the relay writes a file nobody reads.
+    """
+
+    ROW = {"timestamp": "2026-08-09T00:00:00Z", "workflow": "auditor-contribute",
+           "event": "orphaned_fork", "run_id": "local", "run_number": 0,
+           "data": {"repo": "acme/claude-toolkit", "fork_slug": "vibe-bot/claude-toolkit",
+                    "owner": "vibe-bot", "created_at": "2026-08-09T00:00:00Z",
+                    "invariant_failed": "owner_matches"}}
+
+    def _relay(self, doc):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="auditor-orphan-")
+        self.addCleanup(shutil.rmtree, d, True)
+        p = Path(d) / "orphaned-fork.json"
+        p.write_text(json.dumps(doc) if not isinstance(doc, str) else doc)
+        return str(p)
+
+    def test_a_relayed_orphan_record_is_committed_and_pushed(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"ORPHAN_RELAY": self._relay(self.ROW)})
+        self.assertIn("orphaned_fork", res.pushed_events(),
+                      "the relayed orphan record never reached the bare auditor-data remote, "
+                      "so the fork under the bot account is recorded nowhere at all")
+
+    def test_no_relay_means_no_orphan_row(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77})
+        self.assertNotIn("orphaned_fork", res.names(),
+                         "an orphan row appeared with no relay to justify it")
+
+    def test_a_malformed_relay_refuses_rather_than_dropping_it(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"ORPHAN_RELAY": self._relay("<html>502</html>")})
+        self.assertNotEqual(0, res.r.returncode,
+                            "an unreadable orphan relay was ignored; the never-delete policy "
+                            "then leaves nothing behind and no one is told")
+        self.assertIn("REFUSE:orphan-relay-malformed", res.out)
+
+
+class TestTheDisclosureSetGetsItsOwnDurableOutcome(CompositionBase):
+    """F5's second half: downloading the artifact is not the same as acting on it.
+
+    `finalize` now downloads `gate-disclosure` -- and then never opened it. The disclosure
+    outcome was inferred from `reason: security-*`, which only fires when the whole run was
+    BLOCKED. So the ordinary case -- a run that produces both patchable findings and
+    critical security ones -- completed happily, opened its public PR, and the disclosure set
+    vanished with no durable record anywhere. The transport was fixed and the consumption was
+    not, which is why the closure came back `partially_closed`.
+
+    A contribution outcome and a disclosure outcome are independent facts about one run, so
+    they get independent ledger rows.
+    """
+
+    def _disclosure(self, findings):
+        p = Path(self.mkdtemp()) / "disclosure.json"
+        p.write_text(json.dumps({"version": 1, "repo": "acme/claude-toolkit",
+                                 "findings": findings}))
+        return str(p)
+
+    def mkdtemp(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="auditor-disc-")
+        self.addCleanup(shutil.rmtree, d, True)
+        return d
+
+    FINDINGS = [{"rule_id": "SEC-CURL-PIPE", "fingerprint": "sha256:abc", "severity": "critical"}]
+
+    def test_a_successful_contribution_still_records_the_disclosure_set(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(self.FINDINGS)})
+        self.assertIn("contribution_submitted", res.names(),
+                      "the ordinary outcome must be unaffected -- these are independent facts")
+        self.assertIn("disclosure_pending", res.names(),
+                      f"a run carrying critical findings completed with no disclosure record; "
+                      f"got {res.names()}")
+        self.assertIn("disclosure_pending", res.pushed_events(),
+                      "the disclosure record was never committed and pushed to the bare "
+                      "auditor-data remote, so it is not durable")
+
+    def test_a_configured_contact_files_rather_than_pends(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(self.FINDINGS),
+                                    "DISCLOSURE_CONTACT": "security@example.invalid"})
+        self.assertIn("disclosure_filed", res.names(), res.names())
+
+    def test_the_record_carries_the_fingerprints_it_is_meant_to_join_on(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(self.FINDINGS)})
+        rec = res.rec("disclosure_pending")
+        self.assertIsNotNone(rec)
+        data = payload(rec)
+        self.assertEqual(1, data.get("disclosed_count"))
+        self.assertIn("sha256:abc", json.dumps(data),
+                      "the record cannot be joined back to the finding it is about")
+
+    def test_an_empty_disclosure_set_records_nothing(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure([])})
+        self.assertNotIn("disclosure_pending", res.names(),
+                         "an empty disclosure set is not an event; recording one would make "
+                         "the ledger's disclosure rows meaningless")
+        self.assertNotIn("disclosure_filed", res.names())
+
+    def test_a_malformed_disclosure_artifact_refuses_rather_than_dropping_it(self):
+        p = Path(self.mkdtemp()) / "disclosure.json"
+        p.write_text("<html>502</html>")
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": str(p)})
+        self.assertNotEqual(0, res.r.returncode,
+                            "an unreadable disclosure artifact was ignored; silently dropping "
+                            "the security path is the failure this finding is about")
+        self.assertIn("REFUSE:disclosure-malformed", res.out)
+
+    def test_a_finding_without_a_fingerprint_refuses_rather_than_recording_a_null(self):
+        """F5's residue: `.findings | type == "array"` is not validation of the findings.
+
+        The round-2 check confirmed the shape of the container and nothing about its contents,
+        so an entry with no fingerprint passed and was persisted into the ledger with a null in
+        the fingerprints array. A disclosure row exists to be joined back to the finding it is
+        about; one carrying a null records that something was disclosed and destroys the only
+        means of finding out what. Claiming "malformed refuses" while writing that row is the
+        overclaim, not the null.
+        """
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(
+                                 [{"rule_id": "SEC-A", "fingerprint": "sha256:abc",
+                                   "severity": "critical"},
+                                  {"rule_id": "SEC-B", "severity": "high"}])})
+        self.assertNotEqual(0, res.r.returncode)
+        self.assertIn("REFUSE:disclosure-unfingerprinted", res.out)
+        self.assertNotIn("disclosure_pending", res.pushed_events(),
+                         "an unjoinable disclosure row was committed and pushed anyway")
+
+    def test_an_empty_string_fingerprint_is_not_a_fingerprint_either(self):
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(
+                                 [{"rule_id": "SEC-A", "fingerprint": "", "severity": "high"}])})
+        self.assertNotEqual(0, res.r.returncode)
+        self.assertIn("REFUSE:disclosure-unfingerprinted", res.out)
+
+    def test_a_primitive_entry_still_gets_the_named_refusal(self):
+        """F5, round 4: fail closed AND by name.
+
+        A bare string (or number) in `.findings` made jq raise while indexing `.fingerprint`,
+        so the block died on the command substitution under `set -e` -- closed, but anonymous:
+        the promised REFUSE:disclosure-unfingerprinted never printed, and the log showed a jq
+        error where the contract names a reason. A primitive entry carries no fingerprint by
+        construction, so it belongs to the same refusal class, not to a crash.
+        """
+        res = self.drive_row("submit", "submitted", "", ids={"pr_number": 77},
+                             extra={"DISCLOSURE": self._disclosure(
+                                 [{"rule_id": "SEC-A", "fingerprint": "sha256:abc",
+                                   "severity": "critical"},
+                                  "not-an-object"])})
+        self.assertNotEqual(0, res.r.returncode)
+        self.assertIn("REFUSE:disclosure-unfingerprinted", res.out,
+                      "the block failed closed without its named refusal -- a jq stack trace "
+                      "is not a contract")
+        self.assertNotIn("disclosure_pending", res.pushed_events(),
+                         "an unjoinable disclosure row was committed and pushed anyway")
 
 
 if __name__ == "__main__":

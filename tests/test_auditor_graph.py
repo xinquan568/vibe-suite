@@ -208,6 +208,41 @@ class ContributeTopology(unittest.TestCase):
                          f"'gates' runs with write authority ({perms}); the gate job must be "
                          "read-only so a refused run consumes nothing")
 
+    def test_gates_permission_map_is_exactly_contents_and_issues_read(self):
+        # F10.a (round 2): the security gate reads the tracking issue's labels through the
+        # API, which needs `issues: read` — and nothing else was granted for it. The
+        # no-write check above cannot fail on a stray extra READ scope, so the map is pinned
+        # exactly: any future scope addition to gates must change this test with its reason.
+        perms = effective_permissions(self.text, self.body("gates"))
+        self.assertEqual({"contents": "read", "issues": "read"}, perms,
+                         f"'gates' declares {perms}; the label read justifies exactly "
+                         "issues: read beside contents: read — a new scope needs its own "
+                         "justification here")
+
+    def test_the_decision_document_travels_in_gate_context(self):
+        # F10.b (round 2): refuse() writes the named reason and side-exit label into
+        # decision.json, and finalize routes on that document — but an artifact that does
+        # not carry it delivers nothing. The upload must list it, and finalize's route step
+        # must bind DECISION to the downloaded path; absent either half, production
+        # finalize falls back to policy-<reason> and the side-exit labels are lost.
+        gates = body_text(self.body("gates"))
+        idx = gates.find("name: gate-context")
+        self.assertNotEqual(-1, idx, "gates has no gate-context upload")
+        # The upload's `with:` mapping ends within a few lines; comments may sit between
+        # the name and the path list.
+        window = "\n".join(gates[idx:].split("\n")[:16])
+        self.assertIn("context.json", window,
+                      "the gate-context artifact no longer carries context.json")
+        self.assertIn("decision.json", window,
+                      "the gate-context artifact does not carry decision.json, so finalize "
+                      "has no decision document in production and side-exit labels degrade "
+                      "to policy-<reason>")
+        finalize = body_text(self.body("finalize"))
+        self.assertRegex(
+            finalize, r"DECISION:\s*\$\{\{\s*github\.workspace\s*\}\}/decision\.json",
+            "finalize's route step does not bind DECISION to the downloaded decision "
+            "document; the transported file would sit unread")
+
     def test_reserve_holds_contents_write_and_never_calls_the_model(self):
         body = self.body("reserve")
         perms = effective_permissions(self.text, body)

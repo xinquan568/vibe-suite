@@ -1,0 +1,12 @@
+{
+  "repos": {
+    "acme/claude-toolkit": {
+      "status": "audited",
+      "audit_issue": 901,
+      "stars": 742,
+      "pipeline_prs": [],
+      "prs": {},
+      "commit_sha_at_audit": "cafebabecafebabecafebabecafebabecafebabe"
+    }
+  }
+}

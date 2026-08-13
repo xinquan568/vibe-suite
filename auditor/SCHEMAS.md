@@ -240,6 +240,8 @@ Append-only JSONL. Envelope on every record: `timestamp`, `workflow`, `event`, `
 | `finding_introduced` | repo, fingerprint, rule_id, file, pattern, severity, commit_sha | NOT appended to `ledgers/findings.jsonl` — avoids double-counting rule reach |
 | `finding_amended` | references a prior fingerprint | reserved; no emitter yet |
 | `exemplar_published` | repo, exemplar_path, score | emitted after a successful exemplar commit |
+| `contribution_submitted` | repo, pr_number, kept | emitted by contribute once a PR number is validated; `kept` is the count of findings that survived the confidence, duplicate and cap filters. The registry's `pipeline_prs` is the durable record — this is the event trail for when and with how much |
+| `orphaned_fork` | repo, fork_slug, owner, created_at, invariant_failed | emitted by contribute when a fork has been created but its post-creation invariant check fails. The fork is **never deleted** — deleting a repository under a third-party account is not an action this pipeline takes on its own judgement, so the record exists to hand the fork to a human. `invariant_failed` names which of the four checks failed (`resolves` / `is_fork` / `owner_matches` / `parent_matches`). Distinct from the section-1 `orphaned` repo status, which is about a repo whose PRs became untrackable |
 
 Additional lifecycle events (discovery, drift check, aggregation, completion, disclosure
 filed/pending, report-generated, proposals_prepared, published / no-narrative, skip
@@ -337,3 +339,83 @@ Rule states: `healthy` / `noisy` / `dormant` / `disputed`.
   them.
 - Registry state is excluded from E8.5's migration by design (§1): the human-performed
   bootstrap is the sole origin of an empty registry.
+
+## 14. Contribution gate outputs — `proposal-manifest.json`, `disclosure.json`
+
+Two immutable artifacts written by the contribution engine's `gates` job. Both are written
+**once**, by that job alone, and are never rewritten by a downstream job: a later stage that
+could edit them could widen its own authority after the gate that bounded it had already run.
+
+### `proposal-manifest.json`
+
+The allowlist of what may become a patch. Written after the confidence, duplicate and cap
+filters have run, so it names exactly the findings that survived them.
+
+| Field | Meaning |
+|---|---|
+| version | int, currently `1` |
+| repo | target `owner/name` |
+| findings | array of `{rule_id, fingerprint, file, confidence}` — the surviving set |
+| quota_exhausted | bool — `true` when the cap filter dropped at least one admitted finding |
+| remaining_count | int — how many admitted findings the cap dropped; `0` when it dropped none |
+
+The quota pair rides here rather than in `context.json` because `context.json` is written once
+by `derive-context`, *before* any filtering, and is contractually immutable — while the quota is
+a result the filter computes. `finalize` reads the pair to decide whether to raise an umbrella
+issue for work that was real and admitted but exceeded the budget. Findings dropped by the
+disclosure or duplicate filters are deliberately **not** counted: they are never going to be
+pull requests, so an umbrella about them would describe work nobody is waiting for.
+
+Contract point: `submit` MUST validate every patch fingerprint against this allowlist and
+refuse any fingerprint absent from it. Deterministic filtering is thereby *enforced*, not
+merely printed — without the manifest, a patch could reach a PR without any gate having
+admitted the finding behind it.
+
+Second contract point: `submit` MUST also bind each patch to the allowlist by the **paths the
+patch touches**, taken from the patch bytes (`git apply --numstat`) and required to be among
+the `file` values of the admitted findings. Fingerprint validation alone counts without
+binding: N patch files, N metadata entries and N allowlisted fingerprints leave patch *k* and
+fingerprint *k* unrelated, so a patch can be swapped for arbitrary content and still validate.
+Renames and binary diffs refuse — `--numstat` reports only a rename's destination, so a rename
+would move a file no gate considered while the reported path looked admitted.
+
+Third contract point (operator decision, 2026-08-13): each `findings.json` entry MUST declare
+its finding's own patch file in a `patch` field (a bare filename under `_patches/`), and
+`submit` MUST require the declared set to equal the patch files on disk and then scope the
+bytes-derived path check per patch — patch *k* may touch only the `file` the manifest admits
+for fingerprint *k*. The union check bounds the set; the association catches a patch swapped
+for **another admitted finding's** file, which the union cannot see.
+
+**What this establishes, and what it does not.** The declaration says only which finding a
+patch belongs to; what the patch touches is still read from its bytes, never trusted from the
+metadata. Against a compromised proposer the declaration proves nothing — it writes both the
+patches and the metadata, so it can simply name its files correctly — and the association is
+therefore no authorization. What it adds against the sloppy or partially-broken proposer this
+control is written for is exactly the accidental and partial swap: association with the
+independently-produced manifest detects a patch that drifted onto the wrong admitted file.
+
+So this is an **integrity** control against a sloppy or partially-compromised proposer, not an
+**authorization** control against an adversarial one. It bounds the blast radius from "any path
+in the target repository" to "the file each admitted finding names". It does **not** show
+that a patch does what its finding claims; that is not mechanically checkable, and the residual
+controls are that `disclosure.json` never reaches `propose` and that a human reads the PR.
+
+It reinforces the disclosure separation only **partially**: a disclosure-routed finding is
+excluded from the manifest, so its file is usually unadmitted — but if an ordinary admitted
+finding happens to sit in the same file, that path is admitted and the reinforcement does not
+apply. Do not read this control as protecting the disclosure path.
+
+### `disclosure.json`
+
+The security findings routed away from the public-PR path.
+
+| Field | Meaning |
+|---|---|
+| version | int, currently `1` |
+| repo | target `owner/name` |
+| findings | array of `{rule_id, fingerprint, severity}` — critical/high security findings |
+
+Routing constraint (contractual, not incidental to one workflow): `disclosure.json` is routed
+to `finalize` and is **never** delivered to `propose`. `propose` runs the model, and a model
+job that can read undisclosed security findings can leak them into a public patch body. The
+constraint is a property of the record, so any workflow consuming it inherits it.

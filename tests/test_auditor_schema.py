@@ -220,7 +220,9 @@ EMITTERS = [
     ("audit", "stage-logic", {"SCORE": "64", "SECURITY": "REVIEW"}, "registry.json",
      _copy_findings_sidecar),
     ("contribute", "stage-logic",
-     {"FIRST_CONTACT": "true", "WEEK_CONTACT_COUNT": "0", "LABELS": "contribute-approved"},
+     # No LABELS: the terminal-transition block never reads it (the security gate derives
+     # labels from the API since F10.a, and no other reader exists).
+     {"FIRST_CONTACT": "true", "WEEK_CONTACT_COUNT": "0"},
      "registry.json", _copy_findings_sidecar),
     ("track", "stage-logic", {}, "registry-tracked.json", None),
     ("case-study", "stage-logic",
@@ -668,3 +670,48 @@ class TestConsumerLedgerHomogeneity(BlockBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- E8.2b (vibe-164) W1: contract declarations for the contribution engine ------------
+
+class TestE82bContractDeclarations(unittest.TestCase):
+    """W1.1/W1.2 — the records E8.2b's engine must emit are declared in the contract.
+
+    These are contract-shape assertions, not scaffolding checks: each names a record the
+    engine is required to write, and the behavioural proof that the engine writes it in
+    this shape lives with its emitter (W5.3 for orphaned_fork, W4.1/W4.2 for the gate
+    outputs). A declaration without an emitter is exactly the gap Step-5 finding 7 raised.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = (REPO / "auditor" / "SCHEMAS.md").read_text(encoding="utf-8")
+
+    def test_orphaned_fork_is_a_declared_event(self):
+        self.assertIn("`orphaned_fork`", self.text,
+                      "SCHEMAS.md declares no orphaned_fork event; the never-delete policy "
+                      "has no durable record to write")
+        for field in ("fork_slug", "invariant_failed"):
+            self.assertIn(field, self.text,
+                          f"orphaned_fork declares no {field} field")
+
+    def test_orphaned_repo_status_is_untouched(self):
+        # orphaned (repo status, terminal for repos whose PRs became untrackable) and
+        # orphaned_fork (a fork we created whose post-creation invariant failed) are
+        # different concepts at different layers. Overloading one would lose the other.
+        self.assertIn(
+            "`policy_cla_required` / `orphaned`", self.text,
+            "the orphaned repo-status enum entry was altered; orphaned_fork must be added "
+            "as a section-7 event, not by overloading the section-1 status")
+
+    def test_gate_outputs_are_declared_immutable(self):
+        for artifact in ("proposal-manifest.json", "disclosure.json"):
+            self.assertIn(artifact, self.text,
+                          f"SCHEMAS.md declares no {artifact}; submit has no allowlist to "
+                          f"validate against and disclosure has no routed artifact")
+
+    def test_disclosure_routing_constraint_is_contractual(self):
+        # The constraint is a property of the record, not an accident of one workflow.
+        self.assertRegex(
+            self.text, r"disclosure\.json[\s\S]{0,400}?never.{0,40}propose",
+            "the disclosure-never-propose routing constraint is not stated in the contract")

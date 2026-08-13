@@ -438,6 +438,19 @@ class FullTierOracle(unittest.TestCase):
         self.assertEqual(first.strip(), "set -euo pipefail",
                          "the extracted oracle block lost its own strict mode")
 
+    def test_the_census_is_read_from_the_checkout_not_the_clone(self):
+        """The floor's authority must be the checked-out tree. Subtree equality
+        happens to subsume this while both stand, but this pin holds the mechanism
+        in place on its own — a clone-sourced census is the tamper-your-own-floor
+        vector regardless of what other checks exist that day."""
+        census_lines = [l for l in self.block.splitlines() if "CENSUS=" in l]
+        self.assertEqual(len(census_lines), 1, "the oracle must bind CENSUS once")
+        self.assertIn('CENSUS="${FIXTURE_PATH:-auditor/test-fixture}/census.json"',
+                      census_lines[0],
+                      "the oracle reads the census from the clone the model step "
+                      "touched — the floor can be tampered from inside the clone")
+        self.assertNotIn("fixture-clone", census_lines[0])
+
 
 class SecurityChecklistSignOff(unittest.TestCase):
     """D2: the sign-off is an operator act; the unit tier verifies its durable record.

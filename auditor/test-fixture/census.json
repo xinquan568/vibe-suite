@@ -1,0 +1,49 @@
+{
+  "files": 6,
+  "planted": [
+    {
+      "path": "commands/deploy.md",
+      "rule_id": "R01"
+    },
+    {
+      "path": "commands/deploy.md",
+      "rule_id": "R18"
+    },
+    {
+      "path": "commands/cleanup.md",
+      "rule_id": "--"
+    },
+    {
+      "path": "agents/watcher.md",
+      "rule_id": "R01"
+    },
+    {
+      "path": "agents/watcher.md",
+      "rule_id": "R09"
+    },
+    {
+      "path": "agents/broken-front.md",
+      "rule_id": "--"
+    },
+    {
+      "path": "skills/helper-skill/SKILL.md",
+      "rule_id": "--"
+    },
+    {
+      "path": "skills/helper-skill/SKILL.md",
+      "rule_id": "R04"
+    },
+    {
+      "path": "skills/helper-skill/SKILL.md",
+      "rule_id": "R01"
+    }
+  ],
+  "detection_floor": 2,
+  "notes": {
+    "R01": "vague quantifiers planted across three artifacts",
+    "R04": "the skill's description is a summary, not a trigger \u2014 no action phrases",
+    "R09": "the agent carries no <example> blocks",
+    "R18": "the command consumes $ARGUMENTS but declares no argument-hint",
+    "--": "structural defects outside the numbered rubric: a command missing its description, an agent with unparseable frontmatter, a skill whose name mismatches its directory; the oracle skips these rows"
+  }
+}

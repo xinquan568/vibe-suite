@@ -147,7 +147,13 @@ What E8.7's preflight must find, and the command that proves each row today:
 | `auditor-data` branch | `ls-remote` ref |
 | `CLAUDE_CODE_OAUTH_TOKEN` present | secret list |
 | `PAT_TOKEN` present (+`public_repo` scope) | secret list; scope only via preflight exercise |
-| `OPENAI_API_KEY` | optional — absence engages the documented SVG fallback |
+| `OPENAI_API_KEY` | optional — absence engages the documented SVG fallback; the full tier executes the fallback with the key unbound and REQUIRES it to pass |
+| F10.1 security checklist signed | `auditor/SECURITY-CHECKLIST.md` — every row checked and a dated `Signed-off-by:` line; the unit tier refuses by name until the operator signs |
+
+The sign-off is an operator act: the pipeline scaffolds `auditor/SECURITY-CHECKLIST.md`
+unchecked and can only verify the durable record — AC-8 cannot go green before the
+operator has attested the rows (PAT scope, rotation doc, injection separation, audit
+token scope, no secret egress) and signed with a name and an ISO date.
 
 ### Re-provisioning notes
 
@@ -160,7 +166,12 @@ partial state is always advanced, never rewound.
 
 The audit-and-contribute pipeline (F10.1): eighteen workflows staged under `auditor/workflows/`,
 **inert by design** — GitHub runs workflows only from `.github/workflows/`, and activation is a
-deliberate later act (owner: open; at the latest, E8.7 must activate `auditor-integration-test`).
+deliberate later act. E8.7 activated `auditor-integration-test` (2026-08-13): a live COPY at
+`.github/workflows/auditor-integration-test.yml`, held byte-identical to the staged source by
+`tests/test_auditor_fixture.py` (the codex-mirror discipline — the staged file stays the edited,
+lint-covered source; edit it and re-copy). Its tiers audit the in-repo defect fixture at
+`auditor/test-fixture/` (planted defects pinned by `census.json`). The other seventeen remain
+staged-only.
 Eleven of the eighteen carry cron triggers and twelve react to issue events; none may go live
 before the helper scripts (E8.3), the migrated ops data (E8.5) and the AC-8 preflight (E8.7) exist.
 

@@ -119,6 +119,7 @@ jobs:
           BRANCH="exemplar-citations/$DATE"
           cd "$CODE_DIR"
           git checkout -b "$BRANCH"
+          # publish-logic:cite-exemplars
           # propose-rule-citations.py IS the applier — `--apply` writes the blocks into the
           # rulebook. There was never a separate shell helper; the seam here named one that
           # E8.3's closed thirty does not contain and never would, so it refused on every run.
@@ -139,6 +140,7 @@ jobs:
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -am "auditor-cite-exemplars refresh rule citations for $DATE"
+          # /publish-logic
           # Both checkouts use `persist-credentials: false`, so there is no ambient credential
           # and a bare `git push` fails after all the work is done. The token is supplied
           # through a credential helper reading it from the ENVIRONMENT, so it never lands in

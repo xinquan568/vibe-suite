@@ -104,6 +104,7 @@ jobs:
           echo "PASS"
           # /logic
       - run: |
+          # commit-logic:docs-diff
           set -euo pipefail
           cd "$DATA_DIR"
           git add ledgers/docs-hashes.json ledgers/events.jsonl
@@ -115,3 +116,4 @@ jobs:
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-docs-diff refresh the docs hash store"
           bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
+          # /commit-logic

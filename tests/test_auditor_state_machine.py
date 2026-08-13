@@ -716,6 +716,50 @@ class TestDocsDiffWiring(unittest.TestCase):
 
 
 
+    def test_the_commit_path_is_executed_and_stages_the_store(self):
+        # Step-8 finding 6: the commit path was pinned by a regex, which cannot prove it
+        # runs. Executed here against a real data checkout with a bare remote.
+        import hashlib as _h
+        import subprocess as _sp
+        sb = Sandbox()
+        try:
+            (sb.data / "ledgers").mkdir(exist_ok=True)
+            drift = self._page(sb, "drift.html", "after")
+            (sb.data / "ledgers" / "docs-citations.json").write_text(json.dumps({
+                drift: {"rules": ["R09"], "quote": "before"}}), encoding="utf-8")
+            (sb.data / "ledgers" / "docs-hashes.json").write_text(json.dumps({
+                drift: {"hash": _h.sha256(b"before").hexdigest(),
+                        "last_seen": "2026-01-01T00:00:00Z"}}), encoding="utf-8")
+            genv = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+            bare = sb.root / "data-remote.git"
+            _sp.run(["git", "init", "-q", "--bare", "-b", "auditor-data", str(bare)],
+                    check=True)
+            _sp.run(["git", "init", "-q", "-b", "auditor-data", str(sb.data)], check=True)
+            _sp.run(["git", "-C", str(sb.data), "remote", "add", "origin", str(bare)],
+                    check=True)
+            _sp.run(["git", "-C", str(sb.data), "add", "-A"], check=True)
+            _sp.run(["git", "-C", str(sb.data), "commit", "-q", "-m", "seed"],
+                    env={**os.environ, **genv}, check=True)
+            _sp.run(["git", "-C", str(sb.data), "push", "-q", "-u", "origin", "auditor-data"],
+                    check=True)
+            r = self._run(sb)
+            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+            commit_block = extract(WF_DIR / "auditor-docs-diff.yml", "commit-logic",
+                                   "docs-diff")
+            self.assertIsNotNone(commit_block,
+                                 "no commit-logic:docs-diff marker — the commit path is "
+                                 "not executable in tests")
+            rc = sb.run(commit_block, env={"CODE_DIR": str(REPO), **genv})
+            self.assertEqual(0, rc.returncode, rc.stdout + rc.stderr)
+            shown = _sp.run(["git", "-C", str(sb.data), "show", "--name-only",
+                             "--format=", "HEAD"], capture_output=True, text=True)
+            self.assertIn("ledgers/docs-hashes.json", shown.stdout,
+                          "the refreshed hash store never reached the commit")
+        finally:
+            sb.cleanup()
+
+
 class TestSuppressionsWiring(unittest.TestCase):
     """E8.6 (vibe-63): the scan is scan-suppressions.py's, and the corpus reaches the branch.
 
@@ -729,7 +773,9 @@ class TestSuppressionsWiring(unittest.TestCase):
     """
 
     CONFIG = ("---\nrule_overrides:\n  R01:\n    suppress: true\n"
-              "    reason: too noisy\n---\nbody\n")
+              "    reason: too noisy\n  R02:\n    max_penalty: 5\n"
+              "  R03:\n    threshold: 2\n  R04:\n    override: reworded\n"
+              "  nl:R1: suppress\n---\nbody\n")
 
     def _canned(self, sb):
         import base64 as _b
@@ -744,9 +790,12 @@ class TestSuppressionsWiring(unittest.TestCase):
             "content": _b.b64encode(self.CONFIG.encode()).decode()}))
         commits = sb.root / "canned-commits.json"
         commits.write_text(json.dumps([{"sha": "deadbeef"}]))
+        at_ref = sb.root / "canned-contents-at-ref.json"
+        at_ref.write_text(json.dumps({"sha": "blob123"}))
         m = sb.root / "canned-map"
         m.write_text("api -X GET search/code\t" + str(search) + "\n"
                      "api repos/acme/lib/git/blobs/blob123\t" + str(blob) + "\n"
+                     "api repos/acme/lib/contents/.vibe-suite-audit.yml\t" + str(at_ref) + "\n"
                      "api repos/acme/lib/commits\t" + str(commits) + "\n")
         return {"GH_CANNED_MAP": str(m), "GITHUB_REPOSITORY": "example/auditor-repo",
                 "CODE_DIR": str(REPO)}
@@ -770,23 +819,50 @@ class TestSuppressionsWiring(unittest.TestCase):
             self.assertTrue(corpus.is_file(), "no corpus was written")
             recs = [json.loads(l) for l in corpus.read_text().splitlines() if l]
             self.assertEqual(1, len(recs))
-            self.assertEqual(["R01"], recs[0]["rule_ids"])
+            self.assertEqual(["R01", "R02", "R03", "R04", "nl:R1"], recs[0]["rule_ids"])
             dis = [json.loads(l) for l in
                    (sb.data / "ledgers" / "disagreements.jsonl").read_text().splitlines()
                    if l]
             supp = [d for d in dis if d.get("event") == "downstream_suppression"]
-            self.assertEqual(1, len(supp),
-                             "the ledger duty vanished with the rewire — no "
-                             "downstream_suppression was derived from the corpus record")
-            data = supp[0]["data"]
-            self.assertEqual("R01", data["rule_id"])
-            self.assertEqual("suppress", data["suppression_type"])
-            self.assertEqual("too noisy", data.get("reason_given"))
-            self.assertEqual("deadbeef", data["commit_sha"])
+            derived = {(d["data"]["rule_id"], d["data"]["suppression_type"])
+                       for d in supp}
+            # Every SCHEMAS section-5 enum, the namespaced id, and the inline scalar form
+            # (Step-8 finding 2): is_rule_id rejecting nl:R1 or a scalar override producing
+            # no event silently starves the disagreement ledger.
+            self.assertEqual({("R01", "suppress"), ("R02", "max_penalty"),
+                              ("R03", "threshold_adjustment"), ("R04", "rule_override"),
+                              ("nl:R1", "suppress")}, derived,
+                             f"the derivation lost enum kinds or ids: {sorted(derived)}")
+            by_rule = {d["data"]["rule_id"]: d["data"] for d in supp}
+            self.assertEqual("too noisy", by_rule["R01"].get("reason_given"))
+            for d in supp:
+                self.assertEqual("deadbeef", d["data"]["commit_sha"])
             events = [json.loads(l) for l in
                       (sb.data / "ledgers" / "events.jsonl").read_text().splitlines() if l]
             self.assertTrue(any(e.get("event") == "suppression_scan_complete"
                                 for e in events))
+        finally:
+            sb.cleanup()
+
+
+    def test_an_unverifiable_blob_at_the_commit_derives_nothing(self):
+        # The commit_sha binds the observation only if the observed blob actually exists at
+        # that path in that commit; otherwise the record would carry a false provenance.
+        sb = Sandbox()
+        try:
+            (sb.data / "feedback").mkdir(exist_ok=True)
+            env = self._canned(sb)
+            at_ref = sb.root / "canned-contents-at-ref.json"
+            at_ref.write_text(json.dumps({"sha": "a-different-blob"}))
+            r = sb.run(self._block(), env=env)
+            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+            dis = [json.loads(l) for l in
+                   (sb.data / "ledgers" / "disagreements.jsonl").read_text().splitlines()
+                   if l]
+            self.assertEqual([], [d for d in dis
+                                  if d.get("event") == "downstream_suppression"],
+                             "a disagreement was derived with an unverified commit_sha — "
+                             "false provenance")
         finally:
             sb.cleanup()
 
@@ -807,6 +883,75 @@ class TestSuppressionsWiring(unittest.TestCase):
                              "the (repo, sha, path) dedupe did not hold across runs")
             self.assertEqual(n_dis, len(dis.read_text().splitlines()),
                              "a duplicate disagreement was appended for an unchanged blob")
+        finally:
+            sb.cleanup()
+
+
+    def _commit_block(self):
+        b = extract(WF_DIR / "auditor-suppressions.yml", "commit-logic", "suppressions")
+        assert b is not None, "no commit-logic:suppressions marker — the commit path is " \
+                              "not extractable and its behavior rests on reading"
+        return b
+
+    def _run_commit(self, sb):
+        # The commit path runs against DATA_DIR as a real git checkout with a bare remote,
+        # exactly as the data-branch checkout behaves in production.
+        import subprocess as _sp
+        genv = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+        bare = sb.root / "data-remote.git"
+        _sp.run(["git", "init", "-q", "--bare", "-b", "auditor-data", str(bare)], check=True)
+        _sp.run(["git", "init", "-q", "-b", "auditor-data", str(sb.data)], check=True)
+        _sp.run(["git", "-C", str(sb.data), "remote", "add", "origin", str(bare)], check=True)
+        _sp.run(["git", "-C", str(sb.data), "add", "-A"], check=True)
+        _sp.run(["git", "-C", str(sb.data), "commit", "-q", "-m", "seed"], env={
+            **os.environ, **genv}, check=True)
+        _sp.run(["git", "-C", str(sb.data), "push", "-q", "-u", "origin", "auditor-data"],
+                check=True)
+        return sb.run(self._commit_block(), env={"CODE_DIR": str(REPO), **genv})
+
+    def test_the_first_clean_scan_still_commits(self):
+        # Step-8 finding 4: a zero-hit scan wrote no corpus and the unconditional
+        # `git add feedback/suppressions.jsonl` failed the first production run. The logic
+        # block now materializes the empty corpus; the commit path is EXECUTED here, not
+        # read.
+        sb = Sandbox()
+        try:
+            (sb.data / "feedback").mkdir(exist_ok=True)
+            canned_dir = Path(tempfile.mkdtemp(prefix="supp-canned-"))
+            self.addCleanup(shutil.rmtree, canned_dir, True)
+            canned = canned_dir / "empty-search.json"
+            canned.write_text(json.dumps({"total_count": 0, "incomplete_results": False,
+                                          "items": []}))
+            m = canned_dir / "map"
+            m.write_text("api -X GET search/code\t" + str(canned) + "\n")
+            r = sb.run(self._block(), env={"GH_CANNED_MAP": str(m), "CODE_DIR": str(REPO),
+                                           "GITHUB_REPOSITORY": "example/auditor-repo"})
+            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+            self.assertTrue((sb.data / "feedback" / "suppressions.jsonl").is_file(),
+                            "a clean scan left no corpus — the commit path fails on the "
+                            "first real run")
+            rc = self._run_commit(sb)
+            self.assertEqual(0, rc.returncode,
+                             f"the commit path failed after a clean scan: {rc.stdout} "
+                             f"{rc.stderr}")
+        finally:
+            sb.cleanup()
+
+    def test_the_commit_path_stages_the_corpus_with_new_records(self):
+        sb = Sandbox()
+        try:
+            (sb.data / "feedback").mkdir(exist_ok=True)
+            env = self._canned(sb)
+            r = sb.run(self._block(), env=env)
+            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+            rc = self._run_commit(sb)
+            self.assertEqual(0, rc.returncode, rc.stdout + rc.stderr)
+            import subprocess as _sp
+            shown = _sp.run(["git", "-C", str(sb.data), "show", "--name-only",
+                             "--format=", "HEAD"], capture_output=True, text=True)
+            self.assertIn("feedback/suppressions.jsonl", shown.stdout,
+                          "the corpus was produced but the commit does not carry it")
         finally:
             sb.cleanup()
 
@@ -924,15 +1069,60 @@ class TestMirrorBearingCommitPaths(unittest.TestCase):
         ("auditor-refine-rules.yml", "git apply refine-out/rules.patch"),
     )
 
+
+    def test_the_cite_exemplars_publish_path_executes_end_to_end(self):
+        """Step-8 finding 6: index comparisons cannot prove the apply→regen→commit sequence
+        runs. Executed here on a copy of the real repository: the applier writes citations,
+        mirror-sync regenerates, and the commit carries source, mirror and manifest."""
+        import shutil as _sh
+        import subprocess as _sp
+        import tempfile as _tf
+        with _tf.TemporaryDirectory(prefix="cite-publish-") as tmp:
+            code = Path(tmp) / "code"
+            _sh.copytree(REPO, code, symlinks=True,
+                         ignore=_sh.ignore_patterns(".git", "node_modules", "__pycache__"))
+            genv = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+            _sp.run(["git", "init", "-q", "-b", "main", str(code)], check=True)
+            _sp.run(["git", "-C", str(code), "add", "-A"], check=True)
+            _sp.run(["git", "-C", str(code), "commit", "-q", "-m", "seed"],
+                    env={**os.environ, **genv}, check=True)
+            data = Path(tmp) / "data"
+            (data / "exemplars").mkdir(parents=True)
+            (data / "exemplars" / "acme-widget.md").write_text(
+                "---\nslug: acme-widget\nrepo: acme/widget\naudited: 2026-08-01\n"
+                "commit_sha: abc\nscore: 95\nexemplifies: [R01]\n---\nbody\n",
+                encoding="utf-8")
+            block = extract(WF_DIR / "auditor-cite-exemplars.yml", "publish-logic",
+                            "cite-exemplars")
+            self.assertIsNotNone(block, "no publish-logic:cite-exemplars marker")
+            script = "set -euo pipefail\ncd \"$CODE_DIR\"\n" + block
+            r = _sp.run(["bash", "-c", script], capture_output=True, text=True,
+                        env={**os.environ, **genv, "CODE_DIR": str(code),
+                             "DATA_DIR": str(data), "DATE": "2026-08-13",
+                             "VIBE_EXEMPLAR_URL_PREFIX":
+                                 "https://github.com/xinquan568/vibe-suite/blob/"
+                                 "auditor-data/exemplars"},
+                        cwd=str(code))
+            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+            shown = _sp.run(["git", "-C", str(code), "show", "--name-only", "--format=",
+                             "HEAD"], capture_output=True, text=True)
+            for expected in ("skills/rules/SKILL.md", "codex/skills/vibe-rules/SKILL.md",
+                             "codex/MIRROR-MANIFEST.json"):
+                self.assertIn(expected, shown.stdout,
+                              f"the publish commit does not carry {expected} — the mirror "
+                              f"pair would land stale")
+
     def test_mirror_regeneration_sits_between_the_edit_and_the_commit(self):
         for wf, edit_marker in self.CASES:
             with self.subTest(workflow=wf):
                 text = (WF_DIR / wf).read_text(encoding="utf-8")
                 edit = text.index(edit_marker)
-                self.assertIn("scripts/mirror-sync.py", text,
+                REGEN_CMD = 'scripts/mirror-sync.py" generate'
+                self.assertIn(REGEN_CMD, text,
                               f"{wf} commits a mirrored source and never regenerates the "
                               f"mirror — a real run lands a stale mirror on main")
-                regen = text.index("scripts/mirror-sync.py")
+                regen = text.index(REGEN_CMD)
                 commit = text.index("git commit", edit)
                 self.assertLess(edit, regen,
                                 f"{wf}: the mirror regenerates before the source edit — "
@@ -940,10 +1130,20 @@ class TestMirrorBearingCommitPaths(unittest.TestCase):
                 self.assertLess(regen, commit,
                                 f"{wf}: the commit precedes mirror regeneration — the "
                                 f"mirror change is left uncommitted")
-                self.assertRegex(text[commit:commit + 120], r"git commit -am",
-                                 f"{wf}: the commit does not stage all tracked "
-                                 f"modifications, so the regenerated mirror and manifest "
-                                 f"may be left behind")
+                if wf == "auditor-refine-rules.yml":
+                    # Step-8 finding 1: the refine patch is MODEL OUTPUT, so staging is
+                    # EXPLICIT — exactly the guarded source, the mirror, and the manifest;
+                    # -am would let anything the apply escaped ride into the commit.
+                    self.assertIn('git add -- "$ALLOWED" codex/skills/vibe-rules/SKILL.md '
+                                  "codex/MIRROR-MANIFEST.json", text,
+                                  f"{wf}: staging is not the explicit guarded set")
+                    self.assertIn('ALLOWED="skills/rules/SKILL.md"', text,
+                                  f"{wf}: the allowlist variable does not pin the rulebook")
+                else:
+                    self.assertRegex(text[commit:commit + 120], r"git commit -am",
+                                     f"{wf}: the commit does not stage all tracked "
+                                     f"modifications, so the regenerated mirror and "
+                                     f"manifest may be left behind")
 
 
 if __name__ == "__main__":

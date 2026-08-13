@@ -692,13 +692,32 @@ class Test_renderer_workflow_composition(unittest.TestCase):
                         "would fire only after ledgers, registry and labels have changed")
         self.assertNotIn("warn-only", text[call:call + 200],
                          "the drift check still swallows its failure")
-        drift = Path(tempfile.mkdtemp()) / "acme-widget.findings.jsonl"
-        drift.write_text(json.dumps({"rule_id": "R99-NOT-A-RULE", "file": "a.md"}) + "\n",
-                         encoding="utf-8")
-        r = subprocess.run(["python3", str(SCRIPTS / "validate-rule-ids.py"), str(drift)],
+        # Executed, with the refusal proven side-effect free (Step-8 finding 6): the
+        # validator runs over a full data-dir snapshot and must change NOTHING — no ledger,
+        # no registry, no file at all — and call no gh. Actions then never runs the
+        # aggregation step of a failed job, so the ordering assertion above completes the
+        # no-mutations guarantee.
+        d = Path(tempfile.mkdtemp())
+        (d / "audits").mkdir()
+        (d / "ledgers").mkdir()
+        (d / "registry").mkdir()
+        (d / "audits" / "acme-widget.findings.jsonl").write_text(
+            json.dumps({"rule_id": "R99-NOT-A-RULE", "file": "a.md"}) + "\n",
+            encoding="utf-8")
+        (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(json.dumps({"repos": {}}),
+                                                   encoding="utf-8")
+        def snapshot():
+            return {str(p): p.read_bytes() for p in sorted(d.rglob("*")) if p.is_file()}
+        before = snapshot()
+        r = subprocess.run(["python3", str(SCRIPTS / "validate-rule-ids.py"),
+                            "--data-dir", str(d)],
                            capture_output=True, text=True)
         self.assertNotEqual(0, r.returncode, "a seeded rule-id drift did not block")
         self.assertIn("drift", (r.stdout + r.stderr).lower())
+        self.assertEqual(before, snapshot(),
+                         "the refusing validator MUTATED the data dir — the hoist's "
+                         "no-side-effects promise is broken at the source")
 
 
 if __name__ == "__main__":

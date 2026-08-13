@@ -67,10 +67,26 @@ jobs:
               '{timestamp: $t, workflow: $w, event: $e, run_id: $i, run_number: $n, data: $d}'
           }
           is_rule_id() {
-            case "$1" in
-              R[0-9][0-9]) return 0 ;;
+            # SCHEMAS: "a namespaced rule identifier" — an optional lowercase namespace
+            # prefix (nl:R1) ahead of the base forms. R[0-9]+ covers single-digit ids the
+            # two-digit pattern rejected (Step-8 finding 2).
+            _base="$1"
+            case "$_base" in
+              [a-z]*:*) _base="${_base#*:}" ;;
+            esac
+            case "$_base" in
+              R[0-9]|R[0-9][0-9]|R[0-9][0-9][0-9]) return 0 ;;
               SEC-?*|BUG-?*|CC-?*|VOCAB-?*) return 0 ;;
               *) return 1 ;;
+            esac
+          }
+          map_type() {
+            case "$1" in
+              suppress|suppressed|ignore) printf 'suppress' ;;
+              max_penalty|penalty_cap) printf 'max_penalty' ;;
+              threshold|threshold_adjustment) printf 'threshold_adjustment' ;;
+              override|rule_override) printf 'rule_override' ;;
+              *) printf '' ;;
             esac
           }
           record() {
@@ -114,10 +130,15 @@ jobs:
             rm -rf "$WORK"
             exit 1
           fi
-          AFTER=0
-          if [ -f "$CORPUS" ]; then
-            AFTER="$(wc -l < "$CORPUS" | tr -d ' ')"
+          # A successful scan with zero fresh records writes nothing — but "scanned and
+          # found nothing" is a real statement, and the commit step stages the corpus
+          # unconditionally. Materialize the empty corpus so the first clean run cannot
+          # fail at its own commit (Step-8 finding 4).
+          if [ ! -f "$CORPUS" ]; then
+            mkdir -p "$(dirname "$CORPUS")"
+            : > "$CORPUS"
           fi
+          AFTER="$(wc -l < "$CORPUS" | tr -d ' ')"
           NEW=$((AFTER - BEFORE))
           if [ "$NEW" -gt 0 ]; then
             tail -n +"$((BEFORE + 1))" "$CORPUS" > "$WORK/new.jsonl"
@@ -134,11 +155,37 @@ jobs:
                 # record rather than deriving an unpinned override
                 continue
               fi
+              # The commit binds the observation only if the observed BLOB exists at that
+              # path in that commit — otherwise commit_sha is false provenance (Step-8
+              # finding 2). The record's sha is the blob the search found.
+              REC_SHA="$(printf '%s' "$rec" | jq -r '.sha // ""')"
+              AT_REF="$(gh api "repos/$SRC_REPO/contents/$SRC_PATH" -X GET -f ref="$SRC_COMMIT" --jq '.sha // empty' 2> /dev/null | head -n 1 || true)"
+              if [ -z "$AT_REF" ] || [ "$AT_REF" != "$REC_SHA" ]; then
+                echo "SKIP:blob-not-at-commit — $SRC_REPO:$SRC_PATH@$SRC_COMMIT does not carry blob ${REC_SHA:-?}; no disagreement derived" >&2
+                continue
+              fi
               printf '%s' "$rec" | jq -c '.overrides[]?' > "$WORK/overrides.jsonl" || : > "$WORK/overrides.jsonl"
               while IFS= read -r ov; do
                 [ -n "$ov" ] || continue
                 RULE="$(printf '%s' "$ov" | jq -r '.rule_id // ""')"
                 if [ -z "$RULE" ] || ! is_rule_id "$RULE"; then
+                  continue
+                fi
+                OV_TYPE="$(printf '%s' "$ov" | jq -r '.override | type')"
+                if [ "$OV_TYPE" = "string" ]; then
+                  # the grammar's inline scalar form: `<RULE-ID>: suppress`
+                  KIND="$(map_type "$(printf '%s' "$ov" | jq -r '.override')")"
+                  if [ -n "$KIND" ]; then
+                    record "$RULE" "$KIND" ""
+                  else
+                    echo "SKIP:unmapped-scalar-override — $RULE carries an unrecognised scalar; no enum event" >&2
+                  fi
+                  continue
+                fi
+                if [ "$OV_TYPE" != "object" ]; then
+                  # booleans/numbers at the top level have no defined enum reading;
+                  # rejected EXPLICITLY rather than silently (Step-8 finding 2)
+                  echo "SKIP:undefined-override-shape — $RULE carries a $OV_TYPE override; no enum event" >&2
                   continue
                 fi
                 REASON="$(printf '%s' "$ov" | jq -r '.override.reason // ""')"
@@ -165,6 +212,7 @@ jobs:
           env:
             GH_TOKEN: ${{ github.token }}
           run: |
+            # commit-logic:suppressions
             set -euo pipefail
             cd "$DATA_DIR"
             bash "$CODE_DIR/auditor/scripts/guard-protected-paths.sh"
@@ -177,3 +225,4 @@ jobs:
             git config user.email "auditor@users.noreply.github.com"
             git commit -m "auditor-suppressions append downstream suppression events"
             bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
+            # /commit-logic

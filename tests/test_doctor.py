@@ -90,6 +90,37 @@ class TestCleanProject(DoctorCase):
         self.assertNotIn("mirror-staleness", statuses)
         self.assertEqual(self.severities(report), ["[GOOD]"])
 
+    def test_row_9_records_the_executed_migration_without_pending_semantics(self):
+        """E8.5 (vibe-62): the migration EXECUTED, and the row must say so.
+
+        The row stays in the capability table — a project-local, read-only command still has
+        no readable receipt, because the receipt (.vibe-suite-migration/manifest.sha256 +
+        provenance.json) lives on the auditor-data branch — but its reason must record the
+        executed migration, not describe a pending one. The issue's acceptance clause
+        ("doctor's 'migration pending' clears") is honored exactly here: no doctor surface
+        may present §7A row 9 as outstanding. The user-facing contract in commands/doctor.md
+        must present the same resolution, or the two surfaces drift.
+        """
+        self.install()
+        report = self.report()
+        rows = {c["check"]: c for c in report["capabilities"]}
+        self.assertIn("legacy-auditor-data", rows,
+                      "the row 9 capability disappeared; an omitted row is indistinguishable "
+                      "from a passing one")
+        row = rows["legacy-auditor-data"]
+        self.assertEqual(row["status"], "unavailable",
+                         "a project-local command still has no readable receipt; the row "
+                         "must stay a capability, not become a finding or vanish")
+        self.assertIn("executed 2026-08-13", row["blocked_on"],
+                      f"the reason does not record the executed migration: {row['blocked_on']!r}")
+        self.assertIn("auditor-data", row["blocked_on"],
+                      "the reason must name where the receipt lives")
+        doc = (Path(__file__).resolve().parent.parent / "commands" / "doctor.md").read_text()
+        self.assertIn("row 9 (executed 2026-08-13", doc,
+                      "commands/doctor.md still presents §7A row 9 as a check that cannot "
+                      "run yet with no record of the executed migration — the two doctor "
+                      "surfaces have drifted")
+
     def test_mirror_staleness_states(self):
         """E7.2 (round-4): absent manifest → capability row; stale mirror → HIGH with the
         plugin-root remediation; the check is read-only and runs from a workspace OUTSIDE

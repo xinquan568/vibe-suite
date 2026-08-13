@@ -68,6 +68,36 @@ refuses non-regular files on managed paths. Ops data arrives via E8.5's migratio
   provisioning; `tools/migrate-auditor-data.sh` also creates the branch itself on a first run if it
   is missing, so either path is safe.
 
+#### E8.5 execution record (2026-08-13)
+
+§7A row 9 executed for real (vibe-62), operator-approved, from the nlpm source corpus:
+
+- **Invocation**: `tools/migrate-auditor-data.sh <auditor-repo-remote> --source <nlpm-source-tree>`
+  (branch defaulted to `auditor-data`).
+- **Corpus**: `corpus: 1287 file(s) across 5 categories` — 642 `reports/`, 96 `exemplars/`,
+  496 `audits/`, 49 `articles/`, 4 `ledgers/` files (the merge proposal's "exemplars (95)"
+  was a dated snapshot; the tool's own enumeration is the binding count).
+  `disclosures-pending/` was excluded by the tool's corpus definition and is absent from the
+  pushed tree (verified: zero matches in `git ls-tree -r`).
+- **Complete copy**: `published 1287 new file(s)` … `verified 1287 file(s) against
+  auditor-data by content address` — every published blob compared against the SHA-256
+  manifest (`.vibe-suite-migration/manifest.sha256`; provenance in
+  `.vibe-suite-migration/provenance.json`). Exit 0.
+- **Tips**: before `8d8d85a` (sentinel + `registry/repos.json`) → after `72ab8f0`. The two
+  pre-existing blobs are byte-identical before and after (`README.md` `68903f1`,
+  `registry/repos.json` `03be823`).
+- **Idempotent re-run**: second invocation → `already complete — no commit`, exit 0, tip
+  unchanged at `72ab8f0`.
+- **Originals untouched**: whole-source digest (1,531 files, per-file SHA-256, digest of
+  digests `f8631b5…`) identical before and after both runs.
+- **Rollback discipline**: the tool's nothing-was-changed guarantee applies to its `exit 3`
+  refusals only (they fire before staging). For any post-push recovery: fetch and compare
+  the remote tip first; restore the pre-migration tip only while the migration commit is
+  still the tip and only with `--force-with-lease`; if anything landed after it (e.g. a
+  registry write), revert the migration commit instead so intervening state survives.
+  Branch deletion is a first-run/missing-branch remedy only — the live branch carries
+  pipeline state the pipeline owns.
+
 ### Actions secrets
 
 Secret *values* live only in the GitHub Actions environment — never in this repository, its

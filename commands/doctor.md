@@ -21,9 +21,10 @@ Add `--json` when you need the structured form; the command itself takes no argu
 
 ### 2. Present both tables, and keep them apart
 
-**Findings** are defects in *this project*. **Capabilities** are checks that cannot run yet in *this
+**Findings** are defects in *this project*. **Capabilities** are checks that cannot run in *this
 installation* — F4.4 pending #30, mirror staleness live against codex/MIRROR-MANIFEST.json (E7.2), cross-manifest version coherence,
-and §7A row 9.
+and §7A row 9 (executed 2026-08-13, E8.5 — the receipt lives on the `auditor-data` branch, which a
+project-local command does not read; the row records the completed migration rather than a pending one).
 
 Do not merge them. `vibe-core` makes `[GOOD]` **exclusive**: a report containing it contains exactly
 that one entry. Filing an unavailable capability as a finding would mean no project could ever

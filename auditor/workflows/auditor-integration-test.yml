@@ -81,9 +81,10 @@ jobs:
             exit 1
           fi
           for row in "PAT scope" "Rotation doc" "Injection separation" "Audit token scope" "No secret egress"; do
-            N="$(grep -cE -- "^- \[x\] \*\*$row\*\*" "$CHECKLIST")" || true
-            if [ "${N:-0}" -ne 1 ]; then
-              echo "FAIL security checklist row '$row' is not attested exactly once (found ${N:-0})"
+            LINES="$(grep -cE -- "^- \[x\] \*\*$row\*\*" "$CHECKLIST")" || true
+            TOKENS="$(grep -oF -- "- [x] **$row**" "$CHECKLIST" | wc -l | tr -d ' ')" || true
+            if [ "${LINES:-0}" -ne 1 ] || [ "${TOKENS:-0}" -ne 1 ]; then
+              echo "FAIL security checklist row '$row' is not attested exactly once (lines ${LINES:-0}, tokens ${TOKENS:-0})"
               exit 1
             fi
           done
@@ -297,6 +298,14 @@ jobs:
           if [ -n "$CLONE_DIRTY" ]; then
             echo "FAIL the model step mutated the audited fixture clone:"
             printf '%s\n' "$CLONE_DIRTY"
+            exit 1
+          fi
+          # status alone cannot prove pristineness: a tamper-and-COMMIT inside the
+          # clone leaves it clean. The audited subtree must be byte-equal to the
+          # checked-out tree (same repo, same ref; a push racing between checkout
+          # and clone would show here as a spurious red — re-dispatch on that).
+          if ! diff -r "fixture-clone/${FIXTURE_PATH:-auditor/test-fixture}" "${FIXTURE_PATH:-auditor/test-fixture}" > /dev/null; then
+            echo "FAIL the audited fixture tree diverged from the checkout"
             exit 1
           fi
           DIRTY="$(git status --porcelain | grep -v '^?? audit-out/' | grep -v '^?? fixture-clone/' || true)"

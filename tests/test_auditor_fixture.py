@@ -302,6 +302,9 @@ class FullTierOracle(unittest.TestCase):
         trusted = self.repo / "auditor" / "test-fixture"
         trusted.mkdir(parents=True)
         shutil.copy(CENSUS, trusted / "census.json")
+        # the subtree-equality check compares clone vs checkout, so the sandbox's
+        # two trees must start identical, as a real self-clone's do
+        (trusted / "artifact.md").write_text("# audited artifact\n")
         # the checkout's own content is committed, as actions/checkout leaves it —
         # only what the MODEL step adds may appear in the outer status
         subprocess.run(["git", *self.GIT_ID, "add", "-A"], cwd=self.repo, check=True)
@@ -398,6 +401,22 @@ class FullTierOracle(unittest.TestCase):
         r = run_block(self.block, self.env, self.repo)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("not a git checkout", r.stdout)
+
+    def test_a_committed_tamper_inside_the_clone_fails(self):
+        """git status cannot see a tamper the model COMMITTED — the clone reads
+        clean. Only byte-equality of the audited subtree against the checked-out
+        tree catches it."""
+        self.write_report(self.good_report())
+        clone_census = self.clone / "auditor" / "test-fixture" / "census.json"
+        clone_census.write_text(clone_census.read_text().replace(
+            '"detection_floor": 2', '"detection_floor": 0'))
+        subprocess.run(["git", *self.GIT_ID, "commit", "-aqm", "hide the tamper"],
+                       cwd=self.clone, check=True)
+        r = run_block(self.block, self.env, self.repo)
+        self.assertNotEqual(r.returncode, 0,
+                            "a committed tamper left git status clean and the oracle "
+                            "passed — the subtree must be compared to the checkout")
+        self.assertIn("diverged from the checkout", r.stdout)
 
     def test_an_ignored_addition_inside_the_clone_fails(self):
         """`--untracked-files=all` alone leaves IGNORED paths invisible — a
@@ -513,6 +532,20 @@ class SecurityChecklistSignOff(unittest.TestCase):
         r = self.run_check(copy)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("'Rotation doc' is not attested", r.stdout)
+
+    def test_a_duplicate_token_on_the_attested_line_refuses(self):
+        """The iteration-2 verify's bypass: line-count sees one valid PAT line even
+        when a second `- [x] **PAT scope**` token rides on it. Occurrences are
+        counted too, and more than one refuses."""
+        copy = self.root / "dup-token.md"
+        copy.write_text(self.signed_text().replace(
+            "- [x] **PAT scope** — the contribution",
+            "- [x] **PAT scope** and again - [x] **PAT scope** — the contribution"))
+        r = self.run_check(copy)
+        self.assertNotEqual(r.returncode, 0,
+                            "a duplicated attestation token on one valid line passed "
+                            "— tokens must be counted, not lines")
+        self.assertIn("'PAT scope' is not attested", r.stdout)
 
     def test_prose_mentions_of_the_rows_do_not_attest(self):
         """The verify pass's bypass: with an UNANCHORED count, five prose lines each

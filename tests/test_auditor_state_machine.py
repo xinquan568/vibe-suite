@@ -893,22 +893,27 @@ class TestSuppressionsWiring(unittest.TestCase):
                               "not extractable and its behavior rests on reading"
         return b
 
-    def _run_commit(self, sb):
-        # The commit path runs against DATA_DIR as a real git checkout with a bare remote,
-        # exactly as the data-branch checkout behaves in production.
+    GIT_IDENT = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+
+    def _seed_git(self, sb):
+        # Seed the checkout BEFORE the scan runs: the production data-branch checkout
+        # predates the run's writes, and seeding afterwards swallows the scan's products
+        # into the seed commit — the commit block then finds nothing to stage and every
+        # assertion reads the seed (the vacuity the round-1 verify caught).
         import subprocess as _sp
-        genv = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
         bare = sb.root / "data-remote.git"
         _sp.run(["git", "init", "-q", "--bare", "-b", "auditor-data", str(bare)], check=True)
         _sp.run(["git", "init", "-q", "-b", "auditor-data", str(sb.data)], check=True)
         _sp.run(["git", "-C", str(sb.data), "remote", "add", "origin", str(bare)], check=True)
         _sp.run(["git", "-C", str(sb.data), "add", "-A"], check=True)
         _sp.run(["git", "-C", str(sb.data), "commit", "-q", "-m", "seed"], env={
-            **os.environ, **genv}, check=True)
+            **os.environ, **self.GIT_IDENT}, check=True)
         _sp.run(["git", "-C", str(sb.data), "push", "-q", "-u", "origin", "auditor-data"],
                 check=True)
-        return sb.run(self._commit_block(), env={"CODE_DIR": str(REPO), **genv})
+
+    def _run_commit(self, sb):
+        return sb.run(self._commit_block(), env={"CODE_DIR": str(REPO), **self.GIT_IDENT})
 
     def test_the_first_clean_scan_still_commits(self):
         # Step-8 finding 4: a zero-hit scan wrote no corpus and the unconditional
@@ -925,6 +930,7 @@ class TestSuppressionsWiring(unittest.TestCase):
                                           "items": []}))
             m = canned_dir / "map"
             m.write_text("api -X GET search/code\t" + str(canned) + "\n")
+            self._seed_git(sb)
             r = sb.run(self._block(), env={"GH_CANNED_MAP": str(m), "CODE_DIR": str(REPO),
                                            "GITHUB_REPOSITORY": "example/auditor-repo"})
             self.assertEqual(0, r.returncode, r.stdout + r.stderr)
@@ -935,6 +941,12 @@ class TestSuppressionsWiring(unittest.TestCase):
             self.assertEqual(0, rc.returncode,
                              f"the commit path failed after a clean scan: {rc.stdout} "
                              f"{rc.stderr}")
+            import subprocess as _sp
+            shown = _sp.run(["git", "-C", str(sb.data), "show", "--name-only",
+                             "--format=", "HEAD"], capture_output=True, text=True)
+            self.assertIn("feedback/suppressions.jsonl", shown.stdout,
+                          "the first clean run's commit does not carry the materialized "
+                          "corpus — HEAD is still the seed")
         finally:
             sb.cleanup()
 
@@ -942,6 +954,7 @@ class TestSuppressionsWiring(unittest.TestCase):
         sb = Sandbox()
         try:
             (sb.data / "feedback").mkdir(exist_ok=True)
+            self._seed_git(sb)
             env = self._canned(sb)
             r = sb.run(self._block(), env=env)
             self.assertEqual(0, r.returncode, r.stdout + r.stderr)
@@ -950,8 +963,14 @@ class TestSuppressionsWiring(unittest.TestCase):
             import subprocess as _sp
             shown = _sp.run(["git", "-C", str(sb.data), "show", "--name-only",
                              "--format=", "HEAD"], capture_output=True, text=True)
-            self.assertIn("feedback/suppressions.jsonl", shown.stdout,
-                          "the corpus was produced but the commit does not carry it")
+            for f in ("feedback/suppressions.jsonl", "ledgers/disagreements.jsonl"):
+                self.assertIn(f, shown.stdout,
+                              f"the scan produced {f} but the commit does not carry it — "
+                              f"HEAD is still the seed")
+            log = _sp.run(["git", "-C", str(sb.data), "log", "--oneline"],
+                          capture_output=True, text=True)
+            self.assertEqual(2, len(log.stdout.splitlines()),
+                             "no commit landed on top of the seed")
         finally:
             sb.cleanup()
 

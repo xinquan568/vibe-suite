@@ -39,6 +39,9 @@ import sys
 import urllib.parse
 from pathlib import Path
 
+#: At most this many exemplars are cited per rule — strongest first. See collect().
+MAX_PER_RULE = 3
+
 #: The rulebook already carries one `:site <rule>` anchor per rule — 38 of them, hand-placed.
 #: They are the insertion points, not something this helper invents: looking for begin/end
 #: pairs that exist nowhere in the file meant every apply matched nothing and changed nothing,
@@ -126,18 +129,27 @@ def read_exemplars(data_dir: Path):
         if not rules:
             continue
         label = repo.group(1).strip().strip("\"'") if repo else path.stem
+        score_m = re.search(r"^score:[ \t]*(\d+)[ \t]*$", block, re.MULTILINE)
+        score = int(score_m.group(1)) if score_m else 0
         for rule in rules:
-            by_rule.setdefault(rule, []).append((path.name, label))
-    # Sorted per rule so two runs over the same corpus emit identical blocks.
-    return {rule: sorted(set(items)) for rule, items in by_rule.items()}
+            by_rule.setdefault(rule, []).append((-score, path.name, label))
+    # Strongest first (score descending), then filename for determinism, CAPPED per rule:
+    # applied to the real migrated corpus, uncapped one-bullet-per-exemplar rendering pushed
+    # the rulebook past its own R05 sub-500-line cap (973 lines) and under the release-score
+    # floor. Three strong citations serve the reader; sixteen serve nobody (the same
+    # judgment the refinement input applies to evidence). The cap keeps the decoration
+    # inside the constitution it decorates.
+    return {rule: [(name, label) for _neg, name, label in sorted(set(items))[:MAX_PER_RULE]]
+            for rule, items in by_rule.items()}
 
 
 def build_block(rule: str, items, prefix: str) -> str:
-    lines = [BEGIN.format(rule=rule)]
-    for filename, label in items:
-        lines.append(f"- [{markdown_label(label)}]({exemplar_url(prefix, filename)})")
-    lines.append(END.format(rule=rule))
-    return "\n".join(lines)
+    # One line, not one bullet per exemplar: the block's size is what broke R05.
+    links = " · ".join(f"[{markdown_label(label)}]({exemplar_url(prefix, filename)})"
+                       for filename, label in items)
+    return "\n".join([BEGIN.format(rule=rule),
+                       f"- Real-world examples: {links}",
+                       END.format(rule=rule)])
 
 
 def apply_blocks(text: str, blocks: dict):

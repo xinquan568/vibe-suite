@@ -37,6 +37,7 @@ jobs:
           path: _data
           persist-credentials: false
       - run: |
+          # logic:rule-review
           set -euo pipefail
           YEAR="$(date -u +%Y)"
           MONTH="$(date -u +%m)"
@@ -49,17 +50,14 @@ jobs:
             echo "SKIP:already-filed-this-quarter"
             exit 0
           fi
-          REPO_COUNT="$(jq -r '.repos | length' "$REGISTRY" 2>/dev/null || echo 0)"
-          BODY="$RUNNER_TEMP/rule-review-body.md"
-          printf '%s\n' \
-            "Quarterly review of the auditor rulebook ($QUARTER $YEAR). The automation cannot see these; a maintainer works the checklist by hand and this workflow deliberately fixes nothing." \
-            "" \
-            "- [ ] every rule still cites current upstream documentation" \
-            "- [ ] no rule carries a last-verified date older than one quarter" \
-            "- [ ] upstream features shipped since last quarter are covered or consciously skipped" \
-            "- [ ] silently aged premises are re-validated or retired" \
-            "- [ ] the suppression and disagreement ledgers were skimmed for rule-gap signals" \
-            "- [ ] the registry tracks $REPO_COUNT repos on the auditor-data branch; spot-check a sample against the rules" \
-            > "$BODY"
+          # E8.6 (vibe-63): the body is generate-rule-review-body.py's product — the two
+          # sections a maintainer cannot assemble by hand (stale citations, quarterly
+          # rejections) composed from the data branch. The parser takes ONE YYYY-Qn value,
+          # so the separately derived year and quarter compose here; --out names the file
+          # the issue is filed from.
+          BODY="${RUNNER_TEMP:-$PWD}/rule-review-body.md"
+          python3 "$CODE_DIR/auditor/scripts/generate-rule-review-body.py" \
+            --data-dir "$DATA_DIR" --quarter "$YEAR-$QUARTER" --out "$BODY"
           gh issue create --title "$TITLE" --label rule-review --body-file "$BODY"
           echo "PASS"
+          # /logic

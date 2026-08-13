@@ -119,6 +119,7 @@ jobs:
           BRANCH="exemplar-citations/$DATE"
           cd "$CODE_DIR"
           git checkout -b "$BRANCH"
+          # publish-logic:cite-exemplars
           # propose-rule-citations.py IS the applier — `--apply` writes the blocks into the
           # rulebook. There was never a separate shell helper; the seam here named one that
           # E8.3's closed thirty does not contain and never would, so it refused on every run.
@@ -130,9 +131,16 @@ jobs:
             --data-dir "$DATA_DIR" \
             --rules-path "$CODE_DIR/skills/rules/SKILL.md" \
             --exemplar-url-prefix "$VIBE_EXEMPLAR_URL_PREFIX"
+          # E8.6 (vibe-63): skills/rules/SKILL.md is a MIRRORED source
+          # (codex/skills/vibe-rules/SKILL.md via codex/MIRROR-MANIFEST.json), and the
+          # --mirrors release gate fails a stale mirror. Regeneration sits BETWEEN the
+          # source edit and the commit; `commit -am` then stages source, mirror and
+          # manifest together.
+          python3 "$CODE_DIR/scripts/mirror-sync.py" generate
           git config user.name "vibe-suite-auditor"
           git config user.email "auditor@users.noreply.github.com"
           git commit -am "auditor-cite-exemplars refresh rule citations for $DATE"
+          # /publish-logic
           # Both checkouts use `persist-credentials: false`, so there is no ambient credential
           # and a bare `git push` fails after all the work is done. The token is supplied
           # through a credential helper reading it from the ENVIRONMENT, so it never lands in

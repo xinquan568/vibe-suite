@@ -60,51 +60,40 @@ jobs:
           if [ ! -f "$HASH_STORE" ]; then
             printf '%s\n' '{}' > "$HASH_STORE"
           fi
-          CHANGED=0
-          BOOTSTRAPPED=0
-          UNCHANGED=0
-          FAILED=0
-          NEXT="$HASH_STORE.tmp"
-          cp "$HASH_STORE" "$NEXT"
+          # E8.6 (vibe-63): the scan is docs-diff.py's — fetch, hash, compare, store, with
+          # the fetch-failure semantics the helper owns (an unreachable page keeps its
+          # stored hash and is NOT drift). The changed list routes through --changed-out to
+          # a deliberate TEMPORARY artifact — never under ledgers/, where the commit step
+          # below would persist it — and this block keeps the duties the helper does not
+          # have: per-URL drift issues with dedupe-by-comment, and the docs_diff event
+          # carrying the helper's own counts.
+          CHANGED_OUT="${RUNNER_TEMP:-$PWD}/docs-diff-changed-urls.txt"
+          COUNTS="$(python3 "$CODE_DIR/auditor/scripts/docs-diff.py" \
+            --data-dir "$DATA_DIR" --citations "$CITATIONS" \
+            --hash-store "$HASH_STORE" --changed-out "$CHANGED_OUT")"
+          CHANGED="$(printf '%s' "$COUNTS" | jq '.changed')"
+          BOOTSTRAPPED="$(printf '%s' "$COUNTS" | jq '.bootstrapped')"
+          UNCHANGED="$(printf '%s' "$COUNTS" | jq '.unchanged')"
+          FAILED="$(printf '%s' "$COUNTS" | jq '.fetch_failed')"
           while IFS= read -r url; do
             if [ -z "$url" ]; then
               continue
             fi
-            BODY_HASH=""
-            if PAGE="$(curl -fsSL --max-time 20 "$url" 2>/dev/null)"; then
-              BODY_HASH="$(printf '%s' "$PAGE" | shasum -a 256 | cut -d' ' -f1)"
-            fi
-            if [ -z "$BODY_HASH" ]; then
-              FAILED=$((FAILED+1))
-              continue
-            fi
-            PRIOR="$(jq -r --arg u "$url" '.[$u] // ""' "$NEXT")"
-            if [ -z "$PRIOR" ]; then
-              BOOTSTRAPPED=$((BOOTSTRAPPED+1))
-            elif [ "$PRIOR" = "$BODY_HASH" ]; then
-              UNCHANGED=$((UNCHANGED+1))
-              continue
+            TITLE="docs drift detected for $url"
+            RULES_TXT="$(jq -r --arg u "$url" '.[$u].rules // [] | join(", ")' "$CITATIONS" 2>/dev/null || echo unknown)"
+            QUOTE_TXT="$(jq -r --arg u "$url" '.[$u].quote // "none recorded"' "$CITATIONS" 2>/dev/null || echo unknown)"
+            BODY_TEXT="$(printf '%s\n' "Cited documentation changed upstream." "URL $url" "Citing rules ${RULES_TXT:-unknown}" "Recorded quote ${QUOTE_TXT:-unknown}" "" "Manual revalidation" "1. Re-read the changed page." "2. Compare each citing rule quote against the new text." "3. Update or retire the affected rules by hand." "4. Refresh the last-verified date in the citations file.")"
+            # per-URL dedupe: comment on the existing open issue instead
+            # of filing a duplicate
+            NUM="$(gh issue list --state open --label docs-drift --search "$TITLE" --json number --jq '.[0].number' 2>/dev/null | head -n 1)"
+            if [ -n "$NUM" ]; then
+              gh issue comment "$NUM" --body "$BODY_TEXT" \
+                || echo "issue comment failed; tolerated"
             else
-              CHANGED=$((CHANGED+1))
-              TITLE="docs drift detected for $url"
-              RULES_TXT="$(jq -r --arg u "$url" '.[$u].rules // [] | join(", ")' "$CITATIONS" 2>/dev/null || echo unknown)"
-              QUOTE_TXT="$(jq -r --arg u "$url" '.[$u].quote // "none recorded"' "$CITATIONS" 2>/dev/null || echo unknown)"
-              BODY_TEXT="$(printf '%s\n' "Cited documentation changed upstream." "URL $url" "Citing rules ${RULES_TXT:-unknown}" "Recorded quote ${QUOTE_TXT:-unknown}" "" "Manual revalidation" "1. Re-read the changed page." "2. Compare each citing rule quote against the new text." "3. Update or retire the affected rules by hand." "4. Refresh the last-verified date in the citations file.")"
-              # per-URL dedupe: comment on the existing open issue instead
-              # of filing a duplicate
-              NUM="$(gh issue list --state open --label docs-drift --search "$TITLE" --json number --jq '.[0].number' 2>/dev/null | head -n 1)"
-              if [ -n "$NUM" ]; then
-                gh issue comment "$NUM" --body "$BODY_TEXT" \
-                  || echo "issue comment failed; tolerated"
-              else
-                gh issue create --title "$TITLE" --label docs-drift --body "$BODY_TEXT" \
-                  || echo "issue create failed; tolerated"
-              fi
+              gh issue create --title "$TITLE" --label docs-drift --body "$BODY_TEXT" \
+                || echo "issue create failed; tolerated"
             fi
-            jq --arg u "$url" --arg h "$BODY_HASH" '.[$u] = $h' "$NEXT" > "$NEXT.new"
-            mv "$NEXT.new" "$NEXT"
-          done < <(jq -r 'keys[]' "$CITATIONS")
-          mv "$NEXT" "$HASH_STORE"
+          done < "$CHANGED_OUT"
           # §7 envelope: the counts live under `data`, never at top level
           RUN_ID="${GITHUB_RUN_ID:-0}"
           RUN_NUMBER="${GITHUB_RUN_NUMBER:-0}"
@@ -115,6 +104,7 @@ jobs:
           echo "PASS"
           # /logic
       - run: |
+          # commit-logic:docs-diff
           set -euo pipefail
           cd "$DATA_DIR"
           git add ledgers/docs-hashes.json ledgers/events.jsonl
@@ -126,3 +116,4 @@ jobs:
           git config user.email "auditor@users.noreply.github.com"
           git commit -m "auditor-docs-diff refresh the docs hash store"
           bash "$CODE_DIR/auditor/scripts/git-push-with-retry.sh"
+          # /commit-logic

@@ -17,6 +17,7 @@ separate tables.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -111,15 +112,27 @@ class TestCleanProject(DoctorCase):
         self.assertEqual(row["status"], "unavailable",
                          "a project-local command still has no readable receipt; the row "
                          "must stay a capability, not become a finding or vanish")
-        self.assertIn("executed 2026-08-13", row["blocked_on"],
-                      f"the reason does not record the executed migration: {row['blocked_on']!r}")
-        self.assertIn("auditor-data", row["blocked_on"],
-                      "the reason must name where the receipt lives")
+        # Both surfaces must carry the SAME resolution — the same execution date and the
+        # same receipt location — and neither may present the migration as pending or
+        # outstanding in any wording. Substring checks alone let pending-semantics sneak
+        # back beside the asserted date; the semantics are asserted directly.
+        runtime_text = row["blocked_on"]
         doc = (Path(__file__).resolve().parent.parent / "commands" / "doctor.md").read_text()
-        self.assertIn("row 9 (executed 2026-08-13", doc,
-                      "commands/doctor.md still presents §7A row 9 as a check that cannot "
-                      "run yet with no record of the executed migration — the two doctor "
-                      "surfaces have drifted")
+        doc_row = re.search(r"§7A row 9 \(([^)]*)\)", doc)
+        self.assertIsNotNone(doc_row,
+                             "commands/doctor.md no longer carries a row-9 resolution "
+                             "parenthetical — the two doctor surfaces have drifted")
+        doc_text = doc_row.group(1)
+        for surface, text in (("scripts/doctor.py", runtime_text),
+                              ("commands/doctor.md", doc_text)):
+            self.assertIn("executed 2026-08-13", text,
+                          f"{surface} does not record the executed migration: {text!r}")
+            self.assertIn("auditor-data", text,
+                          f"{surface} does not name where the receipt lives: {text!r}")
+            self.assertNotRegex(
+                text, r"(?i)\b(pending|outstanding|not yet|awaiting)\b",
+                f"{surface} reintroduced pending semantics beside the execution record: "
+                f"{text!r}")
 
     def test_mirror_staleness_states(self):
         """E7.2 (round-4): absent manifest → capability row; stale mirror → HIGH with the

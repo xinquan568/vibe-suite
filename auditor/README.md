@@ -91,12 +91,16 @@ refuses non-regular files on managed paths. Ops data arrives via E8.5's migratio
 - **Originals untouched**: whole-source digest (1,531 files, per-file SHA-256, digest of
   digests `f8631b5…`) identical before and after both runs.
 - **Rollback discipline**: the tool's nothing-was-changed guarantee applies to its `exit 3`
-  refusals only (they fire before staging). For any post-push recovery: fetch and compare
-  the remote tip first; restore the pre-migration tip only while the migration commit is
-  still the tip and only with `--force-with-lease`; if anything landed after it (e.g. a
-  registry write), revert the migration commit instead so intervening state survives.
-  Branch deletion is a first-run/missing-branch remedy only — the live branch carries
-  pipeline state the pipeline owns.
+  refusals only (they fire before staging). After any OTHER failure, whether a push
+  happened is unknown until checked — so every recovery, without exception, first stops
+  for the operator, then fetches and compares the remote tip against the recorded
+  baseline. Three outcomes: (1) tip unchanged — nothing landed; fix and re-run (safe by
+  idempotence); (2) the migration commit is the tip — the baseline tip may be restored,
+  only with `--force-with-lease` (the lease fails if anything has since landed); (3) any
+  commit landed after the migration (e.g. a registry write) — never move the tip; revert
+  the migration commit so intervening state survives. Branch deletion is a
+  first-run/missing-branch remedy only — the live branch carries pipeline state the
+  pipeline owns.
 
 ### Actions secrets
 

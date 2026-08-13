@@ -196,11 +196,15 @@ class E85ExecutionRecord(unittest.TestCase):
                          "the recorded category counts drifted from the executed migration")
 
     def test_the_verification_statements_are_verbatim(self):
-        rec = self.record()
-        for needle in ("verified 1287 file(s) against\n  auditor-data by content address",
+        # Whitespace-normalized so the assertion covers the WHOLE statement regardless of
+        # where the runbook wraps it — the first draft split on the newline and silently
+        # asserted only the first physical line, so the load-bearing tail ("auditor-data by
+        # content address") could vanish unnoticed.
+        rec = " ".join(self.record().split())
+        for needle in ("verified 1287 file(s) against auditor-data by content address",
                        "already complete — no commit",
                        "published 1287 new file(s)"):
-            self.assertIn(needle.split("\n")[0].strip(), rec.replace("\n  ", " "),
+            self.assertIn(needle, rec,
                           f"the record lost the tool's own evidence line: {needle!r}")
 
     def test_tips_blobs_and_digest_are_pinned(self):

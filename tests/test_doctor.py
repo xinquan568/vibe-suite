@@ -130,7 +130,7 @@ class TestCleanProject(DoctorCase):
             self.assertIn("auditor-data", text,
                           f"{surface} does not name where the receipt lives: {text!r}")
             self.assertNotRegex(
-                text, r"(?i)\b(pending|outstanding|not yet|awaiting)\b",
+                text, r"(?i)\b(pending|outstanding|not[\s-]+yet|awaiting)\b",
                 f"{surface} reintroduced pending semantics beside the execution record: "
                 f"{text!r}")
 

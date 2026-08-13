@@ -17,6 +17,7 @@ separate tables.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -89,6 +90,49 @@ class TestCleanProject(DoctorCase):
         # check contributes neither a finding nor an unavailable row.
         self.assertNotIn("mirror-staleness", statuses)
         self.assertEqual(self.severities(report), ["[GOOD]"])
+
+    def test_row_9_records_the_executed_migration_without_pending_semantics(self):
+        """E8.5 (vibe-62): the migration EXECUTED, and the row must say so.
+
+        The row stays in the capability table — a project-local, read-only command still has
+        no readable receipt, because the receipt (.vibe-suite-migration/manifest.sha256 +
+        provenance.json) lives on the auditor-data branch — but its reason must record the
+        executed migration, not describe a pending one. The issue's acceptance clause
+        ("doctor's 'migration pending' clears") is honored exactly here: no doctor surface
+        may present §7A row 9 as outstanding. The user-facing contract in commands/doctor.md
+        must present the same resolution, or the two surfaces drift.
+        """
+        self.install()
+        report = self.report()
+        rows = {c["check"]: c for c in report["capabilities"]}
+        self.assertIn("legacy-auditor-data", rows,
+                      "the row 9 capability disappeared; an omitted row is indistinguishable "
+                      "from a passing one")
+        row = rows["legacy-auditor-data"]
+        self.assertEqual(row["status"], "unavailable",
+                         "a project-local command still has no readable receipt; the row "
+                         "must stay a capability, not become a finding or vanish")
+        # Both surfaces must carry the SAME resolution — the same execution date and the
+        # same receipt location — and neither may present the migration as pending or
+        # outstanding in any wording. Substring checks alone let pending-semantics sneak
+        # back beside the asserted date; the semantics are asserted directly.
+        runtime_text = row["blocked_on"]
+        doc = (Path(__file__).resolve().parent.parent / "commands" / "doctor.md").read_text()
+        doc_row = re.search(r"§7A row 9 \(([^)]*)\)", doc)
+        self.assertIsNotNone(doc_row,
+                             "commands/doctor.md no longer carries a row-9 resolution "
+                             "parenthetical — the two doctor surfaces have drifted")
+        doc_text = doc_row.group(1)
+        for surface, text in (("scripts/doctor.py", runtime_text),
+                              ("commands/doctor.md", doc_text)):
+            self.assertIn("executed 2026-08-13", text,
+                          f"{surface} does not record the executed migration: {text!r}")
+            self.assertIn("auditor-data", text,
+                          f"{surface} does not name where the receipt lives: {text!r}")
+            self.assertNotRegex(
+                text, r"(?i)\b(pending|outstanding|not[\s-]+yet|awaiting)\b",
+                f"{surface} reintroduced pending semantics beside the execution record: "
+                f"{text!r}")
 
     def test_mirror_staleness_states(self):
         """E7.2 (round-4): absent manifest → capability row; stale mirror → HIGH with the

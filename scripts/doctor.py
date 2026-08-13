@@ -49,8 +49,10 @@ MEMORY_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
 UNAVAILABLE = (
     ("manifest-vs-disk", "E3.5 (#30) — bin/vibe-check"),
     ("version-coherence", "F4.4 (#30) — marketplace.json carries no version to compare"),
-    ("legacy-auditor-data", "§7A row 9 — migration records completion on the destination branch, "
-                            "so a project-local command has no readable receipt"),
+    ("legacy-auditor-data", "§7A row 9 executed 2026-08-13 (E8.5): 1287 files content-address-"
+                            "verified; the receipt (.vibe-suite-migration/manifest.sha256 + "
+                            "provenance.json) lives on the auditor-data branch, which a "
+                            "project-local command does not read"),
 )
 
 

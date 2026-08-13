@@ -158,3 +158,74 @@ class PrivacyAnchors(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class E85ExecutionRecord(unittest.TestCase):
+    """E8.5 (vibe-62): the runbook's execution record is a set of factual claims.
+
+    Every number in it — corpus total, category breakdown, tips, pre-existing blob ids, the
+    source digest — is a claim about a real, completed ops action. Nothing else in the suite
+    pins them, so a drifted edit (a "tidied" count, a truncated tip) would ship silently as
+    a false record. The record is parsed, its internal arithmetic checked, and its required
+    verification statements required verbatim.
+    """
+
+    RECORD_HEADER = "#### E8.5 execution record (2026-08-13)"
+
+    def record(self):
+        text = (REPO_ROOT / "auditor" / "README.md").read_text()
+        self.assertIn(self.RECORD_HEADER, text,
+                      "the E8.5 execution record vanished from the runbook")
+        body = text.split(self.RECORD_HEADER, 1)[1]
+        nxt = re.search(r"^#{2,4} ", body, re.M)
+        return body[:nxt.start()] if nxt else body
+
+    def test_the_corpus_arithmetic_holds(self):
+        rec = self.record()
+        m = re.search(r"corpus: (\d+) file\(s\) across (\d+) categories", rec)
+        self.assertIsNotNone(m, "the record no longer quotes the tool's corpus line")
+        total, cats = int(m.group(1)), int(m.group(2))
+        self.assertEqual(cats, 5)
+        parts = re.search(r"(\d+) `reports/`, (\d+) `exemplars/`,\s*(\d+) `audits/`, "
+                          r"(\d+) `articles/`, (\d+) `ledgers/`", rec)
+        self.assertIsNotNone(parts, "the category breakdown is gone or reworded")
+        breakdown = [int(g) for g in parts.groups()]
+        self.assertEqual(sum(breakdown), total,
+                         f"the breakdown {breakdown} does not sum to the stated total {total}")
+        self.assertEqual(breakdown, [642, 96, 496, 49, 4],
+                         "the recorded category counts drifted from the executed migration")
+
+    def test_the_verification_statements_are_verbatim(self):
+        # Whitespace-normalized so the assertion covers the WHOLE statement regardless of
+        # where the runbook wraps it — the first draft split on the newline and silently
+        # asserted only the first physical line, so the load-bearing tail ("auditor-data by
+        # content address") could vanish unnoticed.
+        rec = " ".join(self.record().split())
+        for needle in ("verified 1287 file(s) against auditor-data by content address",
+                       "already complete — no commit",
+                       "published 1287 new file(s)"):
+            self.assertIn(needle, rec,
+                          f"the record lost the tool's own evidence line: {needle!r}")
+
+    def test_tips_blobs_and_digest_are_pinned(self):
+        rec = self.record()
+        for fact, why in (("8d8d85a", "the pre-migration tip (the rollback anchor)"),
+                          ("72ab8f0", "the post-migration tip"),
+                          ("68903f1", "the sentinel README's unchanged blob id"),
+                          ("03be823", "registry/repos.json's unchanged blob id"),
+                          ("f8631b5", "the whole-source digest prefix"),
+                          ("1,531 files", "the whole-source file count")):
+            self.assertIn(fact, rec, f"the record lost {why}")
+
+    def test_the_rollback_discipline_names_all_three_outcomes_and_the_operator_stop(self):
+        # Whitespace-normalized: the runbook wraps lines, and a claim must not pass or fail
+        # on where the wrap falls.
+        rec = " ".join(self.record().split())
+        self.assertRegex(rec, r"stops? for (the )?operator",
+                         "the record does not state the mandatory operator stop before "
+                         "any recovery")
+        self.assertRegex(rec, r"fetch(es)? and compares?", "fetch-and-compare is not recorded")
+        for outcome in ("fix and re-?run", "--force-with-lease", "revert"):
+            self.assertRegex(rec, outcome,
+                             f"the rollback record lost the '{outcome}' branch — all three "
+                             f"outcomes must be durable")

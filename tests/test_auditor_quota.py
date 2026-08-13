@@ -375,19 +375,23 @@ class TestStrictModeChangesBehaviour(QuotaBase):
     pipefail` stripped, and requires the two to differ. If a case cannot tell them apart it is
     not evidence about strict mode, and it fails rather than passing quietly.
 
-    What strict mode demonstrably buys this workflow is ONE failure class: a failed output
-    redirection under `set -e`, shown below at two independent sites (the open-PR export and
-    the manifest write). Round 3 called those two classes, which overstated the coverage --
-    both abort by the same mechanism. The other two strict-mode flags have no workflow-level
-    differential to show, and that is by construction rather than omission: `set -u` needs an
-    unguarded read of an unset name, and every read is bound, defaulted or `:?`-guarded --
-    enforced structurally by TestEveryJobBindsWhatItReads (bare reads included since round
-    4); `pipefail` needs a pipeline whose early stage can fail while the last succeeds, and
-    the workflow's pipelines start from `printf` of in-memory values, with command status
-    never taken through a pipe (the discipline recorded at the open-prs block). `${SIDECAR:?}`
-    was tried as a set-u candidate and REJECTED for exactly this reason: the explicit `:?`
-    does the work and `set -u` adds nothing to it. The synthetic pipefail case in
-    TestTheRefusalBranchesWork covers the primitive and says it is not workflow evidence.
+    What strict mode demonstrably buys this workflow is TWO mechanisms, each proven by a
+    differential. The first is a failed output redirection under `set -e`, shown below at two
+    independent sites (the open-PR export and the manifest write) -- round 3 called those two
+    classes, which overstated it; they abort by the same mechanism. The second is a failing
+    early pipeline stage under `pipefail`: round 4 claimed this could not exist because the
+    workflow's pipelines start from `printf` of in-memory values, and the review falsified
+    that -- submit's allowlist read is `jq … "$MANIFEST" | sort -u`, where a manifest that
+    exists but does not parse fails jq behind a successful sort. That differential lives with
+    its sandbox in tests/test_auditor_submit.py::SubmitPipefailChangesBehaviour.
+
+    `set -u` alone still has no workflow-level differential to show, and that is by
+    construction rather than omission: it needs an unguarded read of an unset name, and every
+    read is bound, defaulted or `:?`-guarded -- enforced structurally, per step and in order,
+    by TestEveryJobBindsWhatItReads. `${SIDECAR:?}` was tried as a set-u candidate and
+    REJECTED for exactly this reason: the explicit `:?` does the work and `set -u` adds
+    nothing to it. The synthetic pipefail case in TestTheRefusalBranchesWork covers the
+    primitive and says it is not workflow evidence.
     """
 
     def _both(self, block, env_builder):

@@ -538,16 +538,30 @@ def _unbound_names(job_body, runtime=frozenset(), optional=frozenset()):
     def env_bound(text, indent=8):
         return set(re.findall(r"^\s{%d,}([A-Z][A-Z0-9_]*):\s*\S" % indent, text, re.M))
 
+    # An assignment is a command in command position — the start of a line, or right after a
+    # separator (`;`, `&&`, `||`) or a control keyword (`then`, `else`, `do`), optionally
+    # exported — never a NAME= token inside printf/echo arguments: `echo FOO=bar` binds
+    # nothing. Its credit begins on the NEXT line, so an empty self-default (`X="${X:-}"`)
+    # cannot excuse the read on its own right-hand side. Both over-credits were how LABELS
+    # sat unbound in the security-blocked gate while the round-4 scan passed.
+    assign_re = re.compile(
+        r"(?:^\s*|;\s*|&&\s*|\|\|\s*|\b(?:then|else|do)\s+)"
+        r"(?:export\s+|local\s+)?([A-Z][A-Z0-9_]*)=")
+
     pre, steps = _steps(job_body)
     # Job-level `env:` entries sit at the 6-space indent; step-level ones at 10.
     job_env = env_bound(pre, indent=6)
     offenders, exported_by_earlier = [], set()
     for step in steps:
         code = code_of(step)
-        assigned = set(re.findall(r"(?:^|\s|\()([A-Z][A-Z0-9_]*)=", code, re.M))
-        avail = (set(runtime) | set(optional) | job_env | env_bound(step)
-                 | exported_by_earlier | assigned)
-        offenders.extend(sorted(needs(code) - avail))
+        base = (set(runtime) | set(optional) | job_env | env_bound(step)
+                | exported_by_earlier)
+        assigned_above, flagged = set(), set()
+        for line in code.split("\n"):
+            for name in sorted(needs(line) - base - assigned_above - flagged):
+                offenders.append(name)
+                flagged.add(name)
+            assigned_above.update(assign_re.findall(line))
         exported_by_earlier |= set(re.findall(r'echo "([A-Z][A-Z0-9_]*)=', code))
     return offenders
 
@@ -595,6 +609,21 @@ class TestEveryJobBindsWhatItReads(unittest.TestCase):
                           "the correct production reading and the default covers it",
         "OUTCOME_REASON": "the reason half of the same harness seam as OUTCOME_JOB; empty is "
                           "the correct production reading and the default covers it",
+        "GIT_AUTH_TOKEN": "expanded only inside git's single-quoted credential-helper string, "
+                          "which runs in a subshell under an explicit GIT_AUTH_TOKEN=… env "
+                          "prefix on the same git command — a deferred read the invoking "
+                          "step never performs itself",
+        "FORK_REMOTE": "a harness seam: tests point it at a local bare remote; production "
+                       "leaves it empty and the submit block derives "
+                       "https://github.com/$FORK_SLUG.git before first use",
+        "PR_NUMBER": "a harness seam (test_auditor_state_machine drives outcome rows with "
+                     "it); production takes pr_number from the create/recovery paths and "
+                     "the empty env fallback is the correct no-PR reading",
+        "DECISION": "in finalize only, a harness seam: block tests hand finalize a decision "
+                    "document, while production routes from the outcome artifacts and the "
+                    "label falls back to policy-<reason>, which the gate writers keep equal "
+                    "to their side-exit label. Gates steps get DECISION from derive-context's "
+                    "$GITHUB_ENV export, so the exemption is inert there",
     }
 
     @classmethod
@@ -665,6 +694,35 @@ class TestTheBindingScanItselfCatches(unittest.TestCase):
 
     def test_a_same_step_assignment_satisfies_its_own_read(self):
         job = self._job('LOCAL_VALUE=1\necho "$LOCAL_VALUE"')
+        self.assertEqual([], _unbound_names(job))
+
+    def test_a_self_default_does_not_excuse_its_own_read(self):
+        # X="${X:-}" ASSIGNS X and READS it on the same line, and the read is the step
+        # expecting the name from outside. Whole-step assignment credit excused it — which is
+        # how LABELS sat unbound in the security-blocked gate while the scan passed, and the
+        # label could never block a real run.
+        job = self._job('SELF_DEFAULTED="${SELF_DEFAULTED:-}"\necho "$SELF_DEFAULTED"')
+        self.assertIn("SELF_DEFAULTED", _unbound_names(job),
+                      "an empty self-default excused its own RHS read; the step still gets "
+                      "the name from nobody and the scan certifies it anyway")
+
+    def test_a_literal_name_equals_token_is_not_an_assignment(self):
+        # `echo FOO=bar` prints a token; it binds nothing. The unanchored assignment regex
+        # credited it and the read below stayed green unbound.
+        job = self._job('echo FOO=bar\necho "$FOO"')
+        self.assertIn("FOO", _unbound_names(job),
+                      "a printed NAME= token was credited as an assignment")
+
+    def test_an_assignment_still_credits_only_the_lines_below_it(self):
+        # The line ABOVE a real assignment reads nothing yet.
+        job = self._job('echo "$ORDERED_VALUE"\nORDERED_VALUE=now')
+        self.assertIn("ORDERED_VALUE", _unbound_names(job))
+
+    def test_an_assignment_in_command_position_after_a_keyword_credits(self):
+        # `if …; then X=5; else X=3; fi` assigns on every path; anchoring assignments to the
+        # line start alone would flag the read below — the PATCH_CAP shape.
+        job = self._job('if true; then CTRL_VALUE=5; else CTRL_VALUE=3; fi\n'
+                        'echo "$CTRL_VALUE"')
         self.assertEqual([], _unbound_names(job))
 
     def test_a_step_env_binding_satisfies_that_step(self):

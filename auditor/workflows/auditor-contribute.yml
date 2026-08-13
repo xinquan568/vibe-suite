@@ -238,6 +238,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # /env-for
       - name: gate security-blocked
+        # F10 (round 5): LABELS was bound only in derive-context's step env, so THIS step
+        # read an empty string on every real run and the security-blocked label could never
+        # block. The strict per-step binding scan is what surfaced it.
+        env:
+          LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
         run: |
           # gate:security-blocked
           set -euo pipefail
@@ -275,6 +280,11 @@ jobs:
           echo "PASS"
           # /gate
       - name: gate cla
+        # F10 (round 5): CLA_SIGNED is the operator's attestation and arrives as a repo
+        # variable, but no step env bound it — so an attested CLA was ignored and every
+        # CLA-gated org skipped as unsigned, even after the operator signed.
+        env:
+          CLA_SIGNED: ${{ vars.CLA_SIGNED }}
         run: |
           # gate:cla
           set -euo pipefail
@@ -995,7 +1005,9 @@ jobs:
           export GH_TOKEN="${GH_TOKEN:-${GH_TOKEN_OVERRIDE:-${PAT_SECRET:-}}}"
           REPO="${REPO:?}"
           OWN_REPO="${OWN_REPO:-xinquan568/vibe-suite}"
-          ISSUE="${ISSUE_NUMBER:-${ISSUE:-}}"
+          # No ISSUE pre-read here (F10 round 5): neither ISSUE nor ISSUE_NUMBER is bound in
+          # this job, so the old `ISSUE="${ISSUE_NUMBER:-${ISSUE:-}}"` could only ever assign
+          # empty. The relay is the contracted source; the ctx read below resolves it.
           PATCH_DIR="${PATCH_DIR:-_patches}"
           PATCH_META="${PATCH_META:-$PATCH_DIR/findings.json}"
           TARGET_DIR="${TARGET_DIR:-_target}"
@@ -1718,7 +1730,9 @@ jobs:
           set -euo pipefail
           REPO="${REPO:-}"
           OWN_REPO="${OWN_REPO:-xinquan568/vibe-suite}"
-          ISSUE="${ISSUE_NUMBER:-${ISSUE:-}}"
+          # ISSUE_NUMBER is bound in this job's env (gates output || the event); the old
+          # inner ${ISSUE:-} fallback read a name nothing in this job binds (F10 round 5).
+          ISSUE="${ISSUE_NUMBER:-}"
           DATA_DIR="${DATA_DIR:-_data}"
           DATA_BRANCH="${DATA_BRANCH:-$(git -C "$DATA_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo auditor-data)}"
           EVENT_LOG="${EVENT_LOG:-$DATA_DIR/ledgers/events.jsonl}"

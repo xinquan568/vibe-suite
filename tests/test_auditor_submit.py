@@ -351,7 +351,7 @@ class SubmitSandbox:
             "weekly_cap": 2, "patch_cap": 3}))
         return p
 
-    def run(self, env=None):
+    def run(self, env=None, script=None):
         e = dict(os.environ)
         e.update(self.gitenv)
         e.update({
@@ -383,7 +383,9 @@ class SubmitSandbox:
         })
         e.update(env or {})
         sh = self.root / "submit.sh"
-        sh.write_text(submit_script())
+        # script overrides the block under test — the strict-mode differential runs the same
+        # block with `set -euo pipefail` stripped; everything else runs it as written.
+        sh.write_text(script if script is not None else submit_script())
         return subprocess.run(["bash", str(sh)], capture_output=True, text=True, env=e,
                               cwd=str(self.root), timeout=180)
 
@@ -715,6 +717,32 @@ class SubmitBindsPatchesToAdmittedFiles(unittest.TestCase):
         r = self.sb.run()
         self._assert_refused(r, "REFUSE:patch-renames-a-file")
 
+    def test_a_binary_patch_refuses(self):
+        (self.sb.patches / "0002-fix.patch").write_text(
+            "diff --git a/NOTES.md b/NOTES.md\n"
+            "new file mode 100644\nindex 0000000..1234567\n"
+            "GIT binary patch\nliteral 4\nHc$@<O00001\n\n")
+        r = self.sb.run()
+        self.assertNotEqual(0, r.returncode, "a binary blob was applied to a third party's repo")
+        self.assertRegex(r.stdout + r.stderr, r"REFUSE:patch-(unreadable|is-binary)")
+
+    def test_an_unparseable_patch_refuses(self):
+        (self.sb.patches / "0002-fix.patch").write_text("this is not a patch at all\n")
+        r = self.sb.run()
+        self._assert_refused(r, "REFUSE:patch-unreadable")
+
+    def test_the_check_runs_before_anything_is_cloned_or_pushed(self):
+        # Order is as load-bearing as presence -- the same lesson F8 taught in iteration 1.
+        # A binding validated after the fork exists has already created a repository under the
+        # bot account for a patch set that was never admissible.
+        (self.sb.patches / "0002-fix.patch").write_text(
+            "diff --git a/src/evil.py b/src/evil.py\n"
+            "new file mode 100644\n--- /dev/null\n+++ b/src/evil.py\n"
+            "@@ -0,0 +1 @@\n+import os\n")
+        r = self.sb.run()
+        self.assertEqual([], self.sb.gh_verbs("repo", "fork"),
+                         "the fork was created before the patch binding was validated")
+
 
 class SubmitAssociatesEachPatchWithItsFinding(unittest.TestCase):
     """F6, round 4 -- Option A, decided by the operator on 2026-08-13.
@@ -794,31 +822,65 @@ class SubmitAssociatesEachPatchWithItsFinding(unittest.TestCase):
         (self.sb.patches / "0001-fix.patch").write_text(SECOND_PATCH)
         self._assert_refused(self.sb.run(), "REFUSE:patch-file-mismatch")
 
-    def test_a_binary_patch_refuses(self):
-        (self.sb.patches / "0002-fix.patch").write_text(
-            "diff --git a/NOTES.md b/NOTES.md\n"
-            "new file mode 100644\nindex 0000000..1234567\n"
-            "GIT binary patch\nliteral 4\nHc$@<O00001\n\n")
-        r = self.sb.run()
-        self.assertNotEqual(0, r.returncode, "a binary blob was applied to a third party's repo")
-        self.assertRegex(r.stdout + r.stderr, r"REFUSE:patch-(unreadable|is-binary)")
 
-    def test_an_unparseable_patch_refuses(self):
-        (self.sb.patches / "0002-fix.patch").write_text("this is not a patch at all\n")
-        r = self.sb.run()
-        self._assert_refused(r, "REFUSE:patch-unreadable")
+def _without_strict_mode(block):
+    """The same block with its strict-mode marker removed, and nothing else changed."""
+    out = [l for l in block.split("\n") if l.strip() != "set -euo pipefail"]
+    assert len(out) < len(block.split("\n")), "the block carried no strict-mode marker to strip"
+    return "\n".join(out)
 
-    def test_the_check_runs_before_anything_is_cloned_or_pushed(self):
-        # Order is as load-bearing as presence -- the same lesson F8 taught in iteration 1.
-        # A binding validated after the fork exists has already created a repository under the
-        # bot account for a patch set that was never admissible.
-        (self.sb.patches / "0002-fix.patch").write_text(
-            "diff --git a/src/evil.py b/src/evil.py\n"
-            "new file mode 100644\n--- /dev/null\n+++ b/src/evil.py\n"
-            "@@ -0,0 +1 @@\n+import os\n")
-        r = self.sb.run()
-        self.assertEqual([], self.sb.gh_verbs("repo", "fork"),
-                         "the fork was created before the patch binding was validated")
+
+class SubmitPipefailChangesBehaviour(unittest.TestCase):
+    """F11, round 5: the genuine workflow-level pipefail differential.
+
+    Round 4 reduced the strict-mode claim to one failure class and justified the reduction by
+    saying the workflow's pipelines all start from `printf` of in-memory values, so no early
+    stage can fail behind a successful sorter. The verify pass falsified that with this very
+    block: the allowlist read is `jq -r '.findings[].fingerprint' "$MANIFEST" | sort -u`, and
+    a manifest that exists but does not parse makes jq fail while sort succeeds.
+
+    With `pipefail`, the substitution carries jq's failure and `set -e` stops the block
+    before any refusal prints. Stripped, sort's success masks the failure, the allowlist
+    reads as empty, and the first patch is refused `patch-not-in-manifest` — a named refusal
+    blaming the patches for a manifest that never parsed. The two runs differ observably,
+    which is what makes this evidence about pipefail rather than about the guards. The
+    docstring of tests/test_auditor_quota.py::TestStrictModeChangesBehaviour records both
+    mechanisms and points here.
+    """
+
+    def setUp(self):
+        self.sb = SubmitSandbox(patch=GOOD_PATCH)
+        self.addCleanup(self.sb.cleanup)
+
+    def _malformed_manifest(self):
+        p = self.sb.root / "malformed-manifest.json"
+        p.write_text("<html>502 Bad Gateway</html>")
+        return str(p)
+
+    def _assert_nothing_shipped(self, r):
+        self.assertEqual(self.sb.gh_verbs("pr", "create"), [],
+                         "a pull request was opened despite an unreadable allowlist")
+        self.assertEqual(self.sb.fork_log().strip(), "",
+                         "a branch was pushed to the fork despite an unreadable allowlist")
+
+    def test_as_written_stops_at_the_failed_jq(self):
+        r = self.sb.run(env={"MANIFEST": self._malformed_manifest()})
+        self.assertNotEqual(0, r.returncode,
+                            "a manifest that does not parse was read as an allowlist")
+        self.assertNotIn("REFUSE:patch-not-in-manifest", r.stdout + r.stderr,
+                         "with pipefail the block must stop at the failed jq, not blame the "
+                         "patches for a manifest that never parsed")
+        self._assert_nothing_shipped(r)
+
+    def test_stripped_misattributes_the_refusal_which_is_the_difference(self):
+        r = self.sb.run(env={"MANIFEST": self._malformed_manifest()},
+                        script=_without_strict_mode(submit_script()))
+        self.assertNotEqual(0, r.returncode)
+        self.assertIn("REFUSE:patch-not-in-manifest", r.stdout + r.stderr,
+                      "without pipefail the empty allowlist should refuse the first patch; "
+                      "if it does not, the two runs are indistinguishable and this case is "
+                      "vacuous")
+        self._assert_nothing_shipped(r)
 
 
 if __name__ == "__main__":

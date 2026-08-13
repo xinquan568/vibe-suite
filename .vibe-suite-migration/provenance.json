@@ -1,0 +1,13 @@
+{
+  "branch": "auditor-data",
+  "categories": [
+    "articles",
+    "audits",
+    "exemplars",
+    "ledgers",
+    "reports"
+  ],
+  "files": 1287,
+  "schema": 1,
+  "tool": "vibe-suite/migrate-auditor-data"
+}

@@ -1,0 +1,150 @@
+{
+  "project": "alizarion/openclaw-claude-code-plugin",
+  "score_threshold": 70,
+  "r51_enabled": false,
+  "summary": {
+    "total_files": 2,
+    "average_score": 92,
+    "pass_count": 0,
+    "fail_count": 0
+  },
+  "files": [
+    {
+      "path": "package.json",
+      "type": "?",
+      "score": null,
+      "findings": [
+        {
+          "rule": "SEC-unpinned-semver",
+          "severity": "low",
+          "line": 24,
+          "message": "devDependency esbuild is not pinned to an exact version; supply-chain updates can pull unvetted code into the build"
+        },
+        {
+          "rule": "SEC-unpinned-semver",
+          "severity": "low",
+          "line": 25,
+          "message": "devDependency @sinclair/typebox is not pinned to an exact version"
+        },
+        {
+          "rule": "SEC-unpinned-semver",
+          "severity": "low",
+          "line": 26,
+          "message": "devDependency nanoid is not pinned to an exact version"
+        }
+      ]
+    },
+    {
+      "path": "skills/claude-code-orchestration/SKILL.md",
+      "type": "skill",
+      "score": null,
+      "findings": [
+        {
+          "rule": "R06",
+          "severity": "low",
+          "line": 31,
+          "message": "Vague quantifier 'accordingly' — replace with a concrete decision rule referencing the examples already present"
+        },
+        {
+          "rule": "R06",
+          "severity": "low",
+          "line": 152,
+          "message": "Vague quantifier 'reasonable' — reader must infer what makes an approach reasonable"
+        },
+        {
+          "rule": "R06",
+          "severity": "low",
+          "line": 152,
+          "message": "Vague quantifier 'obvious' — the choice may not be obvious to the agent in all contexts"
+        },
+        {
+          "rule": "R06",
+          "severity": "low",
+          "line": 252,
+          "message": "Vague quantifier 'too many' — the numeric limit is already defined one line earlier but not referenced"
+        }
+      ]
+    }
+  ],
+  "history": [
+    {
+      "timestamp": "2026-06-27T07:09:34Z",
+      "average_score": 92,
+      "kind": "initial_audit"
+    }
+  ],
+  "cross_component": {
+    "nodes": [],
+    "edges": []
+  },
+  "vocabulary": null,
+  "vocab_drift": {
+    "candidates": []
+  },
+  "findings": [
+    {
+      "rule": "R06",
+      "severity": "low",
+      "confidence": "high",
+      "file": "skills/claude-code-orchestration/SKILL.md",
+      "line": 31,
+      "message": "Vague quantifier 'accordingly' — replace with a concrete decision rule referencing the examples already present — Line 31: 'Adjust accordingly: `1-2` for a small fix' — 'accordingly' provides no actionable criterion"
+    },
+    {
+      "rule": "R06",
+      "severity": "low",
+      "confidence": "high",
+      "file": "skills/claude-code-orchestration/SKILL.md",
+      "line": 152,
+      "message": "Vague quantifier 'reasonable' — reader must infer what makes an approach reasonable — Line 152: 'Questions about the approach when only one is reasonable' — 'reasonable' is undefined"
+    },
+    {
+      "rule": "R06",
+      "severity": "low",
+      "confidence": "high",
+      "file": "skills/claude-code-orchestration/SKILL.md",
+      "line": 152,
+      "message": "Vague quantifier 'obvious' — the choice may not be obvious to the agent in all contexts — Line 152: 'Respond with the obvious choice' — 'obvious' is subjective and reader-dependent"
+    },
+    {
+      "rule": "R06",
+      "severity": "low",
+      "confidence": "high",
+      "file": "skills/claude-code-orchestration/SKILL.md",
+      "line": 252,
+      "message": "Vague quantifier 'too many' — the numeric limit is already defined one line earlier but not referenced — Line 252: 'Don't launch too many sessions in parallel' while maxSessions default (5) is stated at line 249"
+    },
+    {
+      "rule": "SEC-unpinned-semver",
+      "severity": "low",
+      "confidence": "high",
+      "file": "package.json",
+      "line": 24,
+      "message": "devDependency esbuild is not pinned to an exact version; supply-chain updates can pull unvetted code into the build — \"esbuild\": \"^0.27.3\" — caret range allows automatic minor/patch upgrades during npm install"
+    },
+    {
+      "rule": "SEC-unpinned-semver",
+      "severity": "low",
+      "confidence": "high",
+      "file": "package.json",
+      "line": 25,
+      "message": "devDependency @sinclair/typebox is not pinned to an exact version — \"@sinclair/typebox\": \"^0.34.48\" — caret range allows automatic minor/patch upgrades during npm install"
+    },
+    {
+      "rule": "SEC-unpinned-semver",
+      "severity": "low",
+      "confidence": "high",
+      "file": "package.json",
+      "line": 26,
+      "message": "devDependency nanoid is not pinned to an exact version — \"nanoid\": \"^3.3.7\" — caret range allows automatic minor/patch upgrades during npm install"
+    }
+  ],
+  "repo_meta": {
+    "status": "discovered",
+    "stars": 131,
+    "security": "CLEAR",
+    "audit_report_path": "auditor/audits/alizarion-openclaw-claude-code-plugin.md"
+  },
+  "generated_at": "2026-06-27T07:09:59Z",
+  "schema_version": 1
+}

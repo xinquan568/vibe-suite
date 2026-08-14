@@ -196,22 +196,100 @@ def in_scope(relpath):
     )
 
 
-# NOTE — a deliberately UNCLOSED gap, recorded rather than half-fixed.
-#
-# A pinned id can be hidden from this scanner by spelling a character as a string escape:
-# `"claude-opus-4-2025051\u0034"` IS the dated id once YAML/JSON/Python decodes it, and the
-# patterns above only ever see the literal backslash-u text.
-#
-# An attempt to close it by decoding escapes before matching was REVERTED, because resolving
-# escapes correctly requires knowing the language AND the string context, which a line-oriented
-# text scanner does not have. The attempt both missed real pins (`\U00000035`, eight-digit form)
-# and — worse — INVENTED them: a Python raw string `r"gpt-\x35"` contains no escape at all, yet
-# the decoder reported `gpt-5`. A repo-wide CI gate that fails honest code is worse than one
-# with a known evasion.
-#
-# The threat model matters here: P9 exists to stop a pinned id being committed by ACCIDENT, not
-# to defeat someone deliberately encoding one to slip past. Closing this properly means
-# per-language string parsing and belongs with the deferred lint work, not in a regex.
+# Escaped pins (#165 item 3). A pinned id can be hidden from the line scan by spelling a
+# character as a string escape: `"claude-opus-4-20250514"` IS the dated id once the
+# file's own language decodes it. A first fix decoded escapes IN the line scanner and was
+# REVERTED: without knowing the language and string context it missed the eight-digit `\U`
+# form and invented a pin inside the Python raw string `r"gpt-\x35"`. The lesson is encoded
+# here as structure: the raw line scan is RETAINED unchanged for every UTF-8 file (comments
+# and all), and an ADDITIVE decoded layer scans string literals in the three languages the
+# repo ships, each decoded by the LANGUAGE'S OWN parser — Python via `ast` (a raw string
+# therefore contains no escapes, killing the false positive by construction), JSON via
+# `json`, YAML via a ruby/Psych emitter. Raw and decoded findings dedupe to one violation
+# per (file, line, token). A missing ruby is a NAMED failure, never a silent narrowing: a
+# scan that quietly stopped decoding YAML would report clean for the wrong reason.
+
+_RUBY_EMITTER = """
+require 'psych'
+require 'json'
+begin
+  tree = Psych.parse_stream(STDIN.read)
+  out = []
+  walk = lambda do |n|
+    out << [n.start_line + 1, n.value] if n.is_a?(Psych::Nodes::Scalar)
+    n.children.each { |c| walk.call(c) } if n.respond_to?(:children) && n.children
+  end
+  walk.call(tree)
+  puts JSON.generate(out)
+rescue => e
+  STDERR.puts e.message
+  exit 1
+end
+"""
+
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+class DecodeError(Exception):
+    """A file whose language should decode could not be parsed."""
+
+
+class DecodeUnavailableError(Exception):
+    """The interpreter a decode layer needs is missing — fail closed, by name."""
+
+
+def _find_ruby():
+    import shutil
+    return shutil.which("ruby")
+
+
+def decoded_strings(relpath, text):
+    """(line, decoded_value) for every string literal in a Python/JSON/YAML
+    file, decoded by that language's own parser; [] for other suffixes."""
+    import ast as ast_mod
+    import json as json_mod
+    suffix = relpath.rsplit(".", 1)[-1] if "." in relpath else ""
+    if suffix == "py":
+        try:
+            tree = ast_mod.parse(text)
+        except SyntaxError as exc:
+            raise DecodeError(f"{relpath}: not parseable Python: {exc}") from exc
+        return [(node.lineno, node.value) for node in ast_mod.walk(tree)
+                if isinstance(node, ast_mod.Constant)
+                and isinstance(node.value, str)]
+    if suffix == "json":
+        try:
+            json_mod.loads(text)
+        except ValueError as exc:
+            raise DecodeError(f"{relpath}: not parseable JSON: {exc}") from exc
+        out = []
+        for number, line in enumerate(text.splitlines(), start=1):
+            for m in _JSON_STRING.finditer(line):
+                out.append((number, json_mod.loads(m.group(0))))
+        return out
+    if suffix in ("yml", "yaml"):
+        ruby = _find_ruby()
+        if ruby is None:
+            raise DecodeUnavailableError(
+                f"ruby is required to decode YAML string escapes ({relpath}); "
+                f"install ruby or exclude the file — the scan must not "
+                f"silently narrow"
+            )
+        proc = subprocess.run(
+            [ruby, "-e", _RUBY_EMITTER],
+            input=text.encode("utf-8"),
+            capture_output=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            detail = proc.stderr.decode("utf-8", "replace").strip()
+            raise DecodeError(f"{relpath}: not parseable YAML: {detail}")
+        return [
+            (line, value)
+            for line, value in json_mod.loads(proc.stdout.decode("utf-8"))
+        ]
+    return []
+
 
 def scan(root, lister=git_lister, notice=None):
     """Return every violation under `root`, in sorted path order.
@@ -236,9 +314,22 @@ def scan(root, lister=git_lister, notice=None):
             continue
         except OSError as exc:
             raise ReadError(f"could not read {relpath}: {exc}") from exc
-        for number, line in enumerate(text.splitlines(), start=1):
+        lines = text.splitlines()
+        seen = set()
+        for number, line in enumerate(lines, start=1):
             for token in find_pins(line):
-                violations.append(Violation(relpath, number, token, line))
+                if (number, token) not in seen:
+                    seen.add((number, token))
+                    violations.append(Violation(relpath, number, token, line))
+        # The ADDITIVE decoded layer (#165 item 3): string literals decoded by
+        # the file's own language, deduped against the raw findings above so a
+        # plainly-written pin inside a literal reports once.
+        for number, value in decoded_strings(relpath, text):
+            source = lines[number - 1] if 0 < number <= len(lines) else ""
+            for token in find_pins(value):
+                if (number, token) not in seen:
+                    seen.add((number, token))
+                    violations.append(Violation(relpath, number, token, source))
     return violations
 
 
@@ -255,6 +346,12 @@ def main(argv=None):
         return 1
     except UnclassifiedEntryError as exc:
         print(f"model-pin-lint: {exc}", file=sys.stderr)
+        return 1
+    except DecodeUnavailableError as exc:
+        print(f"model-pin-lint: decode unavailable: {exc}", file=sys.stderr)
+        return 1
+    except DecodeError as exc:
+        print(f"model-pin-lint: decode failed: {exc}", file=sys.stderr)
         return 1
 
     if violations:

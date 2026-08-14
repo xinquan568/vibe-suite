@@ -637,6 +637,183 @@ def _steps(job_body):
     return "\n".join(pre), steps
 
 
+def _shell_views(code):
+    """Two views of a step's code, honest about SHELL STRING semantics (#165 4-body).
+
+    reads view  — what the shell EXPANDS: double-quoted content, command
+                  substitutions, and unquoted-delimiter heredoc bodies
+                  interpolate, so reads there are real; single-quoted content
+                  and quoted-delimiter heredoc bodies are inert data and are
+                  masked; an escaped `\\$` is not a read.
+    assigns view — where an assignment can BIND this shell: only bare, top-level
+                  code. Content of any string or heredoc body is masked
+                  (`msg="X=1; Y=2"` credits nothing), and so is everything
+                  inside `$( … )` — a subshell assignment never binds the
+                  parent. Quote contexts NEST inside substitutions, tracked on
+                  a stack, so `"$(cd "$(dirname "$X")" )"` stays one value.
+
+    Masking uses `_` (never spaces) so token boundaries survive — the
+    env-prefix judgement below skips a masked value as one word. Line count is
+    preserved in both views.
+    """
+    reads, assigns = [], []
+    stack = []            # enclosing modes; len(stack) > 0 means inside $( )
+    mode = "normal"       # current: normal / single / double
+    pending = []          # heredoc delimiters queued on this line: (delim, quoted)
+    in_heredoc = None
+    i, n = 0, len(code)
+
+    def emit(r, a):
+        reads.append(r)
+        assigns.append(a)
+
+    def depth():
+        return sum(1 for m in stack if m == "$(")
+
+    while i < n:
+        ch = code[i]
+        if in_heredoc is not None:
+            j = code.find("\n", i)
+            line = code[i:j if j >= 0 else n]
+            if line.strip() == in_heredoc[0]:
+                emit(line, line)
+                in_heredoc = None
+            else:
+                masked = "".join("_" if c != "\n" else c for c in line)
+                emit(masked if in_heredoc[1] else line, masked)
+            if j < 0:
+                break
+            emit("\n", "\n")
+            i = j + 1
+            continue
+        sub = depth() > 0
+        if ch == "\n":
+            emit("\n", "\n")
+            if mode == "normal" and not stack and pending:
+                in_heredoc = pending.pop(0)
+            i += 1
+            continue
+        if mode == "single":
+            if ch == "'":
+                mode = "normal"          # single only ever opens from normal
+                emit(ch, ch if not sub else "_")
+            else:
+                emit("_", "_")
+            i += 1
+            continue
+        if mode == "double":
+            if ch == "\\" and i + 1 < n:
+                nxt = code[i + 1]
+                emit("__" if nxt == "$" else "\\" + nxt, "__")
+                i += 2
+                continue
+            if code[i:i + 2] == "$(":
+                stack.append("double")
+                stack.append("$(")
+                mode = "normal"
+                emit("$(", "__")
+                i += 2
+                continue
+            if ch == '"':
+                mode = "normal"
+                emit(ch, ch if not sub else "_")
+            else:
+                emit(ch, ch if ch == "\n" else "_")
+            i += 1
+            continue
+        # mode == "normal"
+        if ch == "\\" and i + 1 < n:
+            nxt = code[i + 1]
+            emit("__" if nxt == "$" else "\\" + nxt,
+                 ("\\" + nxt) if not sub else "__")
+            i += 2
+            continue
+        if code[i:i + 2] == "$(":
+            stack.append("normal")
+            stack.append("$(")
+            emit("$(", "__")
+            i += 2
+            continue
+        if ch == ")" and stack:
+            assert stack[-1] == "$(" or "$(" in stack
+            # Pop back to the state that opened this substitution.
+            while stack and stack[-1] != "$(":
+                stack.pop()
+            if stack:
+                stack.pop()            # the "$(" marker
+                mode = stack.pop() if stack and stack[-1] in ("normal",
+                                                              "double") else "normal"
+            emit(ch, ch if depth() == 0 and mode == "normal" else "_")
+            i += 1
+            continue
+        if ch == "'":
+            mode = "single"
+            emit(ch, ch if not sub else "_")
+            i += 1
+            continue
+        if ch == '"':
+            mode = "double"
+            emit(ch, ch if not sub else "_")
+            i += 1
+            continue
+        if (not sub and ch == "<" and code[i:i + 2] == "<<"
+                and code[i:i + 3] != "<<<"):
+            j = i + 2
+            if j < n and code[j] == "-":
+                j += 1
+            while j < n and code[j] in " \t":
+                j += 1
+            if j < n and code[j] in "'\"":
+                quote = code[j]
+                k = code.find(quote, j + 1)
+                if k > j:
+                    pending.append((code[j + 1:k], True))
+                    emit(code[i:k + 1], code[i:k + 1])
+                    i = k + 1
+                    continue
+            m = re.match(r"[A-Za-z0-9_]+", code[j:])
+            if m:
+                pending.append((m.group(0), False))
+                emit(code[i:j + m.end()], code[i:j + m.end()])
+                i = j + m.end()
+                continue
+            emit(ch, ch)
+            i += 1
+            continue
+        emit(ch, ch if not sub else "_")
+        i += 1
+    return "".join(reads), "".join(assigns)
+
+
+def _crediting_assignments(assign_line, assign_re):
+    """Names a line's assignments bind FOR THE LINES BELOW.
+
+    An env-prefix assignment (`X=1 cmd …`) scopes to its own command — the
+    command's argv is expanded from the PRIOR environment, so the prefix
+    credits nothing here: not later lines, not even the same line's reads.
+    A plain assignment (nothing but assignments, separators, redirects or a
+    comment after it) credits everything below, as before.
+    """
+    names = []
+    for m in assign_re.finditer(assign_line):
+        rest = assign_line[m.end():]
+        # Skip this assignment's value (one word, ending at whitespace OR a
+        # separator; masked strings are `_` runs), then any further NAME=value
+        # words — a prefix can stack.
+        rest = re.sub(r"^[^\s;|&<>#]*", "", rest)
+        while True:
+            nxt = re.match(r"\s+(?:export\s+|local\s+)?[A-Z][A-Z0-9_]*=[^\s;|&<>#]*",
+                           rest)
+            if not nxt:
+                break
+            rest = rest[nxt.end():]
+        rest = rest.strip()
+        if rest and not rest.startswith((";", "&&", "||", "|", "#", ">", "<", "&", ")")):
+            continue          # env-prefix: credits only its own command
+        names.append(m.group(1))
+    return names
+
+
 def _unbound_names(job_body, runtime=frozenset(), optional=frozenset()):
     """Names a job's steps read that nothing available AT THAT POINT binds.
 
@@ -649,6 +826,21 @@ def _unbound_names(job_body, runtime=frozenset(), optional=frozenset()):
     (`${X:-}`), or is required (`${X:?}`). The bare unbraced form is a read like any other;
     the round-3 scan did not match it, so a name read only as `$X` escaped entirely. A read
     with a NON-EMPTY default (`${DATA_DIR:-_data}`) is self-sufficient and is not flagged.
+
+    String semantics (#165 4-body): reads are taken from the view the shell would EXPAND —
+    double-quoted content, command substitutions, and unquoted-delimiter heredoc bodies are
+    real; single-quoted content and quoted-delimiter heredoc bodies are inert data.
+    Assignments exist only in bare top-level code: string content never credits, a subshell
+    assignment never binds the parent, and an env-prefix (`X=1 cmd`) credits only its own
+    command — not later lines, and not its own line's reads, which the shell expands from
+    the PRIOR environment.
+
+    Two boundaries are DELIBERATE exclusions, recorded rather than half-modelled:
+    (c) branch reachability — the scan is straight-line lexical, so an assignment inside an
+    untaken branch credits; refusing conditionals would reject legitimate workflows the
+    runtime executes correctly, and E8.7's live matrix is the reachability oracle.
+    (d) lowercase names are outside the scanned space — uppercase-is-configuration is the
+    house convention this scan enforces.
     """
     def code_of(text):
         return "\n".join(l for l in text.split("\n") if not l.lstrip().startswith("#"))
@@ -678,14 +870,19 @@ def _unbound_names(job_body, runtime=frozenset(), optional=frozenset()):
     offenders, exported_by_earlier = [], set()
     for step in steps:
         code = code_of(step)
+        # #165 4-body: reads come from the view the shell would EXPAND;
+        # assignments only from bare code (string content never credits), and
+        # an env-prefix assignment credits nothing beyond its own command.
+        reads_code, assigns_code = _shell_views(code)
         base = (set(runtime) | set(optional) | job_env | env_bound(step)
                 | exported_by_earlier)
         assigned_above, flagged = set(), set()
-        for line in code.split("\n"):
-            for name in sorted(needs(line) - base - assigned_above - flagged):
+        for read_line, assign_line in zip(reads_code.split("\n"),
+                                          assigns_code.split("\n")):
+            for name in sorted(needs(read_line) - base - assigned_above - flagged):
                 offenders.append(name)
                 flagged.add(name)
-            assigned_above.update(assign_re.findall(line))
+            assigned_above.update(_crediting_assignments(assign_line, assign_re))
         exported_by_earlier |= set(re.findall(r'echo "([A-Z][A-Z0-9_]*)=', code))
     return offenders
 
@@ -853,6 +1050,67 @@ class TestTheBindingScanItselfCatches(unittest.TestCase):
         body = ("  job:\n    steps:\n      - env:\n          BOUND_VALUE: yes\n"
                 "        run: |\n          echo \"$BOUND_VALUE\"\n")
         self.assertEqual([], _unbound_names(body))
+
+    # -- #165 4-body: string semantics and env-prefix scoping ---------------
+
+    def test_a_single_quoted_read_is_inert_data(self):
+        job = self._job("echo '$QUOTED_NAME'")
+        self.assertEqual([], _unbound_names(job),
+                         "single-quoted content is data the shell never expands")
+
+    def test_a_double_quoted_read_is_a_real_read(self):
+        job = self._job('echo "prefix ${DQ_READ} suffix"')
+        self.assertIn("DQ_READ", _unbound_names(job),
+                      "the shell expands inside double quotes; masking them "
+                      "would hide real reads")
+
+    def test_a_string_content_assignment_never_credits(self):
+        job = self._job('msg="INNER_VALUE=x; OTHER_VALUE=y"\n'
+                        'echo "$INNER_VALUE"')
+        self.assertIn("INNER_VALUE", _unbound_names(job),
+                      "an assignment-shaped substring inside a string binds "
+                      "nothing; crediting it certifies an unbound read")
+
+    def test_an_unquoted_delimiter_heredoc_body_reads_for_real(self):
+        job = self._job("cat <<EOF\n${HD_READ}\nEOF")
+        self.assertIn("HD_READ", _unbound_names(job),
+                      "an unquoted-delimiter heredoc interpolates; its reads "
+                      "are real")
+
+    def test_a_quoted_delimiter_heredoc_body_is_inert(self):
+        job = self._job("cat <<'EOF'\n${HD_INERT}\nEOF")
+        self.assertEqual([], _unbound_names(job),
+                         "a quoted-delimiter heredoc body is literal data")
+
+    def test_a_heredoc_body_assignment_never_credits(self):
+        job = self._job('cat <<EOF\nHD_ASSIGN=x\nEOF\necho "$HD_ASSIGN"')
+        self.assertIn("HD_ASSIGN", _unbound_names(job),
+                      "text inside a heredoc body is written to stdin, not "
+                      "executed")
+
+    def test_an_env_prefix_assignment_credits_only_its_command(self):
+        job = self._job('TMP_VALUE=1 mycmd\necho "$TMP_VALUE"')
+        self.assertIn("TMP_VALUE", _unbound_names(job),
+                      "X=1 cmd scopes the binding to cmd's environment; the "
+                      "step-wide credit was how a temporary excused a later "
+                      "unbound read")
+
+    def test_an_env_prefix_does_not_excuse_its_own_line_read(self):
+        # `X=1 cmd "$X"`: the argv is expanded from the PRIOR environment,
+        # before the prefix applies — the read needs an earlier binding.
+        job = self._job('PRE_VALUE=1 mycmd "$PRE_VALUE"')
+        self.assertIn("PRE_VALUE", _unbound_names(job))
+
+    def test_a_subshell_assignment_does_not_bind_the_parent(self):
+        job = self._job('OUT="$(SUB_VALUE=1; echo x)"\necho "$SUB_VALUE"')
+        self.assertIn("SUB_VALUE", _unbound_names(job),
+                      "a $( ) assignment lives and dies in the subshell")
+
+    def test_a_lowercase_name_is_outside_the_scanned_space(self):
+        # RECORDED exclusion (d) — uppercase-is-configuration is the house
+        # convention the scan enforces; see the _unbound_names docstring.
+        job = self._job('echo "$lower_value"')
+        self.assertEqual([], _unbound_names(job))
 
 
 class TestTheStepBindsEveryValueItReads(TriggerBase):

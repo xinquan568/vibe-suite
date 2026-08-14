@@ -457,26 +457,97 @@ class TestCIWiring(unittest.TestCase):
 
 
 
-class EscapedPinsAreAKnownGap(unittest.TestCase):
-    """Pins the DECISION, so the gap is visible and the reverted fix is not re-attempted blind.
+class EscapedPinsAreDetected(unittest.TestCase):
+    """#165 item 3: positive detection tests REPLACING `EscapedPinsAreAKnownGap`.
 
-    A pinned id spelled with string escapes is invisible to this scanner. Closing it by decoding
-    escapes was tried and reverted: correct decoding needs the language and string context, so
-    the attempt missed the eight-digit `\\U` form and reported a pin for a Python RAW string
-    containing no escape at all. A repo-wide gate that fails honest code is worse than one with
-    a known evasion, and P9's job is to catch accidental pinning, not deliberate encoding.
+    A pinned id spelled with string escapes is now found by an ADDITIVE decoded
+    layer: string literals in Python/JSON/YAML files are decoded by each
+    language's OWN parser and matched with the same grammars. The first fix was
+    reverted for missing the eight-digit `\\U` form and inventing a pin inside
+    the Python raw string `r"gpt-\\x35"`; both are pinned below, positive and
+    negative. The raw line scan is retained (comments still catch), findings
+    dedupe per (file, line, token), and a missing ruby is a NAMED failure.
+    Dated fixtures stay assembled from fragments — the decoded id never appears
+    complete in this file.
     """
 
-    def test_an_escaped_pin_is_not_detected_and_that_is_recorded(self):
-        line = 'model: "claude-opus-4-" "2025051\\u0034"'
-        self.assertEqual(lint.find_pins(line), [],
-                         "if this starts passing, the gap closed — update this test and the "
-                         "note in tools/model-pin-lint.py")
+    DATED = "claude-opus-4-" + "202505" + "14"
 
-    def test_a_python_raw_string_is_not_reported_as_a_pin(self):
-        """The false positive the reverted fix introduced. This is the regression guard."""
-        self.assertEqual(lint.find_pins(r'X = r"gpt-\x35"'), [],
-                         "a raw string contains no escape; flagging it breaks honest builds")
+    def test_yaml_escaped_pin_is_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = 'model: "claude-opus-4-2025051\\u0034"\n'
+            _write(tmp, "skills/a.yml", raw)
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.path, v.line, v.token) for v in found],
+                             [("skills/a.yml", 1, self.DATED)])
+            self.assertEqual(found[0].text, raw.rstrip("\n"),
+                             "the diagnostic must show the SOURCE line, "
+                             "escapes as written")
+
+    def test_json_escaped_pin_is_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "schemas/a.json", '{\n  "model": "gpt-\\u0035"\n}\n')
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.path, v.line, v.token) for v in found],
+                             [("schemas/a.json", 2, "gpt-5")])
+
+    def test_python_escaped_pins_are_found_including_eight_digit_form(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "scripts/a.py",
+                   'A = "claude-opus-4-2025051\\U00000034"\n'
+                   'B = "gemini-\\u0032-pro"\n')
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.line, v.token) for v in found],
+                             [(1, self.DATED), (2, "gemini-2-pro")])
+
+    def test_python_raw_string_is_not_reported(self):
+        """The false positive that forced the revert, now dead by construction:
+        `ast` yields the raw string's value with its backslash intact."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "scripts/b.py", 'X = r"gpt-\\x35"\n')
+            self.assertEqual(lint.scan(tmp, lister=_tree_lister), [])
+
+    def test_literal_backslash_runs_are_not_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "skills/c.yml", "x: 'gpt-\\x35'\n")
+            _write(tmp, "schemas/c.json", '{"x": "gpt-\\\\x35"}\n')
+            self.assertEqual(lint.scan(tmp, lister=_tree_lister), [])
+
+    def test_comment_pins_are_still_caught_by_the_raw_layer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "scripts/d.py", "# o3-mini\n")
+            _write(tmp, "skills/d.yml", "a: 1  # o3-mini\n")
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.path, v.token) for v in found],
+                             [("scripts/d.py", "o3-mini"),
+                              ("skills/d.yml", "o3-mini")])
+
+    def test_plain_pin_inside_a_literal_reports_once(self):
+        """Raw and decoded layers both see it; dedupe keeps one violation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "scripts/e.py", 'M = "o3-mini"\n')
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual(len(found), 1)
+
+    def test_missing_ruby_is_a_named_failure(self):
+        """A scan that quietly stopped decoding YAML would report clean for
+        the wrong reason — fail closed, by name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "skills/f.yml", "a: 1\n")
+            with unittest.mock.patch.object(lint, "_find_ruby",
+                                            return_value=None):
+                with self.assertRaises(lint.DecodeUnavailableError):
+                    lint.scan(tmp, lister=_tree_lister)
+
+    def test_unparseable_decode_input_is_a_named_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "scripts/bad.py", "def (\n")
+            with self.assertRaises(lint.DecodeError):
+                lint.scan(tmp, lister=_tree_lister)
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "schemas/bad.json", "{not json\n")
+            with self.assertRaises(lint.DecodeError):
+                lint.scan(tmp, lister=_tree_lister)
 
     def test_a_plainly_written_pin_is_still_caught(self):
         self.assertTrue(lint.find_pins("model: gpt-5.6-sol"))

@@ -1,0 +1,34 @@
+source: github/docs data/reusables/actions/github-token-available-permissions.md
+commit: c64d84db6c0c8c3078dfa6f4456cb82747e8e674  (2026-06-09)
+retrieved: 2026-08-14
+refresh: gh api "repos/github/docs/contents/data/reusables/actions/github-token-available-permissions.md?ref=<commit>" --jq '.content' | base64 -d > tests/fixtures/github-token-available-permissions.md
+
+Why THIS pin (#165 item 5, D9):
+
+The vocabulary source must pass the conformance gate the twelve E8.2a review
+rounds distilled: accept `models: read` (a hand table dropping it was wrong
+about GitHub's vocabulary — the scope is real even though no workflow in this
+tree declares it today), reject `id-token: read` (a hand table accepting it
+was wrong — upstream removed `read` from id-token in github/docs#34306,
+2024-08), and carry `vulnerability-alerts` (added in github/docs#60783,
+2026-04).
+
+Probed and refused:
+- SchemaStore github-workflow.json (retrieved 2026-08-14): types id-token as
+  generic read|write|none and omits vulnerability-alerts — fails the gate in
+  both directions.
+- github/docs HEAD (3363b628, 2026-07-30): the GitHub Models retirement
+  (github/docs#62387) removed `models` from this reusable, while GitHub's
+  EVALUATOR still accepts `models: read` (the live matrix is the oracle and
+  the staged model workflows depend on it) — fails the gate.
+
+c64d84db6c is the last revision before the retirement edit: the only upstream
+revision carrying all three anchors in one file. The pin is deliberately
+GENEROUS: an over-broad vocabulary can admit a scope GitHub later retires
+(harmless — the staleness guard checks what the tree USES), while an
+under-broad one rejects legal workflows (the recorded failure mode). To
+refresh: run the recorded command against a newer commit and keep the
+conformance gate green — if upstream never again carries all three anchors,
+re-litigate the gate in an issue, never by editing the vendored bytes.
+tests/test_auditor_workflows.py extracts scopes and value enums from this
+file at test time — no hand-typed table exists.

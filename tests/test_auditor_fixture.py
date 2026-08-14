@@ -488,16 +488,26 @@ class SecurityChecklistSignOff(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("missing", r.stdout)
 
+    def unchecked_text(self):
+        """The scaffold state, derived DETERMINISTICALLY from the real file: boxes
+        forced unchecked and the signature forced back to the placeholder. The live
+        file's signing state belongs to the operator (unchecked before the pause,
+        signed after) — two tests that trusted it broke the moment the operator
+        signed, which is exactly what the file is for."""
+        text = self.CHECKLIST.read_text().replace("- [x]", "- [ ]")
+        return re.sub(r"(?m)^Signed-off-by: .*$",
+                      "Signed-off-by: <operator name> <YYYY-MM-DD>", text)
+
     def test_the_unchecked_scaffold_refuses(self):
         copy = self.root / "unchecked.md"
-        copy.write_text(self.CHECKLIST.read_text())
+        copy.write_text(self.unchecked_text())
         r = self.run_check(copy)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("unchecked", r.stdout)
 
     def test_checked_rows_without_a_dated_signature_refuse(self):
         copy = self.root / "undated.md"
-        copy.write_text(self.CHECKLIST.read_text().replace("- [ ]", "- [x]"))
+        copy.write_text(self.unchecked_text().replace("- [ ]", "- [x]"))
         r = self.run_check(copy)
         self.assertNotEqual(r.returncode, 0,
                             "all rows checked but the sign-off line still carries the "
@@ -505,7 +515,7 @@ class SecurityChecklistSignOff(unittest.TestCase):
         self.assertIn("sign-off", r.stdout)
 
     def signed_text(self):
-        return self.CHECKLIST.read_text().replace("- [ ]", "- [x]").replace(
+        return self.unchecked_text().replace("- [ ]", "- [x]").replace(
             "Signed-off-by: <operator name> <YYYY-MM-DD>",
             "Signed-off-by: Eric Liu 2026-08-13")
 

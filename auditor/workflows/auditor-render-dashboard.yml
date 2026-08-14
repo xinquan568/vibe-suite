@@ -60,114 +60,37 @@ jobs:
           DOCS="$REPORTS/docs"
           FINDING_LOG="$DATA_DIR/ledgers/findings.jsonl"
           VOCAB_LOG="$DATA_DIR/ledgers/vocab-advisories.jsonl"
-          MARKER="generated-by-auditor-render-dashboard"
-          mkdir -p "$DOCS"
-          read_log() {
-            [ -f "$1" ] || return 0
-            jq -c --arg s "$SINCE" 'select(type == "object")
-              | select($s == "" or ((.timestamp // "") >= $s))' "$1" 2> /dev/null || true
-          }
-          count_log() { read_log "$1" | wc -l | tr -d ' '; }
-          slurp() { read_log "$1" | jq -s -r "$2" 2> /dev/null || true; }
-          FINDINGS="$(count_log "$FINDING_LOG")"
-          ADVISORIES="$(count_log "$VOCAB_LOG")"
-          EVENTS="$(count_log "$EVENT_LOG")"
-          REPOS="$(jq '.repos | length' "$REGISTRY")"
-          FIND_BY_REPO="$(slurp "$FINDING_LOG" 'map(.data.repo // "unknown") | group_by(.) | map({key: .[0], value: length}) | from_entries')"
-          [ -n "$FIND_BY_REPO" ] || FIND_BY_REPO="{}"
-          ADV_BY_REPO="$(slurp "$VOCAB_LOG" 'map(.data.repo // "unknown") | group_by(.) | map({key: .[0], value: length}) | from_entries')"
-          [ -n "$ADV_BY_REPO" ] || ADV_BY_REPO="{}"
-          # per-repo row: registry state joined to the two ledgers, PR outcomes
-          # folded from the registry PR records (outcome first, raw state as fallback)
-          REPO_ROWS="$(jq -r --argjson f "$FIND_BY_REPO" --argjson a "$ADV_BY_REPO" '
-            (.repos // {}) | to_entries | sort_by(.key)[]
-            | .key as $r | (.value // {}) as $v
-            | (($v.prs // {}) | to_entries | map(.value.outcome // ((.value.state // "unknown") | ascii_downcase)) | group_by(.) | map("\(.[0]) \(length)") | join(", ")) as $prs
-            | "<tr><td><a href=\"" + ($r | gsub("/"; "-")) + ".html\">" + ($r | @html) + "</a></td>"
-              + "<td>" + (($v.status // "unknown") | tostring | @html) + "</td>"
-              + "<td>" + (($v.score // "n/a") | tostring | @html) + "</td>"
-              + "<td>" + (($f[$r] // 0) | tostring) + "</td>"
-              + "<td>" + (($a[$r] // 0) | tostring) + "</td>"
-              + "<td>" + (if ($prs | length) == 0 then "none" else ($prs | @html) end) + "</td></tr>"' "$REGISTRY")"
-          [ -n "$REPO_ROWS" ] || REPO_ROWS='<tr><td colspan="6">registry is empty</td></tr>'
-          RULE_ROWS="$(slurp "$FINDING_LOG" 'map(.data.rule_id // "UNCLASSIFIED") | group_by(.) | map({r: .[0], n: length}) | sort_by([(0 - .n), .r])[] | "<tr><td><a href=\"docs/index.html#" + (.r | @uri) + "\">" + (.r | @html) + "</a></td><td>" + (.n | tostring) + "</td></tr>"')"
-          [ -n "$RULE_ROWS" ] || RULE_ROWS='<tr><td colspan="2">no findings in range</td></tr>'
-          SEV_ROWS="$(slurp "$FINDING_LOG" 'map(.data.severity // "info") | group_by(.) | map({s: .[0], n: length}) | sort_by([(0 - .n), .s])[] | "<tr><td>" + (.s | @html) + "</td><td>" + (.n | tostring) + "</td></tr>"')"
-          [ -n "$SEV_ROWS" ] || SEV_ROWS='<tr><td colspan="2">no findings in range</td></tr>'
-          ADV_ROWS="$(slurp "$VOCAB_LOG" 'map(.data.disposition // "unknown") | group_by(.) | map({d: .[0], n: length}) | sort_by([(0 - .n), .d])[] | "<tr><td>" + (.d | @html) + "</td><td>" + (.n | tostring) + "</td></tr>"')"
-          [ -n "$ADV_ROWS" ] || ADV_ROWS='<tr><td colspan="2">no advisories in range</td></tr>'
-          STATUS_ROWS="$(jq -r '(.repos // {}) | to_entries | map(.value.status // "unknown") | group_by(.) | map({s: .[0], n: length}) | sort_by([(0 - .n), .s])[] | "<tr><td>" + (.s | @html) + "</td><td>" + (.n | tostring) + "</td></tr>"' "$REGISTRY")"
-          [ -n "$STATUS_ROWS" ] || STATUS_ROWS='<tr><td colspan="2">registry is empty</td></tr>'
-          EVENT_ROWS="$(slurp "$EVENT_LOG" 'map(.event // "unknown") | group_by(.) | map({e: .[0], n: length}) | sort_by([(0 - .n), .e])[] | "<tr><td>" + (.e | @html) + "</td><td>" + (.n | tostring) + "</td></tr>"')"
-          [ -n "$EVENT_ROWS" ] || EVENT_ROWS='<tr><td colspan="2">no events in range</td></tr>'
-          DOC_SECTIONS="$(slurp "$FINDING_LOG" 'map(.data.rule_id // "UNCLASSIFIED") | unique | .[] | "<h2 id=\"" + (. | @uri) + "\">" + (. | @html) + "</h2>\n<p>rule reached from the cross-repo dashboard</p>"')"
-          OUT="$REPORTS/dashboard.html"
-          {
-            printf '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
-            printf '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-            printf '<title>vibe-suite auditor dashboard</title>\n'
-            printf '<style>\n'
-            printf 'body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 2rem auto; max-width: 62rem; padding: 0 1rem; color: #17181c; }\n'
-            printf 'table { border-collapse: collapse; width: 100%%; margin: 0 0 2rem; font-size: 0.95rem; }\n'
-            printf 'th, td { border: 1px solid #d8dae0; padding: 0.35rem 0.6rem; text-align: left; }\n'
-            printf 'th { background: #f2f3f7; }\n'
-            printf 'nav a { margin-right: 1rem; }\n'
-            printf '</style>\n</head>\n<body>\n'
-            printf '<!-- vibe-suite auditor cross-repo dashboard; self-contained, file:// openable -->\n'
-            printf '<h1>vibe-suite auditor dashboard</h1>\n'
-            printf '<p>generated %s</p>\n' "$TS"
-            printf '<p>cutoff %s</p>\n' "${SINCE:-none (all records)}"
-            printf '<nav><a href="#repos">repos</a><a href="#rules">rules</a><a href="#advisories">advisories</a><a href="#status">status</a><a href="#activity">activity</a></nav>\n'
-            printf '<ul>\n'
-            printf '<li>repos tracked %s</li>\n' "$REPOS"
-            printf '<li>findings %s</li>\n' "$FINDINGS"
-            printf '<li>vocab advisories %s</li>\n' "$ADVISORIES"
-            printf '<li>lifecycle events %s</li>\n' "$EVENTS"
-            printf '</ul>\n'
-            printf '<h2 id="repos">per repo</h2>\n'
-            printf '<table>\n<tr><th>repo</th><th>status</th><th>score</th><th>findings</th><th>advisories</th><th>PR outcomes</th></tr>\n'
-            printf '%s\n' "$REPO_ROWS"
-            printf '</table>\n'
-            printf '<h2 id="rules">rule frequency</h2>\n'
-            printf '<table>\n<tr><th>rule</th><th>findings</th></tr>\n'
-            printf '%s\n' "$RULE_ROWS"
-            printf '</table>\n'
-            printf '<h3>severity mix</h3>\n'
-            printf '<table>\n<tr><th>severity</th><th>findings</th></tr>\n'
-            printf '%s\n' "$SEV_ROWS"
-            printf '</table>\n'
-            printf '<h2 id="advisories">vocab advisories</h2>\n'
-            printf '<table>\n<tr><th>disposition</th><th>advisories</th></tr>\n'
-            printf '%s\n' "$ADV_ROWS"
-            printf '</table>\n'
-            printf '<h2 id="status">registry status breakdown</h2>\n'
-            printf '<table>\n<tr><th>status</th><th>repos</th></tr>\n'
-            printf '%s\n' "$STATUS_ROWS"
-            printf '</table>\n'
-            printf '<h2 id="activity">lifecycle activity</h2>\n'
-            printf '<table>\n<tr><th>event</th><th>records</th></tr>\n'
-            printf '%s\n' "$EVENT_ROWS"
-            printf '</table>\n'
-            printf '<p><a href="docs/index.html">rule docs</a></p>\n'
-            printf '</body>\n</html>\n'
-          } > "$OUT"
-          # the docs subtree is regenerated only while it is still ours, so a real
-          # docs build dropped in later is never clobbered
-          if [ ! -f "$DOCS/index.html" ] || grep -q "$MARKER" "$DOCS/index.html"; then
-            {
-              printf '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
-              printf '<title>vibe-suite auditor rule docs</title>\n</head>\n<body>\n'
-              printf '<!-- %s -->\n' "$MARKER"
-              printf '<h1>vibe-suite auditor rule docs</h1>\n'
-              printf '%s\n' "$DOC_SECTIONS"
-              printf '</body>\n</html>\n'
-            } > "$DOCS/index.html"
+          mkdir -p "$REPORTS"
+          # vibe-167: every byte of dashboard and rule-docs HTML is render-dashboard.py's
+          # duty. What stays here: the docs-clobber guard (the helper renders docs
+          # unconditionally; a real docs build dropped in later must survive), the §7
+          # envelope counts for the event, and the event append via the shared library.
+          KEEP_DOCS=""
+          if [ -f "$DOCS/index.html" ] && ! grep -q "generated-by" "$DOCS/index.html"; then
+            KEEP_DOCS="$(mktemp)"
+            cp "$DOCS/index.html" "$KEEP_DOCS"
           fi
-          jq -cn --arg t "$TS" --arg w "auditor-render-dashboard" --arg i "$RUN_ID" --arg s "$SINCE" \
-            --argjson n "$RUN_NUMBER" --argjson r "$REPOS" --argjson f "$FINDINGS" \
-            --argjson a "$ADVISORIES" --argjson e "$EVENTS" \
-            '{timestamp: $t, workflow: $w, event: "dashboard_rendered", run_id: $i, run_number: $n, data:
-              {repos: $r, findings: $f, advisories: $a, events: $e, since: $s, report: "reports/dashboard.html"}}' >> "$EVENT_LOG"
+          if [ -n "$SINCE" ]; then
+            python3 "$CODE_DIR/auditor/scripts/render-dashboard.py" --data-dir "$DATA_DIR" --out "$REPORTS" --generated-at "$TS" --since "$SINCE"
+          else
+            python3 "$CODE_DIR/auditor/scripts/render-dashboard.py" --data-dir "$DATA_DIR" --out "$REPORTS" --generated-at "$TS"
+          fi
+          if [ -n "$KEEP_DOCS" ]; then
+            cp "$KEEP_DOCS" "$DOCS/index.html"
+            rm -f "$KEEP_DOCS"
+          fi
+          read_count() {
+            [ -f "$1" ] || { echo 0; return 0; }
+            jq -c --arg s "$SINCE" 'select(type == "object")
+              | select($s == "" or ((.timestamp // "") >= $s))' "$1" 2> /dev/null | wc -l | tr -d ' ' || echo 0
+          }
+          FINDINGS="$(read_count "$FINDING_LOG")"
+          ADVISORIES="$(read_count "$VOCAB_LOG")"
+          EVENTS="$(read_count "$EVENT_LOG")"
+          REPOS="$(jq '.repos | length' "$REGISTRY")"
+          # §7 envelope via the shared event library — an adoption site (vibe-167)
+          . "$CODE_DIR/auditor/scripts/log-event.sh"
+          AUDITOR_DATA_DIR="$DATA_DIR" log_event auditor-render-dashboard dashboard_rendered "$(jq -cn --arg s "$SINCE" --argjson r "$REPOS" --argjson f "$FINDINGS" --argjson a "$ADVISORIES" --argjson e "$EVENTS" '{repos: $r, findings: $f, advisories: $a, events: $e, since: $s, report: "reports/dashboard.html"}')"
           echo "PASS"
           # /logic
       - run: |

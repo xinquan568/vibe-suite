@@ -99,6 +99,16 @@ class Sandbox:
         self.code = self.root / "code"
         self.data = self.root / "data"
         (self.code).mkdir()
+        # vibe-167: rewired blocks invoke helpers at $CODE_DIR/auditor/scripts/;
+        # a checkout always carries them, so the sandbox does too
+        shutil.copytree(REPO / "auditor" / "scripts",
+                        self.code / "auditor" / "scripts")
+        # render-dashboard.py resolves ROOT two parents up from itself; its
+        # templates and the rulebook ride along like a real checkout's would
+        shutil.copytree(REPO / "templates" / "report",
+                        self.code / "templates" / "report")
+        shutil.copytree(REPO / "skills" / "rules",
+                        self.code / "skills" / "rules")
         for c in ("reports", "audits", "ledgers", "articles", "exemplars", "registry"):
             (self.data / c).mkdir(parents=True)
         if registry:
@@ -1190,3 +1200,265 @@ class TestRegistryBootstrap(unittest.TestCase):
         t = (REPO / "auditor" / "README.md").read_text()
         self.assertIn("Registry bootstrap (performed", t)
         self.assertIn("REFUSE:registry-missing", t)
+
+
+class TestBatchProcessorWiring(unittest.TestCase):
+    """vibe-167: phase 3's batch selection is batch-process.py's duty.
+
+    The workflow delegates selection + labeling + dispatch to the helper — the one
+    helper whose every gh call touches a third party's repository — and keeps only
+    the label-removal post-pass inline, because the helper adds labels and removes
+    none. Dry run must issue NO mutating call end to end."""
+
+    WF = REPO / "auditor" / "workflows" / "auditor-batch-processor.yml"
+
+    def setUp(self):
+        self.sb = Sandbox(registry=None)
+        self.addCleanup(self.sb.cleanup)
+        (self.sb.data / "registry" / "repos.json").write_text(json.dumps(
+            {"repos": {"acme/w": {"status": "discovered", "issue": 12}}}))
+        self.block = extract(self.WF, "logic", "batch-select")
+        self.assertIsNotNone(self.block,
+                             "no logic:batch-select marker in auditor-batch-processor.yml")
+        canned = self.sb.root / "both-labels.json"
+        # real gh newline-terminates its output; a fixture that does not makes the
+        # consuming read-loop drop its only line
+        canned.write_text(json.dumps([{"number": 12, "title": "Audit candidate: acme/w"}]) + "\n")
+        self.env = {"CODE_DIR": str(REPO), "BATCH_SIZE": "5",
+                    "GH_CANNED_ISSUE_LIST": str(canned)}
+
+    def test_a_dry_run_issues_no_mutating_call(self):
+        r = self.sb.run("set -euo pipefail\n" + self.block,
+                        env={**self.env, "DRY_RUN": "true"})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        mutating = [c for c in self.sb.gh_calls()
+                    if "issue edit" in c or "workflow run" in c]
+        self.assertEqual(mutating, [],
+                         "a dry run reached a third-party repository")
+        self.assertIn("would run", r.stdout, "the helper's dry-run preview is the log")
+
+    def test_apply_labels_dispatches_and_removes_the_candidate_label(self):
+        r = self.sb.run("set -euo pipefail\n" + self.block,
+                        env={**self.env, "DRY_RUN": "false"})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        calls = self.sb.gh_calls()
+        self.assertTrue(any("issue edit 12" in c and "--add-label audit-ready" in c
+                            for c in calls),
+                        f"the helper did not label the eligible issue: {calls}")
+        self.assertTrue(any("workflow run auditor-audit.yml" in c for c in calls),
+                        f"the helper did not dispatch the stage workflow: {calls}")
+        self.assertTrue(any("--remove-label audit-candidate" in c for c in calls),
+                        f"the inline post-pass did not retire the candidate label: {calls}")
+
+
+class TestTrackRefreshWiring(unittest.TestCase):
+    """vibe-167: the PR-body metadata parse is parse-pr-metadata.py's duty — the
+    helper is the documented second implementation of the §9 block contract, and the
+    workflow now feeds from it instead of carrying a third copy inline."""
+
+    WF = REPO / "auditor" / "workflows" / "auditor-track.yml"
+
+    def setUp(self):
+        self.sb = Sandbox(registry=None)
+        self.addCleanup(self.sb.cleanup)
+        (self.sb.data / "registry" / "repos.json").write_text(json.dumps(
+            {"repos": {"acme/w": {"status": "contributed", "pipeline_prs": [7]}}}))
+        self.block = extract(self.WF, "logic", "track-refresh")
+        self.assertIsNotNone(self.block,
+                             "no logic:track-refresh marker in auditor-track.yml")
+
+    def _snap(self, body):
+        return {"state": "MERGED", "mergedAt": "2026-08-01T00:00:00Z",
+                "closedAt": None, "updatedAt": "2026-08-01T00:00:00Z",
+                "body": body, "comments": [], "statusCheckRollup": []}
+
+    def _run_with_body(self, body):
+        canned = self.sb.root / "pr-view.json"
+        canned.write_text(json.dumps(self._snap(body)) + "\n")
+        return self.sb.run("set -euo pipefail\n" + self.block,
+                           env={"CODE_DIR": str(REPO),
+                                "GH_CANNED_PR_VIEW": str(canned)})
+
+    def test_the_block_delegates_to_the_helper(self):
+        self.assertIn("parse-pr-metadata.py", self.block,
+                      "the refresh still parses the metadata block inline — three "
+                      "implementations of one contract instead of two")
+
+    def test_metadata_fingerprints_reach_the_registry(self):
+        body = ('done\n<!-- vibe-suite-auditor-meta-begin '
+                '{"findings":[{"fingerprint":"sha256:ab","rule_id":"R04"}]} '
+                'vibe-suite-auditor-meta-end -->')
+        r = self._run_with_body(body)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        pr = self.sb.registry()["repos"]["acme/w"]["prs"]["7"]
+        self.assertEqual(pr["fingerprints"], ["sha256:ab"])
+        self.assertEqual(pr["rule_ids"], ["R04"])
+        self.assertEqual(pr["state"], "MERGED")
+
+    def test_a_body_without_a_block_keeps_prior_provenance(self):
+        (self.sb.data / "registry" / "repos.json").write_text(json.dumps(
+            {"repos": {"acme/w": {"status": "contributed", "pipeline_prs": [7],
+                                  "prs": {"7": {"number": 7, "outcome": None,
+                                                "fingerprints": ["sha256:old"],
+                                                "rule_ids": ["R05"],
+                                                "stale_90d_emitted": False}}}}}))
+        r = self._run_with_body("no block here")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        pr = self.sb.registry()["repos"]["acme/w"]["prs"]["7"]
+        self.assertEqual(pr["fingerprints"], ["sha256:old"],
+                         "a snapshot refresh must never wipe backfilled provenance")
+
+
+class TestDailyReportWiring(unittest.TestCase):
+    """vibe-167: the report is generate-daily-report.py's duty — the block caches the
+    live inputs into the helper's --inputs seam, and the report_generated event takes
+    the HELPER'S printed output path (the filename contract is the helper's)."""
+
+    WF = REPO / "auditor" / "workflows" / "auditor-daily-report.yml"
+
+    def setUp(self):
+        self.sb = Sandbox(registry=None)
+        self.addCleanup(self.sb.cleanup)
+        (self.sb.data / "registry" / "repos.json").write_text(json.dumps(
+            {"repos": {"acme/w": {"status": "audited", "stars": 10,
+                                  "prs": {"1": {"outcome": "merged"}}}}}))
+        (self.sb.data / "feedback").mkdir(exist_ok=True)
+        (self.sb.data / "feedback" / "log.json").write_text(json.dumps(
+            {"rules": [{"rule_id": "R04", "hits": 3, "merged": 1,
+                        "applied_separately": 0}]}))
+        self.block = extract(self.WF, "stage-logic", "daily-report")
+        self.assertIsNotNone(self.block)
+
+    def test_the_helper_renders_and_the_event_carries_its_path(self):
+        import time as _time
+        r = self.sb.run("set -euo pipefail\n" + self.block,
+                        env={"CODE_DIR": str(REPO)})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("generate-daily-report.py", self.block,
+                      "the report is still rendered inline")
+        day = _time.strftime("%Y-%m-%d", _time.gmtime())
+        report = self.sb.data / "reports" / f"{day}.md"
+        self.assertTrue(report.is_file(),
+                        "the helper's output name (<date>.md) is the contract; the "
+                        "inline daily-<date>.md name lost")
+        text = report.read_text()
+        self.assertIn("# Daily report —", text, "the helper's renderer owns the body")
+        self.assertIn("audit-candidate", text,
+                      "the label census must survive the delegation (activity items)")
+        events = [e for e in self.sb.events() if e.get("event") == "report_generated"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["data"]["report"], f"reports/{day}.md",
+                         "the event path must be the helper's, not a second spelling")
+
+
+class TestVocabFingerprintWiring(unittest.TestCase):
+    """vibe-167: the advisory digest is compute-vocab-fingerprint.sh's duty; the
+    sourced function and the retired inline formula must agree to the byte."""
+
+    WF = REPO / "auditor" / "workflows" / "auditor-vocab-drift.yml"
+    HELPER = REPO / "auditor" / "scripts" / "compute-vocab-fingerprint.sh"
+
+    def test_the_block_sources_the_helper_not_an_inline_digest(self):
+        block = extract(self.WF, "logic", "vocab-drift")
+        self.assertIsNotNone(block)
+        self.assertIn("compute-vocab-fingerprint.sh", block)
+        self.assertIn("compute_vocab_fingerprint", block)
+        self.assertNotIn("shasum", block,
+                         "an inline digest beside the sourced function is the two-"
+                         "implementations defect this wiring retires")
+
+    def test_the_function_matches_the_documented_formula_to_the_byte(self):
+        import hashlib
+        advisory = {"terms": ["beta", "alpha"], "disposition": "merge"}
+        expected = "sha256:" + hashlib.sha256(
+            "acme/w|VOCAB|alpha,beta|merge\n".encode()).hexdigest()
+        script = (f'. "{self.HELPER}"\n'
+                  f"printf '%s' '{json.dumps(advisory)}' "
+                  f'| compute_vocab_fingerprint "acme/w"\n')
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), expected)
+
+
+class TestDiscoverFilterWiring(unittest.TestCase):
+    """vibe-167: vendor/CLA-owner filtering is vendor_default_filter.py's duty — the
+    helper's deny knowledge replaces the four-owner inline list, before audit cost."""
+
+    WF = REPO / "auditor" / "workflows" / "auditor-discover.yml"
+
+    def setUp(self):
+        self.sb = Sandbox(registry=None)
+        self.addCleanup(self.sb.cleanup)
+        (self.sb.data / "registry" / "repos.json").write_text(json.dumps({"repos": {}}))
+        (self.sb.data / "articles").mkdir(exist_ok=True)
+        self.block = extract(self.WF, "logic", "discover-search")
+        self.assertIsNotNone(self.block,
+                             "no logic:discover-search marker in auditor-discover.yml")
+        search = [{"full_name": "anthropics/claude-code", "stargazers_count": 9000,
+                   "archived": False, "pushed_at": "2026-08-01T00:00:00Z",
+                   "description": "d", "default_branch": "main"},
+                  {"full_name": "google/genai-toolbox", "stargazers_count": 5000,
+                   "archived": False, "pushed_at": "2026-08-01T00:00:00Z",
+                   "description": "d", "default_branch": "main"},
+                  {"full_name": "indie/plugin", "stargazers_count": 900,
+                   "archived": False, "pushed_at": "2026-08-01T00:00:00Z",
+                   "description": "d", "default_branch": "main"}]
+        searchfile = self.sb.root / "search.json"
+        searchfile.write_text(json.dumps({"items": search}) + "\n")
+        tree = self.sb.root / "tree.json"
+        tree.write_text(json.dumps(
+            {"tree": [{"type": "blob", "path": ".claude/commands/x.md"}]}) + "\n")
+        mapfile = self.sb.root / "canned.map"
+        mapfile.write_text(f"api -X GET search/repositories\t{searchfile}\n"
+                           f"api repos/\t{tree}\n")
+        self.env = {"CODE_DIR": str(REPO), "GH_CANNED_MAP": str(mapfile),
+                    "CANDIDATE_DIR": str(self.sb.root / "cands")}
+
+    def test_vendor_and_cla_owners_are_dropped_by_the_helper(self):
+        r = self.sb.run("set -euo pipefail\n" + self.block, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("vendor_default_filter.py", self.block,
+                      "discovery still filters with the inline owner list")
+        staged = sorted((self.sb.root / "cands").glob("candidate-*.json"))
+        names = [json.loads(p.read_text())["repo"]["full_name"] for p in staged]
+        self.assertEqual(names, ["indie/plugin"],
+                         f"the helper's deny knowledge must drop the vendor and "
+                         f"CLA-gated owners at discovery: {names}")
+
+
+class TestRenderDashboardWiring(unittest.TestCase):
+    """vibe-167: dashboard + rule docs are render-dashboard.py's duty; the block keeps
+    counting for the event (observability) and the docs-clobber guard, and delegates
+    every byte of HTML."""
+
+    WF = REPO / "auditor" / "workflows" / "auditor-render-dashboard.yml"
+
+    def setUp(self):
+        self.sb = Sandbox(registry=None)
+        self.addCleanup(self.sb.cleanup)
+        (self.sb.data / "registry" / "repos.json").write_text(json.dumps(
+            {"repos": {"acme/w": {"status": "audited"}}}))
+        self.block = extract(self.WF, "logic", "render-dashboard")
+        self.assertIsNotNone(self.block)
+
+    def test_the_helper_renders_and_the_event_still_fires(self):
+        r = self.sb.run("set -euo pipefail\n" + self.block,
+                        env={"CODE_DIR": str(REPO)})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("render-dashboard.py", self.block,
+                      "the dashboard is still rendered inline")
+        self.assertTrue((self.sb.data / "reports" / "dashboard.html").is_file())
+        self.assertTrue((self.sb.data / "reports" / "docs" / "index.html").is_file())
+        events = [e for e in self.sb.events() if e.get("event") == "dashboard_rendered"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["data"]["report"], "reports/dashboard.html")
+
+    def test_a_foreign_docs_build_is_not_clobbered(self):
+        docs = self.sb.data / "reports" / "docs"
+        docs.mkdir(parents=True)
+        (docs / "index.html").write_text("<html>the real docs build</html>")
+        r = self.sb.run("set -euo pipefail\n" + self.block,
+                        env={"CODE_DIR": str(REPO)})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("the real docs build", (docs / "index.html").read_text(),
+                      "a docs build that is not ours was overwritten")

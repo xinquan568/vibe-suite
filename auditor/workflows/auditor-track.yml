@@ -55,6 +55,7 @@ jobs:
           # an empty object, and a body with no block at all leaves whatever
           # fingerprints and rule ids the record already holds untouched, so a
           # snapshot refresh never wipes backfilled provenance.
+          # logic:track-refresh
           set -euo pipefail
           [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
           while IFS="$(printf '\t')" read -r repo pr; do
@@ -64,13 +65,21 @@ jobs:
               sleep 1
               continue
             fi
+            # vibe-167: the §9 metadata-block parse is parse-pr-metadata.py's duty —
+            # the helper is the documented second implementation of the contract, and
+            # feeding from it retires this file's third copy. Its non-zero exit on a
+            # malformed payload stays fail-soft here (stdout is {} either way), which
+            # preserves the never-wipe-provenance degrade below.
+            META="$(printf '%s' "$SNAP" | jq -r '.body // ""' | python3 "$CODE_DIR/auditor/scripts/parse-pr-metadata.py" || true)"
+            [ -n "$META" ] || META='{}'
             NEXT="$REGISTRY.next"
-            jq --arg r "$repo" --arg p "$pr" --argjson s "$SNAP" \
-              '([($s.body // "") | match("<!--\\s*vibe-suite-auditor-meta-begin\\s*(\\{[\\s\\S]*?\\})\\s*vibe-suite-auditor-meta-end\\s*-->"; "g")] | last) as $m | (if $m == null then {} else (try (($m.captures[0].string) | fromjson) catch {}) end) as $meta | [($meta.findings // [])[] | .fingerprint | select(. != null)] as $fps | [($meta.findings // [])[] | .rule_id | select(. != null)] as $rids | ((.repos[$r].prs[$p]) // {number: ($p | tonumber), outcome: null, fingerprints: [], rule_ids: [], stale_90d_emitted: false}) as $prior | .repos[$r].prs[$p] = ($prior + {state: ($s.state // ""), mergedAt: ($s.mergedAt // null), closedAt: ($s.closedAt // null), updatedAt: ($s.updatedAt // null), statusCheckRollup: ($s.statusCheckRollup // []), comments: [(($s.comments // [])[]) | {author: ((.author.login) // ""), authorAssociation: (.authorAssociation // ""), body: ((.body // "")[0:4000])}], fingerprints: (if ($fps | length) > 0 then $fps else ($prior.fingerprints // []) end), rule_ids: (if ($rids | length) > 0 then $rids else ($prior.rule_ids // []) end)})' \
+            jq --arg r "$repo" --arg p "$pr" --argjson s "$SNAP" --argjson meta "$META" \
+              '[($meta.findings // [])[] | .fingerprint | select(. != null)] as $fps | [($meta.findings // [])[] | .rule_id | select(. != null)] as $rids | ((.repos[$r].prs[$p]) // {number: ($p | tonumber), outcome: null, fingerprints: [], rule_ids: [], stale_90d_emitted: false}) as $prior | .repos[$r].prs[$p] = ($prior + {state: ($s.state // ""), mergedAt: ($s.mergedAt // null), closedAt: ($s.closedAt // null), updatedAt: ($s.updatedAt // null), statusCheckRollup: ($s.statusCheckRollup // []), comments: [(($s.comments // [])[]) | {author: ((.author.login) // ""), authorAssociation: (.authorAssociation // ""), body: ((.body // "")[0:4000])}], fingerprints: (if ($fps | length) > 0 then $fps else ($prior.fingerprints // []) end), rule_ids: (if ($rids | length) > 0 then $rids else ($prior.rule_ids // []) end)})' \
               "$REGISTRY" > "$NEXT" && mv "$NEXT" "$REGISTRY"
             sleep 1
           done < <(jq -r '.repos | to_entries[] | select(.value.status == "contributed" or .value.status == "tracked" or .value.status == "complete") | .key as $r | (.value.pipeline_prs // [])[] | [$r, (. | tostring)] | @tsv' "$REGISTRY")
           echo "snapshots refreshed"
+          # /logic
       - run: |
           # Classify outcomes, promote one-shot, record rule adoption, flag
           # case-study candidates, snapshot rejection threads, and emit

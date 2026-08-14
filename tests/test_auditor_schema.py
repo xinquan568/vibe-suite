@@ -146,6 +146,15 @@ class Sandbox:
         self.code = self.root / "code"
         self.data = self.root / "data"
         self.code.mkdir()
+        # vibe-167: rewired blocks invoke helpers at $CODE_DIR/auditor/scripts/,
+        # and render-dashboard.py resolves its templates and the rulebook two
+        # parents above itself — a checkout always carries all three
+        shutil.copytree(REPO / "auditor" / "scripts",
+                        self.code / "auditor" / "scripts")
+        shutil.copytree(REPO / "templates" / "report",
+                        self.code / "templates" / "report")
+        shutil.copytree(REPO / "skills" / "rules",
+                        self.code / "skills" / "rules")
         for c in ("reports", "audits", "ledgers", "articles", "exemplars", "registry"):
             (self.data / c).mkdir(parents=True)
         if registry:
@@ -508,8 +517,12 @@ class TestConsumerRenderDashboard(BlockBase):
         try:
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             html = (sb.data / "reports" / "dashboard.html").read_text()
-            self.assertIn("findings 2", html, "the enveloped findings ledger was not counted")
-            self.assertIn("vocab advisories 1", html, "the enveloped advisory was not counted")
+            # vibe-167: the dashboard is render-dashboard.py's output now — the
+            # counts live in its embedded data blob, not in inline prose
+            self.assertIn('"total_findings":2', html.replace(" ", ""),
+                          "the enveloped findings ledger was not counted")
+            self.assertIn('"total_advisories":1', html.replace(" ", ""),
+                          "the enveloped advisory was not counted")
             bad = [envelope_violation(rec) for rec in sb.ledger("events.jsonl")]
             self.assertEqual(
                 [b for b in bad if b], [],

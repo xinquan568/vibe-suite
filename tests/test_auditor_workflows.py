@@ -1954,5 +1954,360 @@ class TestContributionHandoff(unittest.TestCase):
                         f"{sorted(written)} — nothing hands off")
 
 
+#: vibe-167 (E8.3 follow-up): every helper's obligations — a non-empty subset of
+#: {workflow-called, helper-called, operator}. The inventory test proves the thirty
+#: EXIST; this table plus TestHelperCallSites proves each is REACHED the way its own
+#: docstring intends. `operator` entries carry their individually-verified invocation
+#: policy; they are the only exemption from a call-site requirement, and the exemption
+#: is visible here rather than silent in a test's blind spot.
+#: log-event.sh note: its workflow adoption sites are the six blocks rewired by
+#: vibe-167; older inline event appends elsewhere are legacy sites, kept as-is.
+HELPER_OBLIGATIONS = {
+    "atomic-registry-write.sh": {"helper-called"},
+    "backfill-findings.py": {"operator"},          # default dry run; --apply appends
+    "backfill-pr-fingerprints.py": {"operator"},   # default dry run; --apply writes
+    "batch-process.py": {"workflow-called"},
+    "build-exemplar-gallery.py": {"workflow-called"},
+    "commit-via-pr.sh": {"workflow-called"},
+    "compute-fingerprint.sh": {"workflow-called"},
+    "compute-vocab-fingerprint.sh": {"workflow-called"},
+    "diff-findings.py": {"workflow-called"},
+    "docs-diff.py": {"workflow-called"},
+    "generate-daily-report.py": {"workflow-called"},
+    "generate-rule-review-body.py": {"workflow-called"},
+    "git-push-with-retry.sh": {"workflow-called"},
+    "guard-protected-paths.sh": {"workflow-called"},
+    "log-event.sh": {"workflow-called"},
+    "parse-pr-metadata.py": {"workflow-called"},
+    "parse-suppressions.py": {"helper-called"},
+    "prepare-refinement-input.py": {"workflow-called"},
+    "propose-rule-citations.py": {"workflow-called"},
+    "render-dashboard.py": {"workflow-called", "helper-called"},
+    "render-repo-report.py": {"workflow-called"},
+    "repair-stale-statuses.py": {"operator"},      # writes by default; --dry-run reports
+    "resolve-merge-conflicts.sh": {"helper-called"},
+    "rule-health.py": {"workflow-called"},
+    "scan-suppressions.py": {"workflow-called"},
+    "synthesize-sidecar.py": {"helper-called"},
+    "three-way-merge-registry.py": {"helper-called"},
+    "validate-feedback.sh": {"workflow-called"},
+    "validate-rule-ids.py": {"workflow-called"},
+    "vendor_default_filter.py": {"workflow-called"},
+}
+
+
+class TestHelperCallSites(unittest.TestCase):
+    """vibe-167: the inventory proved existence; this class proves reach.
+
+    E8.3 found four wiring defects by reading; the census that motivated this table
+    found fifteen helpers with zero workflow references, nine reachable from nowhere.
+    A helper whose obligation is `workflow-called` without a call site is a duty the
+    unit claims and does not perform."""
+
+    def test_the_obligations_table_covers_exactly_the_thirty(self):
+        self.assertEqual(sorted(HELPER_OBLIGATIONS), sorted(E83_HELPERS),
+                         "the obligations table and the helper inventory drifted")
+        for name, obligations in HELPER_OBLIGATIONS.items():
+            self.assertTrue(obligations, f"{name} has an empty obligation set")
+            self.assertLessEqual(obligations,
+                                 {"workflow-called", "helper-called", "operator"})
+
+    def workflow_texts(self):
+        return {p.name: p.read_text(encoding="utf-8")
+                for p in sorted((REPO / "auditor" / "workflows").glob("*.yml"))}
+
+    def helper_texts(self):
+        return {p.name: p.read_text(encoding="utf-8", errors="replace")
+                for p in sorted(SCRIPTS_DIR.iterdir()) if p.is_file()}
+
+    def test_every_workflow_called_helper_has_a_workflow_call_site(self):
+        texts = self.workflow_texts()
+        missing = []
+        for name, obligations in sorted(HELPER_OBLIGATIONS.items()):
+            if "workflow-called" not in obligations:
+                continue
+            if not any(name in text for text in texts.values()):
+                missing.append(name)
+        self.assertEqual(missing, [],
+                         f"helpers whose own intent is workflow use, with no call site "
+                         f"in any workflow: {missing} — the duty each implements is "
+                         f"being performed inline or not at all")
+
+    def test_every_helper_called_helper_is_referenced_by_a_helper(self):
+        texts = self.helper_texts()
+        missing = []
+        for name, obligations in sorted(HELPER_OBLIGATIONS.items()):
+            if "helper-called" not in obligations:
+                continue
+            if not any(name in text for other, text in texts.items() if other != name):
+                missing.append(name)
+        self.assertEqual(missing, [],
+                         f"library helpers referenced by no other helper: {missing}")
+
+    def test_operator_helpers_state_their_invocation_policy(self):
+        # The exemption must stay auditable: each operator helper's table row carries
+        # a policy comment, and the helper's own text matches it (--apply for the
+        # backfills' opt-in writes; --dry-run for repair's opt-out).
+        texts = self.helper_texts()
+        for name in ("backfill-findings.py", "backfill-pr-fingerprints.py"):
+            self.assertIn("--apply", texts[name],
+                          f"{name} no longer carries the opt-in write flag its "
+                          f"operator policy records")
+        self.assertIn("--dry-run", texts["repair-stale-statuses.py"],
+                      "repair-stale-statuses.py no longer carries the opt-out flag "
+                      "its operator policy records")
+
+
+#: vibe-167: the reviewed argument contract for every workflow-callable helper.
+#: AUTHORED from each helper's parser, usage text and refusal arms — not introspected,
+#: because most required flags are enforced by post-parse refusals argparse cannot
+#: report, and the shell helpers have no parser object at all.
+#: Shapes: required/allowed flag sets; "stdin" — the helper reads stdin; "positionals"
+#: — (min, max) bare arguments; "sourced" — a function library whose call site is
+#: `. .../helper.sh`, never an interpreter invocation.
+CALL_CONTRACTS = {
+    "batch-process.py": {"required": {"--data-dir", "--stage"},
+                         "allowed": {"--data-dir", "--stage", "--batch-size",
+                                     "--host-repo", "--apply"}},
+    "build-exemplar-gallery.py": {"required": set(),
+                                  "allowed": {"--data-dir", "--exemplars-dir",
+                                              "--output", "--check"}},
+    "commit-via-pr.sh": {"required": {"--checkout"},
+                         "allowed": {"--checkout", "--repo", "--base", "--branch"}},
+    "compute-fingerprint.sh": {"sourced": True},
+    "compute-vocab-fingerprint.sh": {"sourced": True},
+    "diff-findings.py": {"required": set(),
+                         "allowed": {"--generated-at", "--original-score",
+                                     "--reaudit-score", "--repo",
+                                     "--original-sidecar", "--reaudit-sidecar",
+                                     "--registry", "--commit-sha-before",
+                                     "--commit-sha-after", "--events-out",
+                                     "--diff-report-out", "--summary-out"}},
+    "docs-diff.py": {"required": set(),
+                     "allowed": {"--data-dir", "--citations", "--hash-store",
+                                 "--changed-out"}},
+    "generate-daily-report.py": {"required": set(),
+                                 "allowed": {"--data-dir", "--inputs", "--date",
+                                             "--out"}},
+    "generate-rule-review-body.py": {"required": {"--data-dir", "--quarter"},
+                                     "allowed": {"--data-dir", "--quarter", "--as-of",
+                                                 "--out"}},
+    "git-push-with-retry.sh": {"required": set(),
+                               "allowed": {"--checkout", "--data-dir", "--attempts"}},
+    "guard-protected-paths.sh": {"required": set(), "allowed": {"--data-dir"}},
+    "log-event.sh": {"sourced": True},
+    "parse-pr-metadata.py": {"required": set(), "allowed": set(), "stdin": True},
+    "prepare-refinement-input.py": {"required": {"--data-dir"},
+                                    "allowed": {"--data-dir", "--feedback", "--out",
+                                                "--min-hits"}},
+    "propose-rule-citations.py": {"required": {"--data-dir"},
+                                  "allowed": {"--data-dir", "--apply", "--rules-path",
+                                              "--exemplar-url-prefix", "--out"}},
+    "render-dashboard.py": {"required": {"--data-dir"},
+                            "allowed": {"--data-dir", "--out", "--since",
+                                        "--generated-at"}},
+    "render-repo-report.py": {"required": {"--repo", "--data-dir"},
+                              "allowed": {"--repo", "--data-dir", "--out",
+                                          "--generated-at"}},
+    "rule-health.py": {"required": {"--data-dir"},
+                       "allowed": {"--data-dir", "--out", "--generated-at"}},
+    "scan-suppressions.py": {"required": {"--data-dir", "--host-repo"},
+                             "allowed": {"--data-dir", "--host-repo", "--query",
+                                         "--observed-at", "--apply"}},
+    "validate-feedback.sh": {"required": set(),   # cross-flag: --data-dir OR --log
+                             "allowed": {"--data-dir", "--log", "--allow-missing"}},
+    "validate-rule-ids.py": {"required": set(),
+                             "allowed": {"--data-dir", "--rubric"},
+                             "positionals": (0, 400),
+                             # data-dir is the sidecar source only when no explicit
+                             # sidecar is passed (the helper's own branch structure)
+                             "required_if_no_positionals": {"--data-dir"}},
+    "vendor_default_filter.py": {"required": set(), "allowed": {"--report"}},
+}
+
+#: Call sites the static checker CANNOT parse, each bound to the extracted-run test
+#: that executes it instead. An entry here is a tested obligation, not a skip: the
+#: named test must exist in the named module, held by test_the_roster_names_real_tests.
+EXTRACTED_RUN_ROSTER = {
+    # (workflow file, helper): (test module, test attribute substring)
+}
+
+
+def check_call_sites(workflow_texts, contracts, roster):
+    """Every helper call site in every run block, checked fail-closed.
+
+    Returns a list of violation strings; empty means every site parsed and satisfied
+    its helper's contract. A site the tokenizer cannot parse is a VIOLATION unless the
+    roster binds it to an extracted-run test — never a silent skip.
+    """
+    import shlex
+    violations = []
+    for wf_name, text in sorted(workflow_texts.items()):
+        joined = text.replace("\\\n", " ")
+        for line_no, line in enumerate(joined.splitlines(), 1):
+            for helper, contract in sorted(contracts.items()):
+                needle = f"auditor/scripts/{helper}"
+                if needle not in line:
+                    continue
+                where = f"{wf_name}:{line_no} {helper}"
+                if contract.get("sourced"):
+                    if not re.match(r'\s*(\.|source)\s', line):
+                        violations.append(
+                            f"{where}: function library referenced without sourcing "
+                            f"(expected `. .../auditor/scripts/{helper}`)")
+                    continue
+                try:
+                    tokens = shlex.split(line, comments=True)
+                except ValueError:
+                    if (wf_name, helper) in roster:
+                        continue
+                    violations.append(f"{where}: unparseable call site and not on the "
+                                      f"extracted-run roster")
+                    continue
+                index = next((i for i, t in enumerate(tokens) if needle in t), None)
+                if index is None:
+                    if (wf_name, helper) in roster:
+                        continue
+                    violations.append(f"{where}: helper name present but no invocation "
+                                      f"token found and not on the roster")
+                    continue
+                args = tokens[index + 1:]
+                flags, positionals, i = set(), 0, 0
+                while i < len(args):
+                    token = args[i]
+                    if token in ("|", "||", "&&", ";", ">", ">>", "2>", "<"):
+                        break
+                    if token.startswith("--"):
+                        # `--apply; then` glues shell punctuation onto the last flag
+                        terminated = token.endswith(";")
+                        token = token.rstrip(";")
+                        flag = token.split("=", 1)[0]
+                        flags.add(flag)
+                        if terminated:
+                            break
+                        if "=" not in token and i + 1 < len(args) \
+                                and not args[i + 1].startswith("--"):
+                            if args[i + 1].endswith(";"):
+                                break
+                            i += 2
+                            continue
+                    else:
+                        if token.endswith(";"):
+                            break
+                        positionals += 1
+                    i += 1
+                required = set(contract.get("required", set()))
+                if positionals == 0:
+                    required |= contract.get("required_if_no_positionals", set())
+                missing = required - flags
+                unknown = flags - contract.get("allowed", set())
+                lo, hi = contract.get("positionals", (0, 0))
+                if missing:
+                    violations.append(f"{where}: missing required {sorted(missing)}")
+                if unknown:
+                    violations.append(f"{where}: unknown flags {sorted(unknown)}")
+                if not (lo <= positionals <= hi):
+                    violations.append(f"{where}: {positionals} positional(s), "
+                                      f"contract allows {lo}..{hi}")
+    return violations
+
+
+class TestCallSiteArguments(unittest.TestCase):
+    """vibe-167: each call site's arguments checked against its helper's contract.
+
+    E8.3's four wiring defects (a positional where --attempts was required, $SLUG for
+    --repo, a .sh name for a .py helper, a phantom helper) were each findable by this
+    check; the contract table is reviewed prose, the checker is fail-closed."""
+
+    def test_every_workflow_callable_helper_has_a_contract(self):
+        expected = {name for name, obligations in HELPER_OBLIGATIONS.items()
+                    if "workflow-called" in obligations}
+        self.assertEqual(sorted(CALL_CONTRACTS), sorted(expected),
+                         "the contract table and the workflow-called obligation set "
+                         "drifted — author the contract with the wiring, not after it")
+
+    def test_the_roster_names_real_tests(self):
+        for (wf, helper), (module, attr) in sorted(EXTRACTED_RUN_ROSTER.items()):
+            path = REPO / "tests" / f"{module}.py"
+            self.assertTrue(path.is_file(), f"roster names a missing module {module}")
+            self.assertIn(attr, path.read_text(encoding="utf-8"),
+                          f"roster binds {wf}/{helper} to {module}.{attr}, which does "
+                          f"not exist — the dynamic site is unexecuted")
+
+    def test_every_real_call_site_satisfies_its_contract(self):
+        texts = {p.name: p.read_text(encoding="utf-8")
+                 for p in sorted((REPO / "auditor" / "workflows").glob("*.yml"))}
+        violations = check_call_sites(texts, CALL_CONTRACTS, EXTRACTED_RUN_ROSTER)
+        self.assertEqual(violations, [],
+                         "call sites violating their helpers' contracts:\n  "
+                         + "\n  ".join(violations))
+
+    # -- checker mutation tests: each synthetic defect must be CAUGHT ----------------
+    CONTRACT = {"fake-helper.py": {"required": {"--data-dir"},
+                                   "allowed": {"--data-dir", "--out"}}}
+
+    def _check(self, line, contracts=None, roster=None):
+        text = f"jobs:\n  a:\n    steps:\n      - run: |\n          {line}\n"
+        return check_call_sites({"wf.yml": text},
+                                contracts or self.CONTRACT, roster or {})
+
+    def test_mutation_missing_required_flag(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" --out x')
+        self.assertTrue(any("missing required" in s for s in v), v)
+
+    def test_mutation_unknown_flag(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d --wrong x')
+        self.assertTrue(any("unknown flags" in s for s in v), v)
+
+    def test_mutation_stray_positional(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d stray')
+        self.assertTrue(any("positional" in s for s in v), v)
+
+    def test_mutation_continuation_lines_are_joined(self):
+        text = ('jobs:\n  a:\n    steps:\n      - run: |\n'
+                '          python3 "$CODE_DIR/auditor/scripts/fake-helper.py" \\\n'
+                '            --data-dir d \\\n            --out x\n')
+        self.assertEqual(check_call_sites({"wf.yml": text}, self.CONTRACT, {}), [])
+
+    def test_mutation_command_substitution_values_are_opaque(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir "$(pwd)/data" --out "$OUT"')
+        self.assertEqual(v, [], v)
+
+    def test_mutation_unparseable_site_fails_without_roster(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" --data-dir "unclosed')
+        self.assertTrue(any("unparseable" in s or "no invocation" in s for s in v), v)
+
+    def test_mutation_unparseable_site_passes_with_roster(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" --data-dir "unclosed',
+                        roster={("wf.yml", "fake-helper.py"): ("test_x", "test_y")})
+        self.assertEqual(v, [], v)
+
+    def test_mutation_conditionally_required_flag(self):
+        contracts = {"fake-helper.py": {
+            "required": set(), "allowed": {"--data-dir"}, "positionals": (0, 5),
+            "required_if_no_positionals": {"--data-dir"}}}
+        bad = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py"',
+                          contracts)
+        self.assertTrue(any("missing required" in s for s in bad), bad)
+        good = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" x.jsonl',
+                           contracts)
+        self.assertEqual(good, [], good)
+
+    def test_mutation_glued_semicolon_is_stripped(self):
+        v = self._check('if ! python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d; then')
+        self.assertEqual(v, [], v)
+
+    def test_mutation_sourced_library_must_be_sourced(self):
+        contracts = {"fake-lib.sh": {"sourced": True}}
+        bad = self._check('bash "$CODE_DIR/auditor/scripts/fake-lib.sh"', contracts)
+        self.assertTrue(any("without sourcing" in s for s in bad), bad)
+        good = self._check('. "$CODE_DIR/auditor/scripts/fake-lib.sh"', contracts)
+        self.assertEqual(good, [], good)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -59,7 +59,7 @@ CLA_REQUIRED_OWNERS: frozenset[str] = frozenset({
 ECOSYSTEM_VENDORS: frozenset[str] = frozenset()
 
 #: Record shapes discovery emits. `fullName` is the gh-search shape; `repo_name` the query shape.
-REPO_KEYS = ("fullName", "repo_name")
+REPO_KEYS = ("fullName", "repo_name", "full_name")
 
 
 def is_vendor_default(repo):

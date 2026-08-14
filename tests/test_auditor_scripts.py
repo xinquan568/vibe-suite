@@ -274,30 +274,21 @@ class Test_parse_pr_metadata(unittest.TestCase):
         self.assertIn("WARN", r.stderr)
         self.assertEqual(json.loads(r.stdout), {}, "stdout stays {} so callers need no case")
 
-    def test_it_agrees_with_the_workflow_jq_that_reads_the_same_block(self):
-        """auditor-track.yml parses this block with jq `"g"` + `| last`.
-
-        Two implementations of one contract must agree; a divergence would split finding
-        attribution between the workflow and the helper, silently.
-        """
+    def test_the_workflow_feeds_from_this_helper_not_a_second_regex(self):
+        """This test used to hold TWO implementations of the block contract in
+        agreement (the helper and auditor-track.yml's inline jq regex). vibe-167
+        retired the second implementation: the workflow now pipes the PR body
+        through this helper, so the pin inverts — the inline regex must STAY gone,
+        and the tail-most-block-wins behavior it existed to check lives here."""
+        track = (REPO / "auditor" / "workflows" / "auditor-track.yml").read_text()
+        self.assertIn("parse-pr-metadata.py", track,
+                      "auditor-track.yml no longer feeds from the helper")
+        self.assertNotIn('vibe-suite-auditor-meta-begin\\\\s*(\\\\{', track,
+                         "an inline copy of the metadata regex came back — two "
+                         "implementations of one contract, free to disagree")
         body = f"a\n{self.BLOCK.format(fp='first')}\nb\n{self.BLOCK.format(fp='second')}\nc\n"
         mine = json.loads(self._run(body).stdout)["findings"][0]["fingerprint"]
-
-        # Extract the regex FROM auditor-track.yml rather than restating it. A copy here could
-        # drift from the workflow and the test would then be comparing the helper against a
-        # regex nobody runs — which is precisely the failure this test exists to prevent.
-        track = (REPO / "auditor" / "workflows" / "auditor-track.yml").read_text()
-        m = re.search(r'match\("(<!--.*?vibe-suite-auditor-meta-end[^"]*)"; "g"\)', track)
-        self.assertIsNotNone(m, "auditor-track.yml no longer contains the metadata regex")
-        pattern = m.group(1)
-
-        jq = subprocess.run(
-            ["jq", "-R", "-s", "-r",
-             f'[match("{pattern}"; "g")] | last | .captures[0].string '
-             f'| fromjson | .findings[0].fingerprint'],
-            input=body, capture_output=True, text=True)
-        self.assertEqual(jq.returncode, 0, jq.stderr)
-        self.assertEqual(mine, jq.stdout.strip(), "helper and workflow jq disagree")
+        self.assertEqual(mine, "second", "the tail-most block wins")
 
     # --- mutants ------------------------------------------------------------------------
     def test_a_no_op_helper_fails_the_oracle(self):
@@ -414,6 +405,17 @@ class Test_parse_suppressions(unittest.TestCase):
 
 class Test_vendor_default_filter(unittest.TestCase):
     """`vendor_default_filter.py` — drop candidates no PR can ever land against."""
+
+    def test_the_gh_search_snake_case_shape_is_recognized(self):
+        # vibe-167: discover's search stream carries `full_name`; a filter that only
+        # knows fullName/repo_name silently keeps every denied owner in that stream
+        import subprocess, sys, json as _json
+        rec = _json.dumps({"full_name": "anthropics/claude-code"})
+        r = subprocess.run([sys.executable, str(self.HELPER)], input=rec + "\n",
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "",
+                         "a DENY_OWNERS repo under the full_name key passed through")
 
     HELPER = SCRIPTS / "vendor_default_filter.py"
     RECORDS = [

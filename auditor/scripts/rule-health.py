@@ -322,8 +322,8 @@ def main(argv=None):
     # parallel fingerprints[]/rule_ids[] arrays), dissent by type, and downstream
     # suppressions at REPO grain — one repository suppressing a rule twice is one
     # suppressing repository, however many paths or types it used.
-    rejected_fps, pushback_fps = {}, {}
-    dissent_counts = {}
+    rejected_set, pushback_set = set(), set()
+    dissent_of_fp = {}
     suppression_events, suppressing_repos = {}, {}
     event_repos = set()
     for record in read_jsonl(data_dir / "ledgers" / "disagreements.jsonl"):
@@ -334,20 +334,26 @@ def main(argv=None):
             if data.get("rule_id"):
                 rule_of.setdefault(str(data["fingerprint"]), str(data["rule_id"]))
         elif kind in ("maintainer_rejected", "maintainer_pushback"):
+            # ONE GRAIN FOR NUMERATOR AND DENOMINATOR. The event's rule_ids only
+            # SEED rule_of for fingerprints nothing else attributed; the rollup
+            # below buckets every adjudication by the fingerprint's CANONICAL
+            # rule — the rule its `contributed` membership lands under. Bucketing
+            # by the event's own claim let two mis-claimed rejections outnumber a
+            # rule's one contributed finding: rate 2.0, impossible arithmetic.
             fps = data.get("fingerprints") or []
             rids = data.get("rule_ids") or []
-            bucket = rejected_fps if kind == "maintainer_rejected" else pushback_fps
+            bucket = rejected_set if kind == "maintainer_rejected" else pushback_set
             for index, fingerprint in enumerate(fps):
-                rule = str(rids[index]) if index < len(rids) and rids[index] else                     rule_of.get(str(fingerprint))
-                if not rule:
+                key = str(fingerprint)
+                if index < len(rids) and rids[index]:
+                    rule_of.setdefault(key, str(rids[index]))
+                if key not in rule_of:
                     continue
-                rule_of.setdefault(str(fingerprint), rule)
-                bucket.setdefault(rule, set()).add(str(fingerprint))
-                pr_fps.add(str(fingerprint))
+                bucket.add(key)
+                pr_fps.add(key)
                 dissent = str(data.get("dissent_type") or "")
                 if dissent:
-                    dissent_counts.setdefault(rule, {})
-                    dissent_counts[rule][dissent] = dissent_counts[rule].get(dissent, 0) + 1
+                    dissent_of_fp.setdefault(key, []).append(dissent)
         elif kind == "downstream_suppression":
             rule = str(data.get("rule_id") or "")
             repo = str(data.get("repo") or "")
@@ -415,11 +421,16 @@ def main(argv=None):
         row["effect_precision"] = ratio(row["verified_fixed"], row["verified_total"])
         row["contributed"] = len(contributed_fps.get(rule, ()))
         row["intent_precision"] = ratio(row["merged"], row["contributed"])
-        row["maintainer_rejected"] = len(rejected_fps.get(rule, ()))
-        row["maintainer_pushback"] = len(pushback_fps.get(rule, ()))
+        rule_fps = {fp for fp, r in rule_of.items() if r == rule}
+        row["maintainer_rejected"] = len(rejected_set & rule_fps)
+        row["maintainer_pushback"] = len(pushback_set & rule_fps)
         row["maintainer_rejection_rate"] = ratio(row["maintainer_rejected"],
                                                  row["contributed"])
-        distribution = dict(sorted(dissent_counts.get(rule, {}).items()))
+        tallies = {}
+        for fp in sorted(rule_fps):
+            for dissent in dissent_of_fp.get(fp, ()):
+                tallies[dissent] = tallies.get(dissent, 0) + 1
+        distribution = dict(sorted(tallies.items()))
         row["dissent_types"] = distribution
         # a categorical enum has no median (§12's word); the MODE is emitted, ties
         # breaking to the lexicographically smallest tied value — deterministic

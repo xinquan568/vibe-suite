@@ -66,7 +66,7 @@ jobs:
           # unconditionally; a real docs build dropped in later must survive), the §7
           # envelope counts for the event, and the event append via the shared library.
           KEEP_DOCS=""
-          if [ -f "$DOCS/index.html" ] && ! grep -q "generated-by-auditor-render-dashboard" "$DOCS/index.html"; then
+          if [ -f "$DOCS/index.html" ] && ! grep -qF -- "<!-- generated-by-auditor-render-dashboard -->" "$DOCS/index.html"; then
             KEEP_DOCS="$(mktemp)"
             cp "$DOCS/index.html" "$KEEP_DOCS"
           fi

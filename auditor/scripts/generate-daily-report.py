@@ -76,6 +76,10 @@ def render(date, registry, outcomes, rule_health, activity):
     lines += ["## Contribution outcomes", "", "| Metric | Value |", "|---|---|"]
     for name in RESOLVED:
         lines.append(f"| {name} | {int(outcomes.get(name, 0))} |")
+    # vibe-167 F4: outcomes beyond the fixed rows — cla_blocked today, whatever
+    # arrives tomorrow — were displayed by the old dynamic report and stay visible
+    for name in sorted(set(outcomes) - set(RESOLVED) - {"open"}):
+        lines.append(f"| {name} | {int(outcomes.get(name, 0))} |")
     lines += [f"| open (not counted as resolved) | {int(outcomes.get('open', 0))} |",
               f"| resolved | {resolved} |",
               f"| **acceptance rate** (merged + applied separately) | **{pct(acceptance)}** |",

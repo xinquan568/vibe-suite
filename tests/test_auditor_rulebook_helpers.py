@@ -490,6 +490,41 @@ class Test_rule_health_section12(unittest.TestCase):
         self.assertEqual(row["maintainer_rejected"], 1)
         self.assertLessEqual(row["maintainer_rejection_rate"], 1)
 
+    def test_misclaimed_event_rules_cannot_break_the_rate_bound(self):
+        """F1 iteration 2: rejection events CLAIMING R02 against fingerprints the
+        registry attributes to R01 must roll up under R01 — one grain for numerator
+        and denominator, so no rule's rate can exceed 1."""
+        registry = {"repos": {"acme/w": {"prs": {
+            "1": {"number": 1, "updatedAt": "2026-04-01T00:00:00Z", "outcome": "open",
+                  "fingerprints": ["fp-1", "fp-2"], "rule_ids": ["R01", "R01"]},
+            "2": {"number": 2, "updatedAt": "2026-04-02T00:00:00Z", "outcome": "open",
+                  "fingerprints": ["fp-3"], "rule_ids": ["R02"]},
+        }}}}
+        events = [envelope("maintainer_rejected",
+                           {"pr": "acme/w#1", "fingerprints": [fp],
+                            "rule_ids": ["R02"], "dissent_type": "out_of_scope",
+                            "quote": "q", "commenter_role": "maintainer",
+                            "classifier_model": "m", "classifier_confidence": "high"},
+                           "2026-04-03T00:00:00Z") for fp in ("fp-1", "fp-2")]
+        d = Path(tempfile.mkdtemp())
+        for sub in ("ledgers", "registry", "exemplars"):
+            (d / sub).mkdir()
+        (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
+        (d / "ledgers" / "disagreements.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(json.dumps(registry),
+                                                   encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rules = {r["rule_id"]: r
+                 for r in json.loads((d / "feedback" / "log.json").read_text())["rules"]}
+        self.assertEqual(rules["R01"]["maintainer_rejected"], 2)
+        self.assertLessEqual(rules["R01"]["maintainer_rejection_rate"], 1)
+        self.assertEqual(rules["R02"]["maintainer_rejected"], 0,
+                         "the events' mis-claimed rule must receive nothing")
+        self.assertLessEqual(rules["R02"]["maintainer_rejection_rate"] or 0, 1)
+
     def test_a_disagreement_only_legacy_fingerprint_is_contributed(self):
         """F1: an adjudication event IS proof the finding reached a PR, even when
         the registry predates the metadata block and holds no record of it."""

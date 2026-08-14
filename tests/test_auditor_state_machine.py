@@ -1502,8 +1502,11 @@ class TestRenderDashboardWiring(unittest.TestCase):
     def test_a_foreign_page_with_another_generators_stamp_is_preserved(self):
         docs = self.sb.data / "reports" / "docs"
         docs.mkdir(parents=True)
+        # the FORK stamp shares our stamp as a prefix — a substring match would
+        # misclassify it as ours and clobber it (verify iteration 2)
         (docs / "index.html").write_text(
-            "<html><!-- generated-by-vibe-build-docs -->the real docs build</html>")
+            "<html><!-- generated-by-auditor-render-dashboard-fork -->"
+            "the real docs build</html>")
         r = self.sb.run("set -euo pipefail\n" + self.block, env={"CODE_DIR": str(REPO)})
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("the real docs build", (docs / "index.html").read_text(),

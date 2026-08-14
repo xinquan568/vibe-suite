@@ -332,23 +332,12 @@ def scan(root, lister=git_lister, notice=None):
         # The ADDITIVE decoded layer (#165 item 3): string literals decoded by
         # the file's own language, deduped against the raw findings above so a
         # plainly-written pin inside a literal reports once. Attribution
-        # inside a MULTILINE literal: when the decoded newline count equals
-        # the literal's physical span (Python triple-quoted, YAML literal
-        # blocks), newline counting is exact; otherwise (folded quoted
-        # scalars, escaped newlines) the find is located by searching the
-        # span's SOURCE lines for the token's longest literal prefix — an
-        # escape breaks the token's spelling at its backslash, so the text
-        # before the first escaped character appears verbatim. A fully
-        # escaped token has no such prefix and falls back to the literal's
-        # opening line; every reported line lies inside the literal.
+        # follows ONE rule, stated on _locate_in_span: the find reports the
+        # first span line carrying the token's longest verbatim substring.
         for start, end, value in decoded_strings(relpath, text):
-            exact = value.rstrip("\n").count("\n") == end - start
-            for offset, piece in enumerate(value.split("\n")):
+            for piece in value.split("\n"):
                 for token in find_pins(piece):
-                    if exact:
-                        number = min(start + offset, end)
-                    else:
-                        number = _locate_in_span(token, lines, start, end)
+                    number = _locate_in_span(token, lines, start, end)
                     source = lines[number - 1] if 0 < number <= len(lines) else ""
                     if (number, token) not in seen:
                         seen.add((number, token))
@@ -358,11 +347,22 @@ def scan(root, lister=git_lister, notice=None):
 
 
 def _locate_in_span(token, lines, start, end):
+    """The physical line of a decoded find: the FIRST span line carrying the
+    token's LONGEST verbatim substring of at least four characters. Escapes
+    break a token's spelling at their backslashes, so its unescaped runs
+    appear verbatim on the line that carries them, and a plainly-written
+    token appears whole — those cases are exact. A token whose literal runs
+    are all shorter than four characters cannot be located and reports the
+    literal's opening line: always inside the literal, never outside it.
+    Longest substring first, leftmost first, earliest line first — the
+    attribution is deterministic."""
+    last = min(end, len(lines))
     for length in range(len(token), 3, -1):
-        needle = token[:length]
-        for number in range(start, min(end, len(lines)) + 1):
-            if needle in lines[number - 1]:
-                return number
+        for offset in range(0, len(token) - length + 1):
+            needle = token[offset:offset + length]
+            for number in range(start, last + 1):
+                if needle in lines[number - 1]:
+                    return number
     return start
 
 

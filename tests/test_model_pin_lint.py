@@ -502,7 +502,7 @@ class EscapedPinsAreDetected(unittest.TestCase):
 
     def test_a_multiline_python_literal_reports_the_pin_line(self):
         """Step-8 F1: a pin inside a triple-quoted literal is attributed to
-        ITS line — the decoded value's physical newlines carry the offset."""
+        ITS line — the token's literal prefix appears verbatim there."""
         with tempfile.TemporaryDirectory() as tmp:
             _write(tmp, "scripts/m.py",
                    'DOC = """heading\n'
@@ -521,8 +521,8 @@ class EscapedPinsAreDetected(unittest.TestCase):
 
     def test_a_folded_quoted_scalar_reports_the_pin_line(self):
         """Step-9 F1 residue: a YAML multiline QUOTED scalar folds physical
-        newlines away, so newline counting cannot place the find — the
-        locator finds the physical line carrying the token's literal prefix
+        newlines away, so no offset can place the find — the locator finds
+        the span line carrying the token's longest verbatim substring
         (`gpt-` here; the escape breaks the spelling at its backslash)."""
         with tempfile.TemporaryDirectory() as tmp:
             _write(tmp, "skills/f.yml",
@@ -531,9 +531,43 @@ class EscapedPinsAreDetected(unittest.TestCase):
             self.assertEqual([(v.path, v.line, v.token) for v in found],
                              [("skills/f.yml", 2, "gpt-5")])
 
+    def test_a_short_prefix_is_located_by_its_suffix_run(self):
+        """Iteration-2 F1 residue: `o\\u0033-mini` leaves only a one-char
+        literal PREFIX, but its `-mini` run appears verbatim — the locator
+        searches every substring, not prefixes alone."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "skills/s.yml",
+                   'a: "head\n  o\\u0033-mini\n  tail"\n')
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.path, v.line, v.token) for v in found],
+                             [("skills/s.yml", 2, "o3-mini")])
+
+    def test_a_cancelling_newline_pair_cannot_fool_the_locator(self):
+        """Iteration-2 F1 residue: a line-continuation REMOVES a physical
+        newline while an escaped \\n ADDS a decoded one — offset counting
+        cancels numerically and lies; substring location does not count
+        newlines at all."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "scripts/c.py",
+                   'DOC = """head \\\ngpt-\\u0035\\nmiddle\ntail"""\n')
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.path, v.line, v.token) for v in found],
+                             [("scripts/c.py", 2, "gpt-5")])
+
+    def test_all_short_runs_fall_back_to_the_opening_line(self):
+        """The declared boundary, pinned: every literal run shorter than
+        four characters (`o`, `-m`, `ni`) locates nothing, and the find
+        reports the literal's opening line — inside the literal."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "skills/h.yml",
+                   'a: "x\n  o\\u0033-m\\u0069ni\n  y"\n')
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.path, v.line, v.token) for v in found],
+                             [("skills/h.yml", 1, "o3-mini")])
+
     def test_a_fully_escaped_token_falls_back_to_the_opening_line(self):
         """The declared boundary: with EVERY character escaped there is no
-        literal prefix to locate, and the find reports the literal's opening
+        verbatim run to locate, and the find reports the literal's opening
         line — inside the literal, never outside it."""
         with tempfile.TemporaryDirectory() as tmp:
             _write(tmp, "skills/g.yml",
@@ -544,8 +578,8 @@ class EscapedPinsAreDetected(unittest.TestCase):
 
     def test_an_escaped_newline_stays_clamped_inside_the_literal(self):
         """A decoded newline that was itself an ESCAPE moves no line: the
-        attribution clamps to the literal's recorded end, so the report can
-        never point outside the literal."""
+        token's verbatim run sits on the literal's only physical line, and
+        the report stays there."""
         with tempfile.TemporaryDirectory() as tmp:
             _write(tmp, "schemas/m.json", '{"x": "a\\ngpt-\\u0035"}\n')
             found = lint.scan(tmp, lister=_tree_lister)

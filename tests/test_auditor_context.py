@@ -640,23 +640,41 @@ def _steps(job_body):
 def _heredoc_delim(code, j):
     """Parse a heredoc delimiter WORD at j the way the shell reads it:
     quote-removal applied, and quoted=True when ANY part was escaped or
-    quoted (`<<\\EOF`, `<<E\\OF`, `<<'EOF'`, `<<"EO"F` are all the quoted
-    delimiter EOF). Returns (delimiter, quoted, next_index); an empty
-    delimiter means no heredoc starts here."""
-    out, quoted, n = [], False, len(code)
+    quoted (`<<\\EOF`, `<<E\\OF`, `<<'EOF'`, `<<"EO"F`, `<<"E\\"OF"` are the
+    quoted delimiters EOF, EOF, EOF, EOF and E"OF). Inside a double-quoted
+    segment the backslash is special only before `$`, backquote, `"`, `\\`
+    and newline — bash's rule; single-quoted segments carry no escapes.
+    Returns (delimiter, quoted, next_index); an empty delimiter (including
+    any unclosed quote) means no heredoc starts here."""
+    out, quoted, n, j0 = [], False, len(code), j
     while j < n and code[j] not in " \t\n;|&<>()":
         c = code[j]
         if c == "\\" and j + 1 < n:
             out.append(code[j + 1])
             quoted = True
             j += 2
-        elif c in "'\"":
+        elif c == "'":
             k = code.find(c, j + 1)
             if k < 0:
-                break
+                return "", False, j0
             out.append(code[j + 1:k])
             quoted = True
             j = k + 1
+        elif c == '"':
+            j += 1
+            seg = []
+            while j < n and code[j] != '"':
+                if code[j] == "\\" and j + 1 < n and code[j + 1] in '$`"\\\n':
+                    seg.append(code[j + 1])
+                    j += 2
+                else:
+                    seg.append(code[j])
+                    j += 1
+            if j >= n:
+                return "", False, j0
+            out.append("".join(seg))
+            quoted = True
+            j += 1
         else:
             out.append(c)
             j += 1
@@ -1157,6 +1175,11 @@ class TestTheBindingScanItselfCatches(unittest.TestCase):
         self.assertIn("HD_Y", _unbound_names(job))
         job = self._job('cat <<END-MARK\n${HD_R}\nEND-MARK')
         self.assertIn("HD_R", _unbound_names(job))
+        # Iteration-2 residue: an ESCAPED quote inside a double-quoted
+        # segment belongs to the delimiter (bash's rule) — `<<"E\"OF"` ends
+        # at the real terminator E"OF, so the read after it is seen.
+        job = self._job('cat <<"E\\"OF"\nHD_Z=1\nE"OF\necho "$HD_Z"')
+        self.assertIn("HD_Z", _unbound_names(job))
 
     def test_an_escaped_space_keeps_a_stacked_assignment_plain(self):
         # Step-9 F2 residue: `SECOND=two\ words` is ONE value word to the

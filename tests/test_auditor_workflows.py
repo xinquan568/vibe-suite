@@ -1999,6 +1999,120 @@ HELPER_OBLIGATIONS = {
 }
 
 
+def _split_commands(line):
+    """Quote-aware command segmentation for `check_call_sites`.
+
+    Returns (prev_separator, text, has_stdin_redirect) triples. Built character-wise
+    because token-level splitting after shlex cannot tell a PIPE from a quoted "|"
+    argument — the difference between a command position and a spoof. Unquoted
+    `$( … )` contents recurse as their own lines (each inner command is validated
+    with its own argv — nesting cannot hide a flag), leaving a placeholder token as
+    the outer value. An unquoted redirect ends the command's argv: the redirect's
+    target belongs to the redirect, never to a flag."""
+    segments = []
+
+    def scan(text):
+        cur, sep, stdin_in = [], "", False
+        i, n, quote = 0, len(text), None
+
+        def flush(new_sep):
+            nonlocal cur, sep, stdin_in
+            body = "".join(cur).strip()
+            if body:
+                segments.append((sep, body, stdin_in))
+            cur, sep, stdin_in = [], new_sep, False
+
+        while i < n:
+            c = text[i]
+            if quote == '"' and text[i:i + 2] == "$(":
+                # the shell substitutes inside double quotes; recurse there too,
+                # leaving the placeholder inside the quoted value
+                depth, j, q2 = 1, i + 2, None
+                while j < n and depth:
+                    d = text[j]
+                    if q2:
+                        if d == q2:
+                            q2 = None
+                    elif d in "'\"":
+                        q2 = d
+                    elif text[j:j + 2] == "$(":
+                        depth += 1
+                        j += 1
+                    elif d == "(":
+                        depth += 1
+                    elif d == ")":
+                        depth -= 1
+                    j += 1
+                scan(text[i + 2:j - 1])
+                cur.append("__SUBST__")
+                i = j
+                continue
+            if quote:
+                cur.append(c)
+                if c == quote:
+                    quote = None
+                i += 1
+                continue
+            if c in "'\"":
+                quote = c
+                cur.append(c)
+                i += 1
+                continue
+            if text[i:i + 2] == "$(":
+                depth, j, q2 = 1, i + 2, None
+                while j < n and depth:
+                    d = text[j]
+                    if q2:
+                        if d == q2:
+                            q2 = None
+                    elif d in "'\"":
+                        q2 = d
+                    elif text[j:j + 2] == "$(":
+                        depth += 1
+                        j += 1
+                    elif d == "(":
+                        depth += 1
+                    elif d == ")":
+                        depth -= 1
+                    j += 1
+                scan(text[i + 2:j - 1])
+                cur.append(" __SUBST__ ")
+                i = j
+                continue
+            if c in ";&|":
+                two = text[i:i + 2]
+                if two in ("&&", "||"):
+                    flush(two)
+                    i += 2
+                else:
+                    flush(c)
+                    i += 1
+                continue
+            if c in "<>":
+                if c == "<":
+                    stdin_in = True
+                # a digit prefix (2>>) is part of the redirect, not an argument
+                while cur and cur[-1].isdigit():
+                    cur.pop()
+                # consume the whole redirect operator and its target
+                while i < n and text[i] in "<>&":
+                    i += 1
+                while i < n and text[i] == " ":
+                    i += 1
+                while i < n and text[i] not in " ;&|":
+                    i += 1
+                had_stdin = stdin_in
+                flush("")
+                stdin_in = had_stdin
+                continue
+            cur.append(c)
+            i += 1
+        flush("")
+
+    scan(line)
+    return segments
+
+
 def check_call_sites(workflow_texts, contracts, roster):
     """Every helper call site in every run block, checked fail-closed.
 
@@ -2016,44 +2130,27 @@ def check_call_sites(workflow_texts, contracts, roster):
             hits = [h for h in contracts if f"auditor/scripts/{h}" in line]
             if not hits:
                 continue
-            # VAR="$(python3 …)" swallows the whole invocation into one shlex
-            # token; unwrap the assignment-substitution form (opener and its
-            # trailing closer together, so quote parity survives) — the value
-            # form --flag "$(cmd)/x" is deliberately untouched
-            if re.search(r'\b[A-Za-z_][A-Za-z0-9_]*="\$\(', line):
-                unwrapped = re.sub(r'\b[A-Za-z_][A-Za-z0-9_]*="\$\(', ' ', line)
-                unwrapped = re.sub(r'\)"(?!\S)', ' ', unwrapped)
-                # nested substitutions can lose parity under this rewrite; keep the
-                # original line then, so shlex fails CLOSED instead of validating a
-                # corrupted rendering of the site
-                if unwrapped.count('"') % 2 == 0:
-                    line = unwrapped
-            try:
-                tokens = shlex.split(line, comments=True)
-            except ValueError:
+            raw_segments = _split_commands(line)
+            segments, bad_parse = [], False
+            for sep, body, stdin_in in raw_segments:
+                try:
+                    seg_tokens = shlex.split(body, comments=True)
+                except ValueError:
+                    bad_parse = True
+                    continue
+                if seg_tokens:
+                    segments.append((sep, seg_tokens, stdin_in))
+            if bad_parse:
                 for helper in hits:
                     if (wf_name, helper) not in roster:
                         violations.append(f"{wf_name}:{line_no} {helper}: unparseable "
                                           f"call site and not on the extracted-run roster")
-                continue
-            segments, current, prev_sep = [], [], ""
-            for token in tokens:
-                parts = [t for t in re.split(r"(;|\|\||&&|\|)", token) if t]
-                for part in parts:
-                    if part in (";", "&&", "||", "|"):
-                        if current:
-                            segments.append((prev_sep, current))
-                        prev_sep, current = part, []
-                    else:
-                        current.append(part)
-            if current:
-                segments.append((prev_sep, current))
             for helper in hits:
                 needle = f"auditor/scripts/{helper}"
                 contract = contracts[helper]
                 where = f"{wf_name}:{line_no} {helper}"
                 found = False
-                for sep, segment in segments:
+                for sep, segment, stdin_in in segments:
                     indices = [i for i, t in enumerate(segment) if needle in t]
                     if not indices:
                         continue
@@ -2080,8 +2177,7 @@ def check_call_sites(workflow_texts, contracts, roster):
                                           f"interpreter invocation in command "
                                           f"position (a mention is not a call)")
                         continue
-                    if contract.get("stdin") and sep != "|" \
-                            and not any(t == "<" for t in segment):
+                    if contract.get("stdin") and sep != "|" and not stdin_in:
                         violations.append(f"{where}: stdin helper invoked without "
                                           f"piped or redirected input")
                     args = segment[index + 1:]
@@ -2487,6 +2583,30 @@ class TestCallSiteArguments(unittest.TestCase):
                         '--data-dir "unclosed)')
         self.assertTrue(v, "a parity-breaking site produced zero violations — the "
                            "corrupted rendering was validated")
+
+    def test_mutation_quoted_pipe_cannot_spoof_command_position(self):
+        # iteration 4: a quoted "|" is an argument, not a separator — the segment's
+        # command is still echo, and a mention is not a call
+        v = self._check('echo "|" python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d')
+        self.assertTrue(any("command position" in s for s in v), v)
+
+    def test_mutation_quoted_stdin_char_does_not_satisfy_the_contract(self):
+        contracts = {"fake-helper.py": {"required": set(), "allowed": set(),
+                                        "stdin": True, "positionals": (0, 5)}}
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" "<"',
+                        contracts)
+        self.assertTrue(any("without piped" in s for s in v), v)
+
+    def test_mutation_attached_redirect_is_not_a_value(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir 2>>err.log')
+        self.assertTrue(any("missing its value" in s for s in v), v)
+
+    def test_mutation_two_substitutions_cannot_hide_a_flag(self):
+        v = self._check('A="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--wrong "$(dirname "$X")")" B="$(date -u)"')
+        self.assertTrue(any("unknown flags" in s for s in v), v)
 
     def test_mutation_sourced_library_must_be_sourced(self):
         contracts = {"fake-lib.sh": {"sourced": True}}

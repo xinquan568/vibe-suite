@@ -331,22 +331,39 @@ def scan(root, lister=git_lister, notice=None):
                     violations.append(Violation(relpath, number, token, line))
         # The ADDITIVE decoded layer (#165 item 3): string literals decoded by
         # the file's own language, deduped against the raw findings above so a
-        # plainly-written pin inside a literal reports once. A find inside a
-        # MULTILINE literal is attributed by counting the decoded value's
-        # newlines — exact when those newlines are physical (Python
-        # triple-quoted, YAML block scalars), and clamped to the literal's
-        # recorded end line when they were themselves spelled as escapes, so
-        # the reported line always falls inside the literal.
+        # plainly-written pin inside a literal reports once. Attribution
+        # inside a MULTILINE literal: when the decoded newline count equals
+        # the literal's physical span (Python triple-quoted, YAML literal
+        # blocks), newline counting is exact; otherwise (folded quoted
+        # scalars, escaped newlines) the find is located by searching the
+        # span's SOURCE lines for the token's longest literal prefix — an
+        # escape breaks the token's spelling at its backslash, so the text
+        # before the first escaped character appears verbatim. A fully
+        # escaped token has no such prefix and falls back to the literal's
+        # opening line; every reported line lies inside the literal.
         for start, end, value in decoded_strings(relpath, text):
+            exact = value.rstrip("\n").count("\n") == end - start
             for offset, piece in enumerate(value.split("\n")):
-                number = min(start + offset, end)
-                source = lines[number - 1] if 0 < number <= len(lines) else ""
                 for token in find_pins(piece):
+                    if exact:
+                        number = min(start + offset, end)
+                    else:
+                        number = _locate_in_span(token, lines, start, end)
+                    source = lines[number - 1] if 0 < number <= len(lines) else ""
                     if (number, token) not in seen:
                         seen.add((number, token))
                         violations.append(
                             Violation(relpath, number, token, source))
     return violations
+
+
+def _locate_in_span(token, lines, start, end):
+    for length in range(len(token), 3, -1):
+        needle = token[:length]
+        for number in range(start, min(end, len(lines)) + 1):
+            if needle in lines[number - 1]:
+                return number
+    return start
 
 
 def main(argv=None):

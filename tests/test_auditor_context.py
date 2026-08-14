@@ -637,6 +637,32 @@ def _steps(job_body):
     return "\n".join(pre), steps
 
 
+def _heredoc_delim(code, j):
+    """Parse a heredoc delimiter WORD at j the way the shell reads it:
+    quote-removal applied, and quoted=True when ANY part was escaped or
+    quoted (`<<\\EOF`, `<<E\\OF`, `<<'EOF'`, `<<"EO"F` are all the quoted
+    delimiter EOF). Returns (delimiter, quoted, next_index); an empty
+    delimiter means no heredoc starts here."""
+    out, quoted, n = [], False, len(code)
+    while j < n and code[j] not in " \t\n;|&<>()":
+        c = code[j]
+        if c == "\\" and j + 1 < n:
+            out.append(code[j + 1])
+            quoted = True
+            j += 2
+        elif c in "'\"":
+            k = code.find(c, j + 1)
+            if k < 0:
+                break
+            out.append(code[j + 1:k])
+            quoted = True
+            j = k + 1
+        else:
+            out.append(c)
+            j += 1
+    return "".join(out), quoted, j
+
+
 def _shell_views(code):
     """Two views of a step's code, honest about SHELL STRING semantics (#165 4-body).
 
@@ -763,28 +789,11 @@ def _shell_views(code):
                 j += 1
             while j < n and code[j] in " \t":
                 j += 1
-            if j < n and code[j] in "'\"":
-                quote = code[j]
-                k = code.find(quote, j + 1)
-                if k > j:
-                    pending.append((code[j + 1:k], True))
-                    emit(code[i:k + 1], code[i:k + 1])
-                    i = k + 1
-                    continue
-            if j < n and code[j] == "\\":
-                # `<<\EOF` — a backslash-quoted delimiter is QUOTED to the
-                # shell: the body does not interpolate.
-                m = re.match(r"[A-Za-z0-9_]+", code[j + 1:])
-                if m:
-                    pending.append((m.group(0), True))
-                    emit(code[i:j + 1 + m.end()], code[i:j + 1 + m.end()])
-                    i = j + 1 + m.end()
-                    continue
-            m = re.match(r"[A-Za-z0-9_]+", code[j:])
-            if m:
-                pending.append((m.group(0), False))
-                emit(code[i:j + m.end()], code[i:j + m.end()])
-                i = j + m.end()
+            delim, dquoted, k = _heredoc_delim(code, j)
+            if delim:
+                pending.append((delim, dquoted))
+                emit(code[i:k], code[i:k])
+                i = k
                 continue
             emit(ch, ch)
             i += 1
@@ -811,11 +820,11 @@ def _crediting_assignments(assign_line, assign_re):
         # words — collected, because a line of NOTHING BUT assignments
         # (`FIRST=1 SECOND=2`) binds every one of them, while the same stack
         # before a command word is a prefix binding none for later lines.
-        rest = re.sub(r"^[^\s;|&<>#]*", "", rest)
+        rest = re.sub(r"^(?:\\.|[^\s;|&<>#])*", "", rest)
         stacked = [m.group(1)]
         while True:
             nxt = re.match(r"\s+(?:export\s+|local\s+)?"
-                           r"([A-Z][A-Z0-9_]*)=[^\s;|&<>#]*", rest)
+                           r"([A-Z][A-Z0-9_]*)=(?:\\.|[^\s;|&<>#])*", rest)
             if not nxt:
                 break
             stacked.append(nxt.group(1))
@@ -1134,6 +1143,25 @@ class TestTheBindingScanItselfCatches(unittest.TestCase):
         job = self._job('cat <<\\EOF\nHD_DATA=x\nEOF\necho "$HD_DATA"')
         self.assertIn("HD_DATA", _unbound_names(job))
         job = self._job('cat <<\\EOF\n${HD_QUIET}\nEOF')
+        self.assertEqual([], _unbound_names(job))
+
+    def test_heredoc_delimiters_are_parsed_as_shell_words(self):
+        # Step-9 F3 residue: the delimiter WORD takes shell quote-removal —
+        # `<<\END-MARK` is the quoted delimiter END-MARK (hyphen included),
+        # so the terminator is recognized and code AFTER it still executes;
+        # `<<E\OF` is the quoted delimiter EOF; an UNQUOTED hyphen delimiter
+        # interpolates its body like any other unquoted one.
+        job = self._job('cat <<\\END-MARK\nHD_X=1\nEND-MARK\necho "$HD_X"')
+        self.assertIn("HD_X", _unbound_names(job))
+        job = self._job("cat <<E\\OF\nHD_Y=1\nEOF\necho \"$HD_Y\"")
+        self.assertIn("HD_Y", _unbound_names(job))
+        job = self._job('cat <<END-MARK\n${HD_R}\nEND-MARK')
+        self.assertIn("HD_R", _unbound_names(job))
+
+    def test_an_escaped_space_keeps_a_stacked_assignment_plain(self):
+        # Step-9 F2 residue: `SECOND=two\ words` is ONE value word to the
+        # shell — the line is still nothing but assignments and binds both.
+        job = self._job('FIRST=1 SECOND=two\\ words\necho "$SECOND"')
         self.assertEqual([], _unbound_names(job))
 
     def test_a_lowercase_name_is_outside_the_scanned_space(self):

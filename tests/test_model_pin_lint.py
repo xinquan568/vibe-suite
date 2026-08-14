@@ -519,6 +519,29 @@ class EscapedPinsAreDetected(unittest.TestCase):
             self.assertEqual([(v.path, v.line, v.token) for v in found],
                              [("skills/m.yml", 3, "o3-mini")])
 
+    def test_a_folded_quoted_scalar_reports_the_pin_line(self):
+        """Step-9 F1 residue: a YAML multiline QUOTED scalar folds physical
+        newlines away, so newline counting cannot place the find — the
+        locator finds the physical line carrying the token's literal prefix
+        (`gpt-` here; the escape breaks the spelling at its backslash)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "skills/f.yml",
+                   'a: "head\n  gpt-\\u0035\n  tail"\n')
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.path, v.line, v.token) for v in found],
+                             [("skills/f.yml", 2, "gpt-5")])
+
+    def test_a_fully_escaped_token_falls_back_to_the_opening_line(self):
+        """The declared boundary: with EVERY character escaped there is no
+        literal prefix to locate, and the find reports the literal's opening
+        line — inside the literal, never outside it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "skills/g.yml",
+                   'a: "x\n  \\u0067\\u0070\\u0074-\\u0035\n  y"\n')
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.path, v.line, v.token) for v in found],
+                             [("skills/g.yml", 1, "gpt-5")])
+
     def test_an_escaped_newline_stays_clamped_inside_the_literal(self):
         """A decoded newline that was itself an ESCAPE moves no line: the
         attribution clamps to the literal's recorded end, so the report can

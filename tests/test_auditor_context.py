@@ -644,12 +644,32 @@ def _heredoc_delim(code, j):
     quoted delimiters EOF, EOF, EOF, EOF and E"OF). Inside a double-quoted
     segment the backslash is special only before `$`, backquote, `"`, `\\`
     and newline — bash's rule; single-quoted segments carry no escapes.
+    A backslash-newline pair is a LINE CONTINUATION in either context: both
+    characters are removed and the word continues, without making it quoted.
+    The continuation's next line first sheds the OPENING line's indentation:
+    the scan reads YAML-indented step text, and that common prefix is
+    exactly what YAML strips before the shell ever sees the block — spaces
+    beyond it stay in the word, as they would for the shell.
     Returns (delimiter, quoted, next_index); an empty delimiter (including
     any unclosed quote) means no heredoc starts here."""
     out, quoted, n, j0 = [], False, len(code), j
+    line_start = code.rfind("\n", 0, j0) + 1
+    opening = code[line_start:j0]
+    base_indent = len(opening) - len(opening.lstrip(" "))
+
+    def _shed_indent(j):
+        shed = 0
+        while j < n and code[j] == " " and shed < base_indent:
+            j += 1
+            shed += 1
+        return j
+
     while j < n and code[j] not in " \t\n;|&<>()":
         c = code[j]
         if c == "\\" and j + 1 < n:
+            if code[j + 1] == "\n":
+                j = _shed_indent(j + 2)
+                continue
             out.append(code[j + 1])
             quoted = True
             j += 2
@@ -665,6 +685,9 @@ def _heredoc_delim(code, j):
             seg = []
             while j < n and code[j] != '"':
                 if code[j] == "\\" and j + 1 < n and code[j + 1] in '$`"\\\n':
+                    if code[j + 1] == "\n":     # \<newline> removes BOTH
+                        j = _shed_indent(j + 2)
+                        continue
                     seg.append(code[j + 1])
                     j += 2
                 else:
@@ -1180,6 +1203,11 @@ class TestTheBindingScanItselfCatches(unittest.TestCase):
         # at the real terminator E"OF, so the read after it is seen.
         job = self._job('cat <<"E\\"OF"\nHD_Z=1\nE"OF\necho "$HD_Z"')
         self.assertIn("HD_Z", _unbound_names(job))
+        # Iteration-3 residue: backslash-newline inside the quoted word is a
+        # LINE CONTINUATION — both characters removed, delimiter EOF — so the
+        # body stays inert data and the read after the real terminator is seen.
+        job = self._job('cat <<"E\\\nOF"\nHD_N=1\nEOF\necho "$HD_N"')
+        self.assertIn("HD_N", _unbound_names(job))
 
     def test_an_escaped_space_keeps_a_stacked_assignment_plain(self):
         # Step-9 F2 residue: `SECOND=two\ words` is ONE value word to the

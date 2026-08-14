@@ -183,14 +183,14 @@ Contract points:
 
 ## 5. Disagreement records — `ledgers/disagreements.jsonl`
 
-Append-only JSONL; four event types share the one file. Every record carries `event`,
+Append-only JSONL; five event types share the one file. Every record carries `event`,
 `timestamp`, and a join handle (a fingerprint, a fingerprint array, or a PR reference).
 
 | Event | Fields | Notes |
 |---|---|---|
 | `self_false_positive` | repo, fingerprint, rule_id, reason, rule_gap | `rule_gap` is the learning payload |
 | `pr_comments_snapshot` | pr, pr_state, comments_hash, fingerprints[], rule_ids[], comments[] | raw thread captured at rejection; each comment body capped at 4000 chars; `comments_hash` = digest of the serialized (capped) comments — the classifier dedupe key |
-| `maintainer_rejected` | pr, fingerprints[], rule_ids[], dissent_type, quote, commenter_role, classifier_model, classifier_confidence | `dissent_type` ∈ {intentional_pattern, out_of_scope, style_disagreement, context_missed, rule_disputed}; `commenter_role` ∈ {maintainer, contributor, bot, unknown} — only maintainer weighs high; `classifier_confidence` ∈ {high, medium, low} — low is logged but down-weighted; `quote` capped at 200 chars |
+| `maintainer_rejected` | pr, fingerprints[], rule_ids[], dissent_type, quote, commenter_role, classifier_model, classifier_confidence | `dissent_type` ∈ {intentional_pattern, out_of_scope, style_disagreement, context_missed, rule_disputed, docs_citation}; `commenter_role` ∈ {maintainer, contributor, bot, unknown} — only maintainer weighs high; `classifier_confidence` ∈ {high, medium, low} — low is logged but down-weighted; `quote` capped at 200 chars |
 | `maintainer_pushback` | same shape as `maintainer_rejected` | for open or merged-despite-objection PRs; `fingerprints` is an array because bundled PRs need per-finding attribution |
 | `downstream_suppression` | repo, commit_sha, rule_id, suppression_type, reason_given (optional), path | `suppression_type` ∈ {suppress, max_penalty, threshold_adjustment, rule_override} |
 
@@ -314,20 +314,45 @@ exemplar files + the auto-generated gallery.
 ## 12. Learning query + derived metrics
 
 Join: findings ⋈ outcome events ⋈ verified events ⋈ disagreements — all on
-`fingerprint`, grouped by `rule_id`.
+`fingerprint`, grouped by `rule_id`. Computed by `rule-health.py` into
+`feedback/log.json`; gated by `validate-feedback.sh` (vibe-167).
 
-Per-rule metrics:
+Per-rule metrics, as emitted (additive on the pre-§12 row):
 
-- `hits / repos_audited` — reach
-- `merged / contributed` — intent precision
-- `verified_fixed / verified_total` — effect precision; the stricter, more load-bearing
-  signal, weighted above merged
-- `self_fp / hits`
-- `maintainer_rejected / contributed`
-- `downstream_suppression / deployments`
-- median `dissent_type`
+- `reach` = `repos_hit / repos_audited` — REPO grain: distinct repositories among the
+  rule's attributed findings over distinct repositories attributed to any finding.
+  Fingerprints with no recoverable repository are excluded from `repos_hit` and
+  counted in the `repos_unattributed` total, never silently dropped.
+- `intent_precision` = `merged / contributed`; `contributed` = unique fingerprints
+  that reached any PR.
+- `effect_precision` = `verified_fixed / verified_total` — the stricter, more
+  load-bearing signal, weighted above merged. A fingerprint's verification verdict is
+  its LATEST `finding_verified` event by timestamp (the ledger's standing
+  latest-outcome doctrine); `verified` is kept as a compatibility alias for
+  `verified_fixed`.
+- `false_positive_rate` = `false_positives / hits` (`self_fp / hits` in the original
+  query sketch).
+- `maintainer_rejection_rate` = `maintainer_rejected / contributed`;
+  `maintainer_rejected` and `maintainer_pushback` count unique fingerprints via the
+  events' parallel `fingerprints[]`/`rule_ids[]` arrays.
+- `suppression_rate` = `suppressing_repos / deployments` — REPO grain on both sides:
+  distinct repositories with a `downstream_suppression` event for the rule, over
+  `deployments` = distinct corpus repositories (`feedback/suppressions.jsonl` holds a
+  record per discovered config file, zero-override and parse-error rows included)
+  UNIONed with event repositories, so legacy event-only repositories sit in both the
+  numerator and the denominator and the ratio is a true proportion. The raw event
+  count is emitted as `downstream_suppressions` and is unbounded incidence.
+- `dissent_types{}` + `dissent_type_mode` — the full distribution and its MODE ("median
+  dissent_type" in the original sketch; a categorical enum has no median). Ties break
+  to the lexicographically smallest tied value, deterministically.
 
-Rule states: `healthy` / `noisy` / `dormant` / `disputed`.
+Rule states: `healthy` / `noisy` / `dormant` / `disputed`, at the refinement
+selector's thresholds (`MIN_HITS = 3`, `NOISY_FP_RATE = 0.30`,
+`DISPUTED_ACCEPTANCE = 0.50` — one policy, two files, held identical by a cross-pin
+test). Precedence mirrors `prepare-refinement-input.py`'s `classify()`: `dormant`
+(hits below the floor) before every other judgment, then `disputed` (acceptance below
+threshold with ≥ 1 resolution), then `noisy` (false-positive rate above threshold),
+else `healthy`.
 
 ## 13. Versioning invariants
 

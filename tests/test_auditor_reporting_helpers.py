@@ -20,6 +20,36 @@ from auditor_helpers_support import NOOP, REPO, SCRIPTS  # noqa: E402
 
 
 class Test_generate_daily_report(unittest.TestCase):
+
+    def test_non_enum_outcomes_are_rendered_not_hidden(self):
+        # vibe-167 F4 iteration 2: cla_blocked was in the old dynamic report
+        import json as _json, subprocess as _sp, sys as _sys, tempfile as _tf
+        from pathlib import Path as _P
+        d = _P(_tf.mkdtemp())
+        (d / "in").mkdir()
+        (d / "in" / "pr-outcomes.json").write_text(_json.dumps(
+            {"merged": 1, "cla_blocked": 2}))
+        r = _sp.run([_sys.executable, str(SCRIPTS / "generate-daily-report.py"),
+                     "--data-dir", str(d), "--inputs", str(d / "in"),
+                     "--date", "2026-08-14"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = (d / "reports" / "2026-08-14.md").read_text()
+        self.assertIn("| cla_blocked | 2 |", text)
+
+    def test_non_stage_statuses_are_rendered_not_hidden(self):
+        # vibe-167 (F4): policy_denied and friends are report facts
+        import json as _json, subprocess as _sp, sys as _sys, tempfile as _tf
+        from pathlib import Path as _P
+        d = _P(_tf.mkdtemp())
+        (d / "in").mkdir()
+        (d / "in" / "registry-stats.json").write_text(_json.dumps(
+            {"total": 3, "by_status": {"discovered": 1, "policy_denied": 2}}))
+        r = _sp.run([_sys.executable, str(SCRIPTS / "generate-daily-report.py"),
+                     "--data-dir", str(d), "--inputs", str(d / "in"),
+                     "--date", "2026-08-14"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = (d / "reports" / "2026-08-14.md").read_text()
+        self.assertIn("| policy_denied | 2 |", text)
     """`generate-daily-report.py` — the status page, and the two rates on it."""
 
     HELPER = SCRIPTS / "generate-daily-report.py"

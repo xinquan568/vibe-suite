@@ -1954,5 +1954,720 @@ class TestContributionHandoff(unittest.TestCase):
                         f"{sorted(written)} — nothing hands off")
 
 
+#: vibe-167 (E8.3 follow-up): every helper's obligations — a non-empty subset of
+#: {workflow-called, helper-called, operator}. The inventory test proves the thirty
+#: EXIST; this table plus TestHelperCallSites proves each is REACHED the way its own
+#: docstring intends. `operator` entries carry their individually-verified invocation
+#: policy; they are the only exemption from a call-site requirement, and the exemption
+#: is visible here rather than silent in a test's blind spot.
+#: log-event.sh note (plan amendment, step-9 F7): adopted where a rewired block
+#: APPENDS AN EVENT — daily-report and render-dashboard; the other four rewired
+#: duties append no events inside their marker regions, so sourcing the library
+#: there would be a call site with no call. Older inline appends elsewhere are
+#: legacy sites, kept as-is.
+HELPER_OBLIGATIONS = {
+    "atomic-registry-write.sh": {"helper-called"},
+    "backfill-findings.py": {"operator"},          # default dry run; --apply appends
+    "backfill-pr-fingerprints.py": {"operator"},   # default dry run; --apply writes
+    "batch-process.py": {"workflow-called"},
+    "build-exemplar-gallery.py": {"workflow-called"},
+    "commit-via-pr.sh": {"workflow-called"},
+    "compute-fingerprint.sh": {"workflow-called"},
+    "compute-vocab-fingerprint.sh": {"workflow-called"},
+    "diff-findings.py": {"workflow-called"},
+    "docs-diff.py": {"workflow-called"},
+    "generate-daily-report.py": {"workflow-called"},
+    "generate-rule-review-body.py": {"workflow-called"},
+    "git-push-with-retry.sh": {"workflow-called"},
+    "guard-protected-paths.sh": {"workflow-called"},
+    "log-event.sh": {"workflow-called"},
+    "parse-pr-metadata.py": {"workflow-called"},
+    "parse-suppressions.py": {"helper-called"},
+    "prepare-refinement-input.py": {"workflow-called"},
+    "propose-rule-citations.py": {"workflow-called"},
+    "render-dashboard.py": {"workflow-called", "helper-called"},
+    "render-repo-report.py": {"workflow-called"},
+    "repair-stale-statuses.py": {"operator"},      # writes by default; --dry-run reports
+    "resolve-merge-conflicts.sh": {"helper-called"},
+    "rule-health.py": {"workflow-called"},
+    "scan-suppressions.py": {"workflow-called"},
+    "synthesize-sidecar.py": {"helper-called"},
+    "three-way-merge-registry.py": {"helper-called"},
+    "validate-feedback.sh": {"workflow-called"},
+    "validate-rule-ids.py": {"workflow-called"},
+    "vendor_default_filter.py": {"workflow-called"},
+}
+
+
+def _split_commands(line):
+    """Quote-aware command segmentation for `check_call_sites`.
+
+    Returns (prev_separator, text, has_stdin_redirect) triples. Built character-wise
+    because token-level splitting after shlex cannot tell a PIPE from a quoted "|"
+    argument — the difference between a command position and a spoof. Unquoted
+    `$( … )` contents recurse as their own lines (each inner command is validated
+    with its own argv — nesting cannot hide a flag), leaving a placeholder token as
+    the outer value. An unquoted redirect ends the command's argv: the redirect's
+    target belongs to the redirect, never to a flag."""
+    segments = []
+    state = {"ok": True}
+
+    def scan(text):
+        cur, sep, stdin_in = [], "", False
+        i, n, quote = 0, len(text), None
+
+        def flush(new_sep):
+            nonlocal cur, sep, stdin_in
+            body = "".join(cur).strip()
+            if body:
+                segments.append((sep, body, stdin_in))
+            cur, sep, stdin_in = [], new_sep, False
+
+        while i < n:
+            c = text[i]
+            if quote == '"' and text[i:i + 2] == "$(":
+                # the shell substitutes inside double quotes; recurse there too,
+                # leaving the placeholder inside the quoted value
+                depth, j, q2 = 1, i + 2, None
+                while j < n and depth:
+                    d = text[j]
+                    if q2:
+                        if d == q2:
+                            q2 = None
+                    elif d in "'\"":
+                        q2 = d
+                    elif text[j:j + 2] == "$(":
+                        depth += 1
+                        j += 1
+                    elif d == "(":
+                        depth += 1
+                    elif d == ")":
+                        depth -= 1
+                    j += 1
+                if depth:
+                    # an unclosed $( reached EOF: slicing would silently truncate
+                    # the argv and validate a corrupted rendering — poison instead
+                    state["ok"] = False
+                    return
+                scan(text[i + 2:j - 1])
+                cur.append("__SUBST__")
+                i = j
+                continue
+            if quote:
+                cur.append(c)
+                if c == quote:
+                    quote = None
+                i += 1
+                continue
+            if c in "'\"":
+                quote = c
+                cur.append(c)
+                i += 1
+                continue
+            if text[i:i + 2] == "$(":
+                depth, j, q2 = 1, i + 2, None
+                while j < n and depth:
+                    d = text[j]
+                    if q2:
+                        if d == q2:
+                            q2 = None
+                    elif d in "'\"":
+                        q2 = d
+                    elif text[j:j + 2] == "$(":
+                        depth += 1
+                        j += 1
+                    elif d == "(":
+                        depth += 1
+                    elif d == ")":
+                        depth -= 1
+                    j += 1
+                if depth:
+                    # an unclosed $( reached EOF: slicing would silently truncate
+                    # the argv and validate a corrupted rendering — poison instead
+                    state["ok"] = False
+                    return
+                scan(text[i + 2:j - 1])
+                cur.append(" __SUBST__ ")
+                i = j
+                continue
+            if c in ";&|":
+                two = text[i:i + 2]
+                if two in ("&&", "||"):
+                    flush(two)
+                    i += 2
+                else:
+                    flush(c)
+                    i += 1
+                continue
+            if c in "<>":
+                if c == "<":
+                    stdin_in = True
+                # a digit prefix (2>>) is part of the redirect, not an argument
+                while cur and cur[-1].isdigit():
+                    cur.pop()
+                # consume the operator and its target INLINE — the shell keeps
+                # collecting arguments after a redirect, so ending argv here let
+                # `… 2>>err.log --wrong x` smuggle flags past validation
+                while i < n and text[i] in "<>&":
+                    i += 1
+                while i < n and text[i] == " ":
+                    i += 1
+                while i < n and text[i] not in " ;&|":
+                    i += 1
+                cur.append(" ")
+                continue
+            cur.append(c)
+            i += 1
+        flush("")
+
+    scan(line)
+    return segments, state["ok"]
+
+
+def check_call_sites(workflow_texts, contracts, roster):
+    """Every helper call site in every run block, checked fail-closed.
+
+    Returns a list of violation strings; empty means every site parsed and satisfied
+    its helper's contract. Lines are split into COMMAND SEGMENTS (;, &&, ||, |)
+    first, so two helpers on one line are validated independently; value-taking
+    flags must have a value, boolean flags must not; a site the tokenizer cannot
+    parse is a VIOLATION unless the roster binds it to an extracted-run test.
+    """
+    import shlex
+    violations = []
+    for wf_name, text in sorted(workflow_texts.items()):
+        joined = text.replace("\\\n", " ")
+        for line_no, line in enumerate(joined.splitlines(), 1):
+            hits = [h for h in contracts if f"auditor/scripts/{h}" in line]
+            if not hits:
+                continue
+            raw_segments, scan_ok = _split_commands(line)
+            segments, bad_parse = [], not scan_ok
+            for sep, body, stdin_in in raw_segments:
+                try:
+                    seg_tokens = shlex.split(body, comments=True)
+                except ValueError:
+                    bad_parse = True
+                    continue
+                if seg_tokens:
+                    segments.append((sep, seg_tokens, stdin_in))
+            if bad_parse:
+                for helper in hits:
+                    if (wf_name, helper) not in roster:
+                        violations.append(f"{wf_name}:{line_no} {helper}: unparseable "
+                                          f"call site and not on the extracted-run roster")
+            for helper in hits:
+                needle = f"auditor/scripts/{helper}"
+                contract = contracts[helper]
+                where = f"{wf_name}:{line_no} {helper}"
+                found = False
+                for sep, segment, stdin_in in segments:
+                    indices = [i for i, t in enumerate(segment) if needle in t]
+                    if not indices:
+                        continue
+                    found = True
+                    if len(indices) > 1:
+                        violations.append(f"{where}: {len(indices)} occurrences in "
+                                          f"one command segment — only one can be "
+                                          f"the invocation")
+                    index = indices[0]
+                    if contract.get("sourced"):
+                        if index == 0 or segment[index - 1] not in (".", "source"):
+                            violations.append(
+                                f"{where}: function library referenced without "
+                                f"sourcing (expected `. .../{helper}`)")
+                        continue
+                    interpreter = segment[index - 1] if index > 0 else ""
+                    prefix_ok = all(
+                        t in ("if", "!", "then", "else", "elif", "do", "while",
+                              "until", "time")
+                        or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t)
+                        for t in segment[:max(index - 1, 0)])
+                    if interpreter not in ("python3", "bash") or not prefix_ok:
+                        violations.append(f"{where}: referenced without an "
+                                          f"interpreter invocation in command "
+                                          f"position (a mention is not a call)")
+                        continue
+                    if contract.get("stdin") and sep != "|" and not stdin_in:
+                        violations.append(f"{where}: stdin helper invoked without "
+                                          f"piped or redirected input")
+                    args = segment[index + 1:]
+                    flags, positionals, i = set(), 0, 0
+                    boolean = contract.get("boolean", set())
+                    redirect = re.compile(r"^(\d*>>?|<|&>>?)$")
+                    while i < len(args):
+                        token = args[i]
+                        if redirect.match(token) or token in ("then", "do"):
+                            break
+                        if token.startswith("--"):
+                            flag, eq, value = token.partition("=")
+                            flags.add(flag)
+                            if flag in boolean:
+                                if eq:
+                                    violations.append(f"{where}: boolean {flag} "
+                                                      f"takes no value")
+                                i += 1
+                                continue
+                            if eq:
+                                if not value:
+                                    violations.append(f"{where}: {flag} is missing "
+                                                      f"its value")
+                                i += 1
+                                continue
+                            if i + 1 >= len(args) or args[i + 1].startswith("--") \
+                                    or redirect.match(args[i + 1]) \
+                                    or args[i + 1] in ("then", "do"):
+                                violations.append(f"{where}: {flag} is missing "
+                                                  f"its value")
+                                i += 1
+                                continue
+                            i += 2
+                            continue
+                        positionals += 1
+                        i += 1
+                    required = set(contract.get("required", set()))
+                    if positionals == 0:
+                        required |= contract.get("required_if_no_positionals", set())
+                    missing = required - flags
+                    unknown = flags - contract.get("allowed", set())
+                    one_of = contract.get("required_one_of")
+                    lo, hi = contract.get("positionals", (0, 0))
+                    if missing:
+                        violations.append(f"{where}: missing required {sorted(missing)}")
+                    if unknown:
+                        violations.append(f"{where}: unknown flags {sorted(unknown)}")
+                    if one_of and not (flags & one_of):
+                        violations.append(f"{where}: needs one of {sorted(one_of)}")
+                    if not (lo <= positionals <= hi):
+                        violations.append(f"{where}: {positionals} positional(s), "
+                                          f"contract allows {lo}..{hi}")
+                if not found and (wf_name, helper) not in roster:
+                    violations.append(f"{where}: helper name present but no invocation "
+                                      f"token found and not on the roster")
+    return violations
+
+
+class TestHelperCallSites(unittest.TestCase):
+    """vibe-167: the inventory proved existence; this class proves reach.
+
+    E8.3 found four wiring defects by reading; the census that motivated this table
+    found fifteen helpers with zero workflow references, nine reachable from nowhere.
+    A helper whose obligation is `workflow-called` without a call site is a duty the
+    unit claims and does not perform."""
+
+    def test_the_obligations_table_covers_exactly_the_thirty(self):
+        self.assertEqual(sorted(HELPER_OBLIGATIONS), sorted(E83_HELPERS),
+                         "the obligations table and the helper inventory drifted")
+        for name, obligations in HELPER_OBLIGATIONS.items():
+            self.assertTrue(obligations, f"{name} has an empty obligation set")
+            self.assertLessEqual(obligations,
+                                 {"workflow-called", "helper-called", "operator"})
+
+    def workflow_texts(self):
+        return {p.name: p.read_text(encoding="utf-8")
+                for p in sorted((REPO / "auditor" / "workflows").glob("*.yml"))}
+
+    def helper_texts(self):
+        return {p.name: p.read_text(encoding="utf-8", errors="replace")
+                for p in sorted(SCRIPTS_DIR.iterdir()) if p.is_file()}
+
+    def test_every_workflow_called_helper_has_a_workflow_call_site(self):
+        texts = self.workflow_texts()
+        missing = []
+        for name, obligations in sorted(HELPER_OBLIGATIONS.items()):
+            if "workflow-called" not in obligations:
+                continue
+            if not any(name in text for text in texts.values()):
+                missing.append(name)
+        self.assertEqual(missing, [],
+                         f"helpers whose own intent is workflow use, with no call site "
+                         f"in any workflow: {missing} — the duty each implements is "
+                         f"being performed inline or not at all")
+
+    def test_every_helper_called_helper_is_referenced_by_a_helper(self):
+        texts = self.helper_texts()
+        missing = []
+        for name, obligations in sorted(HELPER_OBLIGATIONS.items()):
+            if "helper-called" not in obligations:
+                continue
+            if not any(name in text for other, text in texts.items() if other != name):
+                missing.append(name)
+        self.assertEqual(missing, [],
+                         f"library helpers referenced by no other helper: {missing}")
+
+    def test_operator_helpers_state_their_invocation_policy(self):
+        # The exemption must stay auditable: each operator helper's table row carries
+        # a policy comment, and the helper's own text matches it (--apply for the
+        # backfills' opt-in writes; --dry-run for repair's opt-out).
+        texts = self.helper_texts()
+        for name in ("backfill-findings.py", "backfill-pr-fingerprints.py"):
+            self.assertIn("--apply", texts[name],
+                          f"{name} no longer carries the opt-in write flag its "
+                          f"operator policy records")
+        self.assertIn("--dry-run", texts["repair-stale-statuses.py"],
+                      "repair-stale-statuses.py no longer carries the opt-out flag "
+                      "its operator policy records")
+
+
+#: vibe-167: the reviewed argument contract for every workflow-callable helper.
+#: AUTHORED from each helper's parser, usage text and refusal arms — not introspected,
+#: because most required flags are enforced by post-parse refusals argparse cannot
+#: report, and the shell helpers have no parser object at all.
+#: Shapes: required/allowed flag sets; "stdin" — the helper reads stdin; "positionals"
+#: — (min, max) bare arguments; "sourced" — a function library whose call site is
+#: `. .../helper.sh`, never an interpreter invocation.
+CALL_CONTRACTS = {
+    "batch-process.py": {"required": {"--data-dir", "--stage"},
+                         "allowed": {"--data-dir", "--stage", "--batch-size",
+                                     "--host-repo", "--apply"},
+                         "boolean": {"--apply"}},
+    "build-exemplar-gallery.py": {"required": set(),
+                                  "allowed": {"--data-dir", "--exemplars-dir",
+                                              "--output", "--check"},
+                                  "boolean": {"--check"}},
+    "commit-via-pr.sh": {"required": {"--checkout", "--repo", "--base",
+                                      "--branch"},
+                         "allowed": {"--checkout", "--repo", "--base", "--branch"}},
+    "compute-fingerprint.sh": {"sourced": True},
+    "compute-vocab-fingerprint.sh": {"sourced": True},
+    "diff-findings.py": {"required": {"--repo", "--original-sidecar",
+                                      "--reaudit-sidecar", "--registry",
+                                      "--commit-sha-before", "--commit-sha-after",
+                                      "--events-out", "--diff-report-out",
+                                      "--summary-out"},
+                         "allowed": {"--generated-at", "--original-score",
+                                     "--reaudit-score", "--repo",
+                                     "--original-sidecar", "--reaudit-sidecar",
+                                     "--registry", "--commit-sha-before",
+                                     "--commit-sha-after", "--events-out",
+                                     "--diff-report-out", "--summary-out"}},
+    "docs-diff.py": {"required": set(),
+                     "allowed": {"--data-dir", "--citations", "--hash-store",
+                                 "--changed-out"}},
+    "generate-daily-report.py": {"required": set(),
+                                 "allowed": {"--data-dir", "--inputs", "--date",
+                                             "--out"}},
+    "generate-rule-review-body.py": {"required": {"--data-dir", "--quarter"},
+                                     "allowed": {"--data-dir", "--quarter", "--as-of",
+                                                 "--out"}},
+    "git-push-with-retry.sh": {"required": set(),
+                               "allowed": {"--checkout", "--data-dir", "--attempts"}},
+    "guard-protected-paths.sh": {"required": set(), "allowed": {"--data-dir"}},
+    "log-event.sh": {"sourced": True},
+    "parse-pr-metadata.py": {"required": set(), "allowed": set(), "stdin": True},
+    "prepare-refinement-input.py": {"required": {"--data-dir"},
+                                    "allowed": {"--data-dir", "--feedback", "--out",
+                                                "--min-hits"}},
+    "propose-rule-citations.py": {"required": {"--data-dir", "--rules-path"},
+                                  "allowed": {"--data-dir", "--apply", "--rules-path",
+                                              "--exemplar-url-prefix", "--out"},
+                                  "boolean": {"--apply"}},
+    "render-dashboard.py": {"required": {"--data-dir"},
+                            "allowed": {"--data-dir", "--out", "--since",
+                                        "--generated-at"}},
+    "render-repo-report.py": {"required": {"--repo", "--data-dir"},
+                              "allowed": {"--repo", "--data-dir", "--out",
+                                          "--generated-at"}},
+    "rule-health.py": {"required": {"--data-dir"},
+                       "allowed": {"--data-dir", "--out", "--generated-at"}},
+    "scan-suppressions.py": {"required": {"--data-dir", "--host-repo"},
+                             "allowed": {"--data-dir", "--host-repo", "--query",
+                                         "--observed-at", "--apply"},
+                             "boolean": {"--apply"}},
+    "validate-feedback.sh": {"required": set(),
+                             "allowed": {"--data-dir", "--log", "--allow-missing"},
+                             "boolean": {"--allow-missing"},
+                             "required_one_of": {"--data-dir", "--log"}},
+    "validate-rule-ids.py": {"required": set(),
+                             "allowed": {"--data-dir", "--rubric"},
+                             "positionals": (0, 400),
+                             # data-dir is the sidecar source only when no explicit
+                             # sidecar is passed (the helper's own branch structure)
+                             "required_if_no_positionals": {"--data-dir"}},
+    "vendor_default_filter.py": {"required": set(), "allowed": {"--report"},
+                                 "boolean": {"--report"}},
+}
+
+#: Call sites the static checker CANNOT parse, each bound to the extracted-run test
+#: that executes it instead. An entry here is a tested obligation, not a skip: the
+#: named test must exist in the named module, held by test_the_roster_names_real_tests.
+EXTRACTED_RUN_ROSTER = {
+    # (workflow file, helper): (test module, test attribute substring)
+}
+
+
+class TestCallSiteArguments(unittest.TestCase):
+    """vibe-167: each call site's arguments checked against its helper's contract.
+
+    E8.3's four wiring defects (a positional where --attempts was required, $SLUG for
+    --repo, a .sh name for a .py helper, a phantom helper) were each findable by this
+    check; the contract table is reviewed prose, the checker is fail-closed."""
+
+    def test_every_workflow_callable_helper_has_a_contract(self):
+        expected = {name for name, obligations in HELPER_OBLIGATIONS.items()
+                    if "workflow-called" in obligations}
+        self.assertEqual(sorted(CALL_CONTRACTS), sorted(expected),
+                         "the contract table and the workflow-called obligation set "
+                         "drifted — author the contract with the wiring, not after it")
+
+    def test_the_roster_names_real_tests(self):
+        for (wf, helper), (module, attr) in sorted(EXTRACTED_RUN_ROSTER.items()):
+            path = REPO / "tests" / f"{module}.py"
+            self.assertTrue(path.is_file(), f"roster names a missing module {module}")
+            self.assertIn(attr, path.read_text(encoding="utf-8"),
+                          f"roster binds {wf}/{helper} to {module}.{attr}, which does "
+                          f"not exist — the dynamic site is unexecuted")
+
+    def test_every_real_call_site_satisfies_its_contract(self):
+        texts = {p.name: p.read_text(encoding="utf-8")
+                 for p in sorted((REPO / "auditor" / "workflows").glob("*.yml"))}
+        violations = check_call_sites(texts, CALL_CONTRACTS, EXTRACTED_RUN_ROSTER)
+        self.assertEqual(violations, [],
+                         "call sites violating their helpers' contracts:\n  "
+                         + "\n  ".join(violations))
+
+    # -- checker mutation tests: each synthetic defect must be CAUGHT ----------------
+    CONTRACT = {"fake-helper.py": {"required": {"--data-dir"},
+                                   "allowed": {"--data-dir", "--out"}}}
+
+    def _check(self, line, contracts=None, roster=None):
+        text = f"jobs:\n  a:\n    steps:\n      - run: |\n          {line}\n"
+        return check_call_sites({"wf.yml": text},
+                                contracts or self.CONTRACT, roster or {})
+
+    def test_mutation_missing_required_flag(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" --out x')
+        self.assertTrue(any("missing required" in s for s in v), v)
+
+    def test_mutation_unknown_flag(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d --wrong x')
+        self.assertTrue(any("unknown flags" in s for s in v), v)
+
+    def test_mutation_stray_positional(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d stray')
+        self.assertTrue(any("positional" in s for s in v), v)
+
+    def test_mutation_continuation_lines_are_joined(self):
+        text = ('jobs:\n  a:\n    steps:\n      - run: |\n'
+                '          python3 "$CODE_DIR/auditor/scripts/fake-helper.py" \\\n'
+                '            --data-dir d \\\n            --out x\n')
+        self.assertEqual(check_call_sites({"wf.yml": text}, self.CONTRACT, {}), [])
+
+    def test_mutation_command_substitution_values_are_opaque(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir "$(pwd)/data" --out "$OUT"')
+        self.assertEqual(v, [], v)
+
+    def test_mutation_unparseable_site_fails_without_roster(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" --data-dir "unclosed')
+        self.assertTrue(any("unparseable" in s or "no invocation" in s for s in v), v)
+
+    def test_mutation_unparseable_site_passes_with_roster(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" --data-dir "unclosed',
+                        roster={("wf.yml", "fake-helper.py"): ("test_x", "test_y")})
+        self.assertEqual(v, [], v)
+
+    def test_mutation_conditionally_required_flag(self):
+        contracts = {"fake-helper.py": {
+            "required": set(), "allowed": {"--data-dir"}, "positionals": (0, 5),
+            "required_if_no_positionals": {"--data-dir"}}}
+        bad = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py"',
+                          contracts)
+        self.assertTrue(any("missing required" in s for s in bad), bad)
+        good = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" x.jsonl',
+                           contracts)
+        self.assertEqual(good, [], good)
+
+    def test_mutation_glued_semicolon_is_stripped(self):
+        v = self._check('if ! python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d; then')
+        self.assertEqual(v, [], v)
+
+    def test_mutation_missing_flag_value(self):
+        # F6 (step-8): `--data-dir --out x` silently treated --out as the value
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir --out x')
+        self.assertTrue(any("missing its value" in s for s in v), v)
+
+    def test_mutation_boolean_flag_with_a_value(self):
+        contracts = {"fake-helper.py": {"required": set(),
+                                        "allowed": {"--apply"},
+                                        "boolean": {"--apply"}}}
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--apply=true', contracts)
+        self.assertTrue(any("takes no value" in s for s in v), v)
+
+    def test_mutation_required_one_of_group(self):
+        contracts = {"fake-helper.sh": {"required": set(),
+                                        "allowed": {"--data-dir", "--log"},
+                                        "required_one_of": {"--data-dir", "--log"}}}
+        bad = self._check('bash "$CODE_DIR/auditor/scripts/fake-helper.sh"', contracts)
+        self.assertTrue(any("needs one of" in s for s in bad), bad)
+        good = self._check('bash "$CODE_DIR/auditor/scripts/fake-helper.sh" --log l',
+                           contracts)
+        self.assertEqual(good, [], good)
+
+    def test_mutation_all_four_required_flags(self):
+        # the commit-via-pr shape: --checkout alone must fail
+        contracts = {"fake-helper.sh": {
+            "required": {"--checkout", "--repo", "--base", "--branch"},
+            "allowed": {"--checkout", "--repo", "--base", "--branch"}}}
+        v = self._check('bash "$CODE_DIR/auditor/scripts/fake-helper.sh" '
+                        '--checkout /d', contracts)
+        self.assertTrue(any("missing required" in s for s in v), v)
+
+    def test_mutation_second_helper_on_the_same_line_is_validated(self):
+        contracts = {"fake-lib.sh": {"sourced": True},
+                     "fake-helper.py": {"required": {"--data-dir"},
+                                        "allowed": {"--data-dir"}}}
+        v = self._check('. "$CODE_DIR/auditor/scripts/fake-lib.sh" && '
+                        'bash "$CODE_DIR/auditor/scripts/fake-lib.sh" && '
+                        'python3 "$CODE_DIR/auditor/scripts/fake-helper.py"',
+                        contracts)
+        self.assertTrue(any("without sourcing" in s for s in v),
+                        f"the bash-invoked second segment of the sourced library "
+                        f"escaped: {v}")
+        self.assertTrue(any("missing required" in s for s in v), v)
+
+    def test_mutation_empty_equals_value(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir=')
+        self.assertTrue(any("missing its value" in s for s in v), v)
+
+    def test_mutation_redirection_is_not_a_value(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir > out.txt')
+        self.assertTrue(any("missing its value" in s for s in v), v)
+
+    def test_mutation_a_mention_is_not_a_call(self):
+        v = self._check('echo "see $CODE_DIR/auditor/scripts/fake-helper.py"')
+        self.assertTrue(any("not a call" in s for s in v), v)
+
+    def test_mutation_two_occurrences_in_one_segment(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir "$CODE_DIR/auditor/scripts/fake-helper.py"')
+        self.assertTrue(any("occurrences in one command segment" in s for s in v), v)
+
+    def test_mutation_assignment_substitution_form_is_validated(self):
+        # OUT="$(python3 helper …)" is a real production shape; the unwrap must
+        # expose the invocation to the same checks
+        good = self._check('OUT="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                           '--data-dir d)"')
+        self.assertEqual(good, [], good)
+        bad = self._check('OUT="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                          '--wrong x)"')
+        self.assertTrue(any("unknown flags" in s for s in bad), bad)
+
+    def test_mutation_interpreter_adjacency_cannot_be_spoofed(self):
+        v = self._check('echo python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d')
+        self.assertTrue(any("command position" in s for s in v), v)
+
+    def test_mutation_stdin_contract_requires_piped_input(self):
+        contracts = {"fake-helper.py": {"required": set(), "allowed": set(),
+                                        "stdin": True}}
+        bad = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py"',
+                          contracts)
+        self.assertTrue(any("without piped" in s for s in bad), bad)
+        good = self._check('cat body.txt | python3 '
+                           '"$CODE_DIR/auditor/scripts/fake-helper.py"', contracts)
+        self.assertEqual(good, [], good)
+
+    def test_mutation_numbered_redirection_is_not_a_value(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir 2>> err.log')
+        self.assertTrue(any("missing its value" in s for s in v), v)
+
+    def test_mutation_nested_substitution_keeps_flag_extraction_honest(self):
+        # a nested substitution that still tokenizes must be validated on its REAL
+        # flags — a planted unknown flag inside the same site must still be caught
+        v = self._check('OUT="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--wrong "$(dirname "$X")")"')
+        self.assertTrue(any("unknown flags" in s for s in v), v)
+
+    def test_mutation_parity_breaking_unwrap_fails_closed(self):
+        # when the rewrite would lose quote parity, the original line is kept and
+        # shlex fails CLOSED — never a validated corrupted rendering
+        v = self._check('OUT="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir "unclosed)')
+        self.assertTrue(v, "a parity-breaking site produced zero violations — the "
+                           "corrupted rendering was validated")
+
+    def test_mutation_quoted_pipe_cannot_spoof_command_position(self):
+        # iteration 4: a quoted "|" is an argument, not a separator — the segment's
+        # command is still echo, and a mention is not a call
+        v = self._check('echo "|" python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d')
+        self.assertTrue(any("command position" in s for s in v), v)
+
+    def test_mutation_quoted_stdin_char_does_not_satisfy_the_contract(self):
+        contracts = {"fake-helper.py": {"required": set(), "allowed": set(),
+                                        "stdin": True, "positionals": (0, 5)}}
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" "<"',
+                        contracts)
+        self.assertTrue(any("without piped" in s for s in v), v)
+
+    def test_mutation_attached_redirect_is_not_a_value(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir 2>>err.log')
+        self.assertTrue(any("missing its value" in s for s in v), v)
+
+    def test_mutation_two_substitutions_cannot_hide_a_flag(self):
+        v = self._check('A="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--wrong "$(dirname "$X")")" B="$(date -u)"')
+        self.assertTrue(any("unknown flags" in s for s in v), v)
+
+    def test_mutation_flags_after_a_redirect_are_still_validated(self):
+        # iteration 5: the shell keeps collecting argv after a redirect — ending
+        # the segment there let a bad flag escape validation entirely
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d 2>>err.log --wrong x')
+        self.assertTrue(any("unknown flags" in s for s in v), v)
+
+    def test_mutation_unclosed_UNQUOTED_substitution_fails_closed(self):
+        # round 2: the ORIGINAL fail-open lived on the unquoted branch — no quote
+        # before $(, no closing ) — where the pre-fix scanner sliced at EOF and
+        # validated a silently truncated argv; the double-quoted fixture below
+        # never exercised it
+        v = self._check('OUT=$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir dx')
+        self.assertTrue(any("unparseable" in s for s in v),
+                        f"an unclosed UNQUOTED substitution must poison the parse: {v}")
+
+    def test_mutation_unclosed_substitution_fails_closed(self):
+        v = self._check('OUT="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir dx')
+        self.assertTrue(any("unparseable" in s for s in v),
+                        f"an unclosed substitution must poison the parse, not "
+                        f"validate a truncated argv: {v}")
+
+    def test_mutation_sourced_library_must_be_sourced(self):
+        contracts = {"fake-lib.sh": {"sourced": True}}
+        bad = self._check('bash "$CODE_DIR/auditor/scripts/fake-lib.sh"', contracts)
+        self.assertTrue(any("without sourcing" in s for s in bad), bad)
+        good = self._check('. "$CODE_DIR/auditor/scripts/fake-lib.sh"', contracts)
+        self.assertEqual(good, [], good)
+
+
+class TestSingleDefinitionGuard(unittest.TestCase):
+    """N1 (step-9): a shadowing duplicate silently splits edits between a live
+    copy and a dead one. This guard lives in its OWN class and checks ITSELF —
+    hosting it inside a guarded class let a duplicate of that class disable the
+    guard along with everything else it shadowed."""
+
+    def test_the_call_site_machinery_is_defined_exactly_once(self):
+        source = (REPO / "tests" / "test_auditor_workflows.py").read_text()
+        for name in ("HELPER_OBLIGATIONS", "CALL_CONTRACTS",
+                     "EXTRACTED_RUN_ROSTER", "def check_call_sites",
+                     "class TestHelperCallSites", "class TestCallSiteArguments",
+                     "class TestSingleDefinitionGuard"):
+            definitions = re.findall(rf"^{re.escape(name)}[ (=:]", source, re.M)
+            self.assertEqual(len(definitions), 1,
+                             f"{name!r} is defined more than once — the later copy "
+                             f"shadows the earlier and edits split between them")
+
+
 if __name__ == "__main__":
     unittest.main()

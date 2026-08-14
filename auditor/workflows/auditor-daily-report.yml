@@ -46,56 +46,40 @@ jobs:
           TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           DAY="$(date -u +%Y-%m-%d)"
           [ -f "$REGISTRY" ] || { echo "REFUSE:registry-missing"; exit 1; }
-          REPORT_DIR="$DATA_DIR/reports"
-          mkdir -p "$REPORT_DIR"
-          OUT="$REPORT_DIR/daily-$DAY.md"
-          TOTAL="$(jq -r '.repos | length' "$REGISTRY")"
-          CANDIDATES="$(jq -r '[.repos[] | select(.case_study_candidate // false)] | length' "$REGISTRY")"
+          # vibe-167: the report body is generate-daily-report.py's duty. This block's job
+          # shrank to CACHING the live inputs into the helper's --inputs seam, carrying the
+          # label census through the activity items, and logging the event with the
+          # HELPER'S printed output path — the filename contract is the helper's.
+          INPUTS="$(mktemp -d)"
+          jq '{total: (.repos | length), by_status: ([.repos[] | .status // "unknown"] | group_by(.) | map({key: .[0], value: length}) | from_entries)}' "$REGISTRY" > "$INPUTS/registry-stats.json"
+          jq '[.repos[].prs // {} | to_entries[] | .value.outcome // empty] | group_by(.) | map({key: .[0], value: length}) | from_entries' "$REGISTRY" > "$INPUTS/pr-outcomes.json"
+          if [ -f "$DATA_DIR/feedback/log.json" ]; then
+            jq '[.rules[]? | {key: .rule_id, value: {findings: (.hits // 0), accepted: ((.merged // 0) + (.applied_separately // 0))}}] | from_entries' "$DATA_DIR/feedback/log.json" > "$INPUTS/rule-health.json"
+          fi
           count_label() {
             local raw
             raw="$(gh issue list --label "$1" --state open --limit 1000 --json number --jq 'length' 2> /dev/null || echo 0)"
             case "$raw" in ''|*[!0-9]*) raw=0 ;; esac
             printf '%s' "$raw"
           }
-          L_CANDIDATE="$(count_label audit-candidate)"
-          L_READY="$(count_label audit-ready)"
-          L_AUDITED="$(count_label audit-complete)"
-          L_APPROVED="$(count_label contribute-approved)"
-          L_SUBMITTED="$(count_label prs-submitted)"
-          L_CASE="$(count_label case-study-ready)"
-          L_COMPLETE="$(count_label complete)"
           SINCE="$(jq -rn 'now - 86400 | todate')"
           RECENT="$(gh issue list --state all --search "updated:>=$SINCE" --limit 1000 --json number --jq 'length' 2> /dev/null || echo 0)"
           case "$RECENT" in ''|*[!0-9]*) RECENT=0 ;; esac
           {
-            printf '# vibe-suite auditor daily report — %s\n\n' "$DAY"
-            printf 'Generated %s\n\n' "$TS"
-            printf '## Registry\n\n'
-            printf 'Repos tracked: %s\n\n' "$TOTAL"
-            printf 'Case-study candidates: %s\n\n' "$CANDIDATES"
-            printf '### Status breakdown\n\n'
-            jq -r '[.repos[].status // "unknown"] | if length == 0 then "- empty registry" else (group_by(.) | map("- " + .[0] + ": " + (length | tostring)) | .[]) end' "$REGISTRY"
-            printf '\n### PR outcomes\n\n'
-            jq -r '[.repos[].prs[]?.outcome // empty] | if length == 0 then "- none recorded" else (group_by(.) | map("- " + .[0] + ": " + (length | tostring)) | .[]) end' "$REGISTRY"
-            printf '\n### Top repos by stars\n\n'
-            jq -r '.repos | to_entries | sort_by(-(.value.stars // 0)) | .[:5][] | "- " + .key + " (" + ((.value.stars // 0) | tostring) + " stars)"' "$REGISTRY"
-            printf '\n## Open issues by pipeline label\n\n'
-            printf -- '- audit-candidate: %s\n' "$L_CANDIDATE"
-            printf -- '- audit-ready: %s\n' "$L_READY"
-            printf -- '- audit-complete: %s\n' "$L_AUDITED"
-            printf -- '- contribute-approved: %s\n' "$L_APPROVED"
-            printf -- '- prs-submitted: %s\n' "$L_SUBMITTED"
-            printf -- '- case-study-ready: %s\n' "$L_CASE"
-            printf -- '- complete: %s\n' "$L_COMPLETE"
-            printf '\n## Activity\n\n'
-            printf 'Issues updated in the last 24 hours: %s\n' "$RECENT"
-          } > "$OUT"
-          # §7 envelope: the record's own fields live under `data`, never at top level
-          RUN_ID="${GITHUB_RUN_ID:-0}"
-          RUN_NUMBER="${GITHUB_RUN_NUMBER:-0}"
-          case "$RUN_NUMBER" in ''|*[!0-9]*) RUN_NUMBER=0 ;; esac
-          jq -cn --arg t "$TS" --arg ri "$RUN_ID" --argjson rn "$RUN_NUMBER" --arg p "reports/daily-$DAY.md" \
-            '{timestamp: $t, workflow: "auditor-daily-report", event: "report_generated", run_id: $ri, run_number: $rn, data: {report: $p}}' >> "$EVENT_LOG"
+            printf '{"item": "generated at %s"}\n' "$TS"
+            printf '{"item": "case-study candidates: %s"}\n' "$(jq -r '[.repos[] | select(.case_study_candidate // false)] | length' "$REGISTRY")"
+            for label in audit-candidate audit-ready audit-complete contribute-approved prs-submitted case-study-ready complete; do
+              printf '{"item": "open %s: %s"}\n' "$label" "$(count_label "$label")"
+            done
+            printf '{"item": "issues updated in the last 24 hours: %s"}\n' "$RECENT"
+            jq -c '.repos | to_entries | sort_by(-(.value.stars // 0)) | .[:5][] | {item: ("top repo " + .key + " (" + ((.value.stars // 0) | tostring) + " stars)")}' "$REGISTRY"
+          } | jq -s 'map(.item)' > "$INPUTS/recent-activity.json"
+          OUT_PATH="$(python3 "$CODE_DIR/auditor/scripts/generate-daily-report.py" --data-dir "$DATA_DIR" --inputs "$INPUTS" --date "$DAY")"
+          rm -rf "$INPUTS"
+          REPORT_REL="${OUT_PATH#"$DATA_DIR"/}"
+          # §7 envelope via the shared event library — its adoption site (vibe-167)
+          . "$CODE_DIR/auditor/scripts/log-event.sh"
+          AUDITOR_DATA_DIR="$DATA_DIR" log_event auditor-daily-report report_generated "$(jq -cn --arg p "$REPORT_REL" '{report: $p}')"
           echo "PASS"
           # /stage-logic
       - run: |

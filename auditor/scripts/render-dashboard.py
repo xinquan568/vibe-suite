@@ -45,6 +45,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_DIR = ROOT / "templates" / "report"
+#: The docs page's ownership stamp — matched EXACTLY by the workflow guard.
+DOCS_MARKER = "generated-by-auditor-render-dashboard"
 RULES_SKILL = ROOT / "skills" / "rules" / "SKILL.md"
 SCORING_SKILL = ROOT / "skills" / "scoring" / "SKILL.md"
 VOCAB_SKILL = ROOT / "skills" / "vocabulary" / "SKILL.md"
@@ -327,6 +329,12 @@ def render_docs(out_dir: Path, generated_at: str) -> Path:
     html = template_path.read_text(encoding="utf-8")
     for key, value in values.items():
         html = html.replace("{{" + key + "}}", value)
+
+    # Ownership marker (vibe-167 F5): the workflow's docs-clobber guard preserves
+    # any docs page NOT carrying this exact stamp. Without it, the guard mistook
+    # this helper's own output for a foreign build and froze the first render
+    # forever.
+    html = html.replace("<head>", f"<head>\n<!-- {DOCS_MARKER} -->", 1)
 
     target = out_dir / "docs" / "index.html"
     target.parent.mkdir(parents=True, exist_ok=True)

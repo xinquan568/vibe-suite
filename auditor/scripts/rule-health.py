@@ -42,6 +42,35 @@ REJECTED = ("rejected",)
 #: Terminal outcomes. `open`/`submitted` are deliberately excluded from the denominator.
 RESOLVED = ACCEPTED + REJECTED
 
+#: SECTION-12 STATE POLICY — one policy, two files. These three constants are the
+#: refinement selector's (`prepare-refinement-input.py`), held identical by a
+#: cross-pin test, and `rule_state` mirrors its `classify()` semantics exactly:
+#: the hit floor comes FIRST (below it no rate means anything, so `dormant`
+#: precedes every other judgment — classify()'s early return), then `disputed`,
+#: then `noisy`, else `healthy`.
+MIN_HITS = 3
+NOISY_FP_RATE = 0.30
+DISPUTED_ACCEPTANCE = 0.50
+
+#: §5's dissent_type vocabulary, docs_citation included (the classify workflow
+#: emits it deliberately: a literal citation forces high confidence).
+DISSENT_TYPES = ("context_missed", "docs_citation", "intentional_pattern",
+                 "out_of_scope", "rule_disputed", "style_disagreement")
+
+
+def rule_state(row) -> str:
+    """§12's four states, at the refinement classifier's exact thresholds."""
+    if int(row.get("hits") or 0) < MIN_HITS:
+        return "dormant"
+    acceptance = row.get("acceptance_rate")
+    if acceptance is not None and float(acceptance) < DISPUTED_ACCEPTANCE \
+            and int(row.get("resolved") or 0) > 0:
+        return "disputed"
+    fp_rate = row.get("false_positive_rate")
+    if fp_rate is not None and float(fp_rate) > NOISY_FP_RATE:
+        return "noisy"
+    return "healthy"
+
 #: SCHEMAS.md section 1, PR record: the pipeline outcome enum. This lives in the REGISTRY, not
 #: in the event stream. `finding_outcome` events carry `pr_state`, a different enum
 #: ({merged, closed_unmerged, open, stale_90d, cla_blocked}) describing the PR rather than the
@@ -210,6 +239,23 @@ def main(argv=None):
 
     outcomes, rule_of = outcomes_from_registry(registry)
 
+    # Repo attribution rides the same registry walk: a fingerprint that reached a PR
+    # is a fingerprint of that PR's repository. Sidecar and ledger findings add their
+    # own attributions below; whatever remains unattributed is COUNTED, not hidden.
+    repo_of_fp = {}
+    # CONTRIBUTED MEANS REACHED A PR, NOT ADJUDICATED. A record with outcome null is
+    # a submitted PR awaiting the maintainer; skipping it deflated the denominator
+    # while rejection events still grew the numerator, and a rate above 1 is the
+    # arithmetic the validator exists to refuse.
+    pr_fps = set()
+    for repo, entry in (registry.get("repos") or {}).items():
+        prs = entry.get("prs") if isinstance(entry, dict) else None
+        for record in (prs or {}).values():
+            if isinstance(record, dict):
+                for fingerprint in (record.get("fingerprints") or []):
+                    repo_of_fp.setdefault(str(fingerprint), repo)
+                    pr_fps.add(str(fingerprint))
+
     findings = {}
     audits = data_dir / "audits"
     # THE SIDECAR CARRIES NO FINGERPRINT (section 4) — skipping rows without one dropped every
@@ -239,22 +285,31 @@ def main(argv=None):
         for finding in read_jsonl(path):
             key = finding.get("fingerprint") or fingerprint_of(repo, finding)
             findings.setdefault(key, finding)
+            repo_of_fp.setdefault(key, repo)
             if finding.get("rule_id"):
                 rule_of.setdefault(key, str(finding["rule_id"]))
     for finding in read_jsonl(data_dir / "ledgers" / "findings.jsonl"):
         if finding.get("fingerprint"):
             findings.setdefault(finding["fingerprint"], finding)
+            if finding.get("repo"):
+                repo_of_fp.setdefault(str(finding["fingerprint"]), str(finding["repo"]))
             if finding.get("rule_id"):
                 rule_of.setdefault(finding["fingerprint"], str(finding["rule_id"]))
 
-    # `finding_verified` is singular per SCHEMAS.md, unlike finding_outcome. Only the outcomes
-    # that mean the finding was actually fixed count as verified; the two `persists_*` values
-    # are the opposite result recorded through the same event.
-    verified = {(event.get("data") or {}).get("fingerprint")
-                for event in events
-                if event.get("event") == "finding_verified"
-                and str((event.get("data") or {}).get("outcome", "")).startswith("fixed_")}
-    verified.discard(None)
+    # `finding_verified` is singular per SCHEMAS.md, unlike finding_outcome. A fingerprint
+    # can be verified more than once (persists, then fixed after a follow-up): the LATEST
+    # event is the verdict — the ledger's standing latest-outcome doctrine — and every
+    # verified fingerprint joins the denominator, fixed_* or persists_*.
+    verdicts = {}
+    for event in sorted((e for e in events if e.get("event") == "finding_verified"),
+                        key=lambda e: str(e.get("timestamp") or "")):
+        data = event.get("data") or {}
+        if data.get("fingerprint"):
+            verdicts[str(data["fingerprint"])] = str(data.get("outcome") or "")
+            if data.get("repo"):
+                repo_of_fp.setdefault(str(data["fingerprint"]), str(data["repo"]))
+    verified = {fp for fp, outcome in verdicts.items() if outcome.startswith("fixed_")}
+    verified_any = set(verdicts)
 
     # SELF-FALSE-POSITIVES ARE A DISAGREEMENT EVENT, not a flag on a finding. SCHEMAS.md
     # section 5: the audit workflow routes a self-invalidated finding to
@@ -263,29 +318,96 @@ def main(argv=None):
     # all, so reading one produced a 0% false-positive rate for every rule — the most
     # flattering possible number, and the one that argues for changing nothing.
     self_fp = set()
+    # §12's disagreement join: rejections/pushback per attributed finding (the events'
+    # parallel fingerprints[]/rule_ids[] arrays), dissent by type, and downstream
+    # suppressions at REPO grain — one repository suppressing a rule twice is one
+    # suppressing repository, however many paths or types it used.
+    rejected_set, pushback_set = set(), set()
+    dissent_of_fp = {}
+    suppression_events, suppressing_repos = {}, {}
+    event_repos = set()
     for record in read_jsonl(data_dir / "ledgers" / "disagreements.jsonl"):
         data = record.get("data") if isinstance(record.get("data"), dict) else record
-        if record.get("event") == "self_false_positive" and data.get("fingerprint"):
+        kind = record.get("event")
+        if kind == "self_false_positive" and data.get("fingerprint"):
             self_fp.add(str(data["fingerprint"]))
             if data.get("rule_id"):
                 rule_of.setdefault(str(data["fingerprint"]), str(data["rule_id"]))
+        elif kind in ("maintainer_rejected", "maintainer_pushback"):
+            # ONE GRAIN FOR NUMERATOR AND DENOMINATOR. The event's rule_ids only
+            # SEED rule_of for fingerprints nothing else attributed; the rollup
+            # below buckets every adjudication by the fingerprint's CANONICAL
+            # rule — the rule its `contributed` membership lands under. Bucketing
+            # by the event's own claim let two mis-claimed rejections outnumber a
+            # rule's one contributed finding: rate 2.0, impossible arithmetic.
+            fps = data.get("fingerprints") or []
+            rids = data.get("rule_ids") or []
+            bucket = rejected_set if kind == "maintainer_rejected" else pushback_set
+            for index, fingerprint in enumerate(fps):
+                key = str(fingerprint)
+                if index < len(rids) and rids[index]:
+                    rule_of.setdefault(key, str(rids[index]))
+                if key not in rule_of:
+                    continue
+                bucket.add(key)
+                pr_fps.add(key)
+                dissent = str(data.get("dissent_type") or "")
+                if dissent:
+                    # a SET, not a list: the ledger is append-only and replays the
+                    # same adjudication; per-event tallies let one fingerprint's
+                    # re-logged dissent outvote every other in the mode
+                    dissent_of_fp.setdefault(key, set()).add(dissent)
+        elif kind == "downstream_suppression":
+            rule = str(data.get("rule_id") or "")
+            repo = str(data.get("repo") or "")
+            if not rule:
+                continue
+            suppression_events[rule] = suppression_events.get(rule, 0) + 1
+            if repo:
+                suppressing_repos.setdefault(rule, set()).add(repo)
+                event_repos.add(repo)
+        # pr_comments_snapshot: raw thread capture, deliberately not an adjudication
+
+    # `deployments` (D1): corpus rows enumerate repos-with-a-deployed-config — the
+    # scanner appends a record per discovered config file, zero-override and
+    # parse-error rows included — UNIONed with event repos so legacy event-only
+    # repositories sit in both the numerator and the denominator.
+    corpus_repos = {str(row.get("repo")) for row
+                    in read_jsonl(data_dir / "feedback" / "suppressions.jsonl")
+                    if row.get("repo")}
+    deployments = len(corpus_repos | event_repos)
 
     exemplars = exemplar_counts(data_dir / "exemplars")
 
     rules = {}
+    repos_hit, contributed_fps, unattributed = {}, {}, 0
     for fingerprint, rule in rule_of.items():
         row = rules.setdefault(rule, {"rule_id": rule, "hits": 0, "merged": 0,
                                       "applied_separately": 0, "rejected": 0, "open": 0,
                                       "cla_blocked": 0, "verified": 0, "exemplars": 0,
-                                      "false_positives": 0})
+                                      "false_positives": 0, "verified_total": 0})
         row["hits"] += 1                      # one per UNIQUE fingerprint, never per event
         outcome = outcomes.get(fingerprint)
         if outcome in PIPELINE_OUTCOMES:
             row[outcome] += 1
+        if fingerprint in pr_fps:
+            contributed_fps.setdefault(rule, set()).add(fingerprint)
         if fingerprint in verified:
             row["verified"] += 1
+        if fingerprint in verified_any:
+            row["verified_total"] += 1
         if fingerprint in self_fp or (findings.get(fingerprint) or {}).get("false_positive"):
             row["false_positives"] += 1
+        repo = repo_of_fp.get(fingerprint)
+        if repo:
+            repos_hit.setdefault(rule, set()).add(repo)
+        else:
+            unattributed += 1
+
+    repos_audited = len(set().union(*repos_hit.values())) if repos_hit else 0
+
+    def ratio(numerator, denominator):
+        return round(numerator / denominator, 4) if denominator else None
 
     for rule, row in rules.items():
         row["exemplars"] = exemplars.get(rule, 0)
@@ -294,9 +416,36 @@ def main(argv=None):
         row["resolved"] = resolved
         # applied_separately counts as acceptance: the maintainer fixed it and closed our PR,
         # which means the finding was right.
-        row["acceptance_rate"] = round(accepted / resolved, 4) if resolved else None
-        row["false_positive_rate"] = (round(row["false_positives"] / row["hits"], 4)
-                                      if row["hits"] else None)
+        row["acceptance_rate"] = ratio(accepted, resolved)
+        row["false_positive_rate"] = ratio(row["false_positives"], row["hits"])
+        # §12 (vibe-167). `verified` stays as the documented compatibility alias for
+        # verified_fixed; every ratio's grain is stated beside its denominator.
+        row["verified_fixed"] = row["verified"]
+        row["effect_precision"] = ratio(row["verified_fixed"], row["verified_total"])
+        row["contributed"] = len(contributed_fps.get(rule, ()))
+        row["intent_precision"] = ratio(row["merged"], row["contributed"])
+        rule_fps = {fp for fp, r in rule_of.items() if r == rule}
+        row["maintainer_rejected"] = len(rejected_set & rule_fps)
+        row["maintainer_pushback"] = len(pushback_set & rule_fps)
+        row["maintainer_rejection_rate"] = ratio(row["maintainer_rejected"],
+                                                 row["contributed"])
+        tallies = {}
+        for fp in sorted(rule_fps):
+            for dissent in dissent_of_fp.get(fp, ()):
+                tallies[dissent] = tallies.get(dissent, 0) + 1
+        distribution = dict(sorted(tallies.items()))
+        row["dissent_types"] = distribution
+        # a categorical enum has no median (§12's word); the MODE is emitted, ties
+        # breaking to the lexicographically smallest tied value — deterministic
+        row["dissent_type_mode"] = (min((v for v in distribution
+                                         if distribution[v] == max(distribution.values())))
+                                    if distribution else None)
+        row["downstream_suppressions"] = suppression_events.get(rule, 0)
+        row["suppressing_repos"] = len(suppressing_repos.get(rule, ()))
+        row["suppression_rate"] = ratio(row["suppressing_repos"], deployments)
+        row["repos_hit"] = len(repos_hit.get(rule, ()))
+        row["reach"] = ratio(row["repos_hit"], repos_audited)
+        row["state"] = rule_state(row)
 
     payload = {
         "schema_version": 1,
@@ -306,6 +455,9 @@ def main(argv=None):
             "findings": len(rule_of),
             "resolved": sum(r["resolved"] for r in rules.values()),
             "verified": len(verified),
+            "repos_audited": repos_audited,
+            "deployments": deployments,
+            "repos_unattributed": unattributed,
         },
         "rules": [rules[r] for r in sorted(rules)],
     }

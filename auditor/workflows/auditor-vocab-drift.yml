@@ -151,6 +151,10 @@ jobs:
                 # against the documented advisory schema BEFORE it is appended.
                 # logic:vocab-drift
                 set -euo pipefail
+                # vibe-167: the advisory digest is compute-vocab-fingerprint.sh's
+                # duty; sourcing the one implementation retires this block's inline
+                # copy of the payload formula.
+                . "$CODE_DIR/auditor/scripts/compute-vocab-fingerprint.sh"
                 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
                 WF="auditor-vocab-drift"
                 RID="${RUN_ID:-${GITHUB_RUN_ID:-local}}"
@@ -194,18 +198,12 @@ jobs:
                       DROPPED=$((DROPPED + 1))
                       continue
                     fi
-                    TERMS_CSV="$(printf '%s\n' "$line" | jq -r '((.terms // []) | sort | join(","))')"
-                    DISPOSITION="$(printf '%s\n' "$line" | jq -r '.disposition // ""')"
                     RAW_RULE="$(printf '%s\n' "$line" | jq -r '.rule_id // ""')"
                     case "$RAW_RULE" in
                       VOCAB-*) RULE_ID="$RAW_RULE" ;;
                       *) RULE_ID="VOCAB-$(printf '%s' "$RAW_RULE" | tr '[:lower:]' '[:upper:]')" ;;
                     esac
-                    # the advisory digest folds repo|VOCAB|<sorted, comma-joined
-                    # terms>|disposition with a MANDATORY trailing newline, at
-                    # full sha256 width behind the sha256: prefix
-                    FP="sha256:$(printf '%s|VOCAB|%s|%s\n' "$TARGET" "$TERMS_CSV" "$DISPOSITION" \
-                      | shasum -a 256 | cut -d' ' -f1)"
+                    FP="$(printf '%s\n' "$line" | compute_vocab_fingerprint "$TARGET")"
                     printf '%s\n' "$line" | jq -c --arg t "$TS" --arg w "$WF" --arg i "$RID" \
                       --argjson n "$RNUM" --arg r "$TARGET" --arg s "$SHA" --arg f "$FP" --arg rid "$RULE_ID" \
                       '{timestamp: $t, workflow: $w, event: "vocab_advisory", run_id: $i, run_number: $n, data: (. + {event: "vocab_advisory", timestamp: $t, audit_run_id: $i, repo: $r, commit_sha: $s, fingerprint: $f, rule_id: $rid})}' >> "$ADVISORY_LOG"

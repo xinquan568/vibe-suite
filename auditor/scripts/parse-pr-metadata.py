@@ -13,9 +13,10 @@ later pipeline run appending a correction — so the last block is the current o
 first would pin attribution to a superseded edit forever, and it is the natural thing a
 non-greedy regex does by default, which is why it is called out here and mutation-tested.
 
-This parser is the SECOND implementation of that contract: `auditor-track.yml` reads the same
-block with a jq regex using the `"g"` flag and `| last`. The two must agree, and a test holds
-them to it — a divergence would silently split attribution between the workflow and the helper.
+This parser is the ONE implementation of that contract (vibe-167): `auditor-track.yml` pipes
+each PR body through it and consumes its output — the workflow's former inline jq regex is
+retired, and a test pins both the wiring and the regex's absence, because a second copy would
+be free to disagree and silently split attribution.
 
 Output: the parsed JSON object on stdout, or `{}` when no block is present or its payload is
 malformed. A malformed payload also warns on stderr and exits non-zero, so a corrupted block

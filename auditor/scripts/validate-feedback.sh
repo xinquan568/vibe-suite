@@ -91,6 +91,17 @@ VIOLATIONS="$(
              | "negative-count: \($r.rule_id // "<null>").\(.key)=\(.value)"] | .[]),
         (if ((($r.merged // 0) + ($r.applied_separately // 0) + ($r.rejected // 0)) > ($r.submitted // $r.hits // 0))
          then "resolved-exceeds-submitted: \($r.rule_id // "<null>") merged=\($r.merged // 0) applied_separately=\($r.applied_separately // 0) rejected=\($r.rejected // 0) submitted=\($r.submitted // $r.hits // 0)"
+         else empty end),
+        (if ($r | has("state")) and (($r.state | type) != "string" or ([$r.state] | inside(["healthy","noisy","dormant","disputed"]) | not))
+         then "invalid-state: \($r.rule_id // "<null>") \($r.state)"
+         else empty end),
+        (   [$r | to_entries[]
+             | select(.key | test("_rate$|_precision$|^reach$"))
+             | select((.value != null) and ((.value | type) != "number" or .value < 0 or .value > 1))
+             | "rate-out-of-bounds: \($r.rule_id // "<null>").\(.key)=\(.value)"] | .[]),
+        (if ($r | has("dissent_type_mode")) and ($r.dissent_type_mode != null)
+            and ([$r.dissent_type_mode] | inside(["context_missed","docs_citation","intentional_pattern","out_of_scope","rule_disputed","style_disagreement"]) | not)
+         then "invalid-dissent-mode: \($r.rule_id // "<null>") \($r.dissent_type_mode)"
          else empty end)
       ]
     | .[]
@@ -99,6 +110,17 @@ VIOLATIONS="$(
   echo "REFUSE:validate-feedback:unreadable $LOG" >&2
   exit 1
 }
+
+# vibe-167 W3: the three §12 totals are tallies; negative means subtraction
+TOTALS_BAD="$(jq -r '
+  [((.totals // {}) | to_entries[])
+   | select(.key | test("^(repos_audited|deployments|repos_unattributed)$"))
+   | select((.value | type) != "number" or .value < 0)
+   | "negative-total: \(.key)=\(.value)"] | .[]' "$LOG" 2>/dev/null)" || TOTALS_BAD=""
+if [ -n "$TOTALS_BAD" ]; then
+  VIOLATIONS="${VIOLATIONS:+$VIOLATIONS
+}$TOTALS_BAD"
+fi
 
 if [ -n "$VIOLATIONS" ]; then
   printf '%s\n' "$VIOLATIONS" >&2

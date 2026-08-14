@@ -290,6 +290,363 @@ class Test_rule_health(unittest.TestCase):
                          "mutation ineffective: a correct rule should now look half wrong")
 
 
+class Test_rule_health_section12(unittest.TestCase):
+    """vibe-167: the §12 metric set — every formula asserted against a fixture whose
+    arithmetic is small enough to verify by hand.
+
+    Repo grain everywhere a ratio is bounded: suppression_rate and reach are
+    proportions of repositories, never event or fingerprint counts, so [0,1] holds by
+    construction (the Step-5 review's grain finding)."""
+
+    HELPER = SCRIPTS / "rule-health.py"
+
+    EVENTS = [
+        envelope("finding_recorded", {"fingerprint": "fp-a", "rule_id": "R04"},
+                 "2026-01-01T00:00:00Z"),
+        envelope("finding_recorded", {"fingerprint": "fp-b", "rule_id": "R04"},
+                 "2026-01-05T00:00:00Z"),
+        envelope("finding_recorded", {"fingerprint": "fp-c", "rule_id": "R05"},
+                 "2026-01-06T00:00:00Z"),
+        # LATEST wins: fp-b first persists, then is verified fixed — the later event
+        # is the verdict, mirroring the ledger's standing latest-outcome doctrine.
+        envelope("finding_verified",
+                 {"repo": "acme/w", "fingerprint": "fp-b", "rule_id": "R04",
+                  "outcome": "persists_unchanged"}, "2026-06-01T00:00:00Z"),
+        envelope("finding_verified",
+                 {"repo": "acme/w", "fingerprint": "fp-b", "rule_id": "R04",
+                  "outcome": "fixed_and_merged"}, "2026-07-01T00:00:00Z"),
+        envelope("finding_verified",
+                 {"repo": "acme/w", "fingerprint": "fp-c", "rule_id": "R05",
+                  "outcome": "persists_line_shifted"}, "2026-07-01T00:00:00Z"),
+    ]
+
+    REGISTRY = {"repos": {"acme/w": {"prs": {
+        "1": {"number": 1, "updatedAt": "2026-04-01T00:00:00Z", "outcome": "rejected",
+              "fingerprints": ["fp-a"], "rule_ids": ["R04"]},
+        "2": {"number": 2, "updatedAt": "2026-06-01T00:00:00Z", "outcome": "merged",
+              "fingerprints": ["fp-b"], "rule_ids": ["R04"]},
+        "3": {"number": 3, "updatedAt": "2026-04-02T00:00:00Z", "outcome": "rejected",
+              "fingerprints": ["fp-c"], "rule_ids": ["R05"]},
+    }}}}
+
+    DISAGREEMENTS = [
+        envelope("self_false_positive",
+                 {"repo": "acme/w", "fingerprint": "fp-c", "rule_id": "R05",
+                  "reason": "r", "rule_gap": "g"}, "2026-02-01T00:00:00Z"),
+        envelope("maintainer_rejected",
+                 {"pr": "acme/w#1", "fingerprints": ["fp-a"], "rule_ids": ["R04"],
+                  "dissent_type": "rule_disputed", "quote": "q",
+                  "commenter_role": "maintainer", "classifier_model": "m",
+                  "classifier_confidence": "high"}, "2026-04-02T00:00:00Z"),
+        envelope("maintainer_pushback",
+                 {"pr": "acme/w#2", "fingerprints": ["fp-b"], "rule_ids": ["R04"],
+                  "dissent_type": "docs_citation", "quote": "q",
+                  "commenter_role": "maintainer", "classifier_model": "m",
+                  "classifier_confidence": "high"}, "2026-05-01T00:00:00Z"),
+        # ignored by the metric join: raw thread capture, not an adjudication
+        envelope("pr_comments_snapshot",
+                 {"pr": "acme/w#1", "pr_state": "closed", "comments_hash": "h",
+                  "fingerprints": ["fp-a"], "rule_ids": ["R04"], "comments": []},
+                 "2026-04-01T12:00:00Z"),
+        # two suppressions in ONE repo (paths differ) + one legacy-only repo: the
+        # numerator is repos {acme/w, other/y} = 2, never the event count 3
+        envelope("downstream_suppression",
+                 {"repo": "acme/w", "commit_sha": "c1", "rule_id": "R04",
+                  "suppression_type": "suppress", "path": ".claude/a.json"},
+                 "2026-05-02T00:00:00Z"),
+        envelope("downstream_suppression",
+                 {"repo": "acme/w", "commit_sha": "c2", "rule_id": "R04",
+                  "suppression_type": "max_penalty", "path": ".claude/b.json"},
+                 "2026-05-03T00:00:00Z"),
+        envelope("downstream_suppression",
+                 {"repo": "other/y", "commit_sha": "c3", "rule_id": "R04",
+                  "suppression_type": "suppress", "path": ".claude/c.json"},
+                 "2026-05-04T00:00:00Z"),
+    ]
+
+    #: Corpus rows enumerate repos-with-a-deployed-config: one suppressing, one clean
+    #: (zero overrides), so deployments = |{acme/w, clean/z} ∪ {acme/w, other/y}| = 3.
+    CORPUS = [
+        {"repo": "acme/w", "path": ".claude/a.json", "sha": "s1",
+         "observed_at": "2026-05-02T00:00:00Z", "override_count": 1,
+         "overrides": [{"rule_id": "R04", "map_type": "suppress"}],
+         "rule_ids": ["R04"]},
+        {"repo": "clean/z", "path": ".claude/cfg.json", "sha": "s2",
+         "observed_at": "2026-05-02T00:00:00Z", "override_count": 0,
+         "overrides": [], "rule_ids": []},
+    ]
+
+    SIDECARS = {"acme-w.findings.jsonl": [
+        {"file": "a.md", "rule_id": "R04", "pattern": "p", "line": 1},
+    ]}
+
+    def _data_dir(self):
+        d = Path(tempfile.mkdtemp())
+        for sub in ("ledgers", "registry", "exemplars", "audits", "feedback"):
+            (d / sub).mkdir()
+        (d / "ledgers" / "events.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in self.EVENTS), encoding="utf-8")
+        (d / "ledgers" / "disagreements.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in self.DISAGREEMENTS), encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(json.dumps(self.REGISTRY),
+                                                   encoding="utf-8")
+        (d / "feedback" / "suppressions.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in self.CORPUS), encoding="utf-8")
+        for name, rows in self.SIDECARS.items():
+            (d / "audits" / name).write_text(
+                "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        return d
+
+    def _rules(self):
+        d = self._data_dir()
+        proc = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d),
+                               "--generated-at", "2026-08-14T00:00:00Z"],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads((d / "feedback" / "log.json").read_text(encoding="utf-8"))
+        return payload, {r["rule_id"]: r for r in payload["rules"]}
+
+    def test_disagreement_counts_and_rates(self):
+        _, rules = self._rules()
+        r04 = rules["R04"]
+        self.assertEqual(r04["maintainer_rejected"], 1)
+        self.assertEqual(r04["maintainer_pushback"], 1)
+        # contributed = unique fingerprints that reached any PR (fp-a, fp-b)
+        self.assertEqual(r04["contributed"], 2)
+        self.assertEqual(r04["maintainer_rejection_rate"], 0.5)
+        self.assertEqual(r04["intent_precision"], 0.5)   # merged 1 / contributed 2
+
+    def test_dissent_distribution_and_lexicographic_mode_tie_break(self):
+        _, rules = self._rules()
+        r04 = rules["R04"]
+        self.assertEqual(r04["dissent_types"],
+                         {"docs_citation": 1, "rule_disputed": 1})
+        self.assertEqual(r04["dissent_type_mode"], "docs_citation",
+                         "a 1-1 tie breaks to the lexicographically smallest value")
+
+    def test_suppression_metrics_are_repo_grain(self):
+        payload, rules = self._rules()
+        r04 = rules["R04"]
+        self.assertEqual(r04["downstream_suppressions"], 3)   # raw incidence
+        self.assertEqual(r04["suppressing_repos"], 2)         # acme/w, other/y
+        self.assertEqual(payload["totals"]["deployments"], 3)  # union incl. legacy
+        self.assertEqual(r04["suppression_rate"], round(2 / 3, 4))
+
+    def test_verification_uses_the_latest_event_per_fingerprint(self):
+        _, rules = self._rules()
+        r04, r05 = rules["R04"], rules["R05"]
+        self.assertEqual(r04["verified_fixed"], 1)   # fp-b: persists then FIXED
+        self.assertEqual(r04["verified_total"], 1)
+        self.assertEqual(r04["effect_precision"], 1.0)
+        self.assertEqual(r04["verified"], r04["verified_fixed"],
+                         "`verified` is the documented compatibility alias")
+        self.assertEqual(r05["verified_fixed"], 0)
+        self.assertEqual(r05["verified_total"], 1)
+        self.assertEqual(r05["effect_precision"], 0.0)
+
+    def test_reach_is_repo_grain_and_bounded(self):
+        payload, rules = self._rules()
+        self.assertEqual(payload["totals"]["repos_audited"], 1)
+        self.assertEqual(rules["R04"]["repos_hit"], 1)
+        self.assertEqual(rules["R04"]["reach"], 1.0)
+        self.assertEqual(payload["totals"]["repos_unattributed"], 0)
+
+    def test_states_follow_the_refinement_classifier_precedence(self):
+        _, rules = self._rules()
+        # R04 carries three unique fingerprints (fp-a, fp-b, plus the sidecar row's
+        # computed digest) — at the floor, acceptance 0.5 and zero false positives:
+        # healthy. R05 sits under MIN_HITS: dormant, before any other judgment —
+        # classify()'s early return. (The full precedence matrix is the
+        # cross-alignment class's job.)
+        self.assertEqual(rules["R04"]["hits"], 3)
+        self.assertEqual(rules["R04"]["state"], "healthy")
+        self.assertEqual(rules["R05"]["state"], "dormant")
+
+    def test_a_null_outcome_pr_still_counts_as_contributed(self):
+        """F1 (step-8): a submitted PR awaiting adjudication has REACHED a PR; a
+        rejection event against it must never push the rate past 1."""
+        registry = {"repos": {"acme/w": {"prs": {
+            "9": {"number": 9, "updatedAt": "2026-04-01T00:00:00Z", "outcome": None,
+                  "fingerprints": ["fp-n"], "rule_ids": ["R07"]},
+        }}}}
+        d = Path(tempfile.mkdtemp())
+        for sub in ("ledgers", "registry", "exemplars"):
+            (d / sub).mkdir()
+        (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
+        (d / "ledgers" / "disagreements.jsonl").write_text(json.dumps(envelope(
+            "maintainer_rejected",
+            {"pr": "acme/w#9", "fingerprints": ["fp-n"], "rule_ids": ["R07"],
+             "dissent_type": "out_of_scope", "quote": "q",
+             "commenter_role": "maintainer", "classifier_model": "m",
+             "classifier_confidence": "high"}, "2026-04-02T00:00:00Z")) + "\n",
+            encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(json.dumps(registry),
+                                                   encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        row = json.loads((d / "feedback" / "log.json").read_text())["rules"][0]
+        self.assertEqual(row["contributed"], 1)
+        self.assertEqual(row["maintainer_rejected"], 1)
+        self.assertLessEqual(row["maintainer_rejection_rate"], 1)
+
+    def test_misclaimed_event_rules_cannot_break_the_rate_bound(self):
+        """F1 iteration 2: rejection events CLAIMING R02 against fingerprints the
+        registry attributes to R01 must roll up under R01 — one grain for numerator
+        and denominator, so no rule's rate can exceed 1."""
+        registry = {"repos": {"acme/w": {"prs": {
+            "1": {"number": 1, "updatedAt": "2026-04-01T00:00:00Z", "outcome": "open",
+                  "fingerprints": ["fp-1", "fp-2"], "rule_ids": ["R01", "R01"]},
+            "2": {"number": 2, "updatedAt": "2026-04-02T00:00:00Z", "outcome": "open",
+                  "fingerprints": ["fp-3"], "rule_ids": ["R02"]},
+        }}}}
+        events = [envelope("maintainer_rejected",
+                           {"pr": "acme/w#1", "fingerprints": [fp],
+                            "rule_ids": ["R02"], "dissent_type": "out_of_scope",
+                            "quote": "q", "commenter_role": "maintainer",
+                            "classifier_model": "m", "classifier_confidence": "high"},
+                           "2026-04-03T00:00:00Z") for fp in ("fp-1", "fp-2")]
+        d = Path(tempfile.mkdtemp())
+        for sub in ("ledgers", "registry", "exemplars"):
+            (d / sub).mkdir()
+        (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
+        (d / "ledgers" / "disagreements.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(json.dumps(registry),
+                                                   encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rules = {r["rule_id"]: r
+                 for r in json.loads((d / "feedback" / "log.json").read_text())["rules"]}
+        self.assertEqual(rules["R01"]["maintainer_rejected"], 2)
+        self.assertLessEqual(rules["R01"]["maintainer_rejection_rate"], 1)
+        self.assertEqual(rules["R02"]["maintainer_rejected"], 0,
+                         "the events' mis-claimed rule must receive nothing")
+        self.assertLessEqual(rules["R02"]["maintainer_rejection_rate"] or 0, 1)
+
+    def test_replayed_adjudications_do_not_skew_the_dissent_mode(self):
+        """F1 iteration 3: the same rejection event appended twice (a replay) must
+        tally its dissent once — per unique (fingerprint, type), never per event."""
+        event = envelope("maintainer_rejected",
+                         {"pr": "acme/w#1", "fingerprints": ["fp-r"],
+                          "rule_ids": ["R03"], "dissent_type": "out_of_scope",
+                          "quote": "q", "commenter_role": "maintainer",
+                          "classifier_model": "m", "classifier_confidence": "high"},
+                         "2026-04-01T00:00:00Z")
+        d = Path(tempfile.mkdtemp())
+        for sub in ("ledgers", "registry", "exemplars"):
+            (d / sub).mkdir()
+        (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
+        (d / "ledgers" / "disagreements.jsonl").write_text(
+            json.dumps(event) + "\n" + json.dumps(event) + "\n", encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(json.dumps({"repos": {}}),
+                                                   encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        row = json.loads((d / "feedback" / "log.json").read_text())["rules"][0]
+        self.assertEqual(row["maintainer_rejected"], 1)
+        self.assertEqual(row["dissent_types"], {"out_of_scope": 1},
+                         "a replayed event doubled the dissent tally")
+
+    def test_a_disagreement_only_legacy_fingerprint_is_contributed(self):
+        """F1: an adjudication event IS proof the finding reached a PR, even when
+        the registry predates the metadata block and holds no record of it."""
+        d = Path(tempfile.mkdtemp())
+        for sub in ("ledgers", "registry", "exemplars"):
+            (d / sub).mkdir()
+        (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
+        (d / "ledgers" / "disagreements.jsonl").write_text(json.dumps(envelope(
+            "maintainer_pushback",
+            {"pr": "old/x#1", "fingerprints": ["fp-legacy"], "rule_ids": ["R08"],
+             "dissent_type": "style_disagreement", "quote": "q",
+             "commenter_role": "maintainer", "classifier_model": "m",
+             "classifier_confidence": "high"}, "2026-01-01T00:00:00Z")) + "\n",
+            encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(json.dumps({"repos": {}}),
+                                                   encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        row = json.loads((d / "feedback" / "log.json").read_text())["rules"][0]
+        self.assertEqual(row["contributed"], 1)
+        self.assertLessEqual(row["maintainer_rejection_rate"] or 0, 1)
+
+    def test_empty_corpus_and_no_suppressions_yield_null_rate(self):
+        d = Path(tempfile.mkdtemp())
+        for sub in ("ledgers", "registry", "exemplars"):
+            (d / sub).mkdir()
+        (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
+        # hits come from findings, never from bare events; this record carries no
+        # repo either, so reach's denominator is zero and the ratio must be null
+        (d / "ledgers" / "findings.jsonl").write_text(
+            json.dumps({"fingerprint": "fp-a", "rule_id": "R04"}) + "\n",
+            encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(json.dumps({"repos": {}}),
+                                                   encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads((d / "feedback" / "log.json").read_text(encoding="utf-8"))
+        row = payload["rules"][0]
+        self.assertEqual(payload["totals"]["deployments"], 0)
+        self.assertIsNone(row["suppression_rate"])
+        self.assertIsNone(row["reach"])
+        self.assertEqual(payload["totals"]["repos_unattributed"], 1,
+                         "the un-attributable fingerprint is counted, not hidden")
+
+
+class Test_state_policy_cross_alignment(unittest.TestCase):
+    """vibe-167 D3: rule-health's state must never diverge from the refinement
+    classifier — constants AND behavior, both directions."""
+
+    def _load(self, name, module_name):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(module_name, SCRIPTS / name)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def setUp(self):
+        self.health = self._load("rule-health.py", "rule_health_under_test")
+        self.refine = self._load("prepare-refinement-input.py", "refine_under_test")
+
+    def test_the_threshold_constants_are_identical(self):
+        for name in ("MIN_HITS", "NOISY_FP_RATE", "DISPUTED_ACCEPTANCE"):
+            self.assertEqual(getattr(self.health, name), getattr(self.refine, name),
+                             f"{name} drifted between rule-health and "
+                             f"prepare-refinement-input — one policy, two values")
+
+    ROWS = [
+        {"hits": 2, "false_positive_rate": 0.9, "acceptance_rate": 0.0, "resolved": 1},
+        {"hits": 2, "false_positive_rate": None, "acceptance_rate": None, "resolved": 0},
+        {"hits": 3, "false_positive_rate": 0.31, "acceptance_rate": 1.0, "resolved": 1},
+        {"hits": 3, "false_positive_rate": 0.30, "acceptance_rate": 1.0, "resolved": 1},
+        {"hits": 3, "false_positive_rate": 0.0, "acceptance_rate": 0.49, "resolved": 2},
+        {"hits": 3, "false_positive_rate": 0.0, "acceptance_rate": 0.50, "resolved": 2},
+        {"hits": 3, "false_positive_rate": 0.9, "acceptance_rate": 0.1, "resolved": 2},
+        {"hits": 9, "false_positive_rate": None, "acceptance_rate": None, "resolved": 0},
+    ]
+
+    def test_states_agree_with_the_classifier_row_by_row(self):
+        for row in self.ROWS:
+            with self.subTest(row=row):
+                state = self.health.rule_state(row)
+                include, reasons = self.refine.classify(row, self.refine.MIN_HITS)
+                if row["hits"] < self.refine.MIN_HITS:
+                    self.assertEqual(state, "dormant",
+                                     "the hit floor precedes every other judgment")
+                    self.assertFalse(include)
+                elif include:
+                    # the classifier selected it for refinement: the state must be a
+                    # non-healthy one and must carry a matching reason
+                    self.assertIn(state, ("noisy", "disputed"))
+                    self.assertIn(state, reasons)
+                else:
+                    self.assertEqual(state, "healthy")
+
+
 class Test_validate_feedback(unittest.TestCase):
     """`validate-feedback.sh` — the gate between a rebuild bug and a rulebook change."""
 
@@ -313,6 +670,57 @@ class Test_validate_feedback(unittest.TestCase):
             helper.write_text(script_text, encoding="utf-8")
         return subprocess.run(["bash", str(helper), "--data-dir", str(d), *extra],
                               capture_output=True, text=True)
+
+    # --- vibe-167: the §12 field checks ---------------------------------------------------
+    def _row(self, **overrides):
+        row = {"rule_id": "R04", "hits": 10, "submitted": 6, "merged": 3,
+               "rejected": 2, "state": "healthy", "suppression_rate": 0.5,
+               "reach": 0.8, "effect_precision": None, "intent_precision": 1.0,
+               "maintainer_rejection_rate": 0.0, "dissent_type_mode": "docs_citation"}
+        row.update(overrides)
+        return {"schema_version": 1, "rules": [row]}
+
+    def test_a_section12_shaped_row_passes(self):
+        r = self._run(self._log(self._row()))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_an_unknown_state_is_refused(self):
+        r = self._run(self._log(self._row(state="thriving")))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("invalid-state", r.stderr)
+
+    def test_a_rate_above_one_is_refused(self):
+        # the grain finding: a ratio built on mismatched grains exceeds 1 — the
+        # validator is where that arithmetic impossibility becomes a stop
+        r = self._run(self._log(self._row(suppression_rate=1.5)))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("rate-out-of-bounds", r.stderr)
+
+    def test_a_negative_rate_is_refused(self):
+        r = self._run(self._log(self._row(reach=-0.1)))
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_an_unknown_dissent_mode_is_refused(self):
+        r = self._run(self._log(self._row(dissent_type_mode="vibes")))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("invalid-dissent-mode", r.stderr)
+
+    def test_docs_citation_is_an_accepted_mode(self):
+        # the emitter/schema mismatch resolution: auditor-classify emits it
+        r = self._run(self._log(self._row(dissent_type_mode="docs_citation")))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_negative_total_is_refused(self):
+        payload = self._row()
+        payload["totals"] = {"repos_audited": -1, "deployments": 0}
+        r = self._run(self._log(payload))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("negative-total", r.stderr)
+
+    def test_null_rates_and_absent_new_fields_stay_valid(self):
+        # pre-§12 logs carry none of the new fields; additive means they still pass
+        r = self._run(self._log(self.VALID))
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     # --- oracle ---------------------------------------------------------------------------
     def test_a_valid_log_passes(self):

@@ -171,17 +171,31 @@ jobs:
           done < <(gh issue list --state open --label "audit-complete" --limit 200 \
             --json number,title --jq '.[] | [.number, .title] | @tsv' 2> /dev/null || true)
           # phase 3 — select the next audit batch, capped by BATCH_SIZE
-          picked=0
+          # logic:batch-select
+          # vibe-167: selection + labeling + dispatch are batch-process.py's duty —
+          # the registry-driven helper labels the eligible issues and dispatches the
+          # stage workflow, and every gh call it makes touches a third party's
+          # repository, so its dry run is the whole phase's dry run. The helper ADDS
+          # labels and removes none; the post-pass below retires audit-candidate from
+          # issues now carrying both, keeping the label machine's net transition.
+          if [ "$DRY_RUN" = "true" ]; then
+            python3 "$CODE_DIR/auditor/scripts/batch-process.py" --data-dir "$DATA_DIR" --stage audit --batch-size "$BATCH_SIZE" --host-repo "${GITHUB_REPOSITORY:?}"
+          else
+            python3 "$CODE_DIR/auditor/scripts/batch-process.py" --data-dir "$DATA_DIR" --stage audit --batch-size "$BATCH_SIZE" --host-repo "${GITHUB_REPOSITORY:?}" --apply
+          fi
           while IFS=$'\t' read -r num title; do
             [ -n "$num" ] || continue
-            if [ "$picked" -ge "$BATCH_SIZE" ]; then
-              break
+            # self-contained on purpose: the extracted-run harness executes exactly
+            # this marker region, so the removal cannot lean on apply() above
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "DRY-RUN would edit issue $num remove audit-candidate"
+            else
+              gh issue edit "$num" --remove-label "audit-candidate"
             fi
-            apply "$num" "audit-ready" "audit-candidate"
-            picked=$((picked+1))
-          done < <(gh issue list --state open --label "audit-candidate" --limit 200 \
+          done < <(gh issue list --state open --label "audit-ready" --label "audit-candidate" --limit 200 \
             --json number,title --jq '.[] | [.number, .title] | @tsv' 2> /dev/null || true)
-          echo "audit batch selected $picked of cap $BATCH_SIZE"
+          # /logic
+          echo "audit batch selected via batch-process.py (cap $BATCH_SIZE)"
           # phase 4 — pipeline census for the run log (read-only observability)
           for label in audit-candidate audit-ready audit-complete contribute-approved prs-submitted case-study-ready; do
             n="$(gh issue list --state open --label "$label" --limit 1000 --json number --jq 'length' 2> /dev/null || echo 0)"

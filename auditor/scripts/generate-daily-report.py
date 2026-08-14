@@ -66,10 +66,19 @@ def render(date, registry, outcomes, rule_health, activity):
     by_status = registry.get("by_status") or {}
     for stage in STAGES:
         lines.append(f"| {stage} | {int(by_status.get(stage, 0))} |")
+    # vibe-167 (F4): statuses outside the five stages — policy_denied,
+    # policy_cla_required, orphaned, whatever the registry holds — are facts the
+    # report existed to show; rendering only the known five silently hid them
+    for status in sorted(set(by_status) - set(STAGES)):
+        lines.append(f"| {status} | {int(by_status.get(status, 0))} |")
     lines += [f"| **total** | **{int(registry.get('total', 0))}** |", ""]
 
     lines += ["## Contribution outcomes", "", "| Metric | Value |", "|---|---|"]
     for name in RESOLVED:
+        lines.append(f"| {name} | {int(outcomes.get(name, 0))} |")
+    # vibe-167 F4: outcomes beyond the fixed rows — cla_blocked today, whatever
+    # arrives tomorrow — were displayed by the old dynamic report and stay visible
+    for name in sorted(set(outcomes) - set(RESOLVED) - {"open"}):
         lines.append(f"| {name} | {int(outcomes.get(name, 0))} |")
     lines += [f"| open (not counted as resolved) | {int(outcomes.get('open', 0))} |",
               f"| resolved | {resolved} |",

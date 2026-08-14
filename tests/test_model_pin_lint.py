@@ -500,6 +500,35 @@ class EscapedPinsAreDetected(unittest.TestCase):
             self.assertEqual([(v.line, v.token) for v in found],
                              [(1, self.DATED), (2, "gemini-2-pro")])
 
+    def test_a_multiline_python_literal_reports_the_pin_line(self):
+        """Step-8 F1: a pin inside a triple-quoted literal is attributed to
+        ITS line — the decoded value's physical newlines carry the offset."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "scripts/m.py",
+                   'DOC = """heading\n'
+                   'claude-opus-4-2025051\\u0034\n'
+                   'tail"""\n')
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.path, v.line, v.token) for v in found],
+                             [("scripts/m.py", 2, self.DATED)])
+
+    def test_a_yaml_block_scalar_reports_the_pin_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "skills/m.yml", "a: |\n  x\n  o3-mini\n")
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.path, v.line, v.token) for v in found],
+                             [("skills/m.yml", 3, "o3-mini")])
+
+    def test_an_escaped_newline_stays_clamped_inside_the_literal(self):
+        """A decoded newline that was itself an ESCAPE moves no line: the
+        attribution clamps to the literal's recorded end, so the report can
+        never point outside the literal."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _write(tmp, "schemas/m.json", '{"x": "a\\ngpt-\\u0035"}\n')
+            found = lint.scan(tmp, lister=_tree_lister)
+            self.assertEqual([(v.path, v.line, v.token) for v in found],
+                             [("schemas/m.json", 1, "gpt-5")])
+
     def test_python_raw_string_is_not_reported(self):
         """The false positive that forced the revert, now dead by construction:
         `ast` yields the raw string's value with its backslash intact."""

@@ -1598,15 +1598,23 @@ class TestParsedLint(unittest.TestCase):
         self.assertEqual(lint(text), [])
 
     def test_flow_workflow_validates_equal_to_block_twin(self):
+        # FULLY flow — permissions included, per D4's oracle (step-8 F4): the
+        # twin differs from the block spelling in nothing but syntax, and the
+        # violation lists must be EQUAL.
         block = self.BASE.replace("      - run: echo ok",
                                   "      -\n        name: no action")
-        flow = (self.BASE.split("jobs:\n")[0] +
-                "jobs: {a: {runs-on: ubuntu-latest, steps: [{name: no action}]}}\n")
+        flow = ("name: t\non:\n  push: {}\npermissions: {contents: read}\n"
+                "jobs: {a: {runs-on: ubuntu-latest, "
+                "steps: [{name: no action}]}}\n")
         self.assertEqual(lint(flow), lint(block))
         self.assertIn("job 'a' step 1: neither 'run' nor 'uses' (parsed - "
                       "bare-dash and quoted spellings included)", lint(flow))
         self.assertFalse(any("cannot validate" in x for x in lint(flow)),
                          "the flow refusal must be dead when ruby is available")
+        # and the flow permissions spelling is genuinely VALIDATED, not skipped
+        bad = flow.replace("{contents: read}", "{id-token: read}")
+        self.assertIn("workflow: permission 'id-token: read' is outside the "
+                      "documented values (none|write)", lint(bad))
 
     def test_flow_refusal_stands_without_ruby(self):
         flow = (self.BASE.split("jobs:\n")[0] +
@@ -1877,6 +1885,25 @@ class TestStageLabelOperative(unittest.TestCase):
         gated, _ = _gates_on_label(
             "'audit-ready' == github.event.label.name", "audit-ready")
         self.assertTrue(gated)
+
+    def test_an_unrecognized_escape_disjunct_does_not_gate(self):
+        # D8″'s fixture (step-8 F5): only the DOCUMENTED workflow_dispatch
+        # equality is a recognized escape — any other ungated disjunct defeats
+        # the label however legitimate it looks.
+        gated, reason = _gates_on_label(
+            "github.actor == 'x' || github.event.label.name == 'audit-ready'",
+            "audit-ready")
+        self.assertFalse(gated)
+        self.assertIn("does not carry the label equality", reason)
+
+    def test_a_negated_equality_does_not_gate(self):
+        # D8″'s fixture (step-8 F5): the equality under `!` gates on the
+        # label's ABSENCE. The parenthesized form falls to the judged-shape
+        # refusal; the bare form is a non-gating disjunct.
+        for expr in ("!(github.event.label.name == 'audit-ready')",
+                     "!github.event.label.name == 'audit-ready'"):
+            gated, _reason = _gates_on_label(expr, "audit-ready")
+            self.assertFalse(gated, expr)
 
     def test_dispatch_escape_alone_never_gates(self):
         gated, reason = _gates_on_label(
@@ -2441,7 +2468,7 @@ class TestMutations(unittest.TestCase):
         """
         # an undeclared workflow is still a violation — that is the least-privilege contract
         self._assert_flagged(self.GOOD.replace("permissions:\n  contents: read\n", ""))
-        # and any declared vocabulary passes, including spellings this lint does not judge
+        # and every VALID declared spelling passes — the parsed stage judges them all now
         for spelling in ("permissions:\n  contents: read\n",
                          "permissions:\n  models: read\n",
                          "permissions:\n  artifact-metadata: read\n",

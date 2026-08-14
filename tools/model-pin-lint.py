@@ -216,7 +216,13 @@ begin
   tree = Psych.parse_stream(STDIN.read)
   out = []
   walk = lambda do |n|
-    out << [n.start_line + 1, n.value] if n.is_a?(Psych::Nodes::Scalar)
+    if n.is_a?(Psych::Nodes::Scalar)
+      first = n.start_line + 1
+      # A block scalar's start_line is its |/> HEADER; content begins next line.
+      first += 1 if [Psych::Nodes::Scalar::LITERAL,
+                     Psych::Nodes::Scalar::FOLDED].include?(n.style)
+      out << [first, n.end_line + 1, n.value]
+    end
     n.children.each { |c| walk.call(c) } if n.respond_to?(:children) && n.children
   end
   walk.call(tree)
@@ -244,8 +250,9 @@ def _find_ruby():
 
 
 def decoded_strings(relpath, text):
-    """(line, decoded_value) for every string literal in a Python/JSON/YAML
-    file, decoded by that language's own parser; [] for other suffixes."""
+    """(start_line, end_line, decoded_value) for every string literal in a
+    Python/JSON/YAML file, decoded by that language's own parser; [] for
+    other suffixes."""
     import ast as ast_mod
     import json as json_mod
     suffix = relpath.rsplit(".", 1)[-1] if "." in relpath else ""
@@ -254,7 +261,8 @@ def decoded_strings(relpath, text):
             tree = ast_mod.parse(text)
         except SyntaxError as exc:
             raise DecodeError(f"{relpath}: not parseable Python: {exc}") from exc
-        return [(node.lineno, node.value) for node in ast_mod.walk(tree)
+        return [(node.lineno, node.end_lineno or node.lineno, node.value)
+                for node in ast_mod.walk(tree)
                 if isinstance(node, ast_mod.Constant)
                 and isinstance(node.value, str)]
     if suffix == "json":
@@ -265,7 +273,7 @@ def decoded_strings(relpath, text):
         out = []
         for number, line in enumerate(text.splitlines(), start=1):
             for m in _JSON_STRING.finditer(line):
-                out.append((number, json_mod.loads(m.group(0))))
+                out.append((number, number, json_mod.loads(m.group(0))))
         return out
     if suffix in ("yml", "yaml"):
         ruby = _find_ruby()
@@ -285,8 +293,8 @@ def decoded_strings(relpath, text):
             detail = proc.stderr.decode("utf-8", "replace").strip()
             raise DecodeError(f"{relpath}: not parseable YAML: {detail}")
         return [
-            (line, value)
-            for line, value in json_mod.loads(proc.stdout.decode("utf-8"))
+            (start, end, value)
+            for start, end, value in json_mod.loads(proc.stdout.decode("utf-8"))
         ]
     return []
 
@@ -323,13 +331,21 @@ def scan(root, lister=git_lister, notice=None):
                     violations.append(Violation(relpath, number, token, line))
         # The ADDITIVE decoded layer (#165 item 3): string literals decoded by
         # the file's own language, deduped against the raw findings above so a
-        # plainly-written pin inside a literal reports once.
-        for number, value in decoded_strings(relpath, text):
-            source = lines[number - 1] if 0 < number <= len(lines) else ""
-            for token in find_pins(value):
-                if (number, token) not in seen:
-                    seen.add((number, token))
-                    violations.append(Violation(relpath, number, token, source))
+        # plainly-written pin inside a literal reports once. A find inside a
+        # MULTILINE literal is attributed by counting the decoded value's
+        # newlines — exact when those newlines are physical (Python
+        # triple-quoted, YAML block scalars), and clamped to the literal's
+        # recorded end line when they were themselves spelled as escapes, so
+        # the reported line always falls inside the literal.
+        for start, end, value in decoded_strings(relpath, text):
+            for offset, piece in enumerate(value.split("\n")):
+                number = min(start + offset, end)
+                source = lines[number - 1] if 0 < number <= len(lines) else ""
+                for token in find_pins(piece):
+                    if (number, token) not in seen:
+                        seen.add((number, token))
+                        violations.append(
+                            Violation(relpath, number, token, source))
     return violations
 
 

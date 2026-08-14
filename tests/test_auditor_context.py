@@ -771,6 +771,15 @@ def _shell_views(code):
                     emit(code[i:k + 1], code[i:k + 1])
                     i = k + 1
                     continue
+            if j < n and code[j] == "\\":
+                # `<<\EOF` — a backslash-quoted delimiter is QUOTED to the
+                # shell: the body does not interpolate.
+                m = re.match(r"[A-Za-z0-9_]+", code[j + 1:])
+                if m:
+                    pending.append((m.group(0), True))
+                    emit(code[i:j + 1 + m.end()], code[i:j + 1 + m.end()])
+                    i = j + 1 + m.end()
+                    continue
             m = re.match(r"[A-Za-z0-9_]+", code[j:])
             if m:
                 pending.append((m.group(0), False))
@@ -799,18 +808,22 @@ def _crediting_assignments(assign_line, assign_re):
         rest = assign_line[m.end():]
         # Skip this assignment's value (one word, ending at whitespace OR a
         # separator; masked strings are `_` runs), then any further NAME=value
-        # words — a prefix can stack.
+        # words — collected, because a line of NOTHING BUT assignments
+        # (`FIRST=1 SECOND=2`) binds every one of them, while the same stack
+        # before a command word is a prefix binding none for later lines.
         rest = re.sub(r"^[^\s;|&<>#]*", "", rest)
+        stacked = [m.group(1)]
         while True:
-            nxt = re.match(r"\s+(?:export\s+|local\s+)?[A-Z][A-Z0-9_]*=[^\s;|&<>#]*",
-                           rest)
+            nxt = re.match(r"\s+(?:export\s+|local\s+)?"
+                           r"([A-Z][A-Z0-9_]*)=[^\s;|&<>#]*", rest)
             if not nxt:
                 break
+            stacked.append(nxt.group(1))
             rest = rest[nxt.end():]
         rest = rest.strip()
         if rest and not rest.startswith((";", "&&", "||", "|", "#", ">", "<", "&", ")")):
             continue          # env-prefix: credits only its own command
-        names.append(m.group(1))
+        names.extend(stacked)
     return names
 
 
@@ -1105,6 +1118,23 @@ class TestTheBindingScanItselfCatches(unittest.TestCase):
         job = self._job('OUT="$(SUB_VALUE=1; echo x)"\necho "$SUB_VALUE"')
         self.assertIn("SUB_VALUE", _unbound_names(job),
                       "a $( ) assignment lives and dies in the subshell")
+
+    def test_a_line_of_stacked_plain_assignments_credits_them_all(self):
+        # `FIRST=1 SECOND=2` with no command binds BOTH; crediting only the
+        # first falsely rejected the second (step-8 F2). The same stack before
+        # a command word is a prefix and still credits neither.
+        job = self._job('FIRST=1 SECOND=2\necho "$SECOND"')
+        self.assertEqual([], _unbound_names(job))
+        job = self._job('FIRST=1 SECOND=2 mycmd\necho "$SECOND"')
+        self.assertIn("SECOND", _unbound_names(job))
+
+    def test_a_backslash_quoted_heredoc_delimiter_is_quoted(self):
+        # `<<\EOF` is quoted to the shell: the body neither interpolates nor
+        # executes, so its assignment-shaped text credits nothing (step-8 F3).
+        job = self._job('cat <<\\EOF\nHD_DATA=x\nEOF\necho "$HD_DATA"')
+        self.assertIn("HD_DATA", _unbound_names(job))
+        job = self._job('cat <<\\EOF\n${HD_QUIET}\nEOF')
+        self.assertEqual([], _unbound_names(job))
 
     def test_a_lowercase_name_is_outside_the_scanned_space(self):
         # RECORDED exclusion (d) — uppercase-is-configuration is the house

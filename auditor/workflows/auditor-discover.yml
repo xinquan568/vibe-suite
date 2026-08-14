@@ -108,13 +108,16 @@ jobs:
             | group_by(.full_name) | map(max_by(.stargazers_count // 0))
             | map(select((.full_name | ascii_downcase) as $n | ($d | index($n)) | not))
             | map(select(.full_name as $n | ($reg[0].repos | has($n)) | not))
-            | sort_by(-(.stargazers_count // 0)) | .[:20] | .[]
+            | .[]
           ' "$ALL" > "$NEW.pre" || : > "$NEW.pre"
           # vibe-167: vendor/CLA-owner filtering is vendor_default_filter.py's duty —
           # its deny knowledge (denied owners, denied repos, CLA-gated orgs) replaces
-          # the four-owner inline list, and dropping here saves the whole audit cost
-          python3 "$CODE_DIR/auditor/scripts/vendor_default_filter.py" < "$NEW.pre" > "$NEW" || : > "$NEW"
-          rm -f "$NEW.pre"
+          # the four-owner inline list. It runs BEFORE the sort-and-top-20, so a
+          # denied high-star repository never consumes a candidate slot — the budget
+          # is spent on repositories a PR could actually land against.
+          python3 "$CODE_DIR/auditor/scripts/vendor_default_filter.py" < "$NEW.pre" > "$NEW.kept" || : > "$NEW.kept"
+          jq -c -s 'sort_by(-(.stargazers_count // 0)) | .[:20] | .[]' "$NEW.kept" > "$NEW" || : > "$NEW"
+          rm -f "$NEW.pre" "$NEW.kept"
           i=0
           while IFS= read -r rec; do
             [ -n "$rec" ] || continue

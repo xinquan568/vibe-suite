@@ -1273,11 +1273,12 @@ class TestTrackRefreshWiring(unittest.TestCase):
                 "body": body, "comments": [], "statusCheckRollup": []}
 
     def _run_with_body(self, body):
-        canned = self.sb.root / "pr-view.json"
-        canned.write_text(json.dumps(self._snap(body)) + "\n")
-        return self.sb.run("set -euo pipefail\n" + self.block,
-                           env={"CODE_DIR": str(REPO),
-                                "GH_CANNED_PR_VIEW": str(canned)})
+        # F8 narrowed the marker to the parse+update handoff: the loop's own
+        # bindings (SNAP, repo, pr) are the test's explicit setup, so the fetch
+        # loop and sleeps outside the marker stay byte-stable and untested here
+        setup = (f"set -euo pipefail\nrepo='acme/w'\npr='7'\n"
+                 f"SNAP={json.dumps(json.dumps(self._snap(body)))}\n")
+        return self.sb.run(setup + self.block, env={"CODE_DIR": str(REPO)})
 
     def test_the_block_delegates_to_the_helper(self):
         self.assertIn("parse-pr-metadata.py", self.block,
@@ -1345,6 +1346,11 @@ class TestDailyReportWiring(unittest.TestCase):
         self.assertIn("# Daily report —", text, "the helper's renderer owns the body")
         self.assertIn("audit-candidate", text,
                       "the label census must survive the delegation (activity items)")
+        # F4 parity: the facts the inline report carried must survive delegation
+        self.assertIn("generated at", text, "the exact timestamp was lost")
+        self.assertIn("case-study candidates:", text)
+        self.assertIn("top repo acme/w (10 stars)", text,
+                      "the top-repos-by-stars section was lost")
         events = [e for e in self.sb.events() if e.get("event") == "report_generated"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["data"]["report"], f"reports/{day}.md",
@@ -1414,6 +1420,31 @@ class TestDiscoverFilterWiring(unittest.TestCase):
         self.env = {"CODE_DIR": str(REPO), "GH_CANNED_MAP": str(mapfile),
                     "CANDIDATE_DIR": str(self.sb.root / "cands")}
 
+    def test_denied_repos_do_not_consume_the_candidate_budget(self):
+        """F3 (step-8): the filter must run BEFORE the top-20 truncation — twenty
+        high-star denied repositories previously produced an empty batch while
+        eligible repositories waited below the cut."""
+        denied = [{"full_name": f"anthropics/repo-{i}", "stargazers_count": 10000 - i,
+                   "archived": False, "pushed_at": "2026-08-01T00:00:00Z",
+                   "description": "d", "default_branch": "main"} for i in range(22)]
+        eligible = {"full_name": "indie/low-star-plugin", "stargazers_count": 50,
+                    "archived": False, "pushed_at": "2026-08-01T00:00:00Z",
+                    "description": "d", "default_branch": "main"}
+        searchfile = self.sb.root / "search-many.json"
+        searchfile.write_text(json.dumps({"items": denied + [eligible]}) + "\n")
+        mapfile = self.sb.root / "canned-many.map"
+        tree = self.sb.root / "tree.json"
+        mapfile.write_text(f"api -X GET search/repositories\t{searchfile}\n"
+                           f"api repos/\t{tree}\n")
+        env = dict(self.env)
+        env["GH_CANNED_MAP"] = str(mapfile)
+        r = self.sb.run("set -euo pipefail\n" + self.block, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        staged = sorted((self.sb.root / "cands").glob("candidate-*.json"))
+        names = [json.loads(p.read_text())["repo"]["full_name"] for p in staged]
+        self.assertEqual(names, ["indie/low-star-plugin"],
+                         f"a denied repository consumed the budget: {names}")
+
     def test_vendor_and_cla_owners_are_dropped_by_the_helper(self):
         r = self.sb.run("set -euo pipefail\n" + self.block, env=self.env)
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
@@ -1452,6 +1483,31 @@ class TestRenderDashboardWiring(unittest.TestCase):
         events = [e for e in self.sb.events() if e.get("event") == "dashboard_rendered"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["data"]["report"], "reports/dashboard.html")
+
+    def test_consecutive_renders_refresh_our_own_docs(self):
+        """F5 (step-8): the guard must recognize the helper's own output — before
+        the exact ownership stamp, the FIRST render froze the docs page forever."""
+        r1 = self.sb.run("set -euo pipefail\n" + self.block, env={"CODE_DIR": str(REPO)})
+        self.assertEqual(r1.returncode, 0, r1.stderr + r1.stdout)
+        docs = self.sb.data / "reports" / "docs" / "index.html"
+        first = docs.read_text()
+        self.assertIn("generated-by-auditor-render-dashboard", first)
+        docs.write_text(first.replace("</body>", "<!-- stale sentinel --></body>"))
+        r2 = self.sb.run("set -euo pipefail\n" + self.block, env={"CODE_DIR": str(REPO)})
+        self.assertEqual(r2.returncode, 0, r2.stderr + r2.stdout)
+        self.assertNotIn("stale sentinel", docs.read_text(),
+                         "the guard preserved OUR OWN previous render — the docs "
+                         "page can never update again")
+
+    def test_a_foreign_page_with_another_generators_stamp_is_preserved(self):
+        docs = self.sb.data / "reports" / "docs"
+        docs.mkdir(parents=True)
+        (docs / "index.html").write_text(
+            "<html><!-- generated-by-vibe-build-docs -->the real docs build</html>")
+        r = self.sb.run("set -euo pipefail\n" + self.block, env={"CODE_DIR": str(REPO)})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("the real docs build", (docs / "index.html").read_text(),
+                      "a broad generated-by substring misclassified a foreign build")
 
     def test_a_foreign_docs_build_is_not_clobbered(self):
         docs = self.sb.data / "reports" / "docs"

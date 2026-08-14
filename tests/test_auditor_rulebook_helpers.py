@@ -462,6 +462,57 @@ class Test_rule_health_section12(unittest.TestCase):
         self.assertEqual(rules["R04"]["state"], "healthy")
         self.assertEqual(rules["R05"]["state"], "dormant")
 
+    def test_a_null_outcome_pr_still_counts_as_contributed(self):
+        """F1 (step-8): a submitted PR awaiting adjudication has REACHED a PR; a
+        rejection event against it must never push the rate past 1."""
+        registry = {"repos": {"acme/w": {"prs": {
+            "9": {"number": 9, "updatedAt": "2026-04-01T00:00:00Z", "outcome": None,
+                  "fingerprints": ["fp-n"], "rule_ids": ["R07"]},
+        }}}}
+        d = Path(tempfile.mkdtemp())
+        for sub in ("ledgers", "registry", "exemplars"):
+            (d / sub).mkdir()
+        (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
+        (d / "ledgers" / "disagreements.jsonl").write_text(json.dumps(envelope(
+            "maintainer_rejected",
+            {"pr": "acme/w#9", "fingerprints": ["fp-n"], "rule_ids": ["R07"],
+             "dissent_type": "out_of_scope", "quote": "q",
+             "commenter_role": "maintainer", "classifier_model": "m",
+             "classifier_confidence": "high"}, "2026-04-02T00:00:00Z")) + "\n",
+            encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(json.dumps(registry),
+                                                   encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        row = json.loads((d / "feedback" / "log.json").read_text())["rules"][0]
+        self.assertEqual(row["contributed"], 1)
+        self.assertEqual(row["maintainer_rejected"], 1)
+        self.assertLessEqual(row["maintainer_rejection_rate"], 1)
+
+    def test_a_disagreement_only_legacy_fingerprint_is_contributed(self):
+        """F1: an adjudication event IS proof the finding reached a PR, even when
+        the registry predates the metadata block and holds no record of it."""
+        d = Path(tempfile.mkdtemp())
+        for sub in ("ledgers", "registry", "exemplars"):
+            (d / sub).mkdir()
+        (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
+        (d / "ledgers" / "disagreements.jsonl").write_text(json.dumps(envelope(
+            "maintainer_pushback",
+            {"pr": "old/x#1", "fingerprints": ["fp-legacy"], "rule_ids": ["R08"],
+             "dissent_type": "style_disagreement", "quote": "q",
+             "commenter_role": "maintainer", "classifier_model": "m",
+             "classifier_confidence": "high"}, "2026-01-01T00:00:00Z")) + "\n",
+            encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(json.dumps({"repos": {}}),
+                                                   encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        row = json.loads((d / "feedback" / "log.json").read_text())["rules"][0]
+        self.assertEqual(row["contributed"], 1)
+        self.assertLessEqual(row["maintainer_rejection_rate"] or 0, 1)
+
     def test_empty_corpus_and_no_suppressions_yield_null_rate(self):
         d = Path(tempfile.mkdtemp())
         for sub in ("ledgers", "registry", "exemplars"):
@@ -598,6 +649,13 @@ class Test_validate_feedback(unittest.TestCase):
         # the emitter/schema mismatch resolution: auditor-classify emits it
         r = self._run(self._log(self._row(dissent_type_mode="docs_citation")))
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_negative_total_is_refused(self):
+        payload = self._row()
+        payload["totals"] = {"repos_audited": -1, "deployments": 0}
+        r = self._run(self._log(payload))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("negative-total", r.stderr)
 
     def test_null_rates_and_absent_new_fields_stay_valid(self):
         # pre-§12 logs carry none of the new fields; additive means they still pass

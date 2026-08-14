@@ -111,6 +111,17 @@ VIOLATIONS="$(
   exit 1
 }
 
+# vibe-167 W3: the three §12 totals are tallies; negative means subtraction
+TOTALS_BAD="$(jq -r '
+  [((.totals // {}) | to_entries[])
+   | select(.key | test("^(repos_audited|deployments|repos_unattributed)$"))
+   | select((.value | type) != "number" or .value < 0)
+   | "negative-total: \(.key)=\(.value)"] | .[]' "$LOG" 2>/dev/null)" || TOTALS_BAD=""
+if [ -n "$TOTALS_BAD" ]; then
+  VIOLATIONS="${VIOLATIONS:+$VIOLATIONS
+}$TOTALS_BAD"
+fi
+
 if [ -n "$VIOLATIONS" ]; then
   printf '%s\n' "$VIOLATIONS" >&2
   COUNT="$(printf '%s\n' "$VIOLATIONS" | wc -l | tr -d ' ')"

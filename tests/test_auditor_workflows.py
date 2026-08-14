@@ -1960,8 +1960,11 @@ class TestContributionHandoff(unittest.TestCase):
 #: docstring intends. `operator` entries carry their individually-verified invocation
 #: policy; they are the only exemption from a call-site requirement, and the exemption
 #: is visible here rather than silent in a test's blind spot.
-#: log-event.sh note: its workflow adoption sites are the six blocks rewired by
-#: vibe-167; older inline event appends elsewhere are legacy sites, kept as-is.
+#: log-event.sh note (plan amendment, step-9 F7): adopted where a rewired block
+#: APPENDS AN EVENT — daily-report and render-dashboard; the other four rewired
+#: duties append no events inside their marker regions, so sourcing the library
+#: there would be a call site with no call. Older inline appends elsewhere are
+#: legacy sites, kept as-is.
 HELPER_OBLIGATIONS = {
     "atomic-registry-write.sh": {"helper-called"},
     "backfill-findings.py": {"operator"},          # default dry run; --apply appends
@@ -2068,11 +2071,14 @@ class TestHelperCallSites(unittest.TestCase):
 CALL_CONTRACTS = {
     "batch-process.py": {"required": {"--data-dir", "--stage"},
                          "allowed": {"--data-dir", "--stage", "--batch-size",
-                                     "--host-repo", "--apply"}},
+                                     "--host-repo", "--apply"},
+                         "boolean": {"--apply"}},
     "build-exemplar-gallery.py": {"required": set(),
                                   "allowed": {"--data-dir", "--exemplars-dir",
-                                              "--output", "--check"}},
-    "commit-via-pr.sh": {"required": {"--checkout"},
+                                              "--output", "--check"},
+                                  "boolean": {"--check"}},
+    "commit-via-pr.sh": {"required": {"--checkout", "--repo", "--base",
+                                      "--branch"},
                          "allowed": {"--checkout", "--repo", "--base", "--branch"}},
     "compute-fingerprint.sh": {"sourced": True},
     "compute-vocab-fingerprint.sh": {"sourced": True},
@@ -2102,7 +2108,8 @@ CALL_CONTRACTS = {
                                                 "--min-hits"}},
     "propose-rule-citations.py": {"required": {"--data-dir"},
                                   "allowed": {"--data-dir", "--apply", "--rules-path",
-                                              "--exemplar-url-prefix", "--out"}},
+                                              "--exemplar-url-prefix", "--out"},
+                                  "boolean": {"--apply"}},
     "render-dashboard.py": {"required": {"--data-dir"},
                             "allowed": {"--data-dir", "--out", "--since",
                                         "--generated-at"}},
@@ -2113,9 +2120,12 @@ CALL_CONTRACTS = {
                        "allowed": {"--data-dir", "--out", "--generated-at"}},
     "scan-suppressions.py": {"required": {"--data-dir", "--host-repo"},
                              "allowed": {"--data-dir", "--host-repo", "--query",
-                                         "--observed-at", "--apply"}},
-    "validate-feedback.sh": {"required": set(),   # cross-flag: --data-dir OR --log
-                             "allowed": {"--data-dir", "--log", "--allow-missing"}},
+                                         "--observed-at", "--apply"},
+                             "boolean": {"--apply"}},
+    "validate-feedback.sh": {"required": set(),
+                             "allowed": {"--data-dir", "--log", "--allow-missing"},
+                             "boolean": {"--allow-missing"},
+                             "required_one_of": {"--data-dir", "--log"}},
     "validate-rule-ids.py": {"required": set(),
                              "allowed": {"--data-dir", "--rubric"},
                              "positionals": (0, 400),
@@ -2137,79 +2147,248 @@ def check_call_sites(workflow_texts, contracts, roster):
     """Every helper call site in every run block, checked fail-closed.
 
     Returns a list of violation strings; empty means every site parsed and satisfied
-    its helper's contract. A site the tokenizer cannot parse is a VIOLATION unless the
-    roster binds it to an extracted-run test — never a silent skip.
+    its helper's contract. Lines are split into COMMAND SEGMENTS (;, &&, ||, |)
+    first, so two helpers on one line are validated independently; value-taking
+    flags must have a value, boolean flags must not; a site the tokenizer cannot
+    parse is a VIOLATION unless the roster binds it to an extracted-run test.
     """
     import shlex
     violations = []
     for wf_name, text in sorted(workflow_texts.items()):
         joined = text.replace("\\\n", " ")
         for line_no, line in enumerate(joined.splitlines(), 1):
-            for helper, contract in sorted(contracts.items()):
+            hits = [h for h in contracts if f"auditor/scripts/{h}" in line]
+            if not hits:
+                continue
+            try:
+                tokens = shlex.split(line, comments=True)
+            except ValueError:
+                for helper in hits:
+                    if (wf_name, helper) not in roster:
+                        violations.append(f"{wf_name}:{line_no} {helper}: unparseable "
+                                          f"call site and not on the extracted-run roster")
+                continue
+            segments, current = [], []
+            for token in tokens:
+                parts = [t for t in re.split(r"(;|\|\||&&|\|)", token) if t]
+                for part in parts:
+                    if part in (";", "&&", "||", "|"):
+                        if current:
+                            segments.append(current)
+                        current = []
+                    else:
+                        current.append(part)
+            if current:
+                segments.append(current)
+            for helper in hits:
                 needle = f"auditor/scripts/{helper}"
-                if needle not in line:
-                    continue
+                contract = contracts[helper]
                 where = f"{wf_name}:{line_no} {helper}"
-                if contract.get("sourced"):
-                    if not re.match(r'\s*(\.|source)\s', line):
-                        violations.append(
-                            f"{where}: function library referenced without sourcing "
-                            f"(expected `. .../auditor/scripts/{helper}`)")
-                    continue
-                try:
-                    tokens = shlex.split(line, comments=True)
-                except ValueError:
-                    if (wf_name, helper) in roster:
+                found = False
+                for segment in segments:
+                    index = next((i for i, t in enumerate(segment) if needle in t), None)
+                    if index is None:
                         continue
-                    violations.append(f"{where}: unparseable call site and not on the "
-                                      f"extracted-run roster")
-                    continue
-                index = next((i for i, t in enumerate(tokens) if needle in t), None)
-                if index is None:
-                    if (wf_name, helper) in roster:
+                    found = True
+                    if contract.get("sourced"):
+                        if index == 0 or segment[index - 1] not in (".", "source"):
+                            violations.append(
+                                f"{where}: function library referenced without "
+                                f"sourcing (expected `. .../{helper}`)")
                         continue
-                    violations.append(f"{where}: helper name present but no invocation "
-                                      f"token found and not on the roster")
-                    continue
-                args = tokens[index + 1:]
-                flags, positionals, i = set(), 0, 0
-                while i < len(args):
-                    token = args[i]
-                    if token in ("|", "||", "&&", ";", ">", ">>", "2>", "<"):
-                        break
-                    if token.startswith("--"):
-                        # `--apply; then` glues shell punctuation onto the last flag
-                        terminated = token.endswith(";")
-                        token = token.rstrip(";")
-                        flag = token.split("=", 1)[0]
-                        flags.add(flag)
-                        if terminated:
+                    args = segment[index + 1:]
+                    flags, positionals, i = set(), 0, 0
+                    boolean = contract.get("boolean", set())
+                    while i < len(args):
+                        token = args[i]
+                        if token in (">", ">>", "2>", "<", "then", "do"):
                             break
-                        if "=" not in token and i + 1 < len(args) \
-                                and not args[i + 1].startswith("--"):
-                            if args[i + 1].endswith(";"):
-                                break
+                        if token.startswith("--"):
+                            flag, eq, _ = token.partition("=")
+                            flags.add(flag)
+                            if flag in boolean:
+                                if eq:
+                                    violations.append(f"{where}: boolean {flag} "
+                                                      f"takes no value")
+                                i += 1
+                                continue
+                            if eq:
+                                i += 1
+                                continue
+                            if i + 1 >= len(args) or args[i + 1].startswith("--") \
+                                    or args[i + 1] in ("then", "do"):
+                                violations.append(f"{where}: {flag} is missing "
+                                                  f"its value")
+                                i += 1
+                                continue
                             i += 2
                             continue
-                    else:
-                        if token.endswith(";"):
-                            break
                         positionals += 1
-                    i += 1
-                required = set(contract.get("required", set()))
-                if positionals == 0:
-                    required |= contract.get("required_if_no_positionals", set())
-                missing = required - flags
-                unknown = flags - contract.get("allowed", set())
-                lo, hi = contract.get("positionals", (0, 0))
-                if missing:
-                    violations.append(f"{where}: missing required {sorted(missing)}")
-                if unknown:
-                    violations.append(f"{where}: unknown flags {sorted(unknown)}")
-                if not (lo <= positionals <= hi):
-                    violations.append(f"{where}: {positionals} positional(s), "
-                                      f"contract allows {lo}..{hi}")
+                        i += 1
+                    required = set(contract.get("required", set()))
+                    if positionals == 0:
+                        required |= contract.get("required_if_no_positionals", set())
+                    missing = required - flags
+                    unknown = flags - contract.get("allowed", set())
+                    one_of = contract.get("required_one_of")
+                    lo, hi = contract.get("positionals", (0, 0))
+                    if missing:
+                        violations.append(f"{where}: missing required {sorted(missing)}")
+                    if unknown:
+                        violations.append(f"{where}: unknown flags {sorted(unknown)}")
+                    if one_of and not (flags & one_of):
+                        violations.append(f"{where}: needs one of {sorted(one_of)}")
+                    if not (lo <= positionals <= hi):
+                        violations.append(f"{where}: {positionals} positional(s), "
+                                          f"contract allows {lo}..{hi}")
+                if not found and (wf_name, helper) not in roster:
+                    violations.append(f"{where}: helper name present but no invocation "
+                                      f"token found and not on the roster")
     return violations
+
+
+class TestHelperCallSites(unittest.TestCase):
+    """vibe-167: the inventory proved existence; this class proves reach.
+
+    E8.3 found four wiring defects by reading; the census that motivated this table
+    found fifteen helpers with zero workflow references, nine reachable from nowhere.
+    A helper whose obligation is `workflow-called` without a call site is a duty the
+    unit claims and does not perform."""
+
+    def test_the_obligations_table_covers_exactly_the_thirty(self):
+        self.assertEqual(sorted(HELPER_OBLIGATIONS), sorted(E83_HELPERS),
+                         "the obligations table and the helper inventory drifted")
+        for name, obligations in HELPER_OBLIGATIONS.items():
+            self.assertTrue(obligations, f"{name} has an empty obligation set")
+            self.assertLessEqual(obligations,
+                                 {"workflow-called", "helper-called", "operator"})
+
+    def workflow_texts(self):
+        return {p.name: p.read_text(encoding="utf-8")
+                for p in sorted((REPO / "auditor" / "workflows").glob("*.yml"))}
+
+    def helper_texts(self):
+        return {p.name: p.read_text(encoding="utf-8", errors="replace")
+                for p in sorted(SCRIPTS_DIR.iterdir()) if p.is_file()}
+
+    def test_every_workflow_called_helper_has_a_workflow_call_site(self):
+        texts = self.workflow_texts()
+        missing = []
+        for name, obligations in sorted(HELPER_OBLIGATIONS.items()):
+            if "workflow-called" not in obligations:
+                continue
+            if not any(name in text for text in texts.values()):
+                missing.append(name)
+        self.assertEqual(missing, [],
+                         f"helpers whose own intent is workflow use, with no call site "
+                         f"in any workflow: {missing} — the duty each implements is "
+                         f"being performed inline or not at all")
+
+    def test_every_helper_called_helper_is_referenced_by_a_helper(self):
+        texts = self.helper_texts()
+        missing = []
+        for name, obligations in sorted(HELPER_OBLIGATIONS.items()):
+            if "helper-called" not in obligations:
+                continue
+            if not any(name in text for other, text in texts.items() if other != name):
+                missing.append(name)
+        self.assertEqual(missing, [],
+                         f"library helpers referenced by no other helper: {missing}")
+
+    def test_operator_helpers_state_their_invocation_policy(self):
+        # The exemption must stay auditable: each operator helper's table row carries
+        # a policy comment, and the helper's own text matches it (--apply for the
+        # backfills' opt-in writes; --dry-run for repair's opt-out).
+        texts = self.helper_texts()
+        for name in ("backfill-findings.py", "backfill-pr-fingerprints.py"):
+            self.assertIn("--apply", texts[name],
+                          f"{name} no longer carries the opt-in write flag its "
+                          f"operator policy records")
+        self.assertIn("--dry-run", texts["repair-stale-statuses.py"],
+                      "repair-stale-statuses.py no longer carries the opt-out flag "
+                      "its operator policy records")
+
+
+#: vibe-167: the reviewed argument contract for every workflow-callable helper.
+#: AUTHORED from each helper's parser, usage text and refusal arms — not introspected,
+#: because most required flags are enforced by post-parse refusals argparse cannot
+#: report, and the shell helpers have no parser object at all.
+#: Shapes: required/allowed flag sets; "stdin" — the helper reads stdin; "positionals"
+#: — (min, max) bare arguments; "sourced" — a function library whose call site is
+#: `. .../helper.sh`, never an interpreter invocation.
+CALL_CONTRACTS = {
+    "batch-process.py": {"required": {"--data-dir", "--stage"},
+                         "allowed": {"--data-dir", "--stage", "--batch-size",
+                                     "--host-repo", "--apply"},
+                         "boolean": {"--apply"}},
+    "build-exemplar-gallery.py": {"required": set(),
+                                  "allowed": {"--data-dir", "--exemplars-dir",
+                                              "--output", "--check"},
+                                  "boolean": {"--check"}},
+    "commit-via-pr.sh": {"required": {"--checkout", "--repo", "--base",
+                                      "--branch"},
+                         "allowed": {"--checkout", "--repo", "--base", "--branch"}},
+    "compute-fingerprint.sh": {"sourced": True},
+    "compute-vocab-fingerprint.sh": {"sourced": True},
+    "diff-findings.py": {"required": set(),
+                         "allowed": {"--generated-at", "--original-score",
+                                     "--reaudit-score", "--repo",
+                                     "--original-sidecar", "--reaudit-sidecar",
+                                     "--registry", "--commit-sha-before",
+                                     "--commit-sha-after", "--events-out",
+                                     "--diff-report-out", "--summary-out"}},
+    "docs-diff.py": {"required": set(),
+                     "allowed": {"--data-dir", "--citations", "--hash-store",
+                                 "--changed-out"}},
+    "generate-daily-report.py": {"required": set(),
+                                 "allowed": {"--data-dir", "--inputs", "--date",
+                                             "--out"}},
+    "generate-rule-review-body.py": {"required": {"--data-dir", "--quarter"},
+                                     "allowed": {"--data-dir", "--quarter", "--as-of",
+                                                 "--out"}},
+    "git-push-with-retry.sh": {"required": set(),
+                               "allowed": {"--checkout", "--data-dir", "--attempts"}},
+    "guard-protected-paths.sh": {"required": set(), "allowed": {"--data-dir"}},
+    "log-event.sh": {"sourced": True},
+    "parse-pr-metadata.py": {"required": set(), "allowed": set(), "stdin": True},
+    "prepare-refinement-input.py": {"required": {"--data-dir"},
+                                    "allowed": {"--data-dir", "--feedback", "--out",
+                                                "--min-hits"}},
+    "propose-rule-citations.py": {"required": {"--data-dir"},
+                                  "allowed": {"--data-dir", "--apply", "--rules-path",
+                                              "--exemplar-url-prefix", "--out"},
+                                  "boolean": {"--apply"}},
+    "render-dashboard.py": {"required": {"--data-dir"},
+                            "allowed": {"--data-dir", "--out", "--since",
+                                        "--generated-at"}},
+    "render-repo-report.py": {"required": {"--repo", "--data-dir"},
+                              "allowed": {"--repo", "--data-dir", "--out",
+                                          "--generated-at"}},
+    "rule-health.py": {"required": {"--data-dir"},
+                       "allowed": {"--data-dir", "--out", "--generated-at"}},
+    "scan-suppressions.py": {"required": {"--data-dir", "--host-repo"},
+                             "allowed": {"--data-dir", "--host-repo", "--query",
+                                         "--observed-at", "--apply"},
+                             "boolean": {"--apply"}},
+    "validate-feedback.sh": {"required": set(),
+                             "allowed": {"--data-dir", "--log", "--allow-missing"},
+                             "boolean": {"--allow-missing"},
+                             "required_one_of": {"--data-dir", "--log"}},
+    "validate-rule-ids.py": {"required": set(),
+                             "allowed": {"--data-dir", "--rubric"},
+                             "positionals": (0, 400),
+                             # data-dir is the sidecar source only when no explicit
+                             # sidecar is passed (the helper's own branch structure)
+                             "required_if_no_positionals": {"--data-dir"}},
+    "vendor_default_filter.py": {"required": set(), "allowed": {"--report"}},
+}
+
+#: Call sites the static checker CANNOT parse, each bound to the extracted-run test
+#: that executes it instead. An entry here is a tested obligation, not a skip: the
+#: named test must exist in the named module, held by test_the_roster_names_real_tests.
+EXTRACTED_RUN_ROSTER = {
+    # (workflow file, helper): (test module, test attribute substring)
+}
 
 
 class TestCallSiteArguments(unittest.TestCase):
@@ -2300,6 +2479,52 @@ class TestCallSiteArguments(unittest.TestCase):
         v = self._check('if ! python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
                         '--data-dir d; then')
         self.assertEqual(v, [], v)
+
+    def test_mutation_missing_flag_value(self):
+        # F6 (step-8): `--data-dir --out x` silently treated --out as the value
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir --out x')
+        self.assertTrue(any("missing its value" in s for s in v), v)
+
+    def test_mutation_boolean_flag_with_a_value(self):
+        contracts = {"fake-helper.py": {"required": set(),
+                                        "allowed": {"--apply"},
+                                        "boolean": {"--apply"}}}
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--apply=true', contracts)
+        self.assertTrue(any("takes no value" in s for s in v), v)
+
+    def test_mutation_required_one_of_group(self):
+        contracts = {"fake-helper.sh": {"required": set(),
+                                        "allowed": {"--data-dir", "--log"},
+                                        "required_one_of": {"--data-dir", "--log"}}}
+        bad = self._check('bash "$CODE_DIR/auditor/scripts/fake-helper.sh"', contracts)
+        self.assertTrue(any("needs one of" in s for s in bad), bad)
+        good = self._check('bash "$CODE_DIR/auditor/scripts/fake-helper.sh" --log l',
+                           contracts)
+        self.assertEqual(good, [], good)
+
+    def test_mutation_all_four_required_flags(self):
+        # the commit-via-pr shape: --checkout alone must fail
+        contracts = {"fake-helper.sh": {
+            "required": {"--checkout", "--repo", "--base", "--branch"},
+            "allowed": {"--checkout", "--repo", "--base", "--branch"}}}
+        v = self._check('bash "$CODE_DIR/auditor/scripts/fake-helper.sh" '
+                        '--checkout /d', contracts)
+        self.assertTrue(any("missing required" in s for s in v), v)
+
+    def test_mutation_second_helper_on_the_same_line_is_validated(self):
+        contracts = {"fake-lib.sh": {"sourced": True},
+                     "fake-helper.py": {"required": {"--data-dir"},
+                                        "allowed": {"--data-dir"}}}
+        v = self._check('. "$CODE_DIR/auditor/scripts/fake-lib.sh" && '
+                        'bash "$CODE_DIR/auditor/scripts/fake-lib.sh" && '
+                        'python3 "$CODE_DIR/auditor/scripts/fake-helper.py"',
+                        contracts)
+        self.assertTrue(any("without sourcing" in s for s in v),
+                        f"the bash-invoked second segment of the sourced library "
+                        f"escaped: {v}")
+        self.assertTrue(any("missing required" in s for s in v), v)
 
     def test_mutation_sourced_library_must_be_sourced(self):
         contracts = {"fake-lib.sh": {"sourced": True}}

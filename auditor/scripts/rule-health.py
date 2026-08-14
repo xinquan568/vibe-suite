@@ -243,12 +243,18 @@ def main(argv=None):
     # is a fingerprint of that PR's repository. Sidecar and ledger findings add their
     # own attributions below; whatever remains unattributed is COUNTED, not hidden.
     repo_of_fp = {}
+    # CONTRIBUTED MEANS REACHED A PR, NOT ADJUDICATED. A record with outcome null is
+    # a submitted PR awaiting the maintainer; skipping it deflated the denominator
+    # while rejection events still grew the numerator, and a rate above 1 is the
+    # arithmetic the validator exists to refuse.
+    pr_fps = set()
     for repo, entry in (registry.get("repos") or {}).items():
         prs = entry.get("prs") if isinstance(entry, dict) else None
         for record in (prs or {}).values():
             if isinstance(record, dict):
                 for fingerprint in (record.get("fingerprints") or []):
                     repo_of_fp.setdefault(str(fingerprint), repo)
+                    pr_fps.add(str(fingerprint))
 
     findings = {}
     audits = data_dir / "audits"
@@ -337,6 +343,7 @@ def main(argv=None):
                     continue
                 rule_of.setdefault(str(fingerprint), rule)
                 bucket.setdefault(rule, set()).add(str(fingerprint))
+                pr_fps.add(str(fingerprint))
                 dissent = str(data.get("dissent_type") or "")
                 if dissent:
                     dissent_counts.setdefault(rule, {})
@@ -374,7 +381,7 @@ def main(argv=None):
         outcome = outcomes.get(fingerprint)
         if outcome in PIPELINE_OUTCOMES:
             row[outcome] += 1
-        if fingerprint in outcomes:
+        if fingerprint in pr_fps:
             contributed_fps.setdefault(rule, set()).add(fingerprint)
         if fingerprint in verified:
             row["verified"] += 1

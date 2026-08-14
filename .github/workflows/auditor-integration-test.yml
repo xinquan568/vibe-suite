@@ -248,7 +248,13 @@ jobs:
             - Use only file read, glob, grep and write. Never run shell commands and never touch the network.
             - Write nothing outside audit-out/.
           claude_args: |
-            --allowedTools "Read,Grep,Glob,Write(audit-out/**)"
+            # Bare Write, not Write(audit-out/**): a headless probe proved the CLI
+            # grants the bare tool but silently fails to match path-scoped Write
+            # rules (runs 31763526443 and 31764825588 each ended with one denial
+            # and no report). Confinement is the ORACLE's job and it is layered:
+            # any tree mutation outside audit-out/, any clone mutation, and any
+            # clone-subtree divergence all fail the tier.
+            --allowedTools "Read,Grep,Glob,Write"
             --disallowedTools "WebSearch,Bash,Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ncat:*),Bash(socat:*),Bash(telnet:*),Bash(ssh:*),Bash(scp:*),Bash(sftp:*),Bash(rsync:*),WebFetch"
       - name: Validate the generated report
         run: |

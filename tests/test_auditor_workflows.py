@@ -2010,6 +2010,7 @@ def _split_commands(line):
     the outer value. An unquoted redirect ends the command's argv: the redirect's
     target belongs to the redirect, never to a flag."""
     segments = []
+    state = {"ok": True}
 
     def scan(text):
         cur, sep, stdin_in = [], "", False
@@ -2043,6 +2044,11 @@ def _split_commands(line):
                     elif d == ")":
                         depth -= 1
                     j += 1
+                if depth:
+                    # an unclosed $( reached EOF: slicing would silently truncate
+                    # the argv and validate a corrupted rendering — poison instead
+                    state["ok"] = False
+                    return
                 scan(text[i + 2:j - 1])
                 cur.append("__SUBST__")
                 i = j
@@ -2075,6 +2081,11 @@ def _split_commands(line):
                     elif d == ")":
                         depth -= 1
                     j += 1
+                if depth:
+                    # an unclosed $( reached EOF: slicing would silently truncate
+                    # the argv and validate a corrupted rendering — poison instead
+                    state["ok"] = False
+                    return
                 scan(text[i + 2:j - 1])
                 cur.append(" __SUBST__ ")
                 i = j
@@ -2094,23 +2105,23 @@ def _split_commands(line):
                 # a digit prefix (2>>) is part of the redirect, not an argument
                 while cur and cur[-1].isdigit():
                     cur.pop()
-                # consume the whole redirect operator and its target
+                # consume the operator and its target INLINE — the shell keeps
+                # collecting arguments after a redirect, so ending argv here let
+                # `… 2>>err.log --wrong x` smuggle flags past validation
                 while i < n and text[i] in "<>&":
                     i += 1
                 while i < n and text[i] == " ":
                     i += 1
                 while i < n and text[i] not in " ;&|":
                     i += 1
-                had_stdin = stdin_in
-                flush("")
-                stdin_in = had_stdin
+                cur.append(" ")
                 continue
             cur.append(c)
             i += 1
         flush("")
 
     scan(line)
-    return segments
+    return segments, state["ok"]
 
 
 def check_call_sites(workflow_texts, contracts, roster):
@@ -2130,8 +2141,8 @@ def check_call_sites(workflow_texts, contracts, roster):
             hits = [h for h in contracts if f"auditor/scripts/{h}" in line]
             if not hits:
                 continue
-            raw_segments = _split_commands(line)
-            segments, bad_parse = [], False
+            raw_segments, scan_ok = _split_commands(line)
+            segments, bad_parse = [], not scan_ok
             for sep, body, stdin_in in raw_segments:
                 try:
                     seg_tokens = shlex.split(body, comments=True)
@@ -2607,6 +2618,20 @@ class TestCallSiteArguments(unittest.TestCase):
         v = self._check('A="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
                         '--wrong "$(dirname "$X")")" B="$(date -u)"')
         self.assertTrue(any("unknown flags" in s for s in v), v)
+
+    def test_mutation_flags_after_a_redirect_are_still_validated(self):
+        # iteration 5: the shell keeps collecting argv after a redirect — ending
+        # the segment there let a bad flag escape validation entirely
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d 2>>err.log --wrong x')
+        self.assertTrue(any("unknown flags" in s for s in v), v)
+
+    def test_mutation_unclosed_substitution_fails_closed(self):
+        v = self._check('OUT="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir dx')
+        self.assertTrue(any("unparseable" in s for s in v),
+                        f"an unclosed substitution must poison the parse, not "
+                        f"validate a truncated argv: {v}")
 
     def test_mutation_sourced_library_must_be_sourced(self):
         contracts = {"fake-lib.sh": {"sourced": True}}

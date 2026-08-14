@@ -155,6 +155,23 @@ unchecked and can only verify the durable record — AC-8 cannot go green before
 operator has attested the rows (PAT scope, rotation doc, injection separation, audit
 token scope, no secret egress) and signed with a name and an ISO date.
 
+### AC-8 execution record (2026-08-14)
+
+AC-8 went green from three real dispatched runs off `main`, in ladder order, after the
+operator signed the checklist (`Signed-off-by: Eric Y. Liu 2026-08-14`):
+
+- unit — <https://github.com/xinquan568/vibe-suite/actions/runs/31763369431>
+- smoke — <https://github.com/xinquan568/vibe-suite/actions/runs/31763449196>
+- full — <https://github.com/xinquan568/vibe-suite/actions/runs/31766155221> — the
+  oracle's verdict: report present, 4/2 floor met (all four distinct planted rubric
+  ids detected against a floor of two), tree confined; the optional-key case passed
+  with `OPENAI_API_KEY` unbound (templated SVG produced, article published).
+
+One operational fact the first dispatches taught, kept here for future model steps:
+`--allowedTools` grants bare `Write` but silently fails to match path-scoped forms
+(`Write(audit-out/**)` and variants) in headless runs — scope writes by ORACLE
+checks, not by permission path rules.
+
 ### Re-provisioning notes
 
 Every step above is idempotent as written: label creation targets only the missing set; the

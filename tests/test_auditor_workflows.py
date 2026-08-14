@@ -2626,6 +2626,16 @@ class TestCallSiteArguments(unittest.TestCase):
                         '--data-dir d 2>>err.log --wrong x')
         self.assertTrue(any("unknown flags" in s for s in v), v)
 
+    def test_mutation_unclosed_UNQUOTED_substitution_fails_closed(self):
+        # round 2: the ORIGINAL fail-open lived on the unquoted branch — no quote
+        # before $(, no closing ) — where the pre-fix scanner sliced at EOF and
+        # validated a silently truncated argv; the double-quoted fixture below
+        # never exercised it
+        v = self._check('OUT=$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir dx')
+        self.assertTrue(any("unparseable" in s for s in v),
+                        f"an unclosed UNQUOTED substitution must poison the parse: {v}")
+
     def test_mutation_unclosed_substitution_fails_closed(self):
         v = self._check('OUT="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
                         '--data-dir dx')

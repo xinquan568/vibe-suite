@@ -2021,8 +2021,13 @@ def check_call_sites(workflow_texts, contracts, roster):
             # trailing closer together, so quote parity survives) — the value
             # form --flag "$(cmd)/x" is deliberately untouched
             if re.search(r'\b[A-Za-z_][A-Za-z0-9_]*="\$\(', line):
-                line = re.sub(r'\b[A-Za-z_][A-Za-z0-9_]*="\$\(', ' ', line)
-                line = re.sub(r'\)"(?!\S)', ' ', line)
+                unwrapped = re.sub(r'\b[A-Za-z_][A-Za-z0-9_]*="\$\(', ' ', line)
+                unwrapped = re.sub(r'\)"(?!\S)', ' ', unwrapped)
+                # nested substitutions can lose parity under this rewrite; keep the
+                # original line then, so shlex fails CLOSED instead of validating a
+                # corrupted rendering of the site
+                if unwrapped.count('"') % 2 == 0:
+                    line = unwrapped
             try:
                 tokens = shlex.split(line, comments=True)
             except ValueError:
@@ -2031,24 +2036,24 @@ def check_call_sites(workflow_texts, contracts, roster):
                         violations.append(f"{wf_name}:{line_no} {helper}: unparseable "
                                           f"call site and not on the extracted-run roster")
                 continue
-            segments, current = [], []
+            segments, current, prev_sep = [], [], ""
             for token in tokens:
                 parts = [t for t in re.split(r"(;|\|\||&&|\|)", token) if t]
                 for part in parts:
                     if part in (";", "&&", "||", "|"):
                         if current:
-                            segments.append(current)
-                        current = []
+                            segments.append((prev_sep, current))
+                        prev_sep, current = part, []
                     else:
                         current.append(part)
             if current:
-                segments.append(current)
+                segments.append((prev_sep, current))
             for helper in hits:
                 needle = f"auditor/scripts/{helper}"
                 contract = contracts[helper]
                 where = f"{wf_name}:{line_no} {helper}"
                 found = False
-                for segment in segments:
+                for sep, segment in segments:
                     indices = [i for i, t in enumerate(segment) if needle in t]
                     if not indices:
                         continue
@@ -2065,17 +2070,27 @@ def check_call_sites(workflow_texts, contracts, roster):
                                 f"sourcing (expected `. .../{helper}`)")
                         continue
                     interpreter = segment[index - 1] if index > 0 else ""
-                    if interpreter not in ("python3", "bash"):
+                    prefix_ok = all(
+                        t in ("if", "!", "then", "else", "elif", "do", "while",
+                              "until", "time")
+                        or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t)
+                        for t in segment[:max(index - 1, 0)])
+                    if interpreter not in ("python3", "bash") or not prefix_ok:
                         violations.append(f"{where}: referenced without an "
-                                          f"interpreter invocation (a mention is "
-                                          f"not a call)")
+                                          f"interpreter invocation in command "
+                                          f"position (a mention is not a call)")
                         continue
+                    if contract.get("stdin") and sep != "|" \
+                            and not any(t == "<" for t in segment):
+                        violations.append(f"{where}: stdin helper invoked without "
+                                          f"piped or redirected input")
                     args = segment[index + 1:]
                     flags, positionals, i = set(), 0, 0
                     boolean = contract.get("boolean", set())
+                    redirect = re.compile(r"^(\d*>>?|<|&>>?)$")
                     while i < len(args):
                         token = args[i]
-                        if token in (">", ">>", "2>", "<", "then", "do"):
+                        if redirect.match(token) or token in ("then", "do"):
                             break
                         if token.startswith("--"):
                             flag, eq, value = token.partition("=")
@@ -2093,8 +2108,8 @@ def check_call_sites(workflow_texts, contracts, roster):
                                 i += 1
                                 continue
                             if i + 1 >= len(args) or args[i + 1].startswith("--") \
-                                    or args[i + 1] in (">", ">>", "2>", "<",
-                                                       "then", "do"):
+                                    or redirect.match(args[i + 1]) \
+                                    or args[i + 1] in ("then", "do"):
                                 violations.append(f"{where}: {flag} is missing "
                                                   f"its value")
                                 i += 1
@@ -2132,18 +2147,6 @@ class TestHelperCallSites(unittest.TestCase):
     found fifteen helpers with zero workflow references, nine reachable from nowhere.
     A helper whose obligation is `workflow-called` without a call site is a duty the
     unit claims and does not perform."""
-
-    def test_the_call_site_machinery_is_defined_exactly_once(self):
-        # N1 (step-9): a shadowing duplicate of any of these silently splits edits
-        # between a live copy and a dead one
-        source = (REPO / "tests" / "test_auditor_workflows.py").read_text()
-        for name in ("HELPER_OBLIGATIONS", "CALL_CONTRACTS",
-                     "EXTRACTED_RUN_ROSTER", "def check_call_sites",
-                     "class TestHelperCallSites", "class TestCallSiteArguments"):
-            definitions = re.findall(rf"^{re.escape(name)}[ (=]", source, re.M)
-            self.assertEqual(len(definitions), 1,
-                             f"{name!r} is defined more than once — the later copy "
-                             f"shadows the earlier and edits split between them")
 
     def test_the_obligations_table_covers_exactly_the_thirty(self):
         self.assertEqual(sorted(HELPER_OBLIGATIONS), sorted(E83_HELPERS),
@@ -2450,12 +2453,65 @@ class TestCallSiteArguments(unittest.TestCase):
                           '--wrong x)"')
         self.assertTrue(any("unknown flags" in s for s in bad), bad)
 
+    def test_mutation_interpreter_adjacency_cannot_be_spoofed(self):
+        v = self._check('echo python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir d')
+        self.assertTrue(any("command position" in s for s in v), v)
+
+    def test_mutation_stdin_contract_requires_piped_input(self):
+        contracts = {"fake-helper.py": {"required": set(), "allowed": set(),
+                                        "stdin": True}}
+        bad = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py"',
+                          contracts)
+        self.assertTrue(any("without piped" in s for s in bad), bad)
+        good = self._check('cat body.txt | python3 '
+                           '"$CODE_DIR/auditor/scripts/fake-helper.py"', contracts)
+        self.assertEqual(good, [], good)
+
+    def test_mutation_numbered_redirection_is_not_a_value(self):
+        v = self._check('python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir 2>> err.log')
+        self.assertTrue(any("missing its value" in s for s in v), v)
+
+    def test_mutation_nested_substitution_keeps_flag_extraction_honest(self):
+        # a nested substitution that still tokenizes must be validated on its REAL
+        # flags — a planted unknown flag inside the same site must still be caught
+        v = self._check('OUT="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--wrong "$(dirname "$X")")"')
+        self.assertTrue(any("unknown flags" in s for s in v), v)
+
+    def test_mutation_parity_breaking_unwrap_fails_closed(self):
+        # when the rewrite would lose quote parity, the original line is kept and
+        # shlex fails CLOSED — never a validated corrupted rendering
+        v = self._check('OUT="$(python3 "$CODE_DIR/auditor/scripts/fake-helper.py" '
+                        '--data-dir "unclosed)')
+        self.assertTrue(v, "a parity-breaking site produced zero violations — the "
+                           "corrupted rendering was validated")
+
     def test_mutation_sourced_library_must_be_sourced(self):
         contracts = {"fake-lib.sh": {"sourced": True}}
         bad = self._check('bash "$CODE_DIR/auditor/scripts/fake-lib.sh"', contracts)
         self.assertTrue(any("without sourcing" in s for s in bad), bad)
         good = self._check('. "$CODE_DIR/auditor/scripts/fake-lib.sh"', contracts)
         self.assertEqual(good, [], good)
+
+
+class TestSingleDefinitionGuard(unittest.TestCase):
+    """N1 (step-9): a shadowing duplicate silently splits edits between a live
+    copy and a dead one. This guard lives in its OWN class and checks ITSELF —
+    hosting it inside a guarded class let a duplicate of that class disable the
+    guard along with everything else it shadowed."""
+
+    def test_the_call_site_machinery_is_defined_exactly_once(self):
+        source = (REPO / "tests" / "test_auditor_workflows.py").read_text()
+        for name in ("HELPER_OBLIGATIONS", "CALL_CONTRACTS",
+                     "EXTRACTED_RUN_ROSTER", "def check_call_sites",
+                     "class TestHelperCallSites", "class TestCallSiteArguments",
+                     "class TestSingleDefinitionGuard"):
+            definitions = re.findall(rf"^{re.escape(name)}[ (=:]", source, re.M)
+            self.assertEqual(len(definitions), 1,
+                             f"{name!r} is defined more than once — the later copy "
+                             f"shadows the earlier and edits split between them")
 
 
 if __name__ == "__main__":

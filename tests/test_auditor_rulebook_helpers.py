@@ -525,6 +525,31 @@ class Test_rule_health_section12(unittest.TestCase):
                          "the events' mis-claimed rule must receive nothing")
         self.assertLessEqual(rules["R02"]["maintainer_rejection_rate"] or 0, 1)
 
+    def test_replayed_adjudications_do_not_skew_the_dissent_mode(self):
+        """F1 iteration 3: the same rejection event appended twice (a replay) must
+        tally its dissent once — per unique (fingerprint, type), never per event."""
+        event = envelope("maintainer_rejected",
+                         {"pr": "acme/w#1", "fingerprints": ["fp-r"],
+                          "rule_ids": ["R03"], "dissent_type": "out_of_scope",
+                          "quote": "q", "commenter_role": "maintainer",
+                          "classifier_model": "m", "classifier_confidence": "high"},
+                         "2026-04-01T00:00:00Z")
+        d = Path(tempfile.mkdtemp())
+        for sub in ("ledgers", "registry", "exemplars"):
+            (d / sub).mkdir()
+        (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
+        (d / "ledgers" / "disagreements.jsonl").write_text(
+            json.dumps(event) + "\n" + json.dumps(event) + "\n", encoding="utf-8")
+        (d / "registry" / "repos.json").write_text(json.dumps({"repos": {}}),
+                                                   encoding="utf-8")
+        proc = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        row = json.loads((d / "feedback" / "log.json").read_text())["rules"][0]
+        self.assertEqual(row["maintainer_rejected"], 1)
+        self.assertEqual(row["dissent_types"], {"out_of_scope": 1},
+                         "a replayed event doubled the dissent tally")
+
     def test_a_disagreement_only_legacy_fingerprint_is_contributed(self):
         """F1: an adjudication event IS proof the finding reached a PR, even when
         the registry predates the metadata block and holds no record of it."""

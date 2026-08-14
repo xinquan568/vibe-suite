@@ -353,7 +353,10 @@ def main(argv=None):
                 pr_fps.add(key)
                 dissent = str(data.get("dissent_type") or "")
                 if dissent:
-                    dissent_of_fp.setdefault(key, []).append(dissent)
+                    # a SET, not a list: the ledger is append-only and replays the
+                    # same adjudication; per-event tallies let one fingerprint's
+                    # re-logged dissent outvote every other in the mode
+                    dissent_of_fp.setdefault(key, set()).add(dissent)
         elif kind == "downstream_suppression":
             rule = str(data.get("rule_id") or "")
             repo = str(data.get("repo") or "")

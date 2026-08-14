@@ -248,6 +248,7 @@ jobs:
             - Use only file read, glob, grep and write. Never run shell commands and never touch the network.
             - Write nothing outside audit-out/.
           claude_args: |
+            --allowedTools "Read,Grep,Glob,Write(audit-out/**)"
             --disallowedTools "WebSearch,Bash,Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ncat:*),Bash(socat:*),Bash(telnet:*),Bash(ssh:*),Bash(scp:*),Bash(sftp:*),Bash(rsync:*),WebFetch"
       - name: Validate the generated report
         run: |

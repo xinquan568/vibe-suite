@@ -211,6 +211,16 @@ class IntegrationLadderContract(unittest.TestCase):
                          "the live workflow drifted from the staged source — edit the "
                          "staged file and re-copy")
 
+    def test_the_model_step_may_write_only_the_report_dir(self):
+        # The first real dispatch proved this the expensive way: the action grants
+        # nothing by default, so a step that passes only --disallowedTools runs the
+        # whole audit and then has its ONE write denied headlessly — green step, no
+        # report, red oracle. The allow must exist and must be scoped to audit-out/.
+        text = self.text()
+        self.assertIn('--allowedTools "Read,Grep,Glob,Write(audit-out/**)"', text,
+                      "the model step does not allow the scoped report write — the "
+                      "audit runs, the write is denied, and the oracle refuses")
+
     def test_the_smoke_census_binds_to_the_fixture_census(self):
         text = self.text()
         self.assertIn("census.json", text,

@@ -216,10 +216,13 @@ class IntegrationLadderContract(unittest.TestCase):
         # nothing by default, so a step that passes only --disallowedTools runs the
         # whole audit and then has its ONE write denied headlessly — green step, no
         # report, red oracle. The allow must exist and must be scoped to audit-out/.
+        # Bare Write is deliberate: path-scoped Write(...) rules silently fail to
+        # grant in headless runs (probed and proven on two real dispatches), so
+        # confinement lives in the oracle's tree checks, not in the allow rule.
         text = self.text()
-        self.assertIn('--allowedTools "Read,Grep,Glob,Write(audit-out/**)"', text,
-                      "the model step does not allow the scoped report write — the "
-                      "audit runs, the write is denied, and the oracle refuses")
+        self.assertIn('--allowedTools "Read,Grep,Glob,Write"', text,
+                      "the model step does not allow the report write — the audit "
+                      "runs, the write is denied headlessly, and the oracle refuses")
 
     def test_the_smoke_census_binds_to_the_fixture_census(self):
         text = self.text()

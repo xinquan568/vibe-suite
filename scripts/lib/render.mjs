@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: ISC
 // The one renderer for /vibe-suite:jobs output (E1.2 / vibe-12, implements F2.5).
 //
-// One security property, held everywhere: record fields are DATA. `rawOutput` and `error` were
+// One security property, held everywhere: record fields are DATA. `rawOutput`, `stderrTail`, `signal` and `error` were
 // written by an external process; they are fenced and truncated on display, never interpolated
 // where they could read as instructions to the session that runs the command. The five-key result
 // line is deliberately NOT rendered here — callers print `resultLine` from jobs.mjs, so the
@@ -16,7 +16,7 @@ export const RAW_TRUNCATE = 400;
  * restyle, overwrite, or spoof the operator's terminal. Newlines and tabs survive; every other
  * control character goes.
  */
-function stripControls(text) {
+export function stripControls(text) {
   return text
     .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")                  // CSI sequences
     .replace(/\x1b[@-_]/g, "")                                  // remaining two-byte escapes
@@ -36,6 +36,49 @@ function fenceExternal(label, text) {
   const longestRun = Math.max(0, ...(shown.match(/`+/g) ?? []).map((run) => run.length));
   const fence = "`".repeat(Math.max(3, longestRun + 1));
   return [`${label} (external text, shown as data):`, fence, shown, fence];
+}
+
+/**
+ * The slice of an engine's stderr a record keeps (vibe-182 / grill H7): the FINAL suffix of the
+ * control-stripped text that fits in `STDERR_TAIL_BYTES` of UTF-8 — a byte bound, because the issue's
+ * "last 4–8 KB" is about storage and stderr is not ASCII; the cut lands on a character boundary
+ * (leading continuation bytes are dropped) so the tail is valid text and a true suffix. `null`
+ * stays `null` (nothing captured — the run has not settled, or the lane has no stderr); an empty
+ * string is a truthful "it printed nothing". Stripped here, at persist time, because the stored
+ * text is what `--json` prints verbatim.
+ */
+export const STDERR_TAIL_BYTES = 8192;
+
+export function stderrTail(text) {
+  if (text === null || text === undefined) return null;
+  const body = stripControls(String(text));
+  const bytes = Buffer.from(body, "utf8");
+  if (bytes.length <= STDERR_TAIL_BYTES) return body;
+  let start = bytes.length - STDERR_TAIL_BYTES;
+  while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1;   // not mid-character
+  return bytes.subarray(start).toString("utf8");
+}
+
+/**
+ * The `error` a runner records when the engine produced no terminal event (vibe-182 / grill H7):
+ * a rejected flag, a login failure before any JSON, a crash. It names HOW the engine ended —
+ * `(exit N)`, `(exit N, SIGX)`, `(signal SIGX)`, `(exit unknown)` — and quotes the first non-empty
+ * control-stripped stderr line, capped at `ERROR_STDERR_EXCERPT` characters: `error` is a summary;
+ * the tail is on the record. Lives here, beside `stderrTail`, so it is import-safe for tests.
+ */
+export const ERROR_STDERR_EXCERPT = 200;
+
+export function noTerminalEvent(outcome) {
+  const code = outcome?.exitCode;
+  const signal = typeof outcome?.signal === "string" && outcome.signal.length > 0 ? outcome.signal : null;
+  const how = Number.isInteger(code)
+    ? `exit ${code}${signal ? `, ${signal}` : ""}`
+    : signal ? `signal ${signal}` : "exit unknown";
+  const tail = stderrTail(outcome?.stderr) ?? "";
+  const first = tail.split("\n").map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+  if (!first) return `no terminal event (${how})`;
+  const excerpt = first.length > ERROR_STDERR_EXCERPT ? `${first.slice(0, ERROR_STDERR_EXCERPT)}…` : first;
+  return `no terminal event (${how}); stderr: ${excerpt}`;
 }
 
 function age(iso, now) {
@@ -104,9 +147,16 @@ export function renderDetail(record, { abandoned = new Set(), now = Date.now() }
     `pipes:      ${record.pipesLeaked === true
       ? "LEAKED — a descendant held the engine's stdio open past its exit; output may be incomplete"
       : record.pipesLeaked === false ? "released" : "-"}`,
+    // vibe-182: the count of event-stream lines that did not parse (`-` until settle / pre-field).
+    `malformed:  ${Number.isSafeInteger(record.malformedLines) ? `${record.malformedLines} event line(s) did not parse` : "-"}`,
   ];
+  // vibe-182: the signal that ended the engine is EXTERNAL TEXT like the rest (the schema admits any
+  // non-empty string) — fenced when present, an explicit `-` when absent.
+  if (typeof record.signal === "string") lines.push(...fenceExternal("signal", record.signal));
+  else lines.push("signal:     -");
   lines.push(...fenceExternal("error", record.error));
   lines.push(...fenceExternal("rawOutput", record.rawOutput));
+  lines.push(...fenceExternal("stderrTail", record.stderrTail));
   return lines.join("\n");
 }
 

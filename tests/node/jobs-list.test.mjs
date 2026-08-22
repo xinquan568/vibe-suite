@@ -141,3 +141,27 @@ test("pipesLeaked is declared at creation, validated as nullable boolean, and OP
   delete broken.exitCode;                                      // any OTHER missing key is still corruption
   assert.equal(validateRecord(broken, ID_A).ok, false, "optionality must not leak to other keys");
 });
+
+test("stderrTail, signal and malformedLines are declared at creation, typed, and OPTIONAL for pre-field records (vibe-182)", () => {
+  const fresh = baseRecord(ID_A);
+  for (const key of ["stderrTail", "signal", "malformedLines"]) {
+    assert.equal(fresh[key], null, `newRecord must declare ${key} (null until the run settles)`);
+  }
+  const ok = (overrides) => validateRecord(baseRecord(ID_A, overrides), ID_A).ok;
+  assert.equal(ok({ stderrTail: "codex: error: unexpected argument" }), true);
+  assert.equal(ok({ stderrTail: "" }), true, "an empty tail is a truthful 'printed nothing'");
+  assert.equal(ok({ stderrTail: 42 }), false, "stderrTail is a string or null");
+  assert.equal(ok({ signal: "SIGTERM" }), true);
+  assert.equal(ok({ signal: "" }), false, "an empty signal name is not a signal");
+  assert.equal(ok({ signal: 15 }), false, "a signal is a name, not a number");
+  assert.equal(ok({ malformedLines: 0 }), true);
+  assert.equal(ok({ malformedLines: 3 }), true);
+  assert.equal(ok({ malformedLines: -1 }), false);
+  assert.equal(ok({ malformedLines: 1.5 }), false);
+  const legacy = baseRecord(ID_A);
+  for (const key of ["stderrTail", "signal", "malformedLines"]) delete legacy[key];   // written before the fields existed
+  assert.equal(validateRecord(legacy, ID_A).ok, true, "a pre-field record must remain valid");
+  const broken = baseRecord(ID_A);
+  delete broken.rawOutput;                                    // any OTHER missing key is still corruption
+  assert.equal(validateRecord(broken, ID_A).ok, false, "optionality must not leak to other keys");
+});

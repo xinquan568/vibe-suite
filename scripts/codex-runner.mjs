@@ -47,13 +47,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { billableTokens, readEventStream } from "./lib/events.mjs";
+import { noTerminalEvent, stderrTail } from "./lib/render.mjs";
 import { loadConfig, resolveDefaults } from "./lib/config-bridge.mjs";
 import {
   DEFAULT_TIMEOUT_MS, heartbeatInterval, runWithDeadline, signalGroup,
 } from "./lib/process.mjs";
 import {
   claimWith, createRecord, finaliseRecord, hashToken, newClaimToken, newJobId, newRecord,
-  readRecord, resultLine, TERMINAL_STATUSES, updateRecord,
+  readRecord, resultLine, TERMINAL_STATUSES, updateRecord, withWorkerSink,
 } from "./lib/jobs.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -311,10 +312,18 @@ async function execute(workspace, record, prompt) {
     verdictState: verdict.verdictState,
     exitCode: outcome.exitCode,
     pipesLeaked: outcome.pipesLeaked,
+    // vibe-182: the engine's stderr (tail, control-stripped), the signal that ended it, and the
+    // count of event lines that did not parse — persisted whatever the status, so a failure can be
+    // read back instead of re-run. A run with no terminal event names how the engine ended and
+    // quotes the first stderr line (`noTerminalEvent`); the timed-out and `turn.failed` messages keep
+    // their precedence.
+    stderrTail: stderrTail(outcome.stderr),
+    signal: typeof outcome.signal === "string" ? outcome.signal : null,
+    malformedLines: events.malformedLines,
     error: status === "completed"
       ? null
       : events.errorMessage
-        ?? (outcome.timedOut ? `deadline of ${record.timeoutMs}ms exceeded` : "no terminal event"),
+        ?? (outcome.timedOut ? `deadline of ${record.timeoutMs}ms exceeded` : noTerminalEvent(outcome)),
     tokens: billableTokens(events.usage),
   });
   return finished ?? readRecord(workspace, record.jobId);
@@ -421,10 +430,18 @@ async function runBackground(workspace, options, timeoutMs) {
     return preRecordFailure(error);
   }
 
-  const child = spawn(process.execPath,
-    [SELF, WORKER_FLAG, record.jobId, CLAIM_FLAG, token, "--", options.prompt], {
-      cwd: workspace, env: process.env, detached: true, stdio: ["ignore", "ignore", "ignore"],
-    });
+  // vibe-182 / grill H7: the worker's OWN stderr — a stack from a throw before the claim, the
+  // `codex-runner:` lines — used to go to /dev/null, so a worker that died before claiming left no
+  // trace. It now goes to a private per-job log (`withWorkerSink`: opened through the audited
+  // primitive, handed over as the stderr slot, the launcher's handle closed at once). The Codex
+  // child's stderr is unaffected: `runWithDeadline` pipes it back to the worker, which persists its
+  // tail on the record. The `pre-spawn` latch is a test seam, inert outside the suite.
+  await signalLatch("pre-spawn");
+  await awaitLatch("pre-spawn");
+  const { child, warning } = await withWorkerSink(workspace, record.jobId, (stderr) => spawn(
+    process.execPath, [SELF, WORKER_FLAG, record.jobId, CLAIM_FLAG, token, "--", options.prompt],
+    { cwd: workspace, env: process.env, detached: true, stdio: ["ignore", "ignore", stderr] }));
+  if (warning) process.stderr.write(`codex-runner: ${warning}\n`);
   child.unref();
 
   const claimed = await awaitWorkerClaim(workspace, record.jobId);

@@ -61,6 +61,9 @@ const DEFAULT_FILE_MODE = 0o644;
 
 const SCRATCH_ATTEMPTS = 64;
 const OPEN_WRITE = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+// vibe-182: a long-lived sink (a child's stderr) appends; everything else about its creation is the
+// same — exclusive, never through a symlink, private from the first byte.
+const OPEN_SINK = OPEN_WRITE | constants.O_APPEND;
 
 /** Realpaths of temp roots this process made. A cache for speed — never the authority. */
 const ownedTempCache = new Set();
@@ -257,6 +260,34 @@ export async function publishNew(root, dest, content, { mode = DEFAULT_FILE_MODE
   }
   await syncDir(dir);
   return true;
+}
+
+/**
+ * Open a private, append-only sink at `dest` for a process's lifetime — the one primitive that hands
+ * back an OPEN DESCRIPTOR rather than writing content (vibe-182 / grill H7).
+ *
+ * `writeAtomic`/`publishNew` write whole files and close them; a child's stderr needs a descriptor
+ * that stays open for as long as the child lives, so it is created here — inside `root`, exclusive
+ * (`O_EXCL`: a sink is created once, never reopened over an existing file), `O_NOFOLLOW`, `O_APPEND`,
+ * at `mode` and then `chmod`ed to it so the umask cannot loosen it. The caller owns the handle:
+ * typically it passes `handle.fd` as a `spawn` stdio slot and closes its own copy afterwards — the
+ * child holds its own descriptor. Nothing here writes content.
+ */
+export async function openSinkAt(root, dest, { mode = PRIVATE_FILE_MODE } = {}) {
+  await assertRoot(root);
+  await assertInside(root, dest);
+  const kind = await classify(dest);
+  if (kind === "symlink") throw new WriteError(`${dest}: is a symlink — refusing to open a sink over it`);
+  if (kind !== "absent") throw new WriteError(`${dest}: already exists — a sink is created once, never reopened`);
+  const handle = await fs.open(dest, OPEN_SINK, mode);
+  try {
+    await handle.chmod(mode);
+  } catch (error) {
+    await handle.close().catch(() => {});
+    await fs.unlink(dest).catch(() => {});
+    throw error;
+  }
+  return handle;
 }
 
 /** Create `rel` under `root` at an explicit mode, refusing a symlinked component it observes. */

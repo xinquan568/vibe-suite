@@ -43,7 +43,7 @@ import { lstat, readdir, readFile } from "node:fs/promises";
 
 import {
   assertInside, assertRoot, ensureDirAt, publishNew, secureDirAt, unlinkOwned, writeAtomic,
-  PRIVATE_FILE_MODE, STAMP_KEY,
+  openSinkAt, PRIVATE_FILE_MODE, STAMP_KEY,
 } from "./write.mjs";
 import path from "node:path";
 
@@ -92,6 +92,40 @@ export function isValidJobId(id) {
 
 export function jobsDir(workspace) {
   return path.join(workspace, STATE_DIRNAME, "jobs");
+}
+
+/**
+ * The background worker's own stderr sink (vibe-182 / grill H7): `<jobId>.log` beside the record,
+ * 0600, opened by the launcher before the spawn. Not a record, not a slot, not a scratch temp — the
+ * reaper's candidate rule (`isReapCandidate`) never matches it and `listRecords` never reads it.
+ */
+export function workerLogPath(workspace, jobId) {
+  return path.join(jobsDir(workspace), `${jobId}.log`);
+}
+
+/**
+ * Spawn the worker with a private log as its stderr (vibe-182 / grill H7) — the whole sink lifecycle
+ * in one testable place. `spawnWith(stderr)` receives the sink's descriptor (or `"ignore"`) and
+ * returns the child. The sink is opened through the audited primitive; the launcher's handle is
+ * closed as soon as `spawnWith` returns (or throws) — the child holds its own descriptor from the
+ * spawn. A sink that cannot be opened degrades to `"ignore"` and is reported in `warning` rather
+ * than failing a launch over its diagnostics. Returns `{ child, logPath, warning }`.
+ */
+export async function withWorkerSink(workspace, jobId, spawnWith) {
+  const logPath = workerLogPath(workspace, jobId);
+  let sink = null;
+  let warning = null;
+  try {
+    sink = await openSinkAt(jobsDir(workspace), logPath);
+  } catch (error) {
+    warning = `worker log unavailable for ${jobId} (${String(error?.message ?? error)}); the worker's stderr is discarded`;
+  }
+  try {
+    const child = spawnWith(sink ? sink.fd : "ignore");
+    return { child, logPath: sink ? logPath : null, warning };
+  } finally {
+    if (sink) await sink.close().catch(() => {});
+  }
 }
 
 export function recordPath(workspace, jobId) {
@@ -146,6 +180,12 @@ export function newRecord({ jobId, kind, sandbox, effort, model, background, tim
     // descendant inherited them). null until the run settles; declared here so early-terminal and
     // completed records keep one schema (the vibe-46 rule above).
     pipesLeaked: null,
+    // vibe-182: what the engine said on stderr (last 8 KB, control-stripped), the signal that ended
+    // it, and how many event-stream lines did not parse. null until the run settles; declared here
+    // so early-terminal and completed records keep one schema (the vibe-46 rule above).
+    stderrTail: null,
+    signal: null,
+    malformedLines: null,
   };
 }
 
@@ -526,14 +566,19 @@ const RECORD_SHAPE = {
   // records written before the field existed omit it and must stay valid — `validateRecord`
   // checks presence before the predicate, so optionality has to be declared there, not here.
   pipesLeaked: nullOr((v) => typeof v === "boolean"),
+  // vibe-182: all three null until settle; presence OPTIONAL (OPTIONAL_KEYS) for pre-field records.
+  stderrTail: nullOr((v) => typeof v === "string"),
+  signal: nullOr((v) => typeof v === "string" && v.length > 0),
+  malformedLines: nullOr((v) => Number.isSafeInteger(v) && v >= 0),
 };
 
 /**
  * Keys a record may omit and still validate — fields added after records existed on disk
- * (vibe-181: `pipesLeaked`). Every other `RECORD_SHAPE` key is required: a missing contract key is
+ * (vibe-181: `pipesLeaked`; vibe-182: `stderrTail`, `signal`, `malformedLines`). Every other
+ * `RECORD_SHAPE` key is required: a missing contract key is
  * a corrupt record, never a legacy one.
  */
-const OPTIONAL_KEYS = new Set(["pipesLeaked"]);
+const OPTIONAL_KEYS = new Set(["pipesLeaked", "stderrTail", "signal", "malformedLines"]);
 
 /**
  * One complete verdict on a record: schema, identity, handle invariants. Returns

@@ -11,7 +11,8 @@ import test from "node:test";
 
 import { newRecord, resultLine } from "../../scripts/lib/jobs.mjs";
 import {
-  RAW_TRUNCATE, renderCancelOutcome, renderDetail, renderJson, renderStatusTable,
+  ERROR_STDERR_EXCERPT, RAW_TRUNCATE, STDERR_TAIL_BYTES, noTerminalEvent, renderCancelOutcome, renderDetail,
+  renderJson, renderStatusTable, stderrTail,
 } from "../../scripts/lib/render.mjs";
 
 const ID_A = "job_aaaaaaaaaaaaaaaaaaaa";
@@ -139,4 +140,71 @@ test("detail renders the pipesLeaked verdict in all three states (vibe-181)", ()
   const legacyOut = renderDetail(legacy);
   assert.ok(/pipes:\s+-$/m.test(legacyOut), `a pre-field record (pipesLeaked absent) must render '-':\n${legacyOut}`);
   assert.ok(!/pipes:\s+released/.test(legacyOut), "an absent pipesLeaked must never read as released");
+});
+
+test("detail fences signal and stderrTail as external text, shows the malformed count, and renders a pre-field record as '-' (vibe-182)", () => {
+  const ESC = String.fromCharCode(27);
+  const out = renderDetail(record(ID_A, {
+    status: "failed", exitCode: 2, signal: null, malformedLines: 1,
+    stderrTail: `${ESC}[31mcodex: error: unexpected argument '--bogus'${ESC}[0m\n\`\`\`\nnot a fence break`,
+  }));
+  assert.ok(/^signal:\s+-$/m.test(out), `a null signal renders an explicit '-':\n${out}`);
+  assert.ok(/^malformed:\s+1 event line/m.test(out), `the malformed count is shown:\n${out}`);
+  assert.ok(out.includes("stderrTail (external text, shown as data):"), "stderrTail is labelled as external data");
+  assert.ok(out.includes("codex: error: unexpected argument '--bogus'"), "the stderr text is shown");
+  assert.ok(!out.includes(ESC), "control sequences are stripped on display");
+  const longFences = out.match(/^`{4,}$/mg) ?? [];
+  assert.ok(longFences.length >= 2, `a stderrTail containing a backtick run is fenced with a LONGER fence:\n${out}`);
+
+  // A present signal is external text too (Do-item 3; the schema admits any non-empty string).
+  const hostile = renderDetail(record(ID_A, { status: "timed_out", signal: `SIG${ESC}[31mTERM${ESC}[0m \`\`\`\nfake: line` }));
+  assert.ok(hostile.includes("signal (external text, shown as data):"), `signal is fenced, not interpolated:\n${hostile}`);
+  assert.ok(hostile.includes("SIGTERM"), "the stripped signal text is shown");
+  assert.ok(!hostile.includes(ESC), "control sequences in a signal are stripped");
+  assert.ok(!/^signal:\s/m.test(hostile), "no bare `signal:` line when the signal is fenced");
+  const signalFences = hostile.split("signal (external text, shown as data):")[1].match(/^`{4,}$/mg) ?? [];
+  assert.ok(signalFences.length >= 2, `a backtick run inside the signal gets a longer fence:\n${hostile}`);
+  const plain = renderDetail(record(ID_A, { status: "timed_out", signal: "SIGTERM" }));
+  assert.ok(/signal \(external text, shown as data\):\n```\nSIGTERM\n```/.test(plain), `an ordinary signal is fenced plainly:\n${plain}`);
+
+  const legacy = record(ID_A, { status: "completed" });
+  for (const key of ["stderrTail", "signal", "malformedLines"]) delete legacy[key];    // a pre-field record
+  const legacyOut = renderDetail(legacy);
+  assert.ok(/^signal:\s+-$/m.test(legacyOut) && /^malformed:\s+-$/m.test(legacyOut), `a pre-field record renders '-':\n${legacyOut}`);
+  assert.ok(!legacyOut.includes("stderrTail ("), "no stderrTail fence for a record that carries none");
+});
+
+test("stderrTail keeps the FINAL suffix within 8192 UTF-8 bytes, on a character boundary, control-stripped (vibe-182)", () => {
+  const ESC = String.fromCharCode(27);
+  assert.equal(stderrTail(null), null);
+  assert.equal(stderrTail(undefined), null);
+  assert.equal(stderrTail(""), "", "an empty stderr is a truthful empty tail, not null");
+  assert.equal(stderrTail(`${ESC}[31mred${ESC}[0m\r\n`), "red\n", "controls (colour codes, \\r) are stripped at persist time");
+  // Multibyte: 5 000 × "é" is 10 000 bytes but 5 000 characters — a character bound would keep it all.
+  const body = "HEAD-MARKER " + "é".repeat(5000) + " TAIL-MARKER";
+  const tail = stderrTail(body);
+  assert.ok(Buffer.byteLength(tail, "utf8") <= STDERR_TAIL_BYTES, `byte bound: ${Buffer.byteLength(tail, "utf8")} > ${STDERR_TAIL_BYTES}`);
+  assert.ok(Buffer.byteLength(tail, "utf8") > STDERR_TAIL_BYTES - 4, "the tail is the largest suffix that fits, not a smaller one");
+  assert.ok(body.endsWith(tail), "the tail is a true suffix of the original");
+  assert.ok(tail.endsWith(" TAIL-MARKER") && !tail.includes("HEAD-MARKER"), "the END is kept, the head is dropped");
+  assert.ok(!tail.includes("�"), "the cut lands on a character boundary — no replacement characters");
+  assert.equal(stderrTail("x".repeat(STDERR_TAIL_BYTES)), "x".repeat(STDERR_TAIL_BYTES), "exactly at the bound nothing is cut");
+});
+
+test("noTerminalEvent names how the engine ended and quotes the first non-empty stderr line, capped (vibe-182)", () => {
+  const ESC = String.fromCharCode(27);
+  assert.equal(noTerminalEvent({ exitCode: 2, signal: null, stderr: "" }), "no terminal event (exit 2)");
+  assert.equal(noTerminalEvent({ exitCode: null, signal: "SIGSEGV", stderr: "" }), "no terminal event (signal SIGSEGV)");
+  assert.equal(noTerminalEvent({ exitCode: 137, signal: "SIGKILL", stderr: "" }), "no terminal event (exit 137, SIGKILL)");
+  assert.equal(noTerminalEvent({}), "no terminal event (exit unknown)");
+  assert.equal(noTerminalEvent({ exitCode: 2, signal: "", stderr: null }), "no terminal event (exit 2)", "an empty signal name is no signal");
+  assert.equal(
+    noTerminalEvent({ exitCode: 2, signal: null, stderr: `\n   \n${ESC}[31mcodex: error: unexpected argument '--bogus'${ESC}[0m\n  tip: run with --help\n` }),
+    "no terminal event (exit 2); stderr: codex: error: unexpected argument '--bogus'",
+    "blank leading lines are skipped, the first real line is quoted, controls stripped, later lines left to the tail");
+  const long = "L".repeat(ERROR_STDERR_EXCERPT + 50);
+  const capped = noTerminalEvent({ exitCode: 1, signal: null, stderr: `${long}\nsecond` });
+  assert.equal(capped, `no terminal event (exit 1); stderr: ${"L".repeat(ERROR_STDERR_EXCERPT)}…`, "the excerpt is capped with an ellipsis");
+  assert.equal(noTerminalEvent({ exitCode: 1, signal: null, stderr: "L".repeat(ERROR_STDERR_EXCERPT) }),
+    `no terminal event (exit 1); stderr: ${"L".repeat(ERROR_STDERR_EXCERPT)}`, "exactly at the cap nothing is cut");
 });

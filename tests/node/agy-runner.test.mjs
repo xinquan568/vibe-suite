@@ -140,6 +140,10 @@ test("an OAuth-blocking agy is killed by the deadline: stdin at /dev/null does n
   assert.equal(result.status, 1, `${result.stdout}${result.stderr}`);
   const line = JSON.parse(result.stdout.trim().split("\n").at(-1));
   assert.equal(line.status, "timed_out", "only a detached group kill bounds a blocking OAuth prompt");
+  // vibe-182: the signal that ended agy is on the record — a falsifiable assertion (a lane that
+  // forgot to finalise `signal` would leave newRecord's null here).
+  const record = await readRecord(dir, line.jobId);
+  assert.ok(record.signal === "SIGTERM" || record.signal === "SIGKILL", `the ending signal is recorded: ${record.signal}`);
 });
 
 test("an oversized prompt fails CLOSED — no truncation, no dispatch, no record", () => {
@@ -173,4 +177,14 @@ test("an unconfirmed process-group reap is terminal, not a completed job", async
     { status: "failed", reason: "reap-failed" });
   assert.deepEqual(classifyOutput({ stdout: "Please sign in\n", groupReaped: false }),
     { status: "failed", reason: "reap-failed" });
+});
+
+test("the engine's stderr is persisted on the record as stderrTail; a natural exit records no signal (vibe-182)", async () => {
+  const dir = ws();
+  const result = run(base(), { cwd: dir, gate: passedGateFile(), fixture: "auth-error.mjs" });
+  const line = JSON.parse(result.stdout.trim().split("\n").at(-1));
+  const record = await readRecord(dir, line.jobId);
+  assert.match(record.stderrTail ?? "", /Please sign in/, "the stderr that explained the failure is on the record");
+  assert.equal(record.signal, null, "exit 0 — no signal");
+  assert.equal(record.malformedLines, null, "agy has no event stream; the count stays null");
 });

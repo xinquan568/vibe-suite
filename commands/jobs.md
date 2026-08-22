@@ -41,6 +41,18 @@ retrying.
 | `cancel <job-id>` | cancel that job (see lifecycle below) |
 | `cancel` | cancel the single running background job; refuses to guess when there are several |
 
+## What the detail view carries (diagnostics)
+
+`status <job-id>` shows the record's `exit code`, `pipes`, and `malformed` (event-stream lines that did not
+parse), and fences `error`, `rawOutput`, `stderrTail` and `signal` as external text — the engine wrote
+them, this command only displays them (`signal:     -` when no signal ended the engine). `stderrTail` is
+the last 8 KB of the engine's stderr, control-stripped; like `rawOutput` it lives only inside the 0600
+record, because stderr can carry credentials. A run that ended without a terminal event records
+`no terminal event (exit <code>); stderr: <first line>` as its `error`. A background worker's own stderr
+(stacks, `codex-runner:` lines) goes to `.vibe-suite-state/jobs/<job-id>.log` (0600), so a worker that
+dies before claiming its job leaves a readable trace there; if that log cannot be opened the launcher
+says so on stderr and the worker's stderr is discarded as before.
+
 ## Cancel semantics (worth knowing before relying on them)
 
 Cancel **claims the verdict first**: the record transitions to `cancelled` through the store's

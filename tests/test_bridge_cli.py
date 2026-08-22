@@ -13,8 +13,11 @@ import os
 import shutil
 import subprocess
 import tempfile
+import textwrap
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLI = REPO_ROOT / "scripts" / "bridge_cli.py"
@@ -405,6 +408,120 @@ class WriteAtomicRefusesSymlinks(unittest.TestCase):
         fresh = self.ws / "new.md"
         bridge.write_atomic(self.ws, fresh, "made\n")
         self.assertEqual(fresh.read_text(), "made\n")
+
+
+class WriteAtomicScratchIsUnpredictable(unittest.TestCase):
+    """vibe-178 / grill H9. `write_atomic` staged through the FIXED name `.{dest}.vibe-tmp`, opened
+    `O_EXCL`, and refused when that entry existed. A scratch stranded by a hard crash (no cleanup
+    runs) — or by a cleanup unlink that itself failed — then wedged every later write to the same
+    destination behind an opaque "already exists" refusal, and two writers of one destination
+    collided the same way. The scratch now has the unpredictable `O_EXCL|O_NOFOLLOW` name
+    `publish_new` always used (`_scratch`), so a leftover is an orphan, never a poison pill."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-wa-scratch-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    @staticmethod
+    def scratch_names(parent):
+        return sorted(p.name for p in parent.iterdir() if p.name.endswith(".vibe-tmp"))
+
+    def test_a_write_interrupted_after_scratch_creation_does_not_poison_the_destination(self):
+        """The crash seam is a child process that dies at the moment it would publish: `os._exit`
+        unwinds nothing, so — exactly as after SIGKILL or power loss — the cleanup never runs and the
+        scratch is left behind. The next write to the same destination must still succeed."""
+        dest = self.ws / "CLAUDE.md"
+        dest.write_text("first\n")
+        child = textwrap.dedent(f"""
+            import os, sys
+            sys.path.insert(0, {str(REPO_ROOT / "scripts" / "lib")!r})
+            import bridge
+            def die(*args, **kwargs):
+                os._exit(137)
+            bridge.os.replace = die
+            bridge.write_atomic({str(self.ws)!r}, {str(dest)!r}, "second\\n")
+        """)
+        proc = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 137, proc.stderr)
+        self.assertEqual(dest.read_text(), "first\n", "the interrupted write published a partial result")
+        orphans = self.scratch_names(self.ws)
+        self.assertEqual(len(orphans), 1, f"the seam did not leave the scratch behind: {orphans}")
+        bridge.write_atomic(self.ws, dest, "third\n")
+        self.assertEqual(dest.read_bytes(), b"third\n", "the next write did not land intact")
+
+    def test_a_stale_fixed_name_scratch_from_an_earlier_crash_no_longer_blocks(self):
+        """A leftover at the legacy fixed name — what a crash before this fix left behind — is an
+        unrelated entry now: the write succeeds and the file is neither consumed nor destroyed."""
+        dest = self.ws / ".mcp.json"
+        dest.write_text("{}\n")
+        stale = self.ws / ".{}.vibe-tmp".format(dest.name)
+        stale.write_text("left behind by a crash before the fix\n")
+        bridge.write_atomic(self.ws, dest, '{"a": 1}\n')
+        self.assertEqual(dest.read_text(), '{"a": 1}\n')
+        self.assertEqual(stale.read_text(), "left behind by a crash before the fix\n",
+                         "a file at the legacy scratch name was consumed or destroyed")
+
+    def test_two_concurrent_writers_of_one_destination_both_complete(self):
+        """Deterministic interleaving, not timing: writer-A (a thread) is held after its scratch is
+        open while writer-B runs to completion; then A is released. Both complete and the last
+        `os.replace` wins. Under the fixed name B's `O_EXCL` open collided with A's scratch."""
+        dest = self.ws / "state.json"
+        dest.write_text("0\n")
+        first_open = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        real_fdopen = os.fdopen
+
+        def pausing_fdopen(fd, *args, **kwargs):
+            handle = real_fdopen(fd, *args, **kwargs)
+            if threading.current_thread().name == "writer-A":
+                first_open.set()
+                if not release.wait(10):
+                    raise AssertionError("writer-A was never released")
+            return handle
+
+        failures = []
+
+        def writer_a():
+            try:
+                bridge.write_atomic(self.ws, dest, "A\n")
+            except BaseException as exc:  # noqa: BLE001 — the test reports whatever A raised
+                failures.append(exc)
+
+        with mock.patch.object(os, "fdopen", pausing_fdopen):
+            thread = threading.Thread(target=writer_a, name="writer-A")
+            thread.start()
+            self.assertTrue(first_open.wait(10), "writer-A never reached its scratch")
+            bridge.write_atomic(self.ws, dest, "B\n")
+            self.assertEqual(dest.read_text(), "B\n", "writer-B did not complete while A held its scratch")
+            release.set()
+            thread.join(10)
+        self.assertFalse(thread.is_alive(), "writer-A did not terminate")
+        self.assertEqual(failures, [], f"a concurrent writer failed: {failures}")
+        self.assertEqual(dest.read_text(), "A\n", "the last os.replace did not win")
+        self.assertEqual(self.scratch_names(self.ws), [], "a completed writer left its scratch behind")
+
+    def test_a_symlink_planted_at_the_scratch_name_is_not_followed(self):
+        """The scratch is `O_EXCL|O_NOFOLLOW`. With the name pinned (`os.urandom` stubbed), a link
+        planted there is an EEXIST on every attempt, never a write through the link — and the
+        residual refusal, every candidate taken, names its remedy."""
+        outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        dest = self.ws / "config.toml"
+        dest.write_text("before\n")
+        planted = self.ws / ".config.toml.{}.vibe-tmp".format("00" * 6)
+        planted.symlink_to(outside / "pwned")
+        with mock.patch.object(os, "urandom", lambda n: b"\x00" * n):
+            with self.assertRaises(bridge.BridgeError) as caught:
+                bridge.write_atomic(self.ws, dest, "owned\n")
+        self.assertFalse((outside / "pwned").exists(), "the write escaped through the planted link")
+        self.assertEqual(dest.read_text(), "before\n")
+        self.assertTrue(planted.is_symlink(), "the planted link was consumed")
+        self.assertEqual(planted.readlink(), outside / "pwned", "the planted link was re-pointed")
+        message = str(caught.exception)
+        self.assertIn("remove stale", message, "the residual refusal does not name the corrective action")
+        self.assertIn("no other vibe-suite process is running", message,
+                      "the residual refusal does not name the condition for the remedy")
 
 
 class TestAdvisorMirrorSkip(unittest.TestCase):

@@ -217,7 +217,11 @@ def _open_parent(ws, rel):
     This was a second copy of `bridge._open_dir_chain` — and a copy of a safety rule drifts from the
     original, which is how this codebase kept guarding one writer while another went unguarded.
     """
-    return bridge.open_dir_chain(ws, Path(rel).parent.parts)
+    # `link_skills` runs this as a preflight before `symlink_at` creates the link; on a fresh
+    # workspace the preflight is what brings `.claude/skills/` and `.agents/` into existence, and a
+    # refusal here skips the link — so the parent chain is created on purpose now that the descent
+    # no longer does it implicitly (vibe-179).
+    return bridge.open_dir_chain(ws, Path(rel).parent.parts, create=True)
 
 
 def _link_mirror_skills(ws, report, plugin_root):
@@ -279,8 +283,9 @@ def link_skills(ws, report, plugin_root):
     for rel, target in pairs:
         path = ws / rel
         try:
-            # Opened, not merely checked: a path validated and then used is validated at a different
-            # moment than it is used. The descriptor is what the symlink is created against.
+            # Opened as a preflight (and, on a fresh workspace, created): the parent is validated
+            # through the audited descent here; `symlink_at` below reopens it through the same
+            # descent to create the link.
             parent_fd = _open_parent(ws, rel)
         except bridge.BridgeError as exc:
             report.append(f"skills: {rel} refused — {exc}")

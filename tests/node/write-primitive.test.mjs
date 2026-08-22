@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   classify, ensureDirAt, isOwnedTempRoot, makeOwnedTempDir, publishNew, removeOwnedTree, scratch,
-  secureDirAt, unlinkOwned, writeAtomic, PRIVATE_FILE_MODE, STAMP_KEY,
+  openSinkAt, secureDirAt, unlinkOwned, writeAtomic, PRIVATE_FILE_MODE, STAMP_KEY,
 } from "../../scripts/lib/write.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -425,4 +425,27 @@ test("the gate record refuses an out-of-root and a symlinked destination", async
   assert.ok(readdirSync(owned).includes("gate-status.json"),
     "a permitted destination inside an owned root must still be written");
   await removeOwnedTree(owned).catch(() => {});
+});
+
+test("openSinkAt creates an exclusive 0600 append sink a child can inherit, and refuses an existing file, a symlink and an out-of-root path (vibe-182)", async () => {
+  const root = scratchDir();
+  const dest = path.join(root, "job.log");
+  const sink = await openSinkAt(root, dest);
+  try {
+    assert.equal(mode(dest), PRIVATE_FILE_MODE, "the sink is private from creation, umask notwithstanding");
+    // A child whose stderr IS the sink's descriptor writes straight into the file — the whole point.
+    const child = spawnSync(process.execPath, ["-e", "process.stderr.write('from the child\\n')"],
+      { stdio: ["ignore", "ignore", sink.fd] });
+    assert.equal(child.status, 0);
+  } finally {
+    await sink.close();
+  }
+  assert.equal(readFileSync(dest, "utf8"), "from the child\n", "the child's stderr landed in the sink");
+  await assert.rejects(openSinkAt(root, dest), /already exists/,
+    "a sink is created once — never reopened over an existing file");
+  const link = path.join(root, "link.log");
+  symlinkSync(path.join(root, "elsewhere.log"), link);
+  await assert.rejects(openSinkAt(root, link), /symlink/, "a (dangling) symlink is refused, not followed");
+  await assert.rejects(openSinkAt(root, path.join(tmpdir(), "vibe-182-outside.log")), /outside/,
+    "containment holds for sinks as for every other write");
 });

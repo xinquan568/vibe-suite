@@ -32,6 +32,7 @@ import { runWithDeadline } from "./lib/process.mjs";
 import {
   createRecord, finaliseRecord, newJobId, newRecord, readRecord, resultLine, updateRecord,
 } from "./lib/jobs.mjs";
+import { stderrTail } from "./lib/render.mjs";
 
 export const DEFAULT_TIMEOUT_MS = 600_000;
 // Below Linux MAX_ARG_STRLEN (128 KiB): agy takes the prompt as one argv string.
@@ -180,6 +181,11 @@ async function main() {
     errorClass: verdict.status === "completed" ? null
       : verdict.reason === "quota" ? "quota" : "failure",
     exitCode: Number.isInteger(outcome.exitCode) ? outcome.exitCode : null,
+    // vibe-182: agy's auth and quota complaints arrive on stderr — `classifyOutput` reads it, and
+    // the record now keeps it, with the signal that ended agy when a deadline did. No event stream
+    // here, so `malformedLines` stays null.
+    stderrTail: stderrTail(outcome.stderr),
+    signal: typeof outcome.signal === "string" ? outcome.signal : null,
   });
   const final = finished ?? await readRecord(workspace, record.jobId);
   process.stdout.write(resultLine(final) + "\n");

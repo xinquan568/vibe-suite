@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -576,6 +577,59 @@ class LeakedPipes(RunnerCase):
         self.assertIs(self.job_record(parsed["jobId"]).get("pipesLeaked"), False)
 
 
+
+class StderrDiagnostics(RunnerCase):
+    """vibe-182 / grill H7: what the record keeps when the engine explains itself on stderr.
+
+    A rejected flag, a login failure before any JSON, a crash — the only diagnostic is on stderr and
+    there is no terminal event. Before vibe-182 the record said `error: "no terminal event"` and
+    nothing else; the tail, the exit/signal, and the malformed-line count were discarded.
+    """
+
+    def test_stderr_and_exit_are_persisted_when_no_terminal_event_arrives(self):
+        completed = self.run_runner(*self.base_args(), fixture="stderr-failer.mjs", expect_ok=False)
+        parsed = self.result_line(completed)
+        self.assertEqual(parsed["status"], "failed")
+        record = self.job_record(parsed["jobId"])
+        self.assertEqual(record["exitCode"], 2)
+        self.assertIsNone(record["signal"], "a natural exit has no signal")
+        self.assertEqual(record["malformedLines"], 1, "the non-JSON stdout line is counted, not lost")
+        self.assertEqual(
+            record["error"],
+            "no terminal event (exit 2); stderr: codex: error: unexpected argument '--bogus'",
+            "the error names how the engine ended and quotes the first stderr line")
+        self.assertIn("codex: error: unexpected argument '--bogus'", record["stderrTail"])
+        self.assertIn("tip: run with --help", record["stderrTail"])
+        self.assertNotIn(chr(27), record["stderrTail"], "colour codes are stripped before persisting")
+        self.assertNotIn("\r", record["stderrTail"], "carriage returns are control bytes: stripped")
+        self.assertEqual(record["errorClass"], "failure")
+        self.assertEqual(record["rawOutput"], "this line is not JSON\n", "stdout is still kept verbatim")
+
+    def test_a_timed_out_job_records_the_signal_that_ended_the_engine(self):
+        completed = self.run_runner(
+            "--kind", "review", "--effort", "low", "--sandbox", "read-only",
+            "--timeout-ms", "300", "--", "fixture prompt",
+            fixture="sleeper.mjs", timeout=30, expect_ok=False)
+        parsed = self.result_line(completed)
+        record = self.job_record(parsed["jobId"])
+        self.assertEqual(record["status"], "timed_out")
+        self.assertIn(record["signal"], ("SIGTERM", "SIGKILL"), "the deadline's signal is recorded")
+        self.assertIsInstance(record["stderrTail"], str,
+                              "once the run settles the tail is a string (possibly empty), not null")
+
+    def test_a_background_worker_gets_a_private_log_sink(self):
+        parsed = self.result_line(self.run_runner(*self.base_args("--background")))
+        record = self.wait_for_terminal(parsed["jobId"])
+        log = self.ws / STATE_DIRNAME / "jobs" / f"{parsed['jobId']}.log"
+        self.assertTrue(log.exists(), "the worker's stderr sink is created at launch")
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600,
+                         "the worker log is private: stderr can carry credentials")
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(record["stderrTail"], "", "the emitter prints nothing to stderr")
+        self.assertEqual(record["malformedLines"], 1,
+                         "the emitter fixture prints exactly one non-JSON line; the stream count reaches the record")
+
+
 class SourceConventions(unittest.TestCase):
     """Static checks over the shipped runtime artifacts."""
 
@@ -789,7 +843,10 @@ class RecordSchema(RunnerCase):
                       "verdictText", "verdictState", "errorClass",
                       # vibe-181: null until the run settles; whether the engine's stdio pipes were
                       # still held open past its exit.
-                      "pipesLeaked"):
+                      "pipesLeaked",
+                      # vibe-182: the engine's stderr tail, the signal that ended it, and the
+                      # malformed event-line count — null until the run settles.
+                      "stderrTail", "signal", "malformedLines"):
             self.assertIn(field, record, f"record must always declare {field}")
 
     def test_background_record_carries_worker_handle(self):
@@ -911,7 +968,11 @@ class LifecycleRaces(RunnerCase):
         self.latch = Path(made.stdout.strip())
         self.addCleanup(shutil.rmtree, self.latch, ignore_errors=True)
 
-    def run_latched(self, *args, fixture="emitter.mjs", timeout=60):
+    def run_latched(self, *args, fixture="emitter.mjs", timeout=60, hold_pre_spawn=False):
+        # vibe-182: the launcher pauses at `pre-spawn` (record exists, sink not yet opened) only for
+        # the tests that ask; every other latched test has it released before the launch.
+        if not hold_pre_spawn:
+            self.release("pre-spawn")
         self._spawned_fixtures.append(fixture)
         env = dict(os.environ)
         env["VIBE_SUITE_CODEX_BIN"] = str(FIXTURES / fixture)
@@ -932,6 +993,64 @@ class LifecycleRaces(RunnerCase):
 
     def release(self, name):
         (self.latch / f"{name}.release").write_text("1")
+
+    def test_a_worker_crash_before_claim_leaves_its_stack_in_the_job_log(self):
+        """vibe-182 / grill H7: the worker's stderr was /dev/null, so a pre-claim crash left nothing
+        to read. The launcher opens a private per-job log before the spawn; the worker's terminal
+        catch writes the stack there.
+
+        The crash is injected through the store: held at `pre-claim`, the canonical record is made
+        non-JSON, so the claim's read throws before `runWorker`'s try — exactly the uncaught path.
+        The launcher's handshake then gives up, kills the group, and cannot finalise a record that
+        does not parse; that is today's behaviour and not what this test is about.
+        """
+        proc = self.run_latched(*self.base_args("--background"))
+        self.wait_signal("pre-claim")
+        jobs = list((self.ws / STATE_DIRNAME / "jobs").glob("job_*.json"))
+        self.assertEqual(len(jobs), 1)
+        job_id = jobs[0].stem
+        jobs[0].write_text("not json at all\n")
+        self.release("pre-claim")
+        self.release("pre-kill")
+        self.release("pre-ack")
+        proc.communicate(timeout=60)
+        log = self.ws / STATE_DIRNAME / "jobs" / f"{job_id}.log"
+        self.assertTrue(log.exists(), "the worker log must exist even though the worker died before claiming")
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600, "the worker log is private")
+        text = log.read_text()
+        self.assertIn("codex-runner:", text, f"the worker's terminal catch writes to the log:\n{text}")
+        self.assertIn("    at ", text, f"a stack trace, not just a message:\n{text}")
+
+    def test_a_sink_that_cannot_be_opened_degrades_to_the_old_behaviour_and_says_so(self):
+        """vibe-182: a launch is not failed over its diagnostics. Held at `pre-spawn` (after the record
+        exists, before the sink is opened), the log path is squatted by a symlink — the audited
+        primitive refuses it — so the launcher must say so on stderr, spawn the worker with its stderr
+        discarded, and the job must still run to completion under the unchanged result contract.
+        """
+        proc = self.run_latched(*self.base_args("--background"), hold_pre_spawn=True)
+        self.wait_signal("pre-spawn")
+        jobs = list((self.ws / STATE_DIRNAME / "jobs").glob("job_*.json"))
+        self.assertEqual(len(jobs), 1, "the record exists before the sink is opened")
+        job_id = jobs[0].stem
+        log = self.ws / STATE_DIRNAME / "jobs" / f"{job_id}.log"
+        os.symlink(str(self.ws / "nowhere.log"), log)          # dangling: exists() is false, lstat sees a link
+        self.release("pre-spawn")
+        self.release("pre-claim")
+        self.release("pre-kill")
+        self.release("pre-ack")
+        stdout, stderr = proc.communicate(timeout=60)
+        self.assertIn("worker log unavailable for " + job_id, stderr, f"the degradation is said out loud:\n{stderr}")
+        self.assertIn("symlink", stderr, "the reason travels with the warning")
+        self.assertIn("stderr is discarded", stderr)
+        lines = [line for line in stdout.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, "exactly one result line — the contract is unchanged")
+        parsed = json.loads(lines[0])
+        self.assertEqual(set(parsed), RESULT_KEYS)
+        self.assertEqual(parsed["status"], "running", "the launch receipt is still a launch receipt")
+        record = self.wait_for_terminal(parsed["jobId"])
+        self.assertEqual(record["status"], "completed", "the worker ran without a log sink")
+        self.assertTrue(log.is_symlink(), "the squatting symlink is untouched — never followed, never replaced")
+        self.assertFalse(log.exists(), "no log was created behind the symlink")
 
     def test_killed_worker_is_never_acknowledged_as_running(self):
         """A record we killed must not be reported live, whatever the digest says."""

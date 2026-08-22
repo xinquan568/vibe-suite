@@ -160,7 +160,13 @@ def _open_dir_chain(root, relative, create=False):
     # outside the workspace. `realpath` has no symlink final component by construction, so
     # `O_NOFOLLOW` here rejects exactly the case where that component became one after we looked.
     anchor = os.path.realpath(root)
-    fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        # The root is the trust anchor, not a component: a workspace that is missing, a file, or
+        # a symlink is a refusal (`BridgeError`, the `OSError` kept as `__cause__`) — never
+        # `AbsentPath`, which would let a read answer "nothing there" for a mistyped root.
+        raise BridgeError(f"{root} could not be opened safely as the workspace root ({exc})") from exc
     try:
         st = os.fstat(fd)
         # Keyed by the path the caller handed us, not by what it resolved to: keying by the resolved

@@ -362,6 +362,16 @@ class ReadAndDeleteDoNotCreateDirectories(UnbridgeCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.ws / ".codex").exists(), "teardown recreated a .codex/ the user had removed")
 
+    def test_a_missing_workspace_root_is_a_plain_refusal_not_an_absent_entry(self):
+        """The root is the trust anchor, not a path component: a workspace that does not exist is a
+        refusal (`BridgeError`), never `AbsentPath` — a read must not answer "nothing there" for a
+        root that was simply mistyped. The anchor open used to leak a raw `FileNotFoundError`."""
+        missing = self.ws / "never-made"
+        with self.assertRaises(bridge.BridgeError) as caught:
+            bridge.lstat_at(missing, "config.toml")
+        self.assertNotIsInstance(caught.exception, bridge.AbsentPath)
+        self.assertFalse(missing.exists(), "the refusal created the root")
+
 
 class TestRemoveOnly(UnbridgeCase):
     """Teardown removes what it owns and never writes a pre-image back.

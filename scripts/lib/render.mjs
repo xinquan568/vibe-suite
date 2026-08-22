@@ -74,8 +74,10 @@ export function noTerminalEvent(outcome) {
   const how = Number.isInteger(code)
     ? `exit ${code}${signal ? `, ${signal}` : ""}`
     : signal ? `signal ${signal}` : "exit unknown";
-  const tail = stderrTail(outcome?.stderr) ?? "";
-  const first = tail.split("\n").map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+  // The excerpt comes from the WHOLE control-stripped stderr, not the persisted tail: a first
+  // diagnostic followed by more than STDERR_TAIL_BYTES of chatter would otherwise be lost.
+  const whole = outcome?.stderr === null || outcome?.stderr === undefined ? "" : stripControls(String(outcome.stderr));
+  const first = whole.split("\n").map((line) => line.trim()).find((line) => line.length > 0) ?? "";
   if (!first) return `no terminal event (${how})`;
   const excerpt = first.length > ERROR_STDERR_EXCERPT ? `${first.slice(0, ERROR_STDERR_EXCERPT)}…` : first;
   return `no terminal event (${how}); stderr: ${excerpt}`;

@@ -181,12 +181,16 @@ test("stderrTail keeps the FINAL suffix within 8192 UTF-8 bytes, on a character 
   assert.equal(stderrTail(""), "", "an empty stderr is a truthful empty tail, not null");
   assert.equal(stderrTail(`${ESC}[31mred${ESC}[0m\r\n`), "red\n", "controls (colour codes, \\r) are stripped at persist time");
   // Multibyte: 5 000 × "é" is 10 000 bytes but 5 000 characters — a character bound would keep it all.
-  const body = "HEAD-MARKER " + "é".repeat(5000) + " TAIL-MARKER";
+  // The suffix is 13 bytes (odd), so the naive 8192-byte cut lands on a CONTINUATION byte — asserted
+  // below as a precondition, so a mid-character-unsafe slice cannot pass this test by luck.
+  const body = "HEAD-MARKER " + "é".repeat(5000) + " TAIL-MARKER!";
+  const raw = Buffer.from(body, "utf8");
+  assert.equal(raw[raw.length - STDERR_TAIL_BYTES] & 0xc0, 0x80, "precondition: the naive cut lands mid-character");
   const tail = stderrTail(body);
   assert.ok(Buffer.byteLength(tail, "utf8") <= STDERR_TAIL_BYTES, `byte bound: ${Buffer.byteLength(tail, "utf8")} > ${STDERR_TAIL_BYTES}`);
   assert.ok(Buffer.byteLength(tail, "utf8") > STDERR_TAIL_BYTES - 4, "the tail is the largest suffix that fits, not a smaller one");
   assert.ok(body.endsWith(tail), "the tail is a true suffix of the original");
-  assert.ok(tail.endsWith(" TAIL-MARKER") && !tail.includes("HEAD-MARKER"), "the END is kept, the head is dropped");
+  assert.ok(tail.endsWith(" TAIL-MARKER!") && !tail.includes("HEAD-MARKER"), "the END is kept, the head is dropped");
   assert.ok(!tail.includes("�"), "the cut lands on a character boundary — no replacement characters");
   assert.equal(stderrTail("x".repeat(STDERR_TAIL_BYTES)), "x".repeat(STDERR_TAIL_BYTES), "exactly at the bound nothing is cut");
 });
@@ -207,4 +211,9 @@ test("noTerminalEvent names how the engine ended and quotes the first non-empty 
   assert.equal(capped, `no terminal event (exit 1); stderr: ${"L".repeat(ERROR_STDERR_EXCERPT)}…`, "the excerpt is capped with an ellipsis");
   assert.equal(noTerminalEvent({ exitCode: 1, signal: null, stderr: "L".repeat(ERROR_STDERR_EXCERPT) }),
     `no terminal event (exit 1); stderr: ${"L".repeat(ERROR_STDERR_EXCERPT)}`, "exactly at the cap nothing is cut");
+  // The excerpt is the FIRST diagnostic even when the persisted tail (the last 8 KB) no longer holds it.
+  const chatter = "x".repeat(9000);
+  assert.equal(noTerminalEvent({ exitCode: 2, signal: null, stderr: `FIRST-DIAGNOSTIC: bad flag\n${chatter}\n` }),
+    "no terminal event (exit 2); stderr: FIRST-DIAGNOSTIC: bad flag", "the first line comes from the whole stderr, not the tail");
+  assert.ok(!(stderrTail(`FIRST-DIAGNOSTIC: bad flag\n${chatter}\n`) ?? "").includes("FIRST-DIAGNOSTIC"), "…which the tail itself has dropped");
 });

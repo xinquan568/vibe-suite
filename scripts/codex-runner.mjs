@@ -347,13 +347,46 @@ async function prepareRecord(workspace, options, timeoutMs, claimDigest) {
   });
 }
 
+/**
+ * A failure BEFORE a record exists still owes the consumer the contract line (vibe-180 / grill M7).
+ *
+ * `prepareRecord` shells out to `python3 config.py` and creates the job record; a missing
+ * interpreter, an invalid `.vibe-suite.md` or an unwritable state directory used to escape every
+ * guard and reach `main()`'s terminal `.catch` — a raw stack on stderr and NO result line, which the
+ * slash commands that branch on `status` cannot interpret. `ConfigBridgeError` and its kin are
+ * contract-level failures: the line says `failed`, `jobId` is null because nothing was recorded, and
+ * the reason travels on stderr in the same `codex-runner:` form usage errors use. Usage errors are
+ * NOT failures — they keep exit 2 and no line, so the caller learns its invocation was wrong.
+ */
+function preRecordFailure(error) {
+  const message = String(error?.message ?? error);
+  process.stderr.write(`codex-runner: ${message}\n`);
+  process.stdout.write(resultLine({ jobId: null, status: "failed", errorClass: "failure", error: message }) + "\n");
+  return 1;
+}
+
 async function runForeground(workspace, options, timeoutMs) {
-  const record = await prepareRecord(workspace, options, timeoutMs, null);
-  // Foreground records no pgid: this process inherits the invoking shell's group, so a number here
-  // would name someone else's group and #12 is told to trust it. `pgid` non-null ⟺ background.
-  const claimed = await updateRecord(workspace, record.jobId, {
-    workerPid: process.pid, pgid: null, startedAt: new Date().toISOString(),
-  });
+  let record;
+  let claimed;
+  try {
+    record = await prepareRecord(workspace, options, timeoutMs, null);
+    // Foreground records no pgid: this process inherits the invoking shell's group, so a number
+    // here would name someone else's group and #12 is told to trust it. `pgid` non-null ⟺ background.
+    claimed = await updateRecord(workspace, record.jobId, {
+      workerPid: process.pid, pgid: null, startedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    if (error instanceof UsageError) throw error;
+    if (!record) return preRecordFailure(error);
+    // The record exists (the claim step failed): finalise it as failed so the store and the line
+    // agree, then emit the line — the same shape the execution guard below uses.
+    const failed = await finaliseRecord(workspace, record.jobId, {
+      status: "failed", errorClass: "failure", error: String(error?.message ?? error),
+    }).catch(() => null);
+    process.stderr.write(`codex-runner: ${String(error?.message ?? error)}\n`);
+    process.stdout.write(resultLine(failed ?? { ...record, status: "failed" }) + "\n");
+    return 1;
+  }
   try {
     const finished = await execute(workspace, claimed ?? record, options.prompt);
     process.stdout.write(resultLine(finished) + "\n");
@@ -379,7 +412,13 @@ async function runForeground(workspace, options, timeoutMs) {
  */
 async function runBackground(workspace, options, timeoutMs) {
   const token = newClaimToken();
-  const record = await prepareRecord(workspace, options, timeoutMs, hashToken(token));
+  let record;
+  try {
+    record = await prepareRecord(workspace, options, timeoutMs, hashToken(token));
+  } catch (error) {
+    if (error instanceof UsageError) throw error;
+    return preRecordFailure(error);
+  }
 
   const child = spawn(process.execPath,
     [SELF, WORKER_FLAG, record.jobId, CLAIM_FLAG, token, "--", options.prompt], {

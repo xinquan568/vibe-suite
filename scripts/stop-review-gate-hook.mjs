@@ -216,15 +216,40 @@ function verdictFrom(rawOutput) {
   return match ? { verdict: match[1], reason: match[2] } : null;
 }
 
+/**
+ * The effective gate, with the cause when it cannot be had (vibe-183 / grill H5).
+ *
+ * Returns `{ gate, configError, stderr, why }`. `gate` is the resolved gate section, or `null` when the
+ * STORE could not be read — a damaged `state.json` (`python3` ran and said so on stderr), no `python3`
+ * at all (`spawnSync` reports `result.error`, and `stdout`/`stderr` are undefined), or unparseable
+ * output; `why` then names the cause (the store's first stderr line, or the spawn error) so the
+ * operator learns what happened instead of a fixed phrase. `configError` is set when the store
+ * answered but the PROJECT file (`.vibe-suite.md`) did not parse: the gate is still real — resolved
+ * from runtime state and defaults — and `stderr` carries the store's own warning line, which is what
+ * a decision about that failure must quote.
+ */
 function effectiveGate(cwd) {
   const result = spawnSync("python3", [STORE, "effective-config", cwd], {
     encoding: "utf8", timeout: Math.min(CONFIG_TIMEOUT_MS, Math.max(1_000, remainingMs())),
   });
-  if (result.status !== 0) return null;                                // damaged/unreadable
+  // `result.stderr` is undefined when the interpreter never ran (ENOENT) — read it defensively.
+  const stderr = String(result.stderr ?? "").trim();
+  const stderrLine = stderr.split("\n")[0] ?? "";
+  if (result.error || result.status !== 0) {                             // damaged/unreadable
+    const cause = stderrLine || (result.error ? String(result.error.message ?? result.error) : "");
+    return { gate: null, configError: null, stderr,
+      why: `the runtime store could not be read${cause ? ` (${cause})` : ""}` };
+  }
   try {
-    return JSON.parse(result.stdout).gate ?? {};
+    const parsed = JSON.parse(result.stdout);
+    return {
+      gate: parsed.gate ?? {},
+      configError: typeof parsed.config_error === "string" && parsed.config_error ? parsed.config_error : null,
+      stderr,
+      why: null,
+    };
   } catch {
-    return null;
+    return { gate: null, configError: null, stderr, why: "the runtime store could not be read" };
   }
 }
 
@@ -246,9 +271,25 @@ async function main() {
   if (input.stop_hook_active === true) return allow();
 
   const cwd = input.cwd || process.cwd();
-  const gate = effectiveGate(cwd);
-  if (gate === null) return applyFailPolicy(null, "the runtime store could not be read");
-  if (gate.stop_review_gate !== true) return allow();                  // shipped disabled (D3)
+  const resolved = effectiveGate(cwd);
+  if (resolved.gate === null) return applyFailPolicy(null, resolved.why);
+  const gate = resolved.gate;
+  // vibe-183: when the PROJECT file was unreadable, the cause the hook reports is the store's own
+  // stderr line (`store: config: … — gate resolved from runtime state and defaults`), per the issue —
+  // the `config_error` member is the fallback when stderr carried nothing.
+  const configCause = resolved.configError ? (resolved.stderr || resolved.configError) : null;
+  if (gate.stop_review_gate !== true) {                                // shipped disabled (D3)
+    // A broken project file is still worth a line — nothing is gated, so nothing is decided, but
+    // the operator should not learn about the typo only when the gate is next switched on.
+    if (configCause) process.stderr.write(`stop-review gate: ${configCause} (gate disabled — nothing to decide)\n`);
+    return allow();
+  }
+  // The gate is on but the project configuration could not be read — an indeterminate outcome, so
+  // the STORED policy decides: `closed` blocks with the cause in the reason, `open` allows with the
+  // cause on stderr.
+  if (configCause) {
+    return applyFailPolicy(gate, `the project configuration could not be read (${configCause})`);
+  }
 
   let diff;
   try {

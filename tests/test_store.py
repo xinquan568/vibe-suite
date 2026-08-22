@@ -206,6 +206,64 @@ class TestEffectiveConfig(unittest.TestCase):
             store.Store(ws).set("gate.fail_policy", "open")
             self.assertEqual(path.read_bytes(), before, "the store must not write project config")
 
+    # vibe-183 / grill H5: the project file is not the store. A broken `.vibe-suite.md` must not erase
+    # the stored gate — the setting the issue calls "when in doubt, block". The store is read FIRST; a
+    # project-file failure of any of config.py's three classes degrades to `{gate, config_error}`.
+    BROKEN_PROJECT_FILES = {
+        "syntax":      ("---\ngate:\n  fail_policy: open\n", "frontmatter"),                 # never closes
+        "value":       ("---\nengine: bogus\n---\n", "engine: expected one of"),               # ConfigValueError
+        "containment": ("---\nrule_overrides:\n  R51:\n    vocabulary_skill: ../../outside\n---\n",
+                        "resolves outside the project root"),                                  # ConfigContainmentError
+    }
+
+    def test_a_broken_project_file_of_every_class_still_yields_the_stored_gate_and_names_the_error(self):
+        for kind, (text, expected) in self.BROKEN_PROJECT_FILES.items():
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as ws:
+                (Path(ws) / ".vibe-suite.md").write_text(text, encoding="utf-8")
+                store.Store(ws).set("gate.fail_policy", "closed")
+                effective = store.effective_config(ws)
+                self.assertEqual(effective["gate"]["fail_policy"], "closed", "the stored policy survives the typo")
+                self.assertEqual(effective["gate"]["stop_review_gate"], False, "FRESH defaults still apply")
+                self.assertTrue(effective["config_error"].startswith("config: "), effective["config_error"])
+                self.assertIn(expected, effective["config_error"], "the real cause is named")
+                self.assertNotIn("engine", effective, "nothing but the gate can be resolved without the file")
+
+    def test_a_valid_project_file_carries_no_config_error(self):
+        with tempfile.TemporaryDirectory() as ws:
+            self._project(ws, "engine: codex\n")
+            self.assertNotIn("config_error", store.effective_config(ws))
+
+    def test_effective_config_cli_exits_zero_on_a_broken_project_file_and_warns(self):
+        with tempfile.TemporaryDirectory() as ws:
+            (Path(ws) / ".vibe-suite.md").write_text("---\ngate:\n  fail_policy: open\n", encoding="utf-8")
+            store.Store(ws).set("gate.fail_policy", "closed")
+            result = subprocess.run([sys.executable, str(STORE_PY), "effective-config", ws],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            document = json.loads(result.stdout)
+            self.assertEqual(document["gate"]["fail_policy"], "closed")
+            self.assertIn("config_error", document)
+            self.assertIn("store: config:", result.stderr, "the cause goes to stderr in the store's voice")
+            self.assertIn("gate resolved from runtime state and defaults", result.stderr)
+
+    def test_a_damaged_state_file_is_refused_first_even_when_the_project_file_is_also_broken(self):
+        # The store is read BEFORE the project file (the issue's ordering): damage to the STATE file keeps
+        # its exit-1 precedence — it is never masked by, or degraded alongside, a project-file error.
+        with tempfile.TemporaryDirectory() as ws:
+            (Path(ws) / ".vibe-suite.md").write_text("---\ngate:\n  fail_policy: open\n", encoding="utf-8")
+            state_dir = Path(ws) / ".vibe-suite-state"
+            state_dir.mkdir()
+            (state_dir / "state.json").write_text("not json at all", encoding="utf-8")
+            with self.assertRaises(store.StoreFormatError):
+                store.effective_config(ws)
+            result = subprocess.run([sys.executable, str(STORE_PY), "effective-config", ws],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, "a damaged STORE is still refused — that contract is unchanged")
+            self.assertIn("store:", result.stderr)
+            self.assertIn("refusing to overwrite", result.stderr)
+            self.assertNotIn("config:", result.stderr, "the project-file error never gets a turn when the store is damaged")
+            self.assertEqual(result.stdout, "")
+
 
 if __name__ == "__main__":
     unittest.main()

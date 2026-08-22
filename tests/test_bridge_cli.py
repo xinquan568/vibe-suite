@@ -496,6 +496,7 @@ class WriteAtomicScratchIsUnpredictable(unittest.TestCase):
             self.assertEqual(dest.read_text(), "B\n", "writer-B did not complete while A held its scratch")
             release.set()
             thread.join(10)
+        self.assertFalse(thread.is_alive(), "writer-A did not terminate")
         self.assertEqual(failures, [], f"a concurrent writer failed: {failures}")
         self.assertEqual(dest.read_text(), "A\n", "the last os.replace did not win")
         self.assertEqual(self.scratch_names(self.ws), [], "a completed writer left its scratch behind")
@@ -516,6 +517,7 @@ class WriteAtomicScratchIsUnpredictable(unittest.TestCase):
         self.assertFalse((outside / "pwned").exists(), "the write escaped through the planted link")
         self.assertEqual(dest.read_text(), "before\n")
         self.assertTrue(planted.is_symlink(), "the planted link was consumed")
+        self.assertEqual(planted.readlink(), outside / "pwned", "the planted link was re-pointed")
         message = str(caught.exception)
         self.assertIn("remove stale", message, "the residual refusal does not name the corrective action")
         self.assertIn("no other vibe-suite process is running", message,

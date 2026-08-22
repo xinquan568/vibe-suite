@@ -500,6 +500,82 @@ class PreRecordFailures(RunnerCase):
         self.assertFalse(self.probe.exists(), "nothing may be spawned when confirmation is missing")
 
 
+class LeakedPipes(RunnerCase):
+    """vibe-181 / grill H6. `runWithDeadline` settled on `close`, which Node fires only after the
+    process exits AND every stdio pipe is released. A Codex child that leaked its pipes to a
+    grandchild therefore never settled: the deadline's verdict was never recorded and — because the
+    heartbeat interval was cleared only at settle — a background job kept heartbeating forever,
+    so `isAbandoned` called it healthy and `--settle-abandoned` could not settle it. The leaker
+    fixture spawns exactly that grandchild (pid in the probe, so the test reaps it) and dies on the
+    deadline's SIGTERM; the job must end `timed_out` within `graceMs` of that, with the leak recorded.
+    """
+
+    def _reap_grandchild(self):
+        """Test-owned cleanup with survivor verification. The vibe-129 reaper signals only
+        `running` records' worker groups; once the job is terminal, a descendant that survives is
+        invisible to it — so the test that planted the grandchild kills it and proves it gone."""
+        pid = self.read_probe().get("grandchild")
+        self.assertIsInstance(pid, int, "the leaker fixture must record its grandchild's pid")
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+        self._assert_pid_gone(pid, "the grandchild")
+
+    def _assert_pid_gone(self, pid, what, timeout=5.0):
+        """Gone means ESRCH. A zombie is transient (its parent is exiting, or init reaps it); keep
+        polling until the pid no longer exists, and fail — never shrug — if it still does."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            try:
+                os.waitpid(pid, os.WNOHANG)   # reaps it if it is ours (it usually is not)
+            except ChildProcessError:
+                pass
+            time.sleep(0.05)
+        stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        self.fail(f"{what} {pid} still exists after {timeout}s (ps stat {stat!r})")
+
+    def test_a_timed_out_background_job_whose_engine_leaked_a_pipe_ends_timed_out_and_stops_heartbeating(self):
+        previous = os.environ.get("VIBE_SUITE_HEARTBEAT_MS")
+        os.environ["VIBE_SUITE_HEARTBEAT_MS"] = "50"
+        self.addCleanup(lambda: os.environ.pop("VIBE_SUITE_HEARTBEAT_MS", None)
+                        if previous is None else os.environ.__setitem__("VIBE_SUITE_HEARTBEAT_MS", previous))
+        started = time.monotonic()
+        parsed = self.result_line(self.run_runner(
+            "--kind", "review", "--effort", "low", "--sandbox", "read-only",
+            "--timeout-ms", "600", "--background", "--", "p", fixture="leaker.mjs"))
+        self.assertEqual(parsed["status"], "running", "the launcher acknowledges before the deadline")
+        try:
+            record = self.wait_for_terminal(parsed["jobId"], timeout=20)
+            elapsed = time.monotonic() - started
+            self.assertEqual(record["status"], "timed_out")
+            self.assertIs(record.get("pipesLeaked"), True, "the leak must be recorded on the job")
+            self.assertIsNotNone(record["endedAt"])
+            # SIGTERM at 600 ms + the default 2 s drain; the grandchild holds for 10 s — settling
+            # anywhere near that is the defect. A ceiling, not a window (deadline tests flake on lows).
+            self.assertLess(elapsed, 8, f"the job settled only when the grandchild released the pipes ({elapsed:.1f}s)")
+            # The heartbeat oracle that actually proves cessation: the detached worker must EXIT —
+            # with the pipes still held by the grandchild, only a settled promise (interval cleared,
+            # read ends destroyed) lets its event loop drain. An unchanged `heartbeatAt` alone would
+            # not do: `transact` rejects late writes to a terminal record regardless.
+            self.assertIsInstance(record["workerPid"], int)
+            self._assert_pid_gone(record["workerPid"], "the background worker", timeout=10.0)
+            first = record["heartbeatAt"]
+            time.sleep(0.4)          # 8 intervals at 50 ms — belt and braces on top of the worker exit
+            self.assertEqual(self.job_record(parsed["jobId"])["heartbeatAt"], first,
+                             "the heartbeat kept beating after the job was finalised")
+        finally:
+            self._reap_grandchild()
+
+    def test_a_foreground_job_records_released_pipes_when_nothing_leaks(self):
+        parsed = self.result_line(self.run_runner(*self.base_args()))
+        self.assertIs(self.job_record(parsed["jobId"]).get("pipesLeaked"), False)
+
+
 class SourceConventions(unittest.TestCase):
     """Static checks over the shipped runtime artifacts."""
 
@@ -710,7 +786,10 @@ class RecordSchema(RunnerCase):
                       "rawOutput", "error", "tokens",
                       # vibe-46: declared at creation, so a running record and an early terminal
                       # failure satisfy the same schema as a completed one.
-                      "verdictText", "verdictState", "errorClass"):
+                      "verdictText", "verdictState", "errorClass",
+                      # vibe-181: null until the run settles; whether the engine's stdio pipes were
+                      # still held open past its exit.
+                      "pipesLeaked"):
             self.assertIn(field, record, f"record must always declare {field}")
 
     def test_background_record_carries_worker_handle(self):

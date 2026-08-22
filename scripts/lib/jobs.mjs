@@ -142,6 +142,10 @@ export function newRecord({ jobId, kind, sandbox, effort, model, background, tim
     rawOutput: null,
     error: null,
     tokens: null,
+    // vibe-181: whether the engine child's stdio pipes were still held open past its exit (a
+    // descendant inherited them). null until the run settles; declared here so early-terminal and
+    // completed records keep one schema (the vibe-46 rule above).
+    pipesLeaked: null,
   };
 }
 
@@ -518,7 +522,18 @@ const RECORD_SHAPE = {
   // The runner finalises `tokens` with `billableTokens(usage)` — a non-negative number (or null
   // when no usage event arrived), NOT an object; see events.mjs.
   tokens: nullOr((v) => Number.isFinite(v) && v >= 0),
+  // vibe-181: null until the run settles; boolean after. Presence is OPTIONAL (see OPTIONAL_KEYS):
+  // records written before the field existed omit it and must stay valid — `validateRecord`
+  // checks presence before the predicate, so optionality has to be declared there, not here.
+  pipesLeaked: nullOr((v) => typeof v === "boolean"),
 };
+
+/**
+ * Keys a record may omit and still validate — fields added after records existed on disk
+ * (vibe-181: `pipesLeaked`). Every other `RECORD_SHAPE` key is required: a missing contract key is
+ * a corrupt record, never a legacy one.
+ */
+const OPTIONAL_KEYS = new Set(["pipesLeaked"]);
 
 /**
  * One complete verdict on a record: schema, identity, handle invariants. Returns
@@ -530,7 +545,10 @@ export function validateRecord(record, jobId) {
     return { ok: false, reason: "record is not an object" };
   }
   for (const [key, check] of Object.entries(RECORD_SHAPE)) {
-    if (!(key in record)) return { ok: false, reason: `missing key: ${key}` };
+    if (!(key in record)) {
+      if (OPTIONAL_KEYS.has(key)) continue;                            // pre-field record: legal
+      return { ok: false, reason: `missing key: ${key}` };
+    }
     if (!check(record[key])) return { ok: false, reason: `invalid ${key}: ${JSON.stringify(record[key])}` };
   }
   if (record.jobId !== jobId) {

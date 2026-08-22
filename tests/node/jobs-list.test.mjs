@@ -126,3 +126,18 @@ test("validateRecord enforces schema, identity and handle invariants", () => {
     assert.equal(typeof verdict.reason, "string", `no reason for: ${label}`);
   }
 });
+
+test("pipesLeaked is declared at creation, validated as nullable boolean, and OPTIONAL for pre-field records (vibe-181)", () => {
+  const fresh = baseRecord(ID_A);
+  assert.equal(fresh.pipesLeaked, null, "newRecord must declare pipesLeaked (null until settle)");
+  for (const value of [null, true, false]) {
+    assert.equal(validateRecord(baseRecord(ID_A, { pipesLeaked: value }), ID_A).ok, true, `pipesLeaked ${value} must validate`);
+  }
+  assert.equal(validateRecord(baseRecord(ID_A, { pipesLeaked: "yes" }), ID_A).ok, false, "a non-boolean pipesLeaked must be rejected");
+  const legacy = baseRecord(ID_A);
+  delete legacy.pipesLeaked;                                   // a record written before the field existed
+  assert.equal(validateRecord(legacy, ID_A).ok, true, "a pre-field record must remain valid");
+  const broken = baseRecord(ID_A);
+  delete broken.exitCode;                                      // any OTHER missing key is still corruption
+  assert.equal(validateRecord(broken, ID_A).ok, false, "optionality must not leak to other keys");
+});

@@ -310,6 +310,7 @@ async function execute(workspace, record, prompt) {
     verdictText: verdict.verdictText,
     verdictState: verdict.verdictState,
     exitCode: outcome.exitCode,
+    pipesLeaked: outcome.pipesLeaked,
     error: status === "completed"
       ? null
       : events.errorMessage

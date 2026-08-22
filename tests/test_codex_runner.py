@@ -433,6 +433,73 @@ class Safety(RunnerCase):
         self.assertNotEqual(completed.returncode, 0)
 
 
+class PreRecordFailures(RunnerCase):
+    """vibe-180 / grill M7. `prepareRecord` — the step that shells out to `python3 config.py` and
+    creates the job record — ran OUTSIDE the guard that promises the one-line JSON result, so a
+    missing `python3`, an invalid `.vibe-suite.md` or an unwritable state directory produced a raw
+    stack on stderr and NO result line. Consumers branch on the line's `status`; an absent line is
+    an unspecified state for them. A failure before any record exists still owes them the line:
+    `status: failed`, `jobId: null`, the reason on stderr."""
+
+    def _assert_failed_line_without_a_record(self, completed):
+        self.assertEqual(completed.returncode, 1,
+                         "a contract failure exits 1 (a failed job's code) — not 0, and not the usage-error 2")
+        parsed = self.result_line(completed)
+        self.assertEqual(set(parsed), RESULT_KEYS)
+        self.assertEqual(parsed["status"], "failed")
+        self.assertIsNone(parsed["jobId"], "no record exists for a pre-record failure")
+        self.assertNotIn("\n    at ", completed.stderr, "a raw stack reached stderr")
+        self.assertIn("codex-runner:", completed.stderr, "the reason must reach stderr")
+        return parsed
+
+    def test_missing_python3_still_emits_the_failed_result_line(self):
+        """PATH holds `node` and nothing else, so `config-bridge.loadConfig` cannot spawn `python3`."""
+        bin_dir = self.ws / "only-node-bin"
+        bin_dir.mkdir()
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node must be on PATH for the runner to exist at all")
+        (bin_dir / "node").symlink_to(node)
+        env = dict(os.environ)
+        env["PATH"] = str(bin_dir)
+        env["VIBE_SUITE_CODEX_BIN"] = str(FIXTURES / "emitter.mjs")
+        env["VIBE_TEST_PROBE"] = str(self.probe)
+        completed = subprocess.run(
+            ["node", str(RUNNER), *self.base_args()],
+            cwd=self.ws, env=env, capture_output=True, text=True, timeout=30,
+        )
+        self._assert_failed_line_without_a_record(completed)
+        self.assertIn("python3", completed.stderr)
+        self.assertFalse(self.probe.exists(), "the engine was spawned without a record")
+
+    def test_broken_config_still_emits_the_failed_result_line(self):
+        """An unterminated frontmatter makes `config.py` exit 1, which `loadConfig` raises as
+        `ConfigBridgeError` — a contract-level failure, not a crash."""
+        (self.ws / ".vibe-suite.md").write_text("---\nsandbox: read-only\n", encoding="utf-8")
+        completed = self.run_runner(*self.base_args(), expect_ok=False)
+        self._assert_failed_line_without_a_record(completed)
+        self.assertIn("config", completed.stderr.lower())
+        self.assertFalse(self.probe.exists(), "the engine was spawned without a record")
+
+    def test_background_broken_config_still_emits_the_failed_result_line(self):
+        """The background launcher calls `prepareRecord` too; its failure owes the same line."""
+        (self.ws / ".vibe-suite.md").write_text("---\nsandbox: read-only\n", encoding="utf-8")
+        completed = self.run_runner(*self.base_args("--background"), expect_ok=False)
+        self._assert_failed_line_without_a_record(completed)
+
+    def test_a_usage_error_raised_inside_prepare_record_still_exits_2_without_a_result_line(self):
+        """The guard must not swallow usage errors into `failed` lines. This one is raised INSIDE
+        `prepareRecord` — `assertSandboxAllowed` refuses a config that resolves to
+        `danger-full-access` without `--confirm-danger` — so it crosses the new guard and must be
+        rethrown: exit 2, nothing on stdout, the `codex-runner:` diagnostic on stderr."""
+        (self.ws / ".vibe-suite.md").write_text("---\nsandbox: danger-full-access\n---\n\n# config\n")
+        completed = self.run_runner("--kind", "review", "--effort", "low",
+                                    "--timeout-ms", "5000", "--", "p", expect_ok=False)
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual([l for l in completed.stdout.splitlines() if l.strip()], [])
+        self.assertIn("codex-runner:", completed.stderr)
+        self.assertFalse(self.probe.exists(), "nothing may be spawned when confirmation is missing")
+
+
 class SourceConventions(unittest.TestCase):
     """Static checks over the shipped runtime artifacts."""
 

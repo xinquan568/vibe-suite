@@ -360,7 +360,12 @@ if __name__ == "__main__":
 class TestRegressions(InitCase):
     def test_a_symlink_at_the_temp_path_cannot_redirect_a_write(self):
         """The destination check was not enough: the temp path is predictable, so a symlink planted
-        there was followed and the write landed outside the workspace."""
+        there was followed and the write landed outside the workspace.
+
+        Since vibe-178 the scratch name is unpredictable, so a link at the legacy fixed name is an
+        unrelated directory entry: the write lands inside the workspace, the link is left exactly as
+        planted, and nothing is written through it. The property under guard — no redirect outside
+        the workspace — is asserted directly, not through the refusal the fixed name used to raise."""
         import sys
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         import bridge
@@ -368,10 +373,13 @@ class TestRegressions(InitCase):
         outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (self.ws / ".codex").mkdir()
-        (self.ws / ".codex" / ".config.toml.vibe-tmp").symlink_to(outside / "pwned")
-        with self.assertRaises(bridge.BridgeError):
-            bridge.write_atomic(self.ws, self.ws / ".codex" / "config.toml", "owned")
+        planted = self.ws / ".codex" / ".config.toml.vibe-tmp"
+        planted.symlink_to(outside / "pwned")
+        bridge.write_atomic(self.ws, self.ws / ".codex" / "config.toml", "owned")
+        self.assertEqual((self.ws / ".codex" / "config.toml").read_text(), "owned")
         self.assertFalse((outside / "pwned").exists(), "the write escaped the workspace")
+        self.assertTrue(planted.is_symlink(), "the planted link was consumed")
+        self.assertEqual(planted.readlink(), outside / "pwned", "the planted link was re-pointed")
 
     def test_a_list_shaped_history_is_the_canonical_one(self):
         """nlpm's history is a top-level list (`tests/test_migrate.py:214`); an earlier revision

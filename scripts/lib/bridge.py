@@ -378,7 +378,11 @@ def _scratch(dir_fd, name, mode):
                            mode, dir_fd=dir_fd), candidate
         except FileExistsError:
             continue
-    raise BridgeError("could not create a scratch file after 64 attempts")
+    # The residual refusal: every candidate name was taken. With 48 random bits that means the
+    # directory is full of this suite's own leftovers, so the message names the remedy (vibe-178).
+    raise BridgeError(
+        f"could not create a scratch file for {name} after 64 attempts; remove stale "
+        f".{name}.*.vibe-tmp files from that directory if no other vibe-suite process is running")
 
 
 def _fsync_dir(dir_fd):
@@ -438,6 +442,10 @@ def pin_root(root):
 def write_atomic(root, dest, content, mode=None):
     """Replace a file atomically, without ever resolving its parent path twice.
 
+    The scratch file has an unpredictable `O_EXCL|O_NOFOLLOW` name (`_scratch`), so a scratch left
+    behind by a hard crash is an orphan, never a poison pill for the next write, and concurrent
+    writers of one destination each stage through their own file — the last `os.replace` wins.
+
     `O_NOFOLLOW` on the temp file guards only its final component. The parent is still resolved by
     the kernel on every path-based call, so a directory swapped for a symlink between the
     containment check and the write escapes anyway. Opening the parent **once** with
@@ -474,17 +482,21 @@ def write_atomic(root, dest, content, mode=None):
     dir_fd = _open_dir_chain(root, relative)
 
     data = content if isinstance(content, bytes) else content.encode("utf-8")
-    tmp_name = f".{dest.name}.vibe-tmp"
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        # The scratch name is unpredictable, never the fixed `.{name}.vibe-tmp` (vibe-178 / grill
+        # H9). A fixed name is a path the user may own; and a scratch that outlives a hard crash
+        # (SIGKILL, power loss — the cleanup below never runs) under a fixed name refused every
+        # later write to the same destination until someone found and deleted a dot-file nothing
+        # had told them about. Two writers of one destination collided the same way. `_scratch` is
+        # the primitive `publish_new` already uses: `O_EXCL|O_NOFOLLOW`, random name, bounded
+        # retries, created at `mode` from the start.
         try:
-            fd = os.open(tmp_name, flags, mode, dir_fd=dir_fd)
-        except FileExistsError as exc:
-            raise BridgeError(f"{dest.parent / tmp_name} already exists; refusing to write "
-                              "through it") from exc
+            fd, tmp_name = _scratch(dir_fd, dest.name, mode)
         except OSError as exc:
-            raise BridgeError(f"{dest.parent / tmp_name} could not be created safely "
-                              f"({exc})") from exc
+            # `_scratch` retries EEXIST and nothing else. Any other failure (EACCES, EROFS,
+            # ENOSPC) keeps the primitive's contract: callers catch BridgeError, not OSError.
+            raise BridgeError(f"{dest.parent}: a scratch file for {dest.name} could not be "
+                              f"created safely ({exc})") from exc
         try:
             with os.fdopen(fd, "wb") as handle:
                 handle.write(data)

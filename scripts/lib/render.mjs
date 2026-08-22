@@ -101,6 +101,9 @@ export function renderDetail(record, { abandoned = new Set(), now = Date.now() }
     `worker pid: ${record.workerPid ?? "-"}  pgid: ${record.pgid ?? "-"}`,
     `thread:     ${record.threadId ?? "-"}`,
     `exit code:  ${record.exitCode ?? "-"}`,
+    `pipes:      ${record.pipesLeaked === true
+      ? "LEAKED — a descendant held the engine's stdio open past its exit; output may be incomplete"
+      : record.pipesLeaked === false ? "released" : "-"}`,
   ];
   lines.push(...fenceExternal("error", record.error));
   lines.push(...fenceExternal("rawOutput", record.rawOutput));

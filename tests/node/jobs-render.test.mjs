@@ -124,3 +124,19 @@ test("the result line is jobs.mjs's resultLine — five keys, contract order", (
   const line = resultLine(rec);
   assert.deepEqual(Object.keys(JSON.parse(line)), ["jobId", "status", "threadId", "rawOutput", "verdictState"]);
 });
+
+test("detail renders the pipesLeaked verdict in all three states (vibe-181)", () => {
+  const leaked = renderDetail(record(ID_A, { status: "timed_out", pipesLeaked: true }));
+  assert.ok(/pipes:\s+LEAKED/.test(leaked), `leaked verdict missing in:\n${leaked}`);
+  const released = renderDetail(record(ID_A, { status: "completed", pipesLeaked: false }));
+  assert.ok(/pipes:\s+released/.test(released), `released verdict missing in:\n${released}`);
+  const unknown = renderDetail(record(ID_A, { status: "running" }));
+  assert.ok(/pipes:\s+-$/m.test(unknown), `a record with pipesLeaked null must render '-':\n${unknown}`);
+  // A record written before the field existed has NO pipesLeaked property at all (the store admits
+  // it — OPTIONAL_KEYS); "unknown" must not be mistaken for "released".
+  const legacy = record(ID_A, { status: "completed" });
+  delete legacy.pipesLeaked;
+  const legacyOut = renderDetail(legacy);
+  assert.ok(/pipes:\s+-$/m.test(legacyOut), `a pre-field record (pipesLeaked absent) must render '-':\n${legacyOut}`);
+  assert.ok(!/pipes:\s+released/.test(legacyOut), "an absent pipesLeaked must never read as released");
+});

@@ -13,6 +13,14 @@
 // Termination escalates and is **group-wide**. SIGTERM asks; a child that traps it would otherwise
 // outlive its deadline, so SIGKILL follows and cannot be refused. Both go to the process *group*
 // where one exists, because killing only the direct child would orphan whatever it spawned.
+//
+// The promise settles on the child's **exit**, not on `close` (vibe-181 / grill H6). `close` fires
+// only once every stdio pipe is released, and a descendant that inherited the pipes — a delegate's
+// `npm test --watch`, a dev server, a backgrounded shell — can hold them open long after the child
+// is dead; a deadline that waits for that holder is no deadline, and a heartbeat cleared only then
+// beats forever. After exit the pipes get at most `graceMs` to close; then the result carries
+// `pipesLeaked: true`, the read ends are destroyed so the event loop can drain, and the caller
+// decides what that means.
 
 import { spawn } from "node:child_process";
 
@@ -54,8 +62,10 @@ const GROUP_REAP_POLL_MS = 50;
 /**
  * Run `command args…` under a deadline.
  *
- * Resolves `{ exitCode, signal, stdout, stderr, timedOut, killedHard, groupReaped }`. Never
- * rejects for a non-zero exit — that is data, not an exception.
+ * Resolves `{ exitCode, signal, stdout, stderr, timedOut, killedHard, groupReaped, pipesLeaked }`.
+ * Never rejects for a non-zero exit — that is data, not an exception. `pipesLeaked` is true when
+ * the child exited but its stdio pipes were still held open `graceMs` later (a descendant inherited
+ * them); `stdout`/`stderr` then hold what was read up to that moment.
  *
  * `timeoutMs` must be a finite positive number. A deadline-bounded runner that silently accepts
  * "no deadline" is the defect this throw exists to prevent: the guard is enforced where the value is
@@ -117,6 +127,7 @@ export function runWithDeadline({
     };
 
     let killTimer = null;
+    let drainTimer = null;
     const deadline = setTimeout(() => {
       timedOut = true;
       terminate("SIGTERM");
@@ -129,6 +140,7 @@ export function runWithDeadline({
     const cleanup = () => {
       clearTimeout(deadline);
       if (killTimer) clearTimeout(killTimer);
+      if (drainTimer) clearTimeout(drainTimer);
       if (beat) clearInterval(beat);
     };
 
@@ -155,8 +167,7 @@ export function runWithDeadline({
       }, GROUP_REAP_POLL_MS);
     });
 
-    child.on("close", (code, signal) => {
-      if (settled) return;
+    const settle = (code, signal, pipesLeaked) => {
       settled = true;
       cleanup();
       const finish = (groupReaped) => resolve({
@@ -167,9 +178,35 @@ export function runWithDeadline({
         timedOut,
         killedHard,
         groupReaped,
+        pipesLeaked,
       });
       if (!detached) { finish(null); return; }
       confirmGroupReaped().then(finish);
+    };
+
+    // `exit`: the child's lifetime is over — `code`/`signal` are final, and the deadline and the
+    // SIGKILL escalation are cancelled NOW, so neither can fire during the drain and stamp a
+    // naturally-exited child `timedOut`/`killedHard`. Its pipes may still be held: give `close` at
+    // most `graceMs`, then stop waiting for whoever inherited them — destroy our read ends so nothing
+    // keeps this process's event loop alive on their account — and report the leak. The heartbeat
+    // runs until settle: the job is not finalised until then.
+    let exited = null;
+    child.on("exit", (code, signal) => {
+      if (settled) return;
+      exited = { code, signal };
+      clearTimeout(deadline);
+      if (killTimer) clearTimeout(killTimer);
+      drainTimer = setTimeout(() => {
+        if (settled) return;
+        child.stdout.destroy();
+        child.stderr.destroy();
+        settle(exited.code, exited.signal, true);
+      }, graceMs);
+    });
+
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      settle(exited ? exited.code : code, exited ? exited.signal : signal, false);
     });
   });
 }

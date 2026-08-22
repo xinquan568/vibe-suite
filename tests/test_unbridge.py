@@ -308,6 +308,61 @@ class TestDescriptorRelativeDeletion(UnbridgeCase):
         self.assertFalse(bridge.unlink_at(self.ws, "never-existed"))
 
 
+class ReadAndDeleteDoNotCreateDirectories(UnbridgeCase):
+    """vibe-179 / grill M10. `_open_dir_chain` created every missing path component as a side effect
+    of OPENING it, for every caller — so a read (`lstat_at`) or a deletion (`unlink_at`) minted
+    directories the user never had, and a teardown could leave behind a `.codex/` the user had
+    removed. Creation is opt-in now; read and delete primitives report absence and touch nothing."""
+
+    def test_lstat_at_on_a_missing_intermediate_directory_does_not_create_it(self):
+        self.assertFalse((self.ws / ".codex").exists())
+        self.assertIsNone(bridge.lstat_at(self.ws, ".codex/config.toml"))
+        self.assertFalse((self.ws / ".codex").exists(), "a read created .codex/")
+
+    def test_unlink_at_on_a_missing_intermediate_directory_does_not_create_it(self):
+        self.assertFalse(bridge.unlink_at(self.ws, ".vibe-suite-state/advisor-preimages.json"))
+        self.assertFalse((self.ws / ".vibe-suite-state").exists(), "a deletion created .vibe-suite-state/")
+
+    def test_remove_tree_at_on_a_missing_intermediate_directory_does_not_create_it(self):
+        self.assertFalse(bridge.remove_tree_at(self.ws, ".vibe-suite/agents/gone"))
+        self.assertFalse((self.ws / ".vibe-suite").exists(), "a tree removal created .vibe-suite/")
+
+    def test_secure_dir_on_a_missing_directory_refuses_and_creates_nothing(self):
+        with self.assertRaises(bridge.BridgeError):
+            bridge.secure_dir(self.ws, ".vibe-suite-state")
+        self.assertFalse((self.ws / ".vibe-suite-state").exists(), "a mode change created the directory")
+
+    def test_a_symlink_component_is_still_refused_not_reported_absent(self):
+        """ENOENT alone means "nothing is there". A link where a directory should be stays a refusal
+        — it must not be mistaken for absence and silently skipped."""
+        outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (self.ws / "link").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(bridge.BridgeError) as caught:
+            bridge.lstat_at(self.ws, "link/config.toml")
+        self.assertNotIsInstance(caught.exception, bridge.AbsentPath)
+
+    def test_the_creating_primitives_still_bring_parents_into_existence(self):
+        self.assertTrue(bridge.symlink_at(self.ws, "a/b/link", "target"))
+        self.assertTrue((self.ws / "a" / "b" / "link").is_symlink())
+        bridge.write_atomic(self.ws, self.ws / "c" / "d" / "file.txt", "x")
+        self.assertEqual((self.ws / "c" / "d" / "file.txt").read_text(), "x")
+        self.assertTrue(bridge.publish_new(self.ws, self.ws / "e" / "f" / "new.txt", "y"))
+        bridge.ensure_dir_at(self.ws, "g/h")
+        self.assertTrue((self.ws / "g" / "h").is_dir())
+
+    def test_unbridge_on_a_workspace_whose_codex_dir_is_gone_leaves_no_codex_dir(self):
+        """`.codex/` existed before install (so `prune` never records it), and the user removed it
+        afterwards. Teardown's read of `.codex/config.toml` used to recreate the directory and
+        nothing removed it again."""
+        (self.ws / ".codex").mkdir()
+        self.install()
+        shutil.rmtree(self.ws / ".codex")
+        result = self.unbridge("--confirm")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.ws / ".codex").exists(), "teardown recreated a .codex/ the user had removed")
+
+
 class TestRemoveOnly(UnbridgeCase):
     """Teardown removes what it owns and never writes a pre-image back.
 

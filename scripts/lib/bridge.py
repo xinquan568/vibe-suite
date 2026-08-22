@@ -51,6 +51,16 @@ class BridgeError(Exception):
     """Refusal. The caller aborts; nothing has been written."""
 
 
+class AbsentPath(BridgeError):
+    """A component of the requested path does not exist (vibe-179).
+
+    Raised by the audited descent when it is asked NOT to create and a directory on the way is
+    missing — the only descent failure that means "nothing is there" rather than "something is
+    there that must not be followed". Read and delete primitives translate it into their existing
+    absent-leaf answers (`None` / `False`); every other descent failure stays a plain `BridgeError`.
+    """
+
+
 # --------------------------------------------------------------------------------------------
 # Containment and atomicity
 # --------------------------------------------------------------------------------------------
@@ -123,7 +133,7 @@ def pin_root(root):
     return _ROOT_PIN[str(root)]
 
 
-def _open_dir_chain(root, relative):
+def _open_dir_chain(root, relative, create=False):
     """Open `root/relative` by walking one component at a time, each with `O_NOFOLLOW`.
 
     Opening the parent by path resolves every *ancestor* through the kernel, so containment checked
@@ -131,6 +141,13 @@ def _open_dir_chain(root, relative):
     grandparent redirects the whole subtree. Descending component by component removes the ambiguity:
     each step is relative to a descriptor already proven to be a real directory, and a symlink
     anywhere along the way fails the step that would have followed it.
+
+    `create` is opt-in (vibe-179 / grill M10). The descent used to `mkdir` every missing component
+    as a side effect of opening it, for every caller — so a read (`lstat_at`) or a deletion
+    (`unlink_at`) minted directories the user never had, and a teardown could leave behind a
+    `.codex/` the user had removed. Only the primitives whose purpose is to bring a path into
+    existence (`ensure_dir_at`, `write_atomic`, `publish_new`, `symlink_at`) pass `create=True`;
+    everything else gets `AbsentPath` for a missing component and leaves the tree untouched.
     """
     for flag in ("O_DIRECTORY", "O_NOFOLLOW"):
         if not hasattr(os, flag):
@@ -159,13 +176,23 @@ def _open_dir_chain(root, relative):
                 continue
             if part == "..":
                 raise BridgeError("'..' in a bridge target path; refusing")
+            if create:
+                try:
+                    os.mkdir(part, 0o777, dir_fd=fd)
+                except FileExistsError:
+                    pass
             try:
-                os.mkdir(part, 0o777, dir_fd=fd)
-            except FileExistsError:
-                pass
-            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError as exc:
+                # ENOENT alone means "nothing is there". A symlink or a file where a directory should
+                # be is still a refusal below — ENOTDIR on macOS, ELOOP for a symlink on Linux.
+                raise AbsentPath(
+                    f"{root}/{'/'.join(relative)}: {part} does not exist") from exc
             os.close(fd)
             fd = nxt
+    except AbsentPath:
+        os.close(fd)
+        raise
     except OSError as exc:
         os.close(fd)
         raise BridgeError(f"{root}/{'/'.join(relative)} could not be opened safely ({exc})") from exc
@@ -175,14 +202,14 @@ def _open_dir_chain(root, relative):
     return fd
 
 
-def open_dir_chain(root, relative):
+def open_dir_chain(root, relative, create=False):
     """Public name for the component-wise `O_NOFOLLOW` descent.
 
     `bridge_cli` carried its own copy of this, which is the pattern this module exists to end: a
     second implementation of a safety rule drifts from the first, and the copy had none of the
-    refusals added here since. One descent, one place.
+    refusals added here since. One descent, one place. `create` as in `_open_dir_chain`.
     """
-    return _open_dir_chain(root, relative)
+    return _open_dir_chain(root, relative, create=create)
 
 
 def unlink_at(root, rel):
@@ -195,7 +222,10 @@ def unlink_at(root, rel):
     import stat as _stat
     rel = Path(rel)
     assert_inside(root, Path(root) / rel)
-    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        fd = _open_dir_chain(root, rel.parent.parts)
+    except AbsentPath:
+        return False   # a missing parent is a missing entry; nothing to remove, nothing created
     try:
         try:
             info = os.lstat(rel.name, dir_fd=fd)
@@ -226,11 +256,10 @@ def remove_tree_at(root, rel):
     assert_inside(root, Path(root) / rel)
     if not rel.parts or any(p in ("", ".", "..") for p in rel.parts):
         raise BridgeError(f"{rel} is not a plain workspace-relative directory path; refusing")
-    # Read-only existence probe by path: the destructive walk below is fd-relative regardless, and
-    # probing first keeps `_open_dir_chain` from creating parents for a tree that is not there.
-    if not os.path.lexists(os.path.join(str(root), str(rel))):
-        return False
-    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        fd = _open_dir_chain(root, rel.parent.parts)
+    except AbsentPath:
+        return False   # nothing at `rel` because its parent is not there; the descent created nothing
     try:
         info = os.lstat(rel.name, dir_fd=fd)
         if _stat.S_ISLNK(info.st_mode):
@@ -257,7 +286,7 @@ def ensure_dir_at(root, rel):
     assert_inside(root, Path(root) / rel)
     if any(p == ".." for p in rel.parts):
         raise BridgeError(f"{rel}: '..' in a directory-creation path; refusing")
-    fd = _open_dir_chain(root, rel.parts)
+    fd = _open_dir_chain(root, rel.parts, create=True)
     os.close(fd)
 
 
@@ -310,7 +339,7 @@ def symlink_at(root, rel, target):
     """
     rel = Path(rel)
     assert_inside(root, Path(root) / rel)
-    fd = _open_dir_chain(root, rel.parent.parts)
+    fd = _open_dir_chain(root, rel.parent.parts, create=True)
     try:
         os.symlink(str(target), rel.name, dir_fd=fd)
         return True
@@ -338,7 +367,7 @@ def publish_new(root, dest, content, mode=0o644):
         # through it would write to wherever it points.
         raise BridgeError(f"{dest} is a symlink; refusing to publish through it")
     rel = dest.relative_to(Path(root))
-    fd = _open_dir_chain(root, rel.parent.parts)
+    fd = _open_dir_chain(root, rel.parent.parts, create=True)
     data = content if isinstance(content, bytes) else content.encode("utf-8")
     tmp_name = None
     try:
@@ -402,7 +431,7 @@ def secure_dir(root, rel, mode=0o700):
     """
     rel = Path(rel)
     assert_inside(root, Path(root) / rel)
-    fd = _open_dir_chain(root, rel.parts)
+    fd = _open_dir_chain(root, rel.parts)   # create=False: a mode change creates nothing
     try:
         os.fchmod(fd, mode)
     finally:
@@ -412,7 +441,10 @@ def secure_dir(root, rel, mode=0o700):
 def lstat_at(root, rel):
     """`lstat` a workspace-relative path without resolving any component by path."""
     rel = Path(rel)
-    fd = _open_dir_chain(root, rel.parent.parts)
+    try:
+        fd = _open_dir_chain(root, rel.parent.parts)
+    except AbsentPath:
+        return None   # a missing parent is a missing entry; the descent created nothing
     try:
         return os.lstat(rel.name, dir_fd=fd)
     except FileNotFoundError:
@@ -479,7 +511,7 @@ def write_atomic(root, dest, content, mode=None):
         mode = (dest.lstat().st_mode & 0o7777) if kind == "file" else 0o644
 
     relative = Path(dest).parent.relative_to(Path(root)).parts
-    dir_fd = _open_dir_chain(root, relative)
+    dir_fd = _open_dir_chain(root, relative, create=True)
 
     data = content if isinstance(content, bytes) else content.encode("utf-8")
     try:

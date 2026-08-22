@@ -669,6 +669,9 @@ def _transact(ws, doc, toml_before, toml_after, defs,
         _ignore_block(ws, defs)
         return
 
+    # The state directory is brought into existence by the primitive whose job that is; tightening
+    # its mode no longer creates it as a side effect (vibe-179).
+    bridge.ensure_dir_at(ws, STATE_REL)
     bridge.secure_dir(ws, STATE_REL)
     pre_images = {
         str(MCP_REL): bridge.record_pre_image(mcp_path) if mcp_before is not None else None,

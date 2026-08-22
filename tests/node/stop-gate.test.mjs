@@ -26,7 +26,7 @@ const FIXTURES = path.join(REPO_ROOT, "tests", "fixtures", "fake-codex");
 
 const MARKER = "SEEDED-DEFECT-MARKER";
 
-function repo({ enabled = false, failPolicy = null, gateModel = null, projectModel = null } = {}) {
+function repo({ enabled = false, failPolicy = null, gateModel = null, projectModel = null, brokenProject = false } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "stop-gate-"));
   const git = (...args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
   git("init", "-q");
@@ -37,6 +37,11 @@ function repo({ enabled = false, failPolicy = null, gateModel = null, projectMod
     // `.vibe-suite.md` is YAML FRONTMATTER (config.py's grammar), not a fenced block.
     writeFileSync(path.join(dir, ".vibe-suite.md"),
       `---\nmodel_overrides:\n  codex: ${projectModel}\n---\n\n# project config\n`);
+  }
+  if (brokenProject) {
+    // vibe-183: a human typo — the frontmatter never closes. config.py refuses it with a
+    // ConfigSyntaxError; the STORE (state.json) is untouched and perfectly readable.
+    writeFileSync(path.join(dir, ".vibe-suite.md"), "---\ngate:\n  fail_policy: open\n");
   }
   const setKey = (key, value) => {
     const py = `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(STORE))}); ` +
@@ -386,4 +391,70 @@ test("the absolute deadline governs the collection loop, not just the child proc
   assert.equal(decisionOf(result), null, "fail-open is still the default posture");
   assert.ok(/budget|could not be collected|no time left/.test(result.stderr),
     `an exhausted budget must be reported, not guessed: ${result.stderr}`);
+});
+
+// vibe-183 / grill H5: a stored `fail_policy: closed` must still decide when the PROJECT file is
+// unreadable. `.vibe-suite.md` (human-edited) and `state.json` (the store) are different files; a typo
+// in the first used to make `effective-config` exit 1, the hook read `null`, and the one setting whose
+// purpose is "when in doubt, block" was never consulted — the gate failed open two files away. The
+// cause the hook reports is the store's OWN stderr line, not a phrase the hook invents.
+
+test("a broken .vibe-suite.md with a stored fail_policy: closed BLOCKS, quoting the store's warning (vibe-183)", () => {
+  const dir = repo({ enabled: true, failPolicy: "closed", brokenProject: true });
+  const result = runHook(dir, { fixture: "gate-marker.mjs" });
+  assert.equal(result.status, 0, result.stderr);
+  const decision = decisionOf(result);
+  assert.ok(decision && decision.decision === "block", `a stored closed policy must block when config is unreadable:\n${result.stdout}\n${result.stderr}`);
+  assert.match(decision.reason, /fail_policy is closed/);
+  assert.match(decision.reason, /project configuration could not be read/);
+  // The text below exists ONLY on the store's stderr (never in the JSON document): the hook must have
+  // carried `result.stderr.trim()` into the reason, as the issue asks.
+  assert.match(decision.reason, /store: config: .*frontmatter/, "the store's own stderr line is the cause");
+  assert.match(decision.reason, /gate resolved from runtime state and defaults/, "the stderr-only suffix proves stderr, not stdout JSON, was quoted");
+  assert.ok(!decision.reason.includes("runtime store could not be read"), "the store was fine — the project file was not");
+});
+
+test("a broken .vibe-suite.md with no stored policy ALLOWS, with the store's warning on stderr (vibe-183)", () => {
+  const dir = repo({ enabled: true, brokenProject: true });
+  const result = runHook(dir, { fixture: "gate-marker.mjs" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(decisionOf(result), null, "fail-open by default is unchanged");
+  assert.match(result.stderr, /project configuration could not be read/);
+  assert.match(result.stderr, /store: config: .*frontmatter/, "the cause is the store's stderr line");
+  assert.match(result.stderr, /gate resolved from runtime state and defaults/);
+  assert.match(result.stderr, /failing open/);
+  assert.ok(!result.stderr.includes("runtime store could not be read"), "the store was readable; saying otherwise misleads");
+});
+
+test("a broken .vibe-suite.md with the gate DISABLED allows and says so — nothing is gated, nothing is decided (vibe-183)", () => {
+  const dir = repo({ failPolicy: "closed", brokenProject: true });
+  const result = runHook(dir, { fixture: "gate-marker.mjs" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(decisionOf(result), null, "a disabled gate does not block over a config typo");
+  assert.match(result.stderr, /store: config: .*frontmatter/, "the typo is still reported, in the store's words");
+  assert.match(result.stderr, /gate disabled/);
+});
+
+test("a damaged runtime store still fails open by default — and now carries the store's own reason (vibe-183)", () => {
+  const dir = repo();
+  mkdirSync(path.join(dir, ".vibe-suite-state"), { recursive: true });
+  writeFileSync(path.join(dir, ".vibe-suite-state", "state.json"), "not json at all");
+  const result = runHook(dir, { fixture: "gate-marker.mjs" });
+  assert.equal(result.status, 0);
+  assert.equal(decisionOf(result), null);
+  assert.match(result.stderr, /runtime store could not be read \(store: .*not valid JSON/, "the store's first stderr line is the cause");
+});
+
+test("no python3 on PATH: the hook fails open with the spawn cause, not a stack (vibe-183)", () => {
+  const dir = repo({ enabled: true, failPolicy: "closed" });
+  // A PATH with no python3 at all: `spawnSync("python3", …)` yields status null, error.code ENOENT and
+  // UNDEFINED stdout/stderr — the branch a literal `result.stderr.trim()` would crash on. The hook
+  // itself runs from process.execPath, and it returns before it needs `git`.
+  const empty = mkdtempSync(path.join(tmpdir(), "no-python-"));
+  const result = runHook(dir, { fixture: "gate-marker.mjs", env: { PATH: empty } });
+  assert.equal(result.status, 0, `the hook never exits non-zero:\n${result.stderr}`);
+  assert.equal(decisionOf(result), null, "with no store reader at all the stored policy is unrecoverable: fail open by default");
+  assert.match(result.stderr, /runtime store could not be read \(.*ENOENT/, `the spawn cause is reported:\n${result.stderr}`);
+  assert.match(result.stderr, /failing open/);
+  assert.ok(!/\n\s+at /.test(result.stderr), `no stack trace — the ENOENT path is handled, not crashed:\n${result.stderr}`);
 });

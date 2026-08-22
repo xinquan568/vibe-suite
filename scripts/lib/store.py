@@ -151,13 +151,29 @@ def effective_config(workspace):
     config = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(config)
 
-    resolved = config.load(workspace)
+    # vibe-183 / grill H5: the runtime store is read FIRST — it is the authority for the three
+    # `gate.*` keys and must be consulted whatever the project file looks like. A damaged store still
+    # raises (StoreFormatError → exit 1 in `_cli`): that contract is unchanged. Only then is the
+    # project file loaded; a `.vibe-suite.md` that does not parse used to abort the whole resolution —
+    # and with it the one setting whose purpose is "when in doubt, block" — so its failure now
+    # degrades: the gate is resolved from runtime state and the fresh defaults alone and the document
+    # says so (`config_error`) instead of exiting non-zero with a traceback.
+    overrides = Store(workspace).overrides().get("gate", {})
+    try:
+        resolved = config.load(workspace)
+        config_error = None
+    except (config.ConfigSyntaxError, config.ConfigValueError,
+            config.ConfigContainmentError) as error:
+        resolved = {}
+        config_error = f"config: {error}"
     gate = dict(resolved.get("gate") or {})
-    for leaf, value in Store(workspace).overrides().get("gate", {}).items():
+    for leaf, value in overrides.items():
         gate[leaf] = value
     for key, value in FRESH.items():
         gate.setdefault(key.partition(".")[2], value)
     resolved["gate"] = gate
+    if config_error is not None:
+        resolved["config_error"] = config_error
     return resolved
 
 
@@ -167,16 +183,23 @@ def _cli(argv):
     `effective-config <workspace>` prints the resolved configuration as one JSON object. There is
     deliberately **no write subcommand**: runtime writes belong to `/vibe-suite:config` (E1.8), and
     a hook that could flip its own toggle would be a gate that disables itself. Exits: 0 success,
-    1 a state file too damaged to read (never a silent `{}` — see `_read`), 2 usage.
+    1 a state file too damaged to read (never a silent `{}` — see `_read`), 2 usage. A project
+    file that does not parse is NOT exit 1 (vibe-183): the store is intact, so the document is
+    printed with the gate resolved from runtime state + defaults and a `config_error` member, the
+    cause goes to stderr, and the exit is 0.
     """
     if len(argv) != 2 or argv[0] != "effective-config":
         print("usage: store.py effective-config <workspace>", file=sys.stderr)
         return 2
     try:
-        print(json.dumps(effective_config(argv[1]), indent=2, sort_keys=True))
+        resolved = effective_config(argv[1])
     except (StoreFormatError, StoreKeyError, StoreValueError) as error:
         print(f"store: {error}", file=sys.stderr)
         return 1
+    if resolved.get("config_error"):
+        print(f"store: {resolved['config_error']} — gate resolved from runtime state and defaults",
+              file=sys.stderr)
+    print(json.dumps(resolved, indent=2, sort_keys=True))
     return 0
 
 

@@ -310,7 +310,9 @@ class TestBreakageClasses(DoctorCase):
             encoding="utf-8")
         report = self.report()
         self.assertIn("sentinels", self.checks(report))
-        self.assertTrue(any("registered only in .mcp.json" in f["finding"] for f in report["findings"]), report["findings"])
+        half = [f for f in report["findings"] if "registered only in .mcp.json" in f["finding"]]
+        self.assertEqual(len(half), 1, report["findings"])
+        self.assertFalse(half[0]["auto_fixable"], "repair registers nothing under vibe-mcp — not auto-fixable")
 
     def test_a_deleted_memory_block_is_detected(self):
         self.install()

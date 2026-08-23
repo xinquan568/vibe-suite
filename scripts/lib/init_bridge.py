@@ -80,9 +80,21 @@ def remove_dangling(ws, only=None):
         elif rel == ".mcp.json":
             _upsert_json(ws, rel, lambda d: bridge.json_server_remove(d, DANGLING_SERVER))
         elif rel == ".codex/hooks.json":
-            _upsert_json(ws, rel, lambda d: bridge.json_hook_entry_remove(d, "Stop"))
+            _upsert_json(ws, rel, _drop_bare_owned_stop_hooks)
         removed.append(rel)
     return removed
+
+
+def _drop_bare_owned_stop_hooks(doc):
+    """Remove ONLY the owned `Stop` entries whose command is the bare `vibe-suite` — an owned entry
+    with any other command (an absolute path, say) and every user entry stay. `json_hook_entry_remove`
+    drops every owned entry, which is teardown's job, not this cleanup's."""
+    events = (doc.get("hooks") or {}).get("Stop") or []
+    kept = [e for e in events
+            if not (isinstance(e, dict) and e.get(f"_{bridge.MARKER}_owned") is not None
+                    and str(e.get("command") or "").split()[:1] == [BARE_COMMAND])]
+    doc.setdefault("hooks", {})["Stop"] = kept
+    return doc
 
 #: Every artefact init owns. The codec table names seven; `config-fill` and `history-baseline` add
 #: two more, and those two merge into content migration may just have written.

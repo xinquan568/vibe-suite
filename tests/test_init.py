@@ -146,6 +146,23 @@ def host_files_snapshot(ws):
         out[rel] = (p.read_bytes(), p.lstat().st_mtime_ns) if p.is_file() else None
     return out
 
+def plant_bare_and_non_bare_owned_hooks(ws):
+    """A user's hook, an OWNED non-bare hook (an absolute command) and an OWNED bare
+    `vibe-suite stop-gate` side by side: only the bare one is dangling."""
+    ws = Path(ws)
+    (ws / ".codex").mkdir(exist_ok=True)
+    owned = {"_%s_owned" % bridge.MARKER: bridge.SCHEMA}
+    doc = {"hooks": {"Stop": [
+        {"type": "command", "command": "my-hook"},
+        dict({"type": "command", "command": "/opt/vibe-suite/bin/vibe-suite stop-gate"}, **owned),
+        dict({"type": "command", "command": "vibe-suite stop-gate"}, **owned),
+    ]}}
+    (ws / ".codex" / "hooks.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def stop_commands(ws):
+    return [e.get("command") for e in json.loads((Path(ws) / ".codex" / "hooks.json").read_text(encoding="utf-8"))["hooks"]["Stop"]]
+
 
 class InitCase(unittest.TestCase):
     def setUp(self):
@@ -384,6 +401,14 @@ class TestNoBareRegistrations(InitCase):
         self.assertIn("mine", servers)
         self.assertEqual((self.ws / ".codex" / "config.toml").read_bytes(), toml_before, "the non-bare TOML block stays")
         self.assertEqual((self.ws / ".codex" / "hooks.json").read_bytes(), hooks_before, "the non-bare owned hook stays")
+
+    def test_a_bare_owned_hook_beside_a_non_bare_owned_hook_goes_alone_on_init(self):
+        # the cleanup filters the exact bare shape — not every owned Stop entry
+        plant_bare_and_non_bare_owned_hooks(self.ws)
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stop_commands(self.ws), ["my-hook", "/opt/vibe-suite/bin/vibe-suite stop-gate"],
+                         "only the bare owned hook goes; the user's and the non-bare owned hook stay")
 
     def test_a_fresh_init_creates_the_three_host_files_as_empty_documents(self):
         result = run_init(self.ws, *self.answers())

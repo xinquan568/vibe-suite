@@ -123,6 +123,23 @@ def host_files_snapshot(ws):
         out[rel] = (p.read_bytes(), p.lstat().st_mtime_ns) if p.is_file() else None
     return out
 
+def plant_bare_and_non_bare_owned_hooks(ws):
+    """A user's hook, an OWNED non-bare hook (an absolute command) and an OWNED bare
+    `vibe-suite stop-gate` side by side: only the bare one is dangling."""
+    ws = Path(ws)
+    (ws / ".codex").mkdir(exist_ok=True)
+    owned = {"_%s_owned" % bridge.MARKER: bridge.SCHEMA}
+    doc = {"hooks": {"Stop": [
+        {"type": "command", "command": "my-hook"},
+        dict({"type": "command", "command": "/opt/vibe-suite/bin/vibe-suite stop-gate"}, **owned),
+        dict({"type": "command", "command": "vibe-suite stop-gate"}, **owned),
+    ]}}
+    (ws / ".codex" / "hooks.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def stop_commands(ws):
+    return [e.get("command") for e in json.loads((Path(ws) / ".codex" / "hooks.json").read_text(encoding="utf-8"))["hooks"]["Stop"]]
+
 
 class RepairCase(unittest.TestCase):
     def setUp(self):
@@ -197,6 +214,35 @@ class TestRepairsWhatDoctorFlags(RepairCase):
         self.assertEqual(host_files_snapshot(self.ws), before, "repair must not touch a non-bare registration")
         outcomes = {s["step"]: s["outcome"] for s in json.loads(result.stdout)["steps"]}
         self.assertEqual(outcomes["codex"], "ok"); self.assertEqual(outcomes["mcp"], "ok")
+
+    def test_a_bare_owned_hook_beside_a_non_bare_owned_hook_goes_alone_on_repair(self):
+        self.install()
+        plant_bare_and_non_bare_owned_hooks(self.ws)
+        result = self.repair()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stop_commands(self.ws), ["my-hook", "/opt/vibe-suite/bin/vibe-suite stop-gate"])
+        outcomes = {s["step"]: s["outcome"] for s in json.loads(result.stdout)["steps"]}
+        self.assertIn("removed dangling", outcomes["mcp"]); self.assertIn(".codex/hooks.json", outcomes["mcp"])
+
+    def test_a_non_bare_half_registration_is_reported_not_auto_fixed_and_left_alone(self):
+        # doctor's auto_fixable flag promises a no-prompt repair clears it; repair registers nothing
+        # under vibe-mcp, so a non-bare vibe-mcp present in only one store is reported, NOT flagged
+        # fixable, and left byte-identical by repair
+        self.install()
+        mcp = self.ws / ".mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": {"mine": {"command": "x"},
+                                                  "vibe-mcp": {"command": "/opt/vibe-suite/bin/vibe-suite", "args": []}}},
+                                  indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        before = mcp.read_bytes()
+        report = self.diagnose()
+        half = [f for f in report["findings"] if "registered only in .mcp.json" in f["finding"]]
+        self.assertEqual(len(half), 1, report["findings"])
+        self.assertFalse(half[0]["auto_fixable"], "repair cannot clear it, so it must not promise to")
+        self.assertNotIn("sentinels", self.fixable(report))
+        result = self.repair()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(mcp.read_bytes(), before, "repair left the legitimate half-registration alone")
+        self.assertTrue(any("registered only in .mcp.json" in f["finding"] for f in self.diagnose()["findings"]))
 
     def test_a_missing_registration_is_not_a_finding_and_repair_registers_none(self):
         # the absence of a `vibe-mcp` registration is the healthy state until the binary ships

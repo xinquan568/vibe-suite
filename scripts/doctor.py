@@ -146,8 +146,14 @@ def check_bridge(ws, out):
             continue
         if in_json != in_toml:
             where = ".mcp.json" if in_json else ".codex/config.toml"
+            # grill S4 (vibe-191): `auto_fixable` promises that a no-prompt repair clears it. Repair
+            # reconciles the advisors it registered, but registers NOTHING under `vibe-mcp` (no
+            # binary ships) — so a half-registration of that name is reported and left alone.
+            fixable = name != init_bridge.DANGLING_SERVER
             out.append(finding("[MEDIUM]", "sentinels",
-                               f"{name} is registered only in {where}", True))
+                               f"{name} is registered only in {where}"
+                               + ("" if fixable else " — repair registers nothing under this name; "
+                                  "reconcile it by hand or remove the half"), fixable))
     hooks, _ = safe_json(ws / ".codex" / "hooks.json", out, "hooks")
     for name in MEMORY_FILES:
         text = bridge.read_text_verbatim(ws / name)

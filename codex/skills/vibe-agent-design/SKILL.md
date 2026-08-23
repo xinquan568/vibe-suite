@@ -275,15 +275,20 @@ you change — the values you edit, the `cwd` you narrow, the tool list you tigh
 
 ## After editing an advisor
 
-Edits to an advisor file do not take effect on their own — re-run the bridge:
+Edits to an advisor file do not take effect on their own — re-register it, which
+stamps the edited content in the advisor ledger and converges both stores:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/advisor_cli.py" --workspace . reconcile
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/advisor_cli.py" --workspace . add <name>
 ```
 
-Reconciliation happens automatically inside `/vibe-suite:advisor add` and
-`/vibe-suite:advisor remove`; init, `/vibe-suite:repair` and `/vibe-suite:update`
-run the same reconcile as part of their normal flow.
+A flag-less reconcile — what `/vibe-suite:repair` and `/vibe-suite:update` run as part
+of their normal flow, and what init runs after **listing** the declared definitions —
+converges only definitions the operator registered (`/vibe-suite:advisor add <name>`)
+and whose content is unchanged since: an edited advisor is held at its registered
+content until you re-run `advisor add <name>`; a never-registered one is listed and
+left alone. `/vibe-suite:advisor add` and `/vibe-suite:advisor remove` run the same
+reconcile inside them.
 
 Propagation differs by client: Claude reads `.mcp.json` at session startup, so a new
 or renamed advisor appears only after a session restart; Codex re-reads

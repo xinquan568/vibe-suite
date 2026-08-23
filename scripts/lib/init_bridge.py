@@ -313,12 +313,26 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
     _history_baseline(ws, STRICTNESS[strictness])
     checkpoint("history-baseline")
 
-    # advisors — converge any pre-declared advisor definitions to registrations (E6.1). A fresh
-    # workspace has none, so this is a no-op there. A refusal (e.g. a declared advisor with the
-    # claude-octopus pin still pending) is surfaced, not fatal: the install itself is complete,
-    # and doctor reports the advisor state until the operator supplies a pin or E7.1 ships one.
+    # advisors — vibe-185 / grill H1b: a definition under .vibe-suite/agents/ is repository content,
+    # so init DISCLOSES every declared definition (name, tools, permission mode, cwd, additional
+    # dirs, prompt size, whether it is registered) and registers nothing the operator has not named:
+    # registration is `/vibe-suite:advisor add <name>` (or `add --all`). The flag-less reconcile
+    # still runs — it converges definitions the operator registered before and removes orphaned
+    # registrations; a refusal is surfaced, not fatal, and doctor reports the advisor state.
     import advisors
     try:
+        rows = advisors.listing(ws)
+        for row in rows:
+            danger = f"; DANGEROUS: {', '.join(row['dangerous'])}" if row["dangerous"] else ""
+            print(f"note: advisor {row['name']}: tools={','.join(row['allowed_tools'])} "
+                  f"permission_mode={row['permission_mode']} cwd={row['cwd']} "
+                  f"additional_dirs={','.join(row['additional_dirs']) or '-'} "
+                  f"prompt={row['prompt_bytes']}B registration={row['registration']}{danger}",
+                  file=sys.stderr)
+        unregistered = [r["name"] for r in rows if r["registration"] != "registered"]
+        if unregistered:
+            print("note: init registers no advisor — register one with /vibe-suite:advisor add <name> "
+                  "(or add --all after reading the listing): " + ", ".join(unregistered), file=sys.stderr)
         advisors.reconcile(ws)
     except bridge.BridgeError as exc:
         print(f"note: advisor reconcile deferred — {exc}", file=sys.stderr)

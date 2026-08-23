@@ -969,7 +969,106 @@ class RowSixProvenanceDoesNotPublishSecrets(unittest.TestCase):
 
 
 class TestAdvisorTeardown(UnbridgeCase):
-    """E6.1: bare-name advisor registrations are inventory-visible, so teardown removes them."""
+    """E6.1: bare-name advisor registrations are inventory-visible, so teardown removes them.
+    vibe-185: the advisor ledger (acceptances + registration stamps) and a pending journal are the
+    suite's records — they go with the registrations they authorise."""
+
+    def test_the_advisor_ledger_and_journal_do_not_outlive_teardown(self):
+        self.install()
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "probe_advisor.md").write_text(
+            "---\ndescription: |\n  Judges probe things.\nmodel: sonnet\n---\n\nValue truth.\n", encoding="utf-8")
+        import subprocess as sp
+        r = sp.run(["python3", str(REPO_ROOT / "scripts" / "advisor_cli.py"), "--workspace", str(self.ws),
+                    "add", "probe_advisor"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        state = self.ws / ".vibe-suite-state"
+        self.assertTrue((state / "advisor-preimages.json").is_file(), "precondition: the stamp is on disk")
+        crashed = sp.run(["python3", str(REPO_ROOT / "scripts" / "advisor_cli.py"), "--workspace", str(self.ws),
+                          "remove", "probe_advisor", "--delete-timeline"], capture_output=True, text=True,
+                         env=dict(os.environ, VIBE_ADVISOR_FAIL_AFTER="json"))
+        self.assertEqual(crashed.returncode, 9, crashed.stderr)
+        self.assertTrue((state / "advisor-txn.json").is_file(), "precondition: a pending journal is on disk")
+        self.assertEqual(self.unbridge("--confirm").returncode, 0)
+        self.assertFalse((state / "advisor-preimages.json").exists(), "the ledger went with the registrations")
+        self.assertFalse((state / "advisor-txn.json").exists(), "so did the journal")
+        self.assertNotIn("probe_advisor", (json.loads((self.ws / ".mcp.json").read_text()) if (self.ws / ".mcp.json").is_file() else {}).get("mcpServers", {}))
+
+    def test_lookalike_advisor_records_and_symlinks_survive_teardown(self):
+        # The recogniser demands the COMPLETE schema the suite writes; a same-named file that merely
+        # resembles it — a user's own, or a truncated copy — is not ours to delete.
+        self.install()
+        state = self.ws / ".vibe-suite-state"
+        state.mkdir(exist_ok=True)
+        lookalikes = {
+            "advisor-preimages.json": json.dumps({"registered": "nope"}) + "\n",
+            "advisor-txn.json": json.dumps({"schema": 1, "intent": "apply"}) + "\n",
+        }
+        for name, text in lookalikes.items():
+            (state / name).write_text(text, encoding="utf-8")
+        elsewhere = self.ws / "my-ledger.json"
+        elsewhere.write_text(json.dumps({".mcp.json": None}) + "\n", encoding="utf-8")
+        link = state / "advisor-preimages.json"
+        link.unlink(); link.symlink_to(elsewhere)                                 # a symlink named like the ledger
+        r = self.unbridge("--confirm")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(link.is_symlink(), "a symlink named like the ledger is left alone")
+        self.assertTrue(elsewhere.is_file(), "and its target is untouched")
+        self.assertTrue((state / "advisor-txn.json").is_file(), "a journal lookalike is left alone")
+        self.assertIn("left alone", r.stdout + r.stderr)
+
+    def test_full_key_near_miss_records_are_not_recognised_as_ours(self):
+        # The recogniser demands the EXACT writer shape: a journal or ledger that carries every key but
+        # a value the writer never produces is not ours. Templates come from a real crashed transaction;
+        # the end-to-end removal of real records is `test_the_advisor_ledger_and_journal_do_not_outlive_teardown`.
+        import subprocess as sp, copy, sys as _sys
+        _sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import unbridge as unbridge_mod
+        self.install()
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "probe_advisor.md").write_text(
+            "---\ndescription: |\n  Judges probe things.\nmodel: sonnet\n---\n\nValue truth.\n", encoding="utf-8")
+        cli = ["python3", str(REPO_ROOT / "scripts" / "advisor_cli.py"), "--workspace", str(self.ws)]
+        self.assertEqual(sp.run([*cli, "add", "probe_advisor"], capture_output=True, text=True).returncode, 0)
+        state = self.ws / ".vibe-suite-state"
+        ledger_path = state / "advisor-preimages.json"
+        crashed = sp.run([*cli, "remove", "probe_advisor", "--delete-timeline"], capture_output=True, text=True,
+                         env=dict(os.environ, VIBE_ADVISOR_FAIL_AFTER="json"))
+        self.assertEqual(crashed.returncode, 9, crashed.stderr)
+        txn_path = state / "advisor-txn.json"
+        real_journal = json.loads(txn_path.read_text()); real_ledger = json.loads(ledger_path.read_text())
+        self.assertEqual(real_journal["intent"], "remove")
+        ours = lambda name, path: unbridge_mod._advisor_record_is_ours(name, path)
+        self.assertTrue(ours("advisor-txn.json", txn_path), "control: the real journal is ours")
+        self.assertTrue(ours("advisor-preimages.json", ledger_path), "control: the real ledger is ours")
+        probe = state / "advisor-txn.json"
+        def near_misses():
+            j = copy.deepcopy(real_journal); j["intent"] = "apply"; j["delete_timeline"] = False
+            yield "apply-with-remove-fields", j                       # an apply journal carrying a remove_name and a definition pre-image
+            j = copy.deepcopy(real_journal); j["pre_images"][".mcp.json"]["extra"] = 1
+            yield "image-extra-field", j                              # an image with a field the writer never adds
+            j = copy.deepcopy(real_journal); j["pre_images"][".mcp.json"]["path"] = "/etc/passwd"
+            yield "image-foreign-path", j                             # an image for some other file
+            j = copy.deepcopy(real_journal); j.pop("registered")
+            yield "missing-registered-member", j                      # still recoverable (pre-vibe-185 shape) — but not the writer's shape now
+            j = copy.deepcopy(real_journal); j["remove_name"] = "some_other"
+            yield "definition-image-for-another-name", j              # the definition pre-image names probe_advisor, the journal another advisor
+        for label, j in near_misses():
+            with self.subTest(journal=label):
+                probe.write_text(json.dumps(j) + "\n", encoding="utf-8")
+                self.assertFalse(ours("advisor-txn.json", probe), f"{label}: a full-key near-miss journal is not ours")
+        probe.write_text(json.dumps(real_journal) + "\n", encoding="utf-8")
+        self.assertTrue(ours("advisor-txn.json", probe))
+        lookalike = copy.deepcopy(real_ledger); lookalike[".mcp.json"]["path"] = str(self.ws / "elsewhere.json")
+        ledger_path.write_text(json.dumps(lookalike) + "\n", encoding="utf-8")
+        self.assertFalse(ours("advisor-preimages.json", ledger_path), "a ledger whose image names another file is not ours")
+        lookalike = copy.deepcopy(real_ledger); lookalike[".mcp.json"]["mode"] = "0644"; lookalike[".mcp.json"]["sha256"] = "0" * 64
+        ledger_path.write_text(json.dumps(lookalike) + "\n", encoding="utf-8")
+        self.assertFalse(ours("advisor-preimages.json", ledger_path), "an image whose sha does not match its content is not ours")
+        ledger_path.write_text(json.dumps(real_ledger) + "\n", encoding="utf-8")
+        self.assertTrue(ours("advisor-preimages.json", ledger_path))
 
     def test_marker_and_fence_registrations_are_torn_down(self):
         self.install()

@@ -283,12 +283,32 @@ def check_retired_names(plugin_root, out):
 
 
 def check_advisors(ws, out):
-    """Advisor registration state (E6.1). Every non-consistent state is auto-fixable — a
-    no-prompt `/vibe-suite:repair` runs the same `reconcile` that add/remove use — except when the
-    inventory itself is unreadable, which needs a human."""
+    """Advisor registration state (E6.1; vibe-185). A stamped definition whose registration drifted
+    is auto-fixable — a no-prompt `/vibe-suite:repair` runs the same flag-less `reconcile` — but a
+    definition the operator never registered, registered before stamps existed, or edited since
+    registering needs the operator: `/vibe-suite:advisor add <name>`. An unreadable inventory and
+    an invalid registration need a human."""
     import advisors
     try:
         for row in advisors.list_advisors(ws):
+            registration = row.get("registration")
+            if registration == "changed":
+                out.append(finding("[MEDIUM]", "advisor-state",
+                                   f"advisor '{row['name']}' changed since it was registered; it is held, "
+                                   "its store content left unchanged — re-confirm with "
+                                   f"/vibe-suite:advisor add {row['name']}", False))
+                continue
+            if registration == "unregistered" and row["state"] == "declared-unregistered":
+                out.append(finding("[LOW]", "advisor-state",
+                                   f"advisor '{row['name']}' is declared but not registered; register it "
+                                   f"with /vibe-suite:advisor add {row['name']} (init never registers)", False))
+                continue
+            if registration == "unstamped":
+                out.append(finding("[MEDIUM]", "advisor-state",
+                                   f"advisor '{row['name']}' is unstamped (registered without a registration "
+                                   "stamp, before vibe-185); it is held, its store content left unchanged — "
+                                   f"confirm it with /vibe-suite:advisor add {row['name']}", False))
+                continue
             if row["state"] == "consistent":
                 continue
             if row["state"] == "invalid-registration":

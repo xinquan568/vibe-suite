@@ -87,8 +87,10 @@ def repair(ws):
             record(name, f"failed: {exc}")
 
     # Advisors converge through the same engine add/remove use (E6.1) — the skill's "re-bridge
-    # happens automatically" contract names repair explicitly. A refusal (collision, pending pin
-    # with an unregistered advisor) is a per-step failure like any other.
+    # happens automatically" contract names repair explicitly. vibe-185: the flag-less reconcile
+    # converges only definitions the operator registered (`advisor add`) whose content is unchanged;
+    # a never-registered or edited definition is held and reported, not registered. A refusal
+    # (collision or invalid registration of a registered advisor) is a per-step failure like any other.
     try:
         import advisors
         rep = advisors.reconcile(ws)

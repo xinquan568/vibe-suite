@@ -65,10 +65,22 @@ and declined*. They are different states and the flags keep them apart.
 Name the artefacts written, any row skipped and why, and any warning the survey emitted (leftover
 `nlpm-reports/`, legacy `.nlpm-test/` specs, source plugins still installed).
 
+**Relay the advisor listing verbatim, and register nothing on the user's behalf.** A definition under
+`.vibe-suite/agents/` is repository content, so init prints one `note: advisor <name>: …` line per
+declared definition — its tools, permission mode, cwd, additional dirs, prompt size, whether it is
+already registered, and any dangerous field — and **registers none of them**. Show the user those
+lines as printed. If they want an advisor bridged, run `/vibe-suite:advisor add <name>` for that
+entry (or `/vibe-suite:advisor add --all` once they have read the whole listing); a dangerous
+definition additionally needs `--confirm-danger`, which is their explicit yes. Never pass either on
+your own initiative.
+
 ## Notes
 
 - **Non-interactive** (`--non-interactive`) surfaces exit 3 rather than asking. A conflict without a
   human is not resolvable and §7A forbids guessing.
 - **Idempotent.** A second run changes nothing — same content, modes and mtimes.
+- **Advisors are listed, not registered.** Registration is `/vibe-suite:advisor add <name>` (or
+  `add --all`), which stamps the definition's content in the advisor ledger; init, repair and
+  update converge only stamped, unchanged definitions.
 - **Provenance** is written once, before the first mutation, and holds the pre-image of every target
   so `/vibe-suite:unbridge` can restore it. A re-run never overwrites it.

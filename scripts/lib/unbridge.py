@@ -256,7 +256,25 @@ EXCLUSIVE_FILES = (".vibe-suite.md", ".claude/vibe-history.json")
 #: What the suite writes into `.vibe-suite-state/`. Anything else in there is the user's.
 SUITE_STATE = ("install-provenance.json", "state.json", "config.json", "jobs.json", "history.json",
                "config-resolution.json", "row6-decision.json", "row6-provenance.json",
-               "migration-conflicts.json", "migration-conflicts.txt")
+               "migration-conflicts.json", "migration-conflicts.txt",
+               # vibe-185: the advisor ledger (danger acceptances + registration stamps) and a
+               # pending advisor journal are the suite's records; teardown removes the
+               # registrations they authorise, so they must not outlive them.
+               "advisor-preimages.json", "advisor-txn.json")
+#: vibe-185: the two advisor records carry no `vibe_suite_owned` stamp — their schemas are closed
+#: and fail-closed (`advisors._validated_journal`; the ledger's three member shapes) — so the
+#: COMPLETE schema, validated by the same code recovery trusts, is the ownership proof: a
+#: user's same-named JSON would have to reproduce restorable pre-images, sha-bound acceptance
+#: and registration maps, or a journal with both stores' images. A lookalike is left alone.
+ADVISOR_STATE = ("advisor-preimages.json", "advisor-txn.json")
+
+
+def _advisor_record_is_ours(name, path):
+    import advisors
+    ws = Path(path).parent.parent          # <ws>/.vibe-suite-state/<name>
+    if name == "advisor-txn.json":
+        return advisors.journal_is_well_formed(path, ws)
+    return advisors.ledger_is_well_formed(bridge.load_json(path), ws)
 #: `migrate-state.sh:32` writes `.txt`; the earlier entry said `.md` and matched nothing.
 #:
 #: These migration artefacts carry no `vibe_suite_owned` stamp, so they are *left behind* rather than
@@ -289,6 +307,8 @@ def _is_suite_state(relative, path=None):
     # `load_json` follows a symlink, so the *destination's* stamp was being read as ownership of the
     # *link* — and a user's link pointing at any stamped file of ours was unlinked. The link is what
     # would be deleted, so the link is what must be judged.
+    if parts[0] in ADVISOR_STATE:
+        return _advisor_record_is_ours(parts[0], path)   # vibe-185: full schema, see above
     doc = bridge.load_json(path)
     # An explicit ownership stamp, not a generic `schema` key a user's own JSON may also carry.
     return isinstance(doc, dict) and doc.get("vibe_suite_owned") is True

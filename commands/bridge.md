@@ -27,6 +27,11 @@ what the rule keys on.
 
 A server with no `env` is mirrored in full.
 
+**A variable name crosses only if it is one.** The placeholder is a comment line in the owned block,
+so a name carrying a newline would end the comment and make whatever follows live TOML inside our
+block. An env variable name outside `[A-Za-z0-9_]` is refused by name — the command exits 1 naming
+the server and the variable — and `.codex/config.toml` is left exactly as it was.
+
 The suite's own registration is skipped — mirroring it would register the bridge into itself.
 
 ## `hooks` — the *project's* hooks, not the plugin's

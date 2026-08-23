@@ -7,6 +7,12 @@ variable *names* cross as commented placeholders, which is why `bearer_token_env
 names a variable rather than holding one. A redacted value would still put the secret's shape in a
 second file the user did not choose.
 
+**A variable name crosses only if it is one** (grill S5 / vibe-192): the placeholder is a `#` comment
+line in the owned block, and a "name" carrying a newline would end the comment and put whatever
+follows — a table header, a key, a forged closing marker — into the block as live TOML. A name
+outside `[A-Za-z0-9_]` (the portable environment-variable character set) is refused by name before
+anything is written, and `.codex/config.toml` is left untouched.
+
 **Three hook namespaces, and this mirrors the third**: not the plugin's own `hooks/hooks.json`, not
 the owned `Stop` entry `init` writes, but the *project's* hooks in `.claude/settings.json`.
 """
@@ -14,6 +20,7 @@ the owned `Stop` entry `init` writes, but the *project's* hooks in `.claude/sett
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +35,37 @@ import bridge  # noqa: E402
 SHARED_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
 
 SIDE_FILE = ".codex/hooks.vibe-suite.json"
+
+
+#: The portable environment-variable character set. A `.mcp.json` env *name* outside it is not
+#: mirrored — not quoted, not skipped: the whole mcp mirror is refused by name and nothing is written.
+ENV_NAME_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _refuse_unsafe_env_names(servers):
+    """Raise `bridge.BridgeError` naming the first server/variable whose env name is not a name.
+
+    Runs over every server the mirror loop would render — the loop's own exclusions (a `cc-suite-*`
+    name, a non-dict spec, our own registration, an advisor-owned entry) apply here first — BEFORE
+    any line of the block is rendered, so a refusal leaves `.codex/config.toml` byte-identical,
+    never a half-written block. The offending name is shown `repr`-escaped, on one line: it may
+    carry the very newline the rule exists to keep out of the file."""
+    for name, spec in sorted(servers.items()):
+        # the same exclusions as the mirror loop below: a server the loop would never render
+        # cannot refuse the leg (an advisor-owned entry has one writer — the advisor path)
+        if not isinstance(spec, dict) or name.startswith("cc-suite-") or spec.get("command") == "vibe-suite":
+            continue
+        if bridge.advisor_owned_entry(spec):
+            continue
+        env = spec.get("env")
+        if not isinstance(env, dict):
+            continue
+        for var in env:
+            if not isinstance(var, str) or not ENV_NAME_RE.fullmatch(var):
+                raise bridge.BridgeError(
+                    f"mcp: refused — server {name!r} declares an env variable name that is not a "
+                    f"name ({var!r}: only [A-Za-z0-9_] may cross into the owned TOML block); "
+                    ".codex/config.toml left unchanged")
 
 
 def _toml_key(name):
@@ -89,6 +127,7 @@ def mirror_mcp(ws, report):
     """
     doc = bridge.load_json(ws / ".mcp.json")
     servers = doc.get("mcpServers") or {}
+    _refuse_unsafe_env_names(servers)   # before the first rendered line: a refusal writes nothing
     lines, reduced = [], 0
     for name, spec in sorted(servers.items()):
         if name.startswith("cc-suite-") or not isinstance(spec, dict):

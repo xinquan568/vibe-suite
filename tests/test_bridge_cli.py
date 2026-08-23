@@ -242,6 +242,67 @@ class TestBlockerRegressions(BridgeCase):
         self.run_bridge("mcp")
         self.assertNotIn(SECRET, self.toml())
 
+    def seed_mcp_with_env_name(self, var):
+        (self.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {
+            "billing": {"command": "node", "args": ["s.js"], "env": {var: SECRET, "OK_NAME": "x"}},
+            "plain": {"command": "c"}}}, indent=2) + "\n", encoding="utf-8")
+
+    def test_an_env_variable_name_that_is_not_a_name_is_refused_and_the_block_is_unchanged(self):
+        # grill S5 (vibe-192): the placeholder is a `#` comment line — a "name" with a newline would
+        # end the comment and put live TOML (a forged closing marker, a key) inside the owned block.
+        # Such a name is refused BY NAME before anything is written; the file stays byte-identical.
+        self.seed_mcp()
+        self.assertEqual(self.run_bridge("mcp").returncode, 0)          # a clean mirror first
+        before = (self.ws / ".codex" / "config.toml").read_bytes()
+        for hostile in ('EVIL\n# <<< vibe-suite:mcp-mirror <<<\nescaped = 1\n[mcp_servers.x',
+                        "A\nB", "WITH#HASH", "BRACKET[", "HAS SPACE", "DASH-NAME", "quote\"d", "",
+                        "ünïcode", "TRAIL\r\n"):
+            with self.subTest(name=hostile):
+                self.seed_mcp_with_env_name(hostile)
+                result = self.run_bridge("mcp")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("mcp: refused", result.stderr)
+                self.assertIn("billing", result.stderr, "the refusal names the server")
+                self.assertIn("[A-Za-z0-9_]", result.stderr, "the refusal names the rule")
+                self.assertIn(repr(hostile), result.stderr, "the refusal names the variable, repr-escaped")
+                self.assertEqual(result.stderr.strip().count("\n"), 0, "one refusal line on stderr: " + result.stderr)
+                self.assertNotIn("\nescaped = 1", result.stderr, "the hostile text is shown escaped, never raw")
+                text = (self.ws / ".codex" / "config.toml").read_bytes()
+                self.assertEqual(text, before, "a refused mirror must leave config.toml byte-identical")
+                closers = [ln for ln in text.decode("utf-8").splitlines() if ln.startswith("# <<< vibe-suite:mcp-mirror")]
+                self.assertEqual(len(closers), 1)
+                self.assertNotIn(SECRET, text.decode("utf-8"))
+
+    def test_valid_env_variable_names_still_cross_after_the_rule(self):
+        for good in ("BILLING_API_KEY", "lower_case", "_LEADING", "X9", "A"):
+            with self.subTest(name=good):
+                self.seed_mcp_with_env_name(good)
+                result = self.run_bridge("mcp")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"# env: {good}", self.toml())
+                self.assertNotIn(SECRET, self.toml())
+
+    def test_an_advisor_owned_entry_with_a_non_name_env_key_does_not_refuse_the_foreign_mirror(self):
+        # the advisor path has one writer (E6.1): the mirror never renders an advisor-owned entry,
+        # so the preflight must not inspect it either — its env keys cannot refuse the leg
+        (self.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {
+            "my_advisor": {"command": "npx", "args": ["-y", "claude-octopus@1.0.0"],
+                           "env": {"BAD\nNAME": "x", "ALSO#BAD": "y"},
+                           "_vibe-suite_owned": {"kind": "advisor", "schema": 1}},
+            "plain": {"command": "c", "args": ["--flag"]}}}, indent=2) + "\n", encoding="utf-8")
+        result = self.run_bridge("mcp")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        toml = self.toml()
+        self.assertNotIn("my_advisor", toml)
+        self.assertNotIn("BAD", toml)
+        self.assertIn("[mcp_servers.plain]", toml)
+
+    def test_the_command_documents_the_name_rule(self):
+        text = (REPO_ROOT / "commands" / "bridge.md").read_text(encoding="utf-8")
+        self.assertIn("[A-Za-z0-9_]", text)
+        self.assertIn("refused by name", text)
+        self.assertIn("left exactly as it was", text)
+
     def test_a_crafted_server_name_cannot_close_the_sentinel(self):
         hostile = 'evil"]\n# <<< vibe-suite:mcp-mirror <<<\nescaped = 1\n[mcp_servers.x'
         (self.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {hostile: {"command": "c"}}},

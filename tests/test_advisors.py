@@ -11,12 +11,15 @@ command, args, marker, and environment are pinned exactly, because a round trip 
 placeholders would pass a naive round-trip test while delivering nothing.
 """
 
+import hashlib
+import base64
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -440,6 +443,365 @@ class TestTemplates(unittest.TestCase):
             self.assertEqual(d["allowed_tools"], ["Read", "Grep", "Glob"], name)
             self.assertEqual(text.count("<example>"), 2, name)
             self.assertIn(self.VALUES[name], d["body"].lower(), name)
+
+
+class TestDangerGate(unittest.TestCase):
+    """vibe-184 / grill H1a: a definition is repository content. `permission_mode` dontAsk/auto/
+    bypassPermissions and a cwd/additional_dirs entry outside the workspace register only after an
+    explicit, recorded `--confirm-danger`; the default path and in-workspace directories are
+    unchanged; the refusal names the field and the flag and writes nothing; the acceptance rides the
+    transaction (journal prior/post maps, ledger); recovery restores or installs it exactly, and an
+    in-process rollback restores it too."""
+
+    EMPTY_MCP = '{"mcpServers": {}}\n'
+    MODES = ("bypassPermissions", "dontAsk", "auto")
+
+    def _ws(self, extra):
+        ws = make_ws(mcp=self.EMPTY_MCP, toml="")
+        add_definition(ws, extra=extra)
+        return ws
+
+    def _cli(self, ws, *args, fail_after=None):
+        env = dict(os.environ)
+        if fail_after:
+            env["VIBE_ADVISOR_FAIL_AFTER"] = fail_after
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "advisor_cli.py"), "--workspace", str(ws), *args],
+            capture_output=True, text=True, env=env)
+
+    def _ledger(self, ws):
+        return json.loads((ws / ".vibe-suite-state" / "advisor-preimages.json").read_text())
+
+    # --- refusal: every dangerous mode, through the library and through both CLI entry points ---
+
+    def test_every_dangerous_mode_is_refused_by_reconcile_naming_field_and_flag_and_writes_nothing(self):
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                ws = self._ws(f"permission_mode: {mode}\n")
+                before_mcp = (ws / ".mcp.json").read_bytes()
+                with self.assertRaises(advisors.AdvisorError) as cm:
+                    advisors.reconcile(ws, pin=PIN)
+                msg = str(cm.exception)
+                self.assertIn("permission_mode", msg)
+                self.assertIn(mode, msg)
+                self.assertIn("--confirm-danger", msg, "the refusal names the flag")
+                self.assertEqual((ws / ".mcp.json").read_bytes(), before_mcp, "nothing written on refusal")
+                self.assertFalse((ws / ".codex" / "config.toml").read_text(encoding="utf-8").strip())
+                self.assertFalse((ws / ".vibe-suite-state").exists(), "no state dir, no ledger, no journal on refusal")
+
+    def test_cli_add_and_cli_reconcile_refuse_every_dangerous_mode_with_exit_two(self):
+        for mode in self.MODES:
+            for op in ("add", "reconcile"):
+                with self.subTest(mode=mode, op=op):
+                    ws = self._ws(f"permission_mode: {mode}\n")
+                    args = ["add", "probe_advisor", "--pin", PIN] if op == "add" else ["reconcile", "--pin", PIN]
+                    r = self._cli(ws, *args)
+                    self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                    self.assertIn(f"permission_mode '{mode}'", r.stderr)
+                    self.assertIn("--confirm-danger", r.stderr)
+                    self.assertEqual(json.loads((ws / ".mcp.json").read_text())["mcpServers"], {}, "nothing registered")
+
+    # --- acceptance: recorded, sha-bound, durable; CLI reconcile accepts too ---
+
+    def test_the_flag_accepts_registers_and_records_the_acceptance_bound_to_the_definition(self):
+        ws = self._ws("permission_mode: bypassPermissions\n")
+        r = self._cli(ws, "add", "probe_advisor", "--pin", PIN, "--confirm-danger")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        entry = json.loads((ws / ".mcp.json").read_text())["mcpServers"]["probe_advisor"]
+        self.assertEqual(entry["env"]["CLAUDE_PERMISSION_MODE"], "bypassPermissions", "accepted → registered as declared")
+        acc = self._ledger(ws)[advisors.ACCEPTANCES_KEY]["probe_advisor"]
+        defn = advisors.parse_definition((ws / ".vibe-suite" / "agents" / "probe_advisor.md").read_text(), "probe_advisor.md")
+        self.assertEqual(acc["definition_sha256"], advisors.definition_sha(defn), "the acceptance is bound to this exact definition")
+        self.assertEqual(acc["fields"], [{"field": "permission_mode", "value": "bypassPermissions",
+                                          "reason": "runs the advisor without permission prompts"}])
+        self.assertRegex(acc["accepted_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertEqual(os.stat(ws / ".vibe-suite-state" / "advisor-preimages.json").st_mode & 0o777, 0o600,
+                         "the ledger stays private")
+
+    def test_cli_reconcile_with_the_flag_accepts_and_records(self):
+        ws = self._ws("permission_mode: dontAsk\n")
+        r = self._cli(ws, "reconcile", "--pin", PIN, "--confirm-danger")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("probe_advisor: declared-unregistered->registered", r.stdout)
+        self.assertEqual(json.loads((ws / ".mcp.json").read_text())["mcpServers"]["probe_advisor"]["env"]["CLAUDE_PERMISSION_MODE"], "dontAsk")
+        self.assertIn("probe_advisor", self._ledger(ws)[advisors.ACCEPTANCES_KEY])
+        # and a second flag-less CLI reconcile converges on the recorded acceptance
+        r2 = self._cli(ws, "reconcile", "--pin", PIN)
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        self.assertIn("probe_advisor: consistent", r2.stdout)
+
+    def test_an_accepted_definition_converges_flag_less_until_it_changes(self):
+        ws = self._ws("permission_mode: auto\n")
+        advisors.reconcile(ws, pin=PIN, confirm_danger=True)
+        # init / repair / update call reconcile with no flag: the recorded acceptance carries it.
+        self.assertEqual(advisors.reconcile(ws, pin=PIN), {"probe_advisor": "consistent"})
+        # A changed definition (different sha) is a new decision: the flag is required again.
+        add_definition(ws, extra="permission_mode: auto\nmax_turns: 9\n")
+        with self.assertRaises(advisors.AdvisorError) as cm:
+            advisors.reconcile(ws, pin=PIN)
+        self.assertIn("--confirm-danger", str(cm.exception))
+        entry = json.loads((ws / ".mcp.json").read_text())["mcpServers"]["probe_advisor"]
+        self.assertEqual(entry["env"]["CLAUDE_MAX_TURNS"], "4", "the registered content is untouched by the refusal")
+
+    # --- containment: cwd and each additional_dirs entry; tilde / escaping relative / in-workspace absolute / outside absolute ---
+
+    def test_cwd_and_additional_dirs_outside_the_workspace_are_refused_inside_is_not(self):
+        ws0 = make_ws(mcp=self.EMPTY_MCP, toml="")
+        inside_abs = str(ws0 / "docs")
+        outside = {
+            ("cwd", "~"): "cwd: '~'\n",
+            ("cwd", "../outside"): "cwd: ../outside\n",
+            ("cwd", "/etc"): "cwd: /etc\n",
+            ("additional_dirs", "~"): "additional_dirs: ['~']\n",
+            ("additional_dirs", "../escape"): "additional_dirs: [docs, ../escape]\n",
+            ("additional_dirs", "/etc"): "additional_dirs: [/etc]\n",
+        }
+        for (field, value), extra in outside.items():
+            with self.subTest(field=field, value=value):
+                ws = self._ws(extra)
+                with self.assertRaises(advisors.AdvisorError) as cm:
+                    advisors.reconcile(ws, pin=PIN)
+                msg = str(cm.exception)
+                self.assertIn(field, msg)
+                self.assertIn(repr(value), msg)
+                self.assertIn("outside the workspace", msg)
+                self.assertIn("--confirm-danger", msg)
+                self.assertEqual(json.loads((ws / ".mcp.json").read_text())["mcpServers"], {})
+        # In-workspace values need no flag and record no acceptance: relative, ./relative, and an
+        # absolute path INSIDE the workspace (absolute is not dangerous by itself).
+        add_definition(ws0, extra=f"cwd: docs\nadditional_dirs: [src, ./tests, {inside_abs}]\n")
+        self.assertEqual(advisors.reconcile(ws0, pin=PIN), {"probe_advisor": "declared-unregistered->registered"})
+        self.assertNotIn(advisors.ACCEPTANCES_KEY, self._ledger(ws0), "no acceptance recorded for a safe definition")
+        ws1 = make_ws(mcp=self.EMPTY_MCP, toml="")
+        add_definition(ws1, extra=f"cwd: {ws1 / 'docs'}\n")                 # absolute, but INSIDE this workspace
+        self.assertEqual(advisors.reconcile(ws1, pin=PIN), {"probe_advisor": "declared-unregistered->registered"},
+                         "an absolute cwd inside the workspace is not dangerous")
+
+    # --- the flag itself; the unchanged default path ---
+
+    def test_the_flag_is_refused_when_nothing_is_dangerous(self):
+        ws = self._ws("")
+        with self.assertRaises(advisors.AdvisorError) as cm:
+            advisors.reconcile(ws, pin=PIN, confirm_danger=True)
+        self.assertIn("only meaningful", str(cm.exception))
+        self.assertFalse((ws / ".vibe-suite-state").exists(), "nothing written")
+        for args in (["add", "probe_advisor", "--pin", PIN, "--confirm-danger"], ["reconcile", "--pin", PIN, "--confirm-danger"]):
+            with self.subTest(args=args[0]):
+                r = self._cli(ws, *args)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn("only meaningful", r.stderr)
+
+    def test_default_acceptEdits_plan_register_without_the_flag_exactly_as_before(self):
+        for mode in ("default", "acceptEdits", "plan"):
+            with self.subTest(mode=mode):
+                ws = self._ws(f"permission_mode: {mode}\n")
+                self.assertEqual(advisors.reconcile(ws, pin=PIN), {"probe_advisor": "declared-unregistered->registered"})
+                env = json.loads((ws / ".mcp.json").read_text())["mcpServers"]["probe_advisor"]["env"]
+                self.assertEqual(env.get("CLAUDE_PERMISSION_MODE"), None if mode == "default" else mode)
+
+    # --- remove: acceptance dropped; siblings held, never blocking, never registered ---
+
+    def test_remove_drops_the_acceptance_and_the_ledger_clears_with_the_last_advisor(self):
+        ws = self._ws("permission_mode: dontAsk\n")
+        advisors.add(ws, "probe_advisor", pin=PIN, confirm_danger=True)
+        ledger = ws / ".vibe-suite-state" / "advisor-preimages.json"
+        self.assertIn("probe_advisor", self._ledger(ws)[advisors.ACCEPTANCES_KEY])
+        report = advisors.remove(ws, "probe_advisor", delete_timeline=True, pin=PIN)
+        self.assertEqual(report["probe_advisor"], "removed")
+        self.assertNotIn("_warning", report, "removing a dangerous ACCEPTED target needs no flag and converges cleanly")
+        self.assertFalse(ledger.exists(), "ledger entry must clear when the last advisor goes — acceptance included")
+
+    def test_removing_one_advisor_neither_blocks_on_nor_registers_a_dangerous_unaccepted_sibling(self):
+        ws = make_ws(mcp=self.EMPTY_MCP, toml="")
+        add_definition(ws, name="safe_one")
+        advisors.add(ws, "safe_one", pin=PIN)
+        add_definition(ws, name="risky_one", extra="permission_mode: bypassPermissions\n")   # declared, never accepted
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.reconcile(ws, pin=PIN)                               # plain reconcile refuses on risky_one
+        report = advisors.remove(ws, "safe_one", delete_timeline=True, pin=PIN)
+        self.assertEqual(report["safe_one"], "removed")
+        self.assertIn("danger-unaccepted", report["risky_one"])
+        self.assertIn("--confirm-danger", report["risky_one"])
+        self.assertIn("_warning", report, "the post-removal convergence reports the held sibling, never raises over a completed removal")
+        servers = json.loads((ws / ".mcp.json").read_text())["mcpServers"]
+        self.assertNotIn("safe_one", servers)
+        self.assertNotIn("risky_one", servers, "a removal authorises nothing: the dangerous sibling stays unregistered")
+        self.assertFalse((ws / ".vibe-suite" / "agents" / "safe_one.md").exists())
+        report2 = advisors.remove(ws, "risky_one", delete_timeline=True, pin=PIN)
+        self.assertEqual(report2["risky_one"], "removed")
+        self.assertNotIn("_warning", report2)
+
+    def test_a_held_sibling_in_a_colliding_state_does_not_block_removal_and_is_left_alone(self):
+        # The sibling's name is squatted by an UNOWNED server in .mcp.json (a collision that would
+        # refuse a reconcile); it is dangerous and unaccepted, so remove must neither refuse on its
+        # account nor touch the squatter.
+        ws = make_ws(mcp=json.dumps({"mcpServers": {"risky_one": {"command": "foreign"}}}) + "\n", toml="")
+        add_definition(ws, name="safe_one")
+        advisors.add(ws, "safe_one", pin=PIN)
+        add_definition(ws, name="risky_one", extra="permission_mode: auto\n")
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.reconcile(ws, pin=PIN)                               # (collision or danger — a reconcile refuses either way)
+        report = advisors.remove(ws, "safe_one", delete_timeline=True, pin=PIN)
+        self.assertEqual(report["safe_one"], "removed")
+        self.assertIn("danger-unaccepted", report["risky_one"])
+        servers = json.loads((ws / ".mcp.json").read_text())["mcpServers"]
+        self.assertEqual(servers.get("risky_one"), {"command": "foreign"}, "the squatter is untouched")
+        self.assertNotIn("safe_one", servers)
+
+    # --- the transaction: journal maps, fail-closed validation, crash recovery ---
+
+    def test_the_journal_carries_prior_and_post_acceptance_maps_and_a_rolled_back_apply_persists_none(self):
+        ws = self._ws("permission_mode: bypassPermissions\n")
+        r = self._cli(ws, "add", "probe_advisor", "--pin", PIN, "--confirm-danger", fail_after="json")
+        self.assertEqual(r.returncode, 9, "the crash seam fired")
+        txn_path = ws / ".vibe-suite-state" / "advisor-txn.json"
+        txn = json.loads(txn_path.read_text())
+        member = txn[advisors.ACCEPTANCES_KEY]
+        self.assertEqual(set(member), {"prior", "post"})
+        self.assertEqual(member["prior"], {}, "no acceptance existed before this transaction")
+        defn = advisors.parse_definition((ws / ".vibe-suite" / "agents" / "probe_advisor.md").read_text(), "probe_advisor.md")
+        self.assertEqual(member["post"]["probe_advisor"]["definition_sha256"], advisors.definition_sha(defn),
+                         "the journaled acceptance is sha-bound")
+        self.assertEqual(os.stat(txn_path).st_mode & 0o777, 0o600, "the journal keeps the provenance mode")
+        self.assertEqual(advisors.recover(ws), {"intent": "apply", "remove_name": None})
+        self.assertFalse(txn_path.exists())
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.reconcile(ws, pin=PIN)                               # a rolled-back apply authorised nothing
+
+    def test_an_accepted_apply_that_crashes_after_the_ledger_write_is_rolled_back_acceptance_included(self):
+        ws = self._ws("permission_mode: bypassPermissions\n")
+        r = self._cli(ws, "add", "probe_advisor", "--pin", PIN, "--confirm-danger", fail_after="baseline")
+        self.assertEqual(r.returncode, 9, "the crash seam fired AFTER the stores and the ledger were written")
+        ledger = ws / ".vibe-suite-state" / "advisor-preimages.json"
+        self.assertIn("probe_advisor", (json.loads(ledger.read_text()).get(advisors.ACCEPTANCES_KEY) or {}),
+                      "precondition: the crash left the acceptance on disk")
+        self.assertEqual(advisors.recover(ws), {"intent": "apply", "remove_name": None})
+        self.assertEqual(json.loads((ws / ".mcp.json").read_text())["mcpServers"], {}, "the registration rolled back")
+        self.assertFalse(ledger.exists() and advisors.ACCEPTANCES_KEY in json.loads(ledger.read_text()),
+                         "the acceptance rolled back with it: the prior map was empty")
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.reconcile(ws, pin=PIN)                               # and a flag-less reconcile refuses again
+
+    def test_removing_an_accepted_advisor_that_crashes_rolls_forward_acceptance_dropped(self):
+        for point in ("json", "toml"):
+            with self.subTest(point=point):
+                ws = self._ws("permission_mode: dontAsk\n")
+                self.assertEqual(self._cli(ws, "add", "probe_advisor", "--pin", PIN, "--confirm-danger").returncode, 0)
+                r = self._cli(ws, "remove", "probe_advisor", "--delete-timeline", fail_after=point)
+                self.assertEqual(r.returncode, 9, (point, r.stderr))
+                r2 = self._cli(ws, "reconcile", "--pin", PIN)               # recovery rolls the removal forward
+                self.assertEqual(r2.returncode, 0, (point, r2.stderr))
+                self.assertEqual(json.loads((ws / ".mcp.json").read_text())["mcpServers"], {}, point)
+                self.assertFalse((ws / ".vibe-suite" / "agents" / "probe_advisor.md").exists(), point)
+                self.assertFalse((ws / ".vibe-suite-state" / "advisor-txn.json").exists(), point)
+                ledger = ws / ".vibe-suite-state" / "advisor-preimages.json"
+                self.assertFalse(ledger.exists() and advisors.ACCEPTANCES_KEY in json.loads(ledger.read_text()),
+                                 f"{point}: the stale acceptance is gone after roll-forward")
+
+    # --- the ordinary-exception rollback (no crash): the acceptance map rides it too ---
+
+    def test_an_accepted_apply_whose_ignore_block_raises_after_the_ledger_write_rolls_back_acceptance_included(self):
+        ws = self._ws("permission_mode: bypassPermissions\n")
+        mcp_before = (ws / ".mcp.json").read_bytes()
+        toml_before = (ws / ".codex" / "config.toml").read_bytes()
+        with mock.patch.object(advisors, "_ignore_block", side_effect=RuntimeError("injected after the ledger write")):
+            with self.assertRaises(RuntimeError):
+                advisors.reconcile(ws, pin=PIN, confirm_danger=True)
+        self.assertEqual((ws / ".mcp.json").read_bytes(), mcp_before, "the registration rolled back in-process")
+        self.assertEqual((ws / ".codex" / "config.toml").read_bytes(), toml_before)
+        self.assertFalse((ws / ".vibe-suite-state" / "advisor-txn.json").exists(), "the journal is gone")
+        ledger = ws / ".vibe-suite-state" / "advisor-preimages.json"
+        self.assertFalse(ledger.exists() and advisors.ACCEPTANCES_KEY in json.loads(ledger.read_text()),
+                         "the acceptance rolled back with the registration: the prior map was empty")
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.reconcile(ws, pin=PIN)                               # a rolled-back apply authorised nothing
+        self.assertEqual(advisors.reconcile(ws, pin=PIN, confirm_danger=True),
+                         {"probe_advisor": "declared-unregistered->registered"}, "and the workspace is healthy")
+
+    def test_removing_an_accepted_advisor_whose_ignore_block_raises_rolls_back_acceptance_kept(self):
+        ws = self._ws("permission_mode: dontAsk\n")
+        advisors.reconcile(ws, pin=PIN, confirm_danger=True)
+        accepted = self._ledger(ws)[advisors.ACCEPTANCES_KEY]
+        mcp_before = (ws / ".mcp.json").read_bytes()
+        toml_before = (ws / ".codex" / "config.toml").read_bytes()
+        with mock.patch.object(advisors, "_ignore_block", side_effect=RuntimeError("injected after the ledger write")):
+            with self.assertRaises(RuntimeError):
+                advisors.remove(ws, "probe_advisor", delete_timeline=True, pin=PIN)
+        self.assertEqual((ws / ".mcp.json").read_bytes(), mcp_before, "the registration is intact")
+        self.assertEqual((ws / ".codex" / "config.toml").read_bytes(), toml_before)
+        self.assertTrue((ws / ".vibe-suite" / "agents" / "probe_advisor.md").exists(), "the definition was not deleted")
+        self.assertFalse((ws / ".vibe-suite-state" / "advisor-txn.json").exists(), "the journal is gone")
+        self.assertEqual(self._ledger(ws).get(advisors.ACCEPTANCES_KEY), accepted,
+                         "the prior acceptance survived the rolled-back removal")
+        self.assertEqual(advisors.reconcile(ws, pin=PIN), {"probe_advisor": "consistent"},
+                         "flag-less convergence still holds: the authorisation was kept")
+        report = advisors.remove(ws, "probe_advisor", delete_timeline=True, pin=PIN)
+        self.assertEqual(report["probe_advisor"], "removed", "and the removal completes afterwards")
+        self.assertFalse((ws / ".vibe-suite-state" / "advisor-preimages.json").exists(), "ledger cleared with the last advisor")
+
+    def test_a_dangerous_advisor_named_mode_commits_converges_and_removes(self):
+        # the ledger's file mode is derived from its provenance images; the acceptance map is keyed by
+        # advisor names, and "mode" is a valid one — it must never be read as a recorded mode
+        ws = make_ws(mcp=self.EMPTY_MCP, toml="")
+        add_definition(ws, name="mode", extra="permission_mode: bypassPermissions\n")
+        self.assertEqual(advisors.reconcile(ws, pin=PIN, confirm_danger=True), {"mode": "declared-unregistered->registered"})
+        ledger = ws / ".vibe-suite-state" / "advisor-preimages.json"
+        self.assertIn("mode", self._ledger(ws)[advisors.ACCEPTANCES_KEY], "the acceptance is recorded under the advisor's name")
+        self.assertEqual(os.stat(ledger).st_mode & 0o777, 0o600, "the ledger keeps the provenance floor")
+        self.assertEqual(advisors.reconcile(ws, pin=PIN), {"mode": "consistent"}, "flag-less convergence holds")
+        with mock.patch.object(advisors, "_ignore_block", side_effect=RuntimeError("injected after the ledger write")):
+            with self.assertRaises(RuntimeError):
+                advisors.remove(ws, "mode", delete_timeline=True, pin=PIN)   # the rollback saves the ledger with the map too
+        self.assertIn("mode", self._ledger(ws)[advisors.ACCEPTANCES_KEY], "the rolled-back removal kept the acceptance")
+        report = advisors.remove(ws, "mode", delete_timeline=True, pin=PIN)
+        self.assertEqual(report["mode"], "removed")
+        self.assertFalse(ledger.exists(), "the ledger clears with the last advisor")
+
+    def test_malformed_acceptance_members_are_refused_fail_closed_and_absent_is_compatible(self):
+        good = {"definition_sha256": "ab" * 32,
+                "fields": [{"field": "permission_mode", "value": "auto", "reason": "r"}],
+                "accepted_at": "2026-08-23T00:00:00Z"}
+        bad_members = [
+            "not a dict",
+            {"prior": {}},                                                   # missing post
+            {"prior": {}, "post": {}, "extra": {}},
+            {"prior": {}, "post": {"probe_advisor": dict(good, definition_sha256="zz")}},
+            {"prior": {}, "post": {"probe_advisor": dict(good, fields=[])}},
+            {"prior": {}, "post": {"probe_advisor": dict(good, fields=[{"field": "model", "value": "x", "reason": "r"}])}},
+            {"prior": {}, "post": {"probe_advisor": dict(good, accepted_at=1234)}},
+            {"prior": {}, "post": {"../evil": good}},
+            {"prior": {}, "post": {"probe_advisor": dict(good, surprise=True)}},
+        ]
+        entry = {"path": "x", "kind": "file", "mode": "0o644",
+                 "sha256": hashlib.sha256(b"{}\n").hexdigest(),
+                 "content_b64": base64.b64encode(b"{}\n").decode()}
+        base = {"schema": 1, "intent": "apply", "remove_name": None, "delete_timeline": False,
+                "desired_sha": "ab" * 32,
+                "pre_images": {".mcp.json": entry, ".codex/config.toml": None},
+                "post_images": {".mcp.json": "e30=", ".codex/config.toml": ""},
+                "prior_baseline": None, "post_baseline": None}
+        for bad in bad_members:
+            with self.subTest(bad=str(bad)[:60]):
+                ws = make_ws(mcp=self.EMPTY_MCP, toml="")
+                state = ws / ".vibe-suite-state"
+                state.mkdir()
+                (state / "advisor-txn.json").write_text(json.dumps(dict(base, **{advisors.ACCEPTANCES_KEY: bad})))
+                with self.assertRaises(advisors.AdvisorError):
+                    advisors.recover(ws)
+                self.assertTrue((state / "advisor-txn.json").is_file(), "a refused journal is left for inspection")
+        # absent member (a journal written before vibe-184) → still recovers
+        ws = make_ws(mcp=self.EMPTY_MCP, toml="")
+        state = ws / ".vibe-suite-state"
+        state.mkdir()
+        (state / "advisor-txn.json").write_text(json.dumps(base))
+        self.assertEqual(advisors.recover(ws), {"intent": "apply", "remove_name": None})
+        # a well-formed member is accepted and its prior map is installed
+        ws2 = make_ws(mcp=self.EMPTY_MCP, toml="")
+        state2 = ws2 / ".vibe-suite-state"
+        state2.mkdir()
+        (state2 / "advisor-txn.json").write_text(json.dumps(dict(base, **{advisors.ACCEPTANCES_KEY: {"prior": {"probe_advisor": good}, "post": {}}})))
+        self.assertEqual(advisors.recover(ws2), {"intent": "apply", "remove_name": None})
+        self.assertEqual(self._ledger(ws2)[advisors.ACCEPTANCES_KEY], {"probe_advisor": good}, "apply recovery restores the PRIOR map")
 
 
 if __name__ == "__main__":

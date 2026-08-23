@@ -15,6 +15,14 @@ a state worth acting on before starting the next link. This program is that wait
     2  closed without merge       6  ten consecutive state-probe failures
     3  activity newer than cursor 7  green and unarmed (--merge-when-green only)
 
+**Exit 3 also carries WHO** (vibe-188 / grill H2 part b): the triggering activity's
+`author_association` (GitHub's `OWNER | MEMBER | COLLABORATOR | CONTRIBUTOR | FIRST_TIME_CONTRIBUTOR |
+FIRST_TIMER | MANNEQUIN | NONE`) and author login are printed as ONE JSON line on stdout —
+`{"at": "<iso>", "author": "<login>", "author_association": "<assoc>", "exit": 3}` — so the chain can
+gate a babysit round on the author instead of on the mere existence of activity. The exit code stays
+the interface; the line is the evidence that rides with it. An association the API did not supply is
+reported as the empty string, which the chain treats as not a collaborator.
+
 **Two properties that a re-implementation gets wrong by default**, both encoded below:
 
 - **Exit 5 is a timeout, not a state.** It is evaluated at the top of the iteration, *before* the
@@ -74,6 +82,27 @@ def reduce(body, field):
     return "\n".join(str(v) for v in values if v not in (None, ""))
 
 
+def reduce_activity(body, field):
+    """What `gh api --paginate --jq '.[] | select(.F != null and .F != "") | [.F, (.author_association
+    // ""), (.user.login // "")] | @tsv'` writes (vibe-188): one tab-separated line per element that
+    carries the field — stamp, association, login — with tabs, newlines and backslashes inside a value
+    escaped the way jq's `@tsv` escapes them, so a hostile login cannot forge a column."""
+    def esc(value):
+        return (str(value).replace("\\", "\\\\").replace("\t", "\\t")
+                .replace("\n", "\\n").replace("\r", "\\r"))
+    lines = []
+    for element in body:
+        if not isinstance(element, dict):
+            continue
+        stamp = element.get(field)
+        if stamp in (None, ""):
+            continue
+        user = element.get("user") if isinstance(element.get("user"), dict) else {}
+        lines.append("\t".join([esc(stamp), esc(element.get("author_association") or ""),
+                               esc(user.get("login") or "")]))
+    return "\n".join(lines)
+
+
 def _run_gh(argv):
     result = subprocess.run(["gh"] + argv, capture_output=True, text=True)
     if result.returncode != 0:
@@ -91,7 +120,7 @@ class Watcher:
     """
 
     def __init__(self, repo, pr, cursor, poll=90, max_wait=21600, merge_when_green=False,
-                 gh=None, clock=None, max_polls=None):
+                 gh=None, clock=None, max_polls=None, emit=None):
         self.repo = repo
         self.pr = str(pr)
         self.cursor = "" if cursor in ("-", None) else cursor
@@ -101,7 +130,10 @@ class Watcher:
         self.gh = gh or _run_gh
         self.clock = clock or time.time
         self.max_polls = max_polls
+        self.emit = emit or print           # where the exit-3 JSON line goes (stdout by default)
         self.consecutive_failures = 0
+        #: vibe-188: the activity that produced EXIT_ACTIVITY — `{at, author_association, author}`.
+        self.last_activity = None
 
     # -- the five calls, in the shape this port commits to --------------------------------------
     #
@@ -127,17 +159,37 @@ class Watcher:
         return [(c.get("conclusion") or c.get("state") or "") for c in checks]
 
     def _latest_activity(self):
+        """The newest activity across the three endpoints, as `{at, author_association, author}`.
+
+        vibe-188: each line is `<stamp>\t<author_association>\t<login>` (jq `@tsv`, which escapes tabs
+        and newlines inside a value, so a hostile login cannot forge a column). A bare stamp — no tab —
+        is still accepted and reports an empty association: the chain treats "unknown" as "not a
+        collaborator". Returns None when nothing was observed.
+        """
         endpoints = ((f"repos/{self.repo}/issues/{self.pr}/comments", "updated_at"),
                      (f"repos/{self.repo}/pulls/{self.pr}/reviews", "submitted_at"),
                      (f"repos/{self.repo}/pulls/{self.pr}/comments", "updated_at"))
-        stamps = []
+        records = []
         for path, field in endpoints:
+            jq = (f'.[] | select(.{field} != null and .{field} != "") | '
+                  f'[.{field}, (.author_association // ""), (.user.login // "")] | @tsv')
             try:
-                raw = self.gh(["api", "--paginate", path, "--jq", f".[].{field} // empty"])
+                raw = self.gh(["api", "--paginate", path, "--jq", jq])
             except GhError:
                 continue                   # degrades, like the rollup
-            stamps.extend(line for line in raw.splitlines() if line.strip())
-        return max(stamps) if stamps else None
+            for line in raw.splitlines():
+                if not line.strip():
+                    continue
+                parts = line.split("\t")
+                stamp = parts[0].strip()
+                if not stamp:
+                    continue
+                records.append({"at": stamp,
+                                "author_association": parts[1].strip() if len(parts) > 1 else "",
+                                "author": parts[2].strip() if len(parts) > 2 else ""})
+        if not records:
+            return None
+        return max(records, key=lambda r: r["at"])
 
     # -- one poll -------------------------------------------------------------------------------
 
@@ -170,7 +222,8 @@ class Watcher:
                 return EXIT_GREEN
 
         latest = self._latest_activity()
-        if latest and (not self.cursor or latest > self.cursor):
+        if latest and (not self.cursor or latest["at"] > self.cursor):
+            self.last_activity = latest
             return EXIT_ACTIVITY
         return None
 
@@ -190,6 +243,10 @@ class Watcher:
 
             outcome = self.poll_once(elapsed)
             if outcome is not None:
+                if outcome == EXIT_ACTIVITY and self.last_activity is not None:
+                    # vibe-188: the exit code says "activity"; this line says whose.
+                    self.emit(json.dumps({"exit": EXIT_ACTIVITY, **self.last_activity},
+                                         sort_keys=True))
                 return outcome
 
             polls += 1

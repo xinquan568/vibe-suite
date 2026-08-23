@@ -421,6 +421,31 @@ class TestWatcherExitActionMap(unittest.TestCase):
         actions = [record["guidance"] for record in self.mapping().values()]
         self.assertEqual(len(set(actions)), len(actions), "two exits map to the same action text")
 
+    def test_exit_3_declares_the_author_gate_and_exit_4_opts_out(self):
+        # vibe-188: the declaration — not the driver — says which authors may trigger a babysit round,
+        # what happens otherwise (notify-only; auto-merge never re-armed; the decision recorded), and
+        # that a failing check (exit 4) has no author to gate on.
+        mapping = self.mapping()
+        three = mapping[3]["effect"]
+        self.assertEqual(three["requires"], ["classification", "babysit_round", "babysit_cap"], "the flag is required by the gate, for actionable activity")
+        gate = three["author_gate"]
+        self.assertEqual(gate["applies_to"], "actionable")
+        self.assertEqual(gate["babysit_allowed"], ["OWNER", "MEMBER", "COLLABORATOR"])
+        otherwise = gate["otherwise"]
+        self.assertEqual(otherwise["report"], "notify-only")
+        self.assertEqual(otherwise["link_flag"], {"auto_merge_rearm": False})
+        self.assertIn("NOT re-armed", otherwise["timeline_note"])
+        self.assertEqual(otherwise.get("cursor"), "advance")
+        self.assertEqual(otherwise.get("result_events"), [], "the notify-only branch awaits no result event")
+        self.assertIn("edge", three["by_classification"]["actionable_within_cap"], "the collaborator path is unchanged")
+        four = mapping[4]["effect"]
+        self.assertEqual(four["as"], "3")
+        self.assertIsNone(four["author_gate"])
+        self.assertNotIn("requires", four, "exit 4 inherits its requirements from exit 3 through the alias")
+        for code, guidance in ((3, mapping[3]["guidance"]), (4, mapping[4]["guidance"])):
+            self.assertIn("classify" if code == 3 else "check", guidance.lower())
+        self.assertIn("never re-armed", mapping[3]["guidance"])
+
 
 class TestGuardsResolve(unittest.TestCase):
     def test_the_run_collision_guard_points_at_the_modes_it_names(self):
@@ -524,6 +549,8 @@ class TestWatcherIsAProgram(unittest.TestCase):
         result = subprocess.run([sys.executable, str(WATCH), "owner/repo"],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 1, "a usage error exits 1, before the loop")
+        self.assertEqual(result.stdout, "", "a usage error writes no activity line — it exits "
+                                            "before a Watcher exists (vibe-188)")
 
 
 class WatcherCase(unittest.TestCase):
@@ -594,6 +621,99 @@ class TestWatcherExitCodes(WatcherCase):
     def test_a_cursor_of_dash_treats_any_activity_as_new(self):
         module, w = self.watcher(state=self.OPEN, cursor="-", activity=["2000-01-01T00:00:00Z"])
         self.assertEqual(w.run(), module.EXIT_ACTIVITY)
+
+
+class TestWatcherCarriesTheAuthor(WatcherCase):
+    """vibe-188 / grill H2 (part b): exit 3 says WHO — author_association and login of the activity
+    that produced it, as one JSON line on stdout — so the chain can gate a babysit round on it."""
+
+    def watcher_with_emit(self, **kw):
+        module, w = self.watcher(**kw)
+        lines = []
+        w.emit = lines.append
+        return module, w, lines
+
+    def test_a_non_collaborator_comment_exits_3_carrying_author_association_none(self):
+        module, w, lines = self.watcher_with_emit(
+            state=self.OPEN, activity=["2026-06-01T00:00:00Z\tNONE\tstranger"])
+        self.assertEqual(w.run(), module.EXIT_ACTIVITY)
+        self.assertEqual(w.last_activity,
+                         {"at": "2026-06-01T00:00:00Z", "author_association": "NONE", "author": "stranger"})
+        self.assertEqual(len(lines), 1, lines)
+        self.assertEqual(json.loads(lines[0]),
+                         {"exit": 3, "at": "2026-06-01T00:00:00Z", "author_association": "NONE", "author": "stranger"})
+
+    def test_a_collaborator_comment_exits_3_carrying_its_association(self):
+        module, w, lines = self.watcher_with_emit(
+            state=self.OPEN, activity=["2026-06-01T00:00:00Z\tCOLLABORATOR\tmaintainer"])
+        self.assertEqual(w.run(), module.EXIT_ACTIVITY)
+        self.assertEqual(w.last_activity["author_association"], "COLLABORATOR")
+        self.assertEqual(json.loads(lines[0])["author"], "maintainer")
+
+    def test_the_newest_activity_is_the_one_reported(self):
+        module, w, lines = self.watcher_with_emit(
+            state=self.OPEN, activity=["2026-06-01T00:00:00Z\tOWNER\tboss",
+                                       "2026-06-02T00:00:00Z\tNONE\tstranger",
+                                       "2026-05-30T00:00:00Z\tMEMBER\tteam"])
+        self.assertEqual(w.run(), module.EXIT_ACTIVITY)
+        self.assertEqual(w.last_activity["author_association"], "NONE", "the newest stamp wins, whoever wrote it")
+
+    def test_a_bare_stamp_is_accepted_and_reports_an_empty_association(self):
+        # the pre-vibe-188 line shape (timestamps only) still produces exit 3; unknown is not a collaborator
+        module, w, lines = self.watcher_with_emit(state=self.OPEN, activity=["2026-06-01T00:00:00Z"])
+        self.assertEqual(w.run(), module.EXIT_ACTIVITY)
+        self.assertEqual(w.last_activity["author_association"], "")
+        self.assertEqual(json.loads(lines[0])["author_association"], "")
+
+    def test_no_activity_newer_than_the_cursor_reports_nothing(self):
+        module, w, lines = self.watcher_with_emit(
+            state=self.OPEN, activity=["2025-01-01T00:00:00Z\tNONE\tstranger"], clock=(0, 99999), max_wait=10)
+        self.assertEqual(w.run(), module.EXIT_TIMEOUT)
+        self.assertIsNone(w.last_activity)
+        self.assertEqual(lines, [])
+
+    def test_no_line_is_emitted_on_any_other_exit(self):
+        # the line is tied to exit 3 alone — every other outcome, with tempting activity present,
+        # emits nothing; the failing-check case matters most (exit 4 returns BEFORE the activity probe)
+        newer = ["2026-06-01T00:00:00Z	NONE	stranger"]
+        cases = {
+            "merged": dict(state=self.MERGED, activity=newer),
+            "closed": dict(state=self.CLOSED, activity=newer),
+            "checks-failed": dict(state=self.OPEN, rollup=self.ROLLUP_FAIL, activity=newer),
+            "green": dict(state=self.OPEN, rollup=self.ROLLUP_GREEN, activity=newer, clock=(0, 200), merge_when_green=True),
+            "timeout": dict(state=self.OPEN, activity=newer, clock=(0, 99999), max_wait=10),
+            "gh-errors": dict(state=self.OPEN, activity=newer, fail_probe=True),
+        }
+        expected = {"merged": "EXIT_MERGED", "closed": "EXIT_CLOSED", "checks-failed": "EXIT_CHECKS_FAILED",
+                    "green": "EXIT_GREEN", "timeout": "EXIT_TIMEOUT", "gh-errors": "EXIT_GH_ERRORS"}
+        for name, kw in cases.items():
+            with self.subTest(outcome=name):
+                module, w, lines = self.watcher_with_emit(**kw)
+                if name == "gh-errors":
+                    w.max_polls = 20
+                self.assertEqual(w.run(), getattr(module, expected[name]))
+                self.assertEqual(lines, [], f"{name} must emit no line")
+
+    def test_the_activity_query_asks_for_the_association_and_login_as_tsv(self):
+        module = load_watcher()
+        seen = []
+
+        def gh(argv):
+            seen.append(argv)
+            if "--json" in argv and "state" in argv:
+                return json.dumps(self.OPEN)
+            if "--json" in argv and "statusCheckRollup" in argv:
+                return json.dumps(self.ROLLUP_EMPTY)
+            return ""
+        w = module.Watcher("owner/repo", 1, "-", poll=0, max_wait=1, gh=gh, clock=lambda: 0, max_polls=1)
+        w.run()
+        api_calls = [a for a in seen if a and a[0] == "api"]
+        self.assertEqual(len(api_calls), 3, seen)
+        for argv in api_calls:
+            jq = argv[argv.index("--jq") + 1]
+            self.assertIn("author_association", jq)
+            self.assertIn("user.login", jq)
+            self.assertIn("@tsv", jq)
 
 
 class TestWatcherPrecedence(WatcherCase):
@@ -708,7 +828,11 @@ class RecordedGh:
         endpoint = self.endpoint(argv[2])
         for name in self.activity:
             if self.endpoint(self.record(name)["_invocation"]) == endpoint:
-                field = argv[-1].split(".")[-1].split(" ")[0]
+                jq = argv[-1]
+                if "@tsv" in jq:          # vibe-188: stamp, author_association, login per element
+                    field = re.search(r"\[\.(\w+),", jq).group(1)
+                    return self.module.reduce_activity(self.record(name)["body"], field)
+                field = jq.split(".")[-1].split(" ")[0]
                 return self.module.reduce(self.record(name)["body"], field)
         if endpoint in self.EMPTY_OK:
             return ""          # a genuinely empty collection, declared rather than defaulted
@@ -789,13 +913,13 @@ class TestRecordedFixturesDriveTheWatcher(unittest.TestCase):
                          ["pr", "view", "1", "--repo", "owner/repo", "--json", "statusCheckRollup"])
         # By identity, not by class. A previous version checked "has --paginate, lacks -f" and
         # passed against wrong paths, an added `--method GET`, and bogus jq fields.
+        def tsv(field):   # vibe-188: the activity query now carries the author with the stamp
+            return (f'.[] | select(.{field} != null and .{field} != "") | '
+                    f'[.{field}, (.author_association // ""), (.user.login // "")] | @tsv')
         self.assertEqual(apis, [
-            ["api", "--paginate", "repos/owner/repo/issues/1/comments",
-             "--jq", ".[].updated_at // empty"],
-            ["api", "--paginate", "repos/owner/repo/pulls/1/reviews",
-             "--jq", ".[].submitted_at // empty"],
-            ["api", "--paginate", "repos/owner/repo/pulls/1/comments",
-             "--jq", ".[].updated_at // empty"],
+            ["api", "--paginate", "repos/owner/repo/issues/1/comments", "--jq", tsv("updated_at")],
+            ["api", "--paginate", "repos/owner/repo/pulls/1/reviews", "--jq", tsv("submitted_at")],
+            ["api", "--paginate", "repos/owner/repo/pulls/1/comments", "--jq", tsv("updated_at")],
         ])
         for call in (state, rollup):
             self.assertNotIn("--jq", call, "pr view reduces in Python, not through gh's jq")

@@ -241,7 +241,8 @@ class TestChain(DriverCase):
                 before = tree_hash(chain.parent)
                 r = self.drive_chain(chain, "--watcher-exit", "3",
                                      "--classification", classification,
-                                     "--babysit-round", rnd, "--babysit-cap", "3")
+                                     "--babysit-round", rnd, "--babysit-cap", "3",
+                                     "--author-association", "COLLABORATOR")
                 self.assertEqual(r.returncode, 0, r.stderr)
                 data = self.load(chain)
                 self.assertEqual(data["links"][0]["status"], link_status)
@@ -260,7 +261,8 @@ class TestChain(DriverCase):
                 chain, _ = self.chain_file()
                 r = self.drive_chain(chain, "--watcher-exit", "3",
                                      "--classification", "actionable",
-                                     "--babysit-round", rnd, "--babysit-cap", "1")
+                                     "--babysit-round", rnd, "--babysit-cap", "1",
+                                     "--author-association", "OWNER")
                 self.assertEqual(r.returncode, 0, r.stderr)
                 data = self.load(chain)
                 self.assertEqual(data["links"][0]["status"], link_status)
@@ -279,11 +281,214 @@ class TestChain(DriverCase):
         r = self.drive_chain(chain, "--watcher-exit", "3",
                              "--classification", "status-noise",
                              "--babysit-round", "1", "--babysit-cap", "3",
+                             "--author-association", "COLLABORATOR",
                              "--cursor", "2026-08-02T00:00:00Z")
         self.assertEqual(r.returncode, 0, r.stderr)
         data = self.load(chain)
         self.assertEqual(data["links"][0]["status"], "waiting_merge")
         self.assertEqual(data["links"][0]["cursor"], "2026-08-02T00:00:00Z")
+
+    def test_exit3_non_collaborator_is_notify_only_and_never_rearms(self):
+        # vibe-188 / grill H2 (part b): the babysit path is for OWNER/MEMBER/COLLABORATOR only;
+        # everyone else — including CONTRIBUTOR and an unknown/empty association — is notified
+        # about, never acted upon, and auto-merge is never re-armed on their account.
+        for assoc in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "MANNEQUIN", "SOMETHING_NEW", ""):
+            with self.subTest(author_association=assoc or "<empty>"):
+                chain, timeline = self.chain_file()
+                r = self.drive_chain(chain, "--watcher-exit", "3",
+                                     "--classification", "actionable",
+                                     "--babysit-round", "1", "--babysit-cap", "3",
+                                     "--author-association", assoc,
+                                     "--cursor", "2026-08-02T00:00:00Z")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                data = self.load(chain)
+                self.assertEqual(data["links"][0]["status"], "waiting_merge", "no babysit round")
+                self.assertEqual(data["status"], "waiting_merge", "the chain neither iterates nor pauses")
+                self.assertIs(data["links"][0]["auto_merge_rearm"], False, "the decision is recorded in chain.json")
+                self.assertEqual(data["links"][0]["cursor"], "2026-08-02T00:00:00Z", "the cursor advances so the watcher does not re-fire on the same activity")
+                self.assertEqual(data["links"][1]["status"], "pending")
+                text = timeline.read_text()
+                self.assertIn("auto-merge NOT re-armed", text)
+                self.assertIn(f"author_association={assoc or 'UNKNOWN'}", text)
+                self.assertIn("notify-only", r.stdout)
+                self.assertNotIn("babysit-start", r.stdout)
+                self.assertNotIn("babysit-finish", r.stdout, "the notify-only branch declares no result events")
+                self.assertNotIn("awaiting result events", r.stdout)
+
+    def test_exit3_collaborator_babysit_path_unchanged(self):
+        for assoc in ("OWNER", "MEMBER", "COLLABORATOR", "collaborator"):
+            with self.subTest(author_association=assoc):
+                chain, timeline = self.chain_file()
+                r = self.drive_chain(chain, "--watcher-exit", "3",
+                                     "--classification", "actionable",
+                                     "--babysit-round", "1", "--babysit-cap", "3",
+                                     "--author-association", assoc)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                data = self.load(chain)
+                self.assertEqual(data["links"][0]["status"], "iterating")
+                self.assertNotIn("auto_merge_rearm", data["links"][0])
+                self.assertIn("babysit-start", r.stdout)
+                self.assertNotIn("NOT re-armed", timeline.read_text())
+
+    def test_exit3_refuses_without_the_author_association(self):
+        chain, _ = self.chain_file()
+        before = tree_hash(chain.parent)
+        r = self.drive_chain(chain, "--watcher-exit", "3",
+                             "--classification", "actionable",
+                             "--babysit-round", "1", "--babysit-cap", "3")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("author-association", r.stderr)
+        self.assertEqual(tree_hash(chain.parent), before, "a refusal writes nothing")
+
+    def test_exit3_question_and_status_noise_need_no_author(self):
+        # the gate applies to actionable activity only: a question or status-noise never edits anything
+        chain, _ = self.chain_file()
+        r = self.drive_chain(chain, "--watcher-exit", "3", "--classification", "question",
+                             "--babysit-round", "1", "--babysit-cap", "3")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("notify", r.stdout)
+        chain, _ = self.chain_file()
+        r = self.drive_chain(chain, "--watcher-exit", "3", "--classification", "status-noise",
+                             "--babysit-round", "1", "--babysit-cap", "3", "--cursor", "2026-08-02T00:00:00Z")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.load(chain)["links"][0]["cursor"], "2026-08-02T00:00:00Z")
+
+    def test_exit3_author_gate_is_consumed_from_the_declaration_fail_closed(self):
+        # vibe-188: the driver DERIVES the gate from the block — removal is a gap naming the member
+        # (exit 4), never a silent return to the old babysit path; mutation changes behaviour.
+        def drive(ref, assoc="COLLABORATOR", cursor=True):
+            chain, timeline = self.chain_file()
+            argv = ["--watcher-exit", "3", "--classification", "actionable", "--babysit-round", "1",
+                    "--babysit-cap", "3", "--author-association", assoc]
+            if cursor:
+                argv += ["--cursor", "2026-08-02T00:00:00Z"]
+            return self.drive_chain(chain, *argv, reference=ref), chain, timeline
+
+        def removed(*path):
+            def mutate(blocks):
+                node = blocks["watcher-exit-actions"]["3"]["effect"]
+                for key in path[:-1]:
+                    node = node[key]
+                del node[path[-1]]
+            return edit_reference(mutate)
+
+        for path, named in ((("author_gate",), "author_gate"),
+                            (("author_gate", "applies_to"), "applies_to"),
+                            (("author_gate", "babysit_allowed"), "babysit_allowed"),
+                            (("author_gate", "otherwise"), "otherwise"),
+                            (("author_gate", "otherwise", "report"), "otherwise.report"),
+                            (("author_gate", "otherwise", "link_flag"), "otherwise.link_flag"),
+                            (("author_gate", "otherwise", "timeline_note"), "otherwise.timeline_note"),
+                            (("author_gate", "otherwise", "cursor"), "otherwise.cursor"),
+                            (("author_gate", "otherwise", "result_events"), "otherwise.result_events")):
+            with self.subTest(removed=".".join(path)):
+                r, chain, _ = drive(removed(*path), assoc="OWNER")
+                self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+                self.assertIn(named, r.stderr)
+                self.assertEqual(self.load(chain)["links"][0]["status"], "waiting_merge", "a gap writes no transition")
+
+        with self.subTest(mutation="applies_to unsupported"):
+            def mutate(blocks):
+                blocks["watcher-exit-actions"]["3"]["effect"]["author_gate"]["applies_to"] = "everything"
+            r, _, _ = drive(edit_reference(mutate), assoc="OWNER")
+            self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+            self.assertIn("applies_to", r.stderr)
+
+        with self.subTest(mutation="babysit_allowed narrowed"):
+            def mutate(blocks):
+                blocks["watcher-exit-actions"]["3"]["effect"]["author_gate"]["babysit_allowed"] = ["OWNER"]
+            r, chain, _ = drive(edit_reference(mutate), assoc="COLLABORATOR")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(self.load(chain)["links"][0]["status"], "waiting_merge", "COLLABORATOR is now notify-only")
+            self.assertIn("notify-only", r.stdout)
+
+        with self.subTest(mutation="otherwise report / link_flag / timeline_note / cursor"):
+            def mutate(blocks):
+                o = blocks["watcher-exit-actions"]["3"]["effect"]["author_gate"]["otherwise"]
+                o["report"] = "custom-report-x"; o["link_flag"] = {"custom_flag": 7}
+                o["timeline_note"] = "custom-note-y"; del o["cursor"]
+                o["cursor"] = "advance"
+            r, chain, timeline = drive(edit_reference(mutate), assoc="NONE")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("custom-report-x", r.stdout)
+            self.assertEqual(self.load(chain)["links"][0]["custom_flag"], 7)
+            self.assertIn("custom-note-y", timeline.read_text())
+
+        with self.subTest(mutation="otherwise result_events declared"):
+            def mutate(blocks):
+                blocks["watcher-exit-actions"]["3"]["effect"]["author_gate"]["otherwise"]["result_events"] = ["babysit-finish"]
+            r, _, _ = drive(edit_reference(mutate), assoc="NONE")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("awaiting result events: babysit-finish", r.stdout, "the branch's own result events are awaited")
+
+        with self.subTest(mutation="exit 4 keeps its explicit opt-out"):
+            chain, _ = self.chain_file()
+            r = self.drive_chain(chain, "--watcher-exit", "4", "--classification", "actionable",
+                                 "--babysit-round", "1", "--babysit-cap", "3")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(self.load(chain)["links"][0]["status"], "iterating")
+
+    def test_exit3_author_gate_rejects_unsupported_shapes_and_values_before_any_persistence(self):
+        # vibe-188: every member is validated — shape AND value — and an unsupported declaration
+        # is a gap naming the exact member (exit 4) with NOTHING persisted. Driven as a
+        # non-collaborator, whose branch would otherwise write a link flag, the cursor and a note.
+        def set_at(path, value):
+            def mutate(blocks):
+                node = blocks["watcher-exit-actions"]["3"]["effect"]
+                for key in path[:-1]:
+                    node = node[key]
+                node[path[-1]] = value
+            return edit_reference(mutate)
+
+        G = ("author_gate",)
+        O = ("author_gate", "otherwise")
+        table = (
+            (G, "OWNER", "3.effect.author_gate'"),
+            (G + ("applies_to",), 7, "author_gate.applies_to"),
+            (G + ("babysit_allowed",), "OWNER", "author_gate.babysit_allowed"),
+            (G + ("babysit_allowed",), [], "author_gate.babysit_allowed"),
+            (G + ("babysit_allowed",), ["OWNER", 3], "author_gate.babysit_allowed"),
+            (G + ("babysit_allowed",), [" "], "author_gate.babysit_allowed"),
+            (O, "notify-only", "author_gate.otherwise'"),
+            (O + ("report",), "", "otherwise.report"),
+            (O + ("report",), 5, "otherwise.report"),
+            (O + ("link_flag",), "no", "otherwise.link_flag"),
+            (O + ("link_flag",), {}, "otherwise.link_flag"),
+            (O + ("link_flag",), {"": True}, "otherwise.link_flag"),
+            (O + ("link_flag",), {"auto_merge_rearm": [False]}, "otherwise.link_flag"),
+            (O + ("timeline_note",), "", "otherwise.timeline_note"),
+            (O + ("timeline_note",), None, "otherwise.timeline_note"),
+            (O + ("cursor",), "hold", "otherwise.cursor"),
+            (O + ("cursor",), True, "otherwise.cursor"),
+            (O + ("result_events",), "babysit-finish", "otherwise.result_events"),
+            (O + ("result_events",), [7], "otherwise.result_events"),
+            (O + ("result_events",), ["never-declared-event"], "otherwise.result_events"),
+        )
+        for path, value, named in table:
+            with self.subTest(member=".".join(path), value=repr(value)):
+                chain, timeline = self.chain_file()
+                before = chain.read_bytes()
+                before_tl = timeline.read_bytes() if timeline.exists() else None
+                r = self.drive_chain(chain, "--watcher-exit", "3", "--classification", "actionable",
+                                     "--babysit-round", "1", "--babysit-cap", "3",
+                                     "--author-association", "NONE",
+                                     "--cursor", "2026-08-02T00:00:00Z",
+                                     reference=set_at(path, value))
+                self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+                self.assertIn(named, r.stderr, "the exact member is named")
+                self.assertNotIn("notify-only", r.stdout, "nothing was applied")
+                self.assertEqual(chain.read_bytes(), before, "nothing persisted")
+                self.assertEqual(timeline.read_bytes() if timeline.exists() else None, before_tl,
+                                 "nothing persisted")
+
+    def test_exit4_has_no_author_gate(self):
+        # a failing check has no author: exit 4 keeps its babysit path without --author-association
+        chain, _ = self.chain_file()
+        r = self.drive_chain(chain, "--watcher-exit", "4",
+                             "--classification", "actionable",
+                             "--babysit-round", "1", "--babysit-cap", "3")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.load(chain)["links"][0]["status"], "iterating")
 
     def test_exit4_notes_failing_check_in_timeline(self):
         chain, timeline = self.chain_file()

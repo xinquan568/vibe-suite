@@ -304,9 +304,14 @@ class TestCollisions(unittest.TestCase):
 
 class TestReconcile(unittest.TestCase):
     def test_states_classified_and_converged(self):
+        # vibe-185: a flag-less reconcile HOLDS a definition nobody registered; `add` registers it.
         ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
         add_definition(ws, name="declared_only")
         report = advisors.reconcile(ws, pin=PIN)
+        self.assertEqual(report["declared_only"],
+                         "declared-unregistered (not registered; register with advisor add declared_only)")
+        self.assertNotIn("declared_only", json.loads((ws / ".mcp.json").read_text())["mcpServers"])
+        report = advisors.add(ws, "declared_only", pin=PIN)
         self.assertEqual(report["declared_only"], "declared-unregistered->registered")
         doc = json.loads((ws / ".mcp.json").read_text())
         self.assertIn("declared_only", doc["mcpServers"])
@@ -474,13 +479,15 @@ class TestDangerGate(unittest.TestCase):
 
     # --- refusal: every dangerous mode, through the library and through both CLI entry points ---
 
-    def test_every_dangerous_mode_is_refused_by_reconcile_naming_field_and_flag_and_writes_nothing(self):
+    def test_every_dangerous_mode_is_refused_by_add_naming_field_and_flag_and_writes_nothing(self):
+        # vibe-185: the gate guards the WRITE — `add <name>` — and a flag-less reconcile, which
+        # registers nothing it was not told to, discloses the danger instead of refusing.
         for mode in self.MODES:
             with self.subTest(mode=mode):
                 ws = self._ws(f"permission_mode: {mode}\n")
                 before_mcp = (ws / ".mcp.json").read_bytes()
                 with self.assertRaises(advisors.AdvisorError) as cm:
-                    advisors.reconcile(ws, pin=PIN)
+                    advisors.add(ws, "probe_advisor", pin=PIN)
                 msg = str(cm.exception)
                 self.assertIn("permission_mode", msg)
                 self.assertIn(mode, msg)
@@ -488,18 +495,29 @@ class TestDangerGate(unittest.TestCase):
                 self.assertEqual((ws / ".mcp.json").read_bytes(), before_mcp, "nothing written on refusal")
                 self.assertFalse((ws / ".codex" / "config.toml").read_text(encoding="utf-8").strip())
                 self.assertFalse((ws / ".vibe-suite-state").exists(), "no state dir, no ledger, no journal on refusal")
+                held = advisors.reconcile(ws, pin=PIN)
+                self.assertIn("dangerous: permission_mode", held["probe_advisor"], "a flag-less reconcile discloses")
+                self.assertIn("--confirm-danger", held["probe_advisor"])
+                self.assertEqual((ws / ".mcp.json").read_bytes(), before_mcp, "and writes nothing")
+                self.assertFalse((ws / ".vibe-suite-state").exists())
 
-    def test_cli_add_and_cli_reconcile_refuse_every_dangerous_mode_with_exit_two(self):
+    def test_cli_add_refuses_every_dangerous_mode_with_exit_two_and_cli_reconcile_discloses(self):
         for mode in self.MODES:
-            for op in ("add", "reconcile"):
+            for op in ("add", "add --all"):
                 with self.subTest(mode=mode, op=op):
                     ws = self._ws(f"permission_mode: {mode}\n")
-                    args = ["add", "probe_advisor", "--pin", PIN] if op == "add" else ["reconcile", "--pin", PIN]
+                    args = ["add", "probe_advisor", "--pin", PIN] if op == "add" else ["add", "--all", "--pin", PIN]
                     r = self._cli(ws, *args)
                     self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
                     self.assertIn(f"permission_mode '{mode}'", r.stderr)
                     self.assertIn("--confirm-danger", r.stderr)
                     self.assertEqual(json.loads((ws / ".mcp.json").read_text())["mcpServers"], {}, "nothing registered")
+            with self.subTest(mode=mode, op="reconcile"):
+                ws = self._ws(f"permission_mode: {mode}\n")
+                r = self._cli(ws, "reconcile", "--pin", PIN)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("dangerous: permission_mode", r.stdout)
+                self.assertEqual(json.loads((ws / ".mcp.json").read_text())["mcpServers"], {}, "nothing registered")
 
     # --- acceptance: recorded, sha-bound, durable; CLI reconcile accepts too ---
 
@@ -518,9 +536,11 @@ class TestDangerGate(unittest.TestCase):
         self.assertEqual(os.stat(ws / ".vibe-suite-state" / "advisor-preimages.json").st_mode & 0o777, 0o600,
                          "the ledger stays private")
 
-    def test_cli_reconcile_with_the_flag_accepts_and_records(self):
+    def test_cli_add_all_with_the_flag_accepts_and_records_and_cli_reconcile_has_no_flag(self):
         ws = self._ws("permission_mode: dontAsk\n")
-        r = self._cli(ws, "reconcile", "--pin", PIN, "--confirm-danger")
+        self.assertEqual(self._cli(ws, "reconcile", "--pin", PIN, "--confirm-danger").returncode, 2,
+                         "vibe-185: acceptance rides the explicit add; reconcile takes no --confirm-danger")
+        r = self._cli(ws, "add", "--all", "--pin", PIN, "--confirm-danger")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("probe_advisor: declared-unregistered->registered", r.stdout)
         self.assertEqual(json.loads((ws / ".mcp.json").read_text())["mcpServers"]["probe_advisor"]["env"]["CLAUDE_PERMISSION_MODE"], "dontAsk")
@@ -532,16 +552,22 @@ class TestDangerGate(unittest.TestCase):
 
     def test_an_accepted_definition_converges_flag_less_until_it_changes(self):
         ws = self._ws("permission_mode: auto\n")
-        advisors.reconcile(ws, pin=PIN, confirm_danger=True)
+        advisors.add(ws, "probe_advisor", pin=PIN, confirm_danger=True)
         # init / repair / update call reconcile with no flag: the recorded acceptance carries it.
         self.assertEqual(advisors.reconcile(ws, pin=PIN), {"probe_advisor": "consistent"})
-        # A changed definition (different sha) is a new decision: the flag is required again.
+        # A changed definition (different sha) is a new decision: held by the flag-less reconcile,
+        # and the re-confirming add needs the flag again.
         add_definition(ws, extra="permission_mode: auto\nmax_turns: 9\n")
+        held = advisors.reconcile(ws, pin=PIN)
+        self.assertIn("changed-unconfirmed", held["probe_advisor"])
         with self.assertRaises(advisors.AdvisorError) as cm:
-            advisors.reconcile(ws, pin=PIN)
+            advisors.add(ws, "probe_advisor", pin=PIN)
         self.assertIn("--confirm-danger", str(cm.exception))
         entry = json.loads((ws / ".mcp.json").read_text())["mcpServers"]["probe_advisor"]
         self.assertEqual(entry["env"]["CLAUDE_MAX_TURNS"], "4", "the registered content is untouched by the refusal")
+        advisors.add(ws, "probe_advisor", pin=PIN, confirm_danger=True)
+        entry = json.loads((ws / ".mcp.json").read_text())["mcpServers"]["probe_advisor"]
+        self.assertEqual(entry["env"]["CLAUDE_MAX_TURNS"], "9", "re-confirmed: re-accepted and re-registered")
 
     # --- containment: cwd and each additional_dirs entry; tilde / escaping relative / in-workspace absolute / outside absolute ---
 
@@ -560,7 +586,7 @@ class TestDangerGate(unittest.TestCase):
             with self.subTest(field=field, value=value):
                 ws = self._ws(extra)
                 with self.assertRaises(advisors.AdvisorError) as cm:
-                    advisors.reconcile(ws, pin=PIN)
+                    advisors.add(ws, "probe_advisor", pin=PIN)
                 msg = str(cm.exception)
                 self.assertIn(field, msg)
                 self.assertIn(repr(value), msg)
@@ -570,11 +596,11 @@ class TestDangerGate(unittest.TestCase):
         # In-workspace values need no flag and record no acceptance: relative, ./relative, and an
         # absolute path INSIDE the workspace (absolute is not dangerous by itself).
         add_definition(ws0, extra=f"cwd: docs\nadditional_dirs: [src, ./tests, {inside_abs}]\n")
-        self.assertEqual(advisors.reconcile(ws0, pin=PIN), {"probe_advisor": "declared-unregistered->registered"})
+        self.assertEqual(advisors.add(ws0, "probe_advisor", pin=PIN), {"probe_advisor": "declared-unregistered->registered"})
         self.assertNotIn(advisors.ACCEPTANCES_KEY, self._ledger(ws0), "no acceptance recorded for a safe definition")
         ws1 = make_ws(mcp=self.EMPTY_MCP, toml="")
         add_definition(ws1, extra=f"cwd: {ws1 / 'docs'}\n")                 # absolute, but INSIDE this workspace
-        self.assertEqual(advisors.reconcile(ws1, pin=PIN), {"probe_advisor": "declared-unregistered->registered"},
+        self.assertEqual(advisors.add(ws1, "probe_advisor", pin=PIN), {"probe_advisor": "declared-unregistered->registered"},
                          "an absolute cwd inside the workspace is not dangerous")
 
     # --- the flag itself; the unchanged default path ---
@@ -582,20 +608,20 @@ class TestDangerGate(unittest.TestCase):
     def test_the_flag_is_refused_when_nothing_is_dangerous(self):
         ws = self._ws("")
         with self.assertRaises(advisors.AdvisorError) as cm:
-            advisors.reconcile(ws, pin=PIN, confirm_danger=True)
+            advisors.add(ws, "probe_advisor", pin=PIN, confirm_danger=True)
         self.assertIn("only meaningful", str(cm.exception))
         self.assertFalse((ws / ".vibe-suite-state").exists(), "nothing written")
-        for args in (["add", "probe_advisor", "--pin", PIN, "--confirm-danger"], ["reconcile", "--pin", PIN, "--confirm-danger"]):
-            with self.subTest(args=args[0]):
+        for args in (["add", "probe_advisor", "--pin", PIN, "--confirm-danger"], ["add", "--all", "--pin", PIN, "--confirm-danger"]):
+            with self.subTest(args=" ".join(args[:2])):
                 r = self._cli(ws, *args)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
                 self.assertIn("only meaningful", r.stderr)
 
-    def test_default_acceptEdits_plan_register_without_the_flag_exactly_as_before(self):
+    def test_default_acceptEdits_plan_register_through_add_without_the_flag(self):
         for mode in ("default", "acceptEdits", "plan"):
             with self.subTest(mode=mode):
                 ws = self._ws(f"permission_mode: {mode}\n")
-                self.assertEqual(advisors.reconcile(ws, pin=PIN), {"probe_advisor": "declared-unregistered->registered"})
+                self.assertEqual(advisors.add(ws, "probe_advisor", pin=PIN), {"probe_advisor": "declared-unregistered->registered"})
                 env = json.loads((ws / ".mcp.json").read_text())["mcpServers"]["probe_advisor"]["env"]
                 self.assertEqual(env.get("CLAUDE_PERMISSION_MODE"), None if mode == "default" else mode)
 
@@ -617,12 +643,12 @@ class TestDangerGate(unittest.TestCase):
         advisors.add(ws, "safe_one", pin=PIN)
         add_definition(ws, name="risky_one", extra="permission_mode: bypassPermissions\n")   # declared, never accepted
         with self.assertRaises(advisors.AdvisorError):
-            advisors.reconcile(ws, pin=PIN)                               # plain reconcile refuses on risky_one
+            advisors.add(ws, "risky_one", pin=PIN)                        # the write-time gate refuses risky_one
         report = advisors.remove(ws, "safe_one", delete_timeline=True, pin=PIN)
         self.assertEqual(report["safe_one"], "removed")
         self.assertIn("danger-unaccepted", report["risky_one"])
         self.assertIn("--confirm-danger", report["risky_one"])
-        self.assertIn("_warning", report, "the post-removal convergence reports the held sibling, never raises over a completed removal")
+        self.assertNotIn("_warning", report, "vibe-185: the post-removal convergence holds the sibling and reports it — no refusal to warn about")
         servers = json.loads((ws / ".mcp.json").read_text())["mcpServers"]
         self.assertNotIn("safe_one", servers)
         self.assertNotIn("risky_one", servers, "a removal authorises nothing: the dangerous sibling stays unregistered")
@@ -640,7 +666,7 @@ class TestDangerGate(unittest.TestCase):
         advisors.add(ws, "safe_one", pin=PIN)
         add_definition(ws, name="risky_one", extra="permission_mode: auto\n")
         with self.assertRaises(advisors.AdvisorError):
-            advisors.reconcile(ws, pin=PIN)                               # (collision or danger — a reconcile refuses either way)
+            advisors.add(ws, "risky_one", pin=PIN, confirm_danger=True)  # the collision refuses the write
         report = advisors.remove(ws, "safe_one", delete_timeline=True, pin=PIN)
         self.assertEqual(report["safe_one"], "removed")
         self.assertIn("danger-unaccepted", report["risky_one"])
@@ -666,7 +692,7 @@ class TestDangerGate(unittest.TestCase):
         self.assertEqual(advisors.recover(ws), {"intent": "apply", "remove_name": None})
         self.assertFalse(txn_path.exists())
         with self.assertRaises(advisors.AdvisorError):
-            advisors.reconcile(ws, pin=PIN)                               # a rolled-back apply authorised nothing
+            advisors.add(ws, "probe_advisor", pin=PIN)                    # a rolled-back apply authorised nothing
 
     def test_an_accepted_apply_that_crashes_after_the_ledger_write_is_rolled_back_acceptance_included(self):
         ws = self._ws("permission_mode: bypassPermissions\n")
@@ -680,7 +706,7 @@ class TestDangerGate(unittest.TestCase):
         self.assertFalse(ledger.exists() and advisors.ACCEPTANCES_KEY in json.loads(ledger.read_text()),
                          "the acceptance rolled back with it: the prior map was empty")
         with self.assertRaises(advisors.AdvisorError):
-            advisors.reconcile(ws, pin=PIN)                               # and a flag-less reconcile refuses again
+            advisors.add(ws, "probe_advisor", pin=PIN)                    # and a flag-less add refuses again
 
     def test_removing_an_accepted_advisor_that_crashes_rolls_forward_acceptance_dropped(self):
         for point in ("json", "toml"):
@@ -706,7 +732,7 @@ class TestDangerGate(unittest.TestCase):
         toml_before = (ws / ".codex" / "config.toml").read_bytes()
         with mock.patch.object(advisors, "_ignore_block", side_effect=RuntimeError("injected after the ledger write")):
             with self.assertRaises(RuntimeError):
-                advisors.reconcile(ws, pin=PIN, confirm_danger=True)
+                advisors.add(ws, "probe_advisor", pin=PIN, confirm_danger=True)
         self.assertEqual((ws / ".mcp.json").read_bytes(), mcp_before, "the registration rolled back in-process")
         self.assertEqual((ws / ".codex" / "config.toml").read_bytes(), toml_before)
         self.assertFalse((ws / ".vibe-suite-state" / "advisor-txn.json").exists(), "the journal is gone")
@@ -714,13 +740,13 @@ class TestDangerGate(unittest.TestCase):
         self.assertFalse(ledger.exists() and advisors.ACCEPTANCES_KEY in json.loads(ledger.read_text()),
                          "the acceptance rolled back with the registration: the prior map was empty")
         with self.assertRaises(advisors.AdvisorError):
-            advisors.reconcile(ws, pin=PIN)                               # a rolled-back apply authorised nothing
-        self.assertEqual(advisors.reconcile(ws, pin=PIN, confirm_danger=True),
+            advisors.add(ws, "probe_advisor", pin=PIN)                    # a rolled-back apply authorised nothing
+        self.assertEqual(advisors.add(ws, "probe_advisor", pin=PIN, confirm_danger=True),
                          {"probe_advisor": "declared-unregistered->registered"}, "and the workspace is healthy")
 
     def test_removing_an_accepted_advisor_whose_ignore_block_raises_rolls_back_acceptance_kept(self):
         ws = self._ws("permission_mode: dontAsk\n")
-        advisors.reconcile(ws, pin=PIN, confirm_danger=True)
+        advisors.add(ws, "probe_advisor", pin=PIN, confirm_danger=True)
         accepted = self._ledger(ws)[advisors.ACCEPTANCES_KEY]
         mcp_before = (ws / ".mcp.json").read_bytes()
         toml_before = (ws / ".codex" / "config.toml").read_bytes()
@@ -744,7 +770,7 @@ class TestDangerGate(unittest.TestCase):
         # advisor names, and "mode" is a valid one — it must never be read as a recorded mode
         ws = make_ws(mcp=self.EMPTY_MCP, toml="")
         add_definition(ws, name="mode", extra="permission_mode: bypassPermissions\n")
-        self.assertEqual(advisors.reconcile(ws, pin=PIN, confirm_danger=True), {"mode": "declared-unregistered->registered"})
+        self.assertEqual(advisors.add(ws, "mode", pin=PIN, confirm_danger=True), {"mode": "declared-unregistered->registered"})
         ledger = ws / ".vibe-suite-state" / "advisor-preimages.json"
         self.assertIn("mode", self._ledger(ws)[advisors.ACCEPTANCES_KEY], "the acceptance is recorded under the advisor's name")
         self.assertEqual(os.stat(ledger).st_mode & 0o777, 0o600, "the ledger keeps the provenance floor")
@@ -802,6 +828,394 @@ class TestDangerGate(unittest.TestCase):
         (state2 / "advisor-txn.json").write_text(json.dumps(dict(base, **{advisors.ACCEPTANCES_KEY: {"prior": {"probe_advisor": good}, "post": {}}})))
         self.assertEqual(advisors.recover(ws2), {"intent": "apply", "remove_name": None})
         self.assertEqual(self._ledger(ws2)[advisors.ACCEPTANCES_KEY], {"probe_advisor": good}, "apply recovery restores the PRIOR map")
+
+
+class TestRegistrationStamp(unittest.TestCase):
+    """vibe-185 / grill H1b: registration is an explicit operator act. A flag-less `reconcile` — what
+    init / repair / update run — converges only definitions the operator registered (`add <name>` /
+    `add --all` stamp the parsed content's sha in the ledger) and whose content is unchanged; a
+    never-registered definition is held and disclosed, an edited one is held at its registered
+    content until `add <name>` re-confirms and records the new hash; the stamp rides the journal,
+    both rollback paths and `remove` exactly like the danger acceptance; `add a` is never refused on
+    account of an unrelated declared definition."""
+
+    EMPTY_MCP = '{"mcpServers": {}}\n'
+
+    def _ws(self, *names, extra=None):
+        ws = make_ws(mcp=self.EMPTY_MCP, toml="")
+        for n in names:
+            add_definition(ws, name=n, extra=(extra or {}).get(n, ""))
+        return ws
+
+    def _cli(self, ws, *args, fail_after=None):
+        env = dict(os.environ)
+        if fail_after:
+            env["VIBE_ADVISOR_FAIL_AFTER"] = fail_after
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "advisor_cli.py"), "--workspace", str(ws), *args],
+            capture_output=True, text=True, env=env)
+
+    def _ledger(self, ws):
+        p = ws / ".vibe-suite-state" / "advisor-preimages.json"
+        return json.loads(p.read_text()) if p.is_file() else {}
+
+    def _servers(self, ws):
+        return json.loads((ws / ".mcp.json").read_text())["mcpServers"]
+
+    def _sha(self, ws, name):
+        return advisors.definition_sha(advisors.parse_definition(
+            (ws / ".vibe-suite" / "agents" / f"{name}.md").read_text(), f"{name}.md"))
+
+    # --- the rule: a flag-less reconcile registers nothing it was not told to --------------------------
+
+    def test_a_flag_less_reconcile_holds_every_never_registered_definition_and_writes_nothing(self):
+        ws = self._ws("alpha_one", "beta_two")
+        report = advisors.reconcile(ws, pin=PIN)
+        for n in ("alpha_one", "beta_two"):
+            self.assertEqual(report[n], f"declared-unregistered (not registered; register with advisor add {n})")
+        self.assertEqual(self._servers(ws), {})
+        self.assertFalse((ws / ".codex" / "config.toml").read_text().strip())
+        self.assertFalse((ws / ".vibe-suite-state").exists(), "no ledger, no journal: nothing was written")
+        r = self._cli(ws, "reconcile", "--pin", PIN)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("alpha_one: declared-unregistered (not registered; register with advisor add alpha_one)", r.stdout)
+
+    def test_add_registers_exactly_the_named_definition_and_stamps_it(self):
+        ws = self._ws("alpha_one", "beta_two")
+        report = advisors.add(ws, "alpha_one", pin=PIN)
+        self.assertEqual(report["alpha_one"], "declared-unregistered->registered")
+        self.assertEqual(report["beta_two"], "declared-unregistered (not registered; register with advisor add beta_two)")
+        self.assertEqual(set(self._servers(ws)), {"alpha_one"}, "exactly alpha_one")
+        self.assertNotIn("beta_two", (ws / ".codex" / "config.toml").read_text())
+        stamps = self._ledger(ws)[advisors.REGISTRATIONS_KEY]
+        self.assertEqual(set(stamps), {"alpha_one"})
+        self.assertEqual(stamps["alpha_one"]["definition_sha256"], self._sha(ws, "alpha_one"), "the stamp is the parsed content's sha")
+        self.assertRegex(stamps["alpha_one"]["registered_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertEqual(os.stat(ws / ".vibe-suite-state" / "advisor-preimages.json").st_mode & 0o777, 0o600)
+        self.assertNotIn(advisors.ACCEPTANCES_KEY, self._ledger(ws), "a safe definition records no acceptance")
+
+    def test_cli_add_registers_one_and_cli_add_all_registers_every_declared_definition(self):
+        ws = self._ws("alpha_one", "beta_two")
+        r = self._cli(ws, "add", "alpha_one", "--pin", PIN)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(set(self._servers(ws)), {"alpha_one"})
+        r = self._cli(ws, "add", "--all", "--pin", PIN)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("beta_two: declared-unregistered->registered", r.stdout)
+        self.assertEqual(set(self._servers(ws)), {"alpha_one", "beta_two"})
+        self.assertEqual(set(self._ledger(ws)[advisors.REGISTRATIONS_KEY]), {"alpha_one", "beta_two"})
+        for args in (["add", "--pin", PIN], ["add", "alpha_one", "--all", "--pin", PIN], ["add", "--all", "--custom", "--pin", PIN]):
+            with self.subTest(args=" ".join(args)):
+                self.assertEqual(self._cli(ws, *args).returncode, 2, "exactly one of <name> or --all; --all never composes a custom definition")
+        empty = make_ws(mcp=self.EMPTY_MCP, toml="")
+        self.assertEqual(self._cli(empty, "add", "--all", "--pin", PIN).returncode, 2, "--all with nothing declared refuses")
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.reconcile(ws, pin=PIN, register={"nope"})
+
+    def test_a_stamped_definition_converges_flag_less_when_its_registration_drifts(self):
+        ws = self._ws("alpha_one")
+        advisors.add(ws, "alpha_one", pin=PIN)
+        stamp = self._ledger(ws)[advisors.REGISTRATIONS_KEY]["alpha_one"]
+        toml_path = ws / ".codex" / "config.toml"
+        toml_path.write_text(bridge.text_block_remove(toml_path.read_text(), "server:alpha_one"))
+        self.assertEqual(advisors.reconcile(ws, pin=PIN), {"alpha_one": "half-registered->registered"},
+                         "init / repair / update converge what the operator registered")
+        self.assertIn("alpha_one", toml_path.read_text())
+        self.assertEqual(self._ledger(ws)[advisors.REGISTRATIONS_KEY]["alpha_one"], stamp, "a convergence does not re-stamp")
+
+    def test_an_edited_registered_definition_is_held_until_re_added_and_the_ledger_records_the_new_hash(self):
+        ws = self._ws("alpha_one")
+        advisors.add(ws, "alpha_one", pin=PIN)
+        sha1 = self._ledger(ws)[advisors.REGISTRATIONS_KEY]["alpha_one"]["definition_sha256"]
+        add_definition(ws, name="alpha_one", extra="max_turns: 9\n")
+        sha2 = self._sha(ws, "alpha_one")
+        self.assertNotEqual(sha1, sha2)
+        held = advisors.reconcile(ws, pin=PIN)
+        self.assertEqual(held["alpha_one"], "changed-unconfirmed (held; existing store content left unchanged; re-confirm with advisor add alpha_one)")
+        self.assertEqual(self._servers(ws)["alpha_one"]["env"]["CLAUDE_MAX_TURNS"], "4", "the registered content stays")
+        self.assertEqual(self._ledger(ws)[advisors.REGISTRATIONS_KEY]["alpha_one"]["definition_sha256"], sha1, "the stamp is untouched")
+        r = self._cli(ws, "reconcile", "--pin", PIN)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("changed-unconfirmed", r.stdout)
+        self.assertEqual(advisors.add(ws, "alpha_one", pin=PIN), {"alpha_one": "stale-registered->registered"})
+        self.assertEqual(self._servers(ws)["alpha_one"]["env"]["CLAUDE_MAX_TURNS"], "9")
+        self.assertEqual(self._ledger(ws)[advisors.REGISTRATIONS_KEY]["alpha_one"]["definition_sha256"], sha2, "the ledger records the new hash")
+
+    def test_add_of_one_definition_is_not_refused_on_account_of_an_unrelated_one(self):
+        ws = make_ws(mcp=json.dumps({"mcpServers": {"squat_me": {"command": "foreign"}}}) + "\n", toml="")
+        add_definition(ws, name="alpha_one")
+        add_definition(ws, name="risky_one", extra="permission_mode: bypassPermissions\n")
+        add_definition(ws, name="squat_me")
+        report = advisors.add(ws, "alpha_one", pin=PIN)
+        self.assertEqual(report["alpha_one"], "declared-unregistered->registered")
+        self.assertIn("dangerous: permission_mode", report["risky_one"])
+        self.assertIn("--confirm-danger", report["risky_one"])
+        self.assertEqual(report["squat_me"], "declared-unregistered (not registered; register with advisor add squat_me)")
+        servers = self._servers(ws)
+        self.assertIn("alpha_one", servers)
+        self.assertNotIn("risky_one", servers)
+        self.assertEqual(servers["squat_me"], {"command": "foreign"}, "the squatter is untouched")
+        with self.assertRaises(advisors.AdvisorError) as cm:
+            advisors.add(ws, "risky_one", pin=PIN)
+        self.assertIn("--confirm-danger", str(cm.exception))
+        with self.assertRaises(advisors.AdvisorError) as cm:
+            advisors.add(ws, "squat_me", pin=PIN)
+        self.assertIn("unowned", str(cm.exception))
+
+    def test_a_dangerous_definition_needs_both_records_and_a_change_asks_for_the_flag_again(self):
+        ws = self._ws("risky_one", extra={"risky_one": "permission_mode: dontAsk\n"})
+        advisors.add(ws, "risky_one", pin=PIN, confirm_danger=True)
+        ledger = self._ledger(ws)
+        self.assertIn("risky_one", ledger[advisors.ACCEPTANCES_KEY])
+        self.assertIn("risky_one", ledger[advisors.REGISTRATIONS_KEY])
+        self.assertEqual(ledger[advisors.ACCEPTANCES_KEY]["risky_one"]["definition_sha256"],
+                         ledger[advisors.REGISTRATIONS_KEY]["risky_one"]["definition_sha256"], "both bound to the same parsed content")
+        self.assertEqual(advisors.reconcile(ws, pin=PIN), {"risky_one": "consistent"})
+        add_definition(ws, name="risky_one", extra="permission_mode: dontAsk\nmax_turns: 9\n")
+        self.assertIn("changed-unconfirmed", advisors.reconcile(ws, pin=PIN)["risky_one"])
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.add(ws, "risky_one", pin=PIN)
+        self.assertEqual(advisors.add(ws, "risky_one", pin=PIN, confirm_danger=True), {"risky_one": "stale-registered->registered"})
+
+    # --- remove: the stamp is dropped; held siblings are left alone ------------------------------------
+
+    def test_remove_drops_the_stamp_holds_siblings_and_the_ledger_clears_with_the_last_advisor(self):
+        ws = self._ws("alpha_one", "beta_two")
+        advisors.add(ws, "alpha_one", pin=PIN)
+        advisors.add(ws, "beta_two", pin=PIN)
+        add_definition(ws, name="beta_two", extra="max_turns: 9\n")            # beta is now changed
+        report = advisors.remove(ws, "alpha_one", delete_timeline=True, pin=PIN)
+        self.assertEqual(report["alpha_one"], "removed")
+        self.assertIn("changed-unconfirmed", report["beta_two"])
+        self.assertNotIn("_warning", report)
+        stamps = self._ledger(ws)[advisors.REGISTRATIONS_KEY]
+        self.assertEqual(set(stamps), {"beta_two"})
+        self.assertEqual(self._servers(ws)["beta_two"]["env"]["CLAUDE_MAX_TURNS"], "4", "the held sibling was not refreshed")
+        report = advisors.remove(ws, "beta_two", delete_timeline=True, pin=PIN)
+        self.assertEqual(report["beta_two"], "removed")
+        self.assertFalse((ws / ".vibe-suite-state" / "advisor-preimages.json").exists())
+
+    def test_a_registration_without_a_stamp_is_held_never_refreshed_and_add_adopts_it(self):
+        # A registration written before stamps existed: the stores hold it, the ledger does not.
+        ws = self._ws("alpha_one")
+        advisors.add(ws, "alpha_one", pin=PIN)
+        ledger_path = ws / ".vibe-suite-state" / "advisor-preimages.json"
+        ledger = json.loads(ledger_path.read_text()); ledger.pop(advisors.REGISTRATIONS_KEY)
+        ledger_path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
+        self.assertEqual(advisors.reconcile(ws, pin=PIN), {"alpha_one": "unstamped (held; existing store content left unchanged; confirm with advisor add alpha_one)"})
+        self.assertEqual(advisors.list_advisors(ws, pin=PIN)[0]["registration"], "unstamped", "list says unstamped — the stores hold it, the ledger never stamped it")
+        self.assertEqual(advisors.listing(ws)[0]["registration"], "unstamped")
+        toml_path = ws / ".codex" / "config.toml"
+        toml_path.write_text(bridge.text_block_remove(toml_path.read_text(), "server:alpha_one"))
+        advisors.reconcile(ws, pin=PIN)
+        self.assertNotIn("alpha_one", toml_path.read_text(), "held: never refreshed")
+        self.assertEqual(advisors.add(ws, "alpha_one", pin=PIN), {"alpha_one": "half-registered->registered"})
+        self.assertIn("alpha_one", self._ledger(ws)[advisors.REGISTRATIONS_KEY], "add adopts it: stamped at the current content")
+
+    # --- the transaction: the stamp rides the journal, both rollback paths, and recovery ---------------
+
+    def test_the_journal_carries_prior_and_post_stamp_maps_and_a_crashed_add_is_rolled_back_stamp_included(self):
+        ws = self._ws("alpha_one")
+        r = self._cli(ws, "add", "alpha_one", "--pin", PIN, fail_after="baseline")
+        self.assertEqual(r.returncode, 9, "the crash seam fired AFTER the stores and the ledger were written")
+        txn = json.loads((ws / ".vibe-suite-state" / "advisor-txn.json").read_text())
+        member = txn[advisors.REGISTRATIONS_KEY]
+        self.assertEqual(set(member), {"prior", "post"})
+        self.assertEqual(member["prior"], {})
+        self.assertEqual(member["post"]["alpha_one"]["definition_sha256"], self._sha(ws, "alpha_one"))
+        self.assertIn("alpha_one", self._ledger(ws).get(advisors.REGISTRATIONS_KEY, {}), "precondition: the crash left the stamp on disk")
+        self.assertEqual(advisors.recover(ws), {"intent": "apply", "remove_name": None})
+        self.assertEqual(self._servers(ws), {}, "the registration rolled back")
+        self.assertNotIn("alpha_one", self._ledger(ws).get(advisors.REGISTRATIONS_KEY, {}), "the stamp rolled back with it")
+        self.assertIn("not registered", advisors.reconcile(ws, pin=PIN)["alpha_one"], "a rolled-back add registered nothing")
+        self.assertEqual(advisors.add(ws, "alpha_one", pin=PIN), {"alpha_one": "declared-unregistered->registered"})
+
+    def test_an_add_whose_ignore_block_raises_after_the_ledger_write_rolls_back_stamp_included(self):
+        ws = self._ws("alpha_one", "beta_two")
+        advisors.add(ws, "alpha_one", pin=PIN)
+        before = self._ledger(ws)[advisors.REGISTRATIONS_KEY]
+        with mock.patch.object(advisors, "_ignore_block", side_effect=RuntimeError("injected after the ledger write")):
+            with self.assertRaises(RuntimeError):
+                advisors.add(ws, "beta_two", pin=PIN)
+        self.assertEqual(self._ledger(ws)[advisors.REGISTRATIONS_KEY], before, "the prior stamp map is restored in-process")
+        self.assertEqual(set(self._servers(ws)), {"alpha_one"})
+        self.assertFalse((ws / ".vibe-suite-state" / "advisor-txn.json").exists())
+        self.assertIn("not registered", advisors.reconcile(ws, pin=PIN)["beta_two"])
+
+    def test_removing_a_stamped_advisor_that_crashes_rolls_forward_stamp_dropped(self):
+        for point in ("json", "toml"):
+            with self.subTest(point=point):
+                ws = self._ws("alpha_one")
+                self.assertEqual(self._cli(ws, "add", "alpha_one", "--pin", PIN).returncode, 0)
+                self.assertEqual(self._ledger(ws)[advisors.REGISTRATIONS_KEY]["alpha_one"]["definition_sha256"], self._sha(ws, "alpha_one"),
+                                 "precondition: the stamp exists and matches the definition")
+                r = self._cli(ws, "remove", "alpha_one", "--delete-timeline", fail_after=point)
+                self.assertEqual(r.returncode, 9, (point, r.stderr))
+                r2 = self._cli(ws, "reconcile", "--pin", PIN)
+                self.assertEqual(r2.returncode, 0, (point, r2.stderr))
+                self.assertEqual(self._servers(ws), {}, point)
+                self.assertFalse((ws / ".vibe-suite-state" / "advisor-preimages.json").exists(), f"{point}: the stamp is gone with the ledger")
+
+    def test_malformed_stamp_members_are_refused_fail_closed_and_absent_is_compatible(self):
+        ws = self._ws("alpha_one")
+        r = self._cli(ws, "add", "alpha_one", "--pin", PIN, fail_after="json")
+        self.assertEqual(r.returncode, 9)
+        txn_path = ws / ".vibe-suite-state" / "advisor-txn.json"
+        good = json.loads(txn_path.read_text())
+        sha = good[advisors.REGISTRATIONS_KEY]["post"]["alpha_one"]["definition_sha256"]
+        bad_members = {
+            "not-a-dict": [], "missing-post": {"prior": {}}, "extra-key": {"prior": {}, "post": {}, "x": {}},
+            "bad-sha": {"prior": {}, "post": {"alpha_one": {"definition_sha256": "zz", "registered_at": "2026-01-01T00:00:00Z"}}},
+            "bad-time": {"prior": {}, "post": {"alpha_one": {"definition_sha256": sha, "registered_at": "yesterday"}}},
+            "extra-entry-key": {"prior": {}, "post": {"alpha_one": {"definition_sha256": sha, "registered_at": "2026-01-01T00:00:00Z", "x": 1}}},
+            "bad-name": {"prior": {}, "post": {"-bad": {"definition_sha256": sha, "registered_at": "2026-01-01T00:00:00Z"}}},
+        }
+        for label, member in bad_members.items():
+            with self.subTest(member=label):
+                txn = dict(good); txn[advisors.REGISTRATIONS_KEY] = member
+                txn_path.write_text(json.dumps(txn) + "\n")
+                with self.assertRaises(advisors.AdvisorError):
+                    advisors.recover(ws)
+                self.assertTrue(txn_path.exists(), "a refused journal is left in place")
+        txn = dict(good); txn.pop(advisors.REGISTRATIONS_KEY)
+        txn_path.write_text(json.dumps(txn) + "\n")
+        self.assertEqual(advisors.recover(ws), {"intent": "apply", "remove_name": None}, "an absent member (a pre-vibe-185 journal) still recovers")
+
+    def test_a_remove_whose_ignore_block_raises_keeps_every_stamp_in_process(self):
+        ws = self._ws("alpha_one", "beta_two")
+        advisors.add(ws, "alpha_one", pin=PIN)
+        advisors.add(ws, "beta_two", pin=PIN)
+        before = self._ledger(ws)[advisors.REGISTRATIONS_KEY]
+        self.assertEqual(set(before), {"alpha_one", "beta_two"}, "precondition: both stamped")
+        with mock.patch.object(advisors, "_ignore_block", side_effect=RuntimeError("injected after the ledger write")):
+            with self.assertRaises(RuntimeError):
+                advisors.remove(ws, "alpha_one", delete_timeline=True, pin=PIN)
+        self.assertEqual(self._ledger(ws)[advisors.REGISTRATIONS_KEY], before, "the rolled-back removal kept alpha's stamp and beta's")
+        self.assertEqual(set(self._servers(ws)), {"alpha_one", "beta_two"})
+        self.assertTrue((ws / ".vibe-suite" / "agents" / "alpha_one.md").exists())
+        self.assertEqual(advisors.reconcile(ws, pin=PIN), {"alpha_one": "consistent", "beta_two": "consistent"})
+
+    # --- an explicit add acts on exactly its name: never refused, never accepting, on account of a sibling ---
+
+    def test_add_of_one_definition_ignores_a_stamped_but_problematic_sibling(self):
+        ws = self._ws("alpha_one", "beta_two", "gamma_3")
+        advisors.add(ws, "beta_two", pin=PIN)                                   # stamped …
+        advisors.add(ws, "gamma_3", pin=PIN)
+        doc = json.loads((ws / ".mcp.json").read_text())
+        doc["mcpServers"]["beta_two"] = {"command": "foreign"}                  # … then squatted (a collision for beta)
+        doc["mcpServers"]["gamma_3"]["args"] = ["-y", "claude-octopus@latest"]  # … and gamma's target floats (invalid without a pin)
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        report = advisors.add(ws, "alpha_one")                                  # no pin: gamma would be invalid-registration if acted on
+        self.assertEqual(report["alpha_one"], "declared-unregistered->registered")
+        self.assertIn("alpha_one", self._servers(ws))
+        self.assertEqual(self._servers(ws)["beta_two"], {"command": "foreign"}, "the squatter is untouched")
+        self.assertEqual(self._servers(ws)["gamma_3"]["args"], ["-y", "claude-octopus@latest"], "gamma is untouched")
+        self.assertIn("registered (not converged by an explicit add", report["beta_two"])
+        self.assertIn("registered (not converged by an explicit add", report["gamma_3"])
+
+    def test_add_with_the_flag_accepts_only_the_named_definition(self):
+        ws = self._ws("alpha_one", "risky_one", extra={"risky_one": "permission_mode: bypassPermissions\n"})
+        with self.assertRaises(advisors.AdvisorError) as cm:
+            advisors.add(ws, "alpha_one", pin=PIN, confirm_danger=True)         # alpha is safe: the flag is meaningless for it
+        self.assertIn("only meaningful", str(cm.exception))
+        self.assertFalse((ws / ".vibe-suite-state").exists(), "nothing written: no acceptance for risky_one either")
+        advisors.add(ws, "alpha_one", pin=PIN)
+        self.assertNotIn(advisors.ACCEPTANCES_KEY, self._ledger(ws))
+        advisors.add(ws, "risky_one", pin=PIN, confirm_danger=True)
+        self.assertEqual(set(self._ledger(ws)[advisors.ACCEPTANCES_KEY]), {"risky_one"})
+        # a stamped dangerous sibling whose acceptance was removed by hand never blocks an unrelated add
+        ledger_path = ws / ".vibe-suite-state" / "advisor-preimages.json"
+        ledger = json.loads(ledger_path.read_text()); ledger.pop(advisors.ACCEPTANCES_KEY)
+        ledger_path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
+        add_definition(ws, name="gamma_3")
+        self.assertEqual(advisors.add(ws, "gamma_3", pin=PIN)["gamma_3"], "declared-unregistered->registered")
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.reconcile(ws, pin=PIN)                                       # the flag-less caller still refuses the write of risky_one
+
+    def test_add_of_one_definition_leaves_an_unrelated_orphaned_registration_for_the_flag_less_callers(self):
+        orphan = {"command": "npx", "args": ["-y", f"claude-octopus@{PIN}"], "env": {},
+                  "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}
+        ws = make_ws(mcp=json.dumps({"mcpServers": {"orphan_one": orphan}}, indent=2, sort_keys=True) + "\n",
+                     toml="# >>> vibe-suite:server:orphan_one v1 >>>\n[mcp_servers.orphan_one]\ncommand = \"npx\"\n# <<< vibe-suite:server:orphan_one <<<\n")
+        add_definition(ws, name="alpha_one")
+        report = advisors.add(ws, "alpha_one", pin=PIN)
+        self.assertEqual(report["alpha_one"], "declared-unregistered->registered")
+        self.assertEqual(report["orphan_one"], "registered-undeclared (not converged by an explicit add; run advisor reconcile)")
+        self.assertEqual(self._servers(ws)["orphan_one"], orphan, "an explicit add leaves the orphan in .mcp.json")
+        self.assertIn("orphan_one", (ws / ".codex" / "config.toml").read_text(), "and in config.toml")
+        self.assertEqual(advisors.reconcile(ws, pin=PIN)["orphan_one"], "registered-undeclared->removed", "the flag-less caller removes it")
+        self.assertNotIn("orphan_one", self._servers(ws))
+        self.assertNotIn("orphan_one", (ws / ".codex" / "config.toml").read_text())
+
+    # --- a definition deleted by hand loses its records; restoring the file is a new registration ---
+
+    def test_deleting_a_definition_by_hand_drops_its_records_and_restoring_it_is_held(self):
+        ws = self._ws("alpha_one", "risky_one", extra={"risky_one": "permission_mode: dontAsk\n"})
+        advisors.add(ws, "alpha_one", pin=PIN)
+        advisors.add(ws, "risky_one", pin=PIN, confirm_danger=True)
+        text = (ws / ".vibe-suite" / "agents" / "risky_one.md").read_text()
+        (ws / ".vibe-suite" / "agents" / "risky_one.md").unlink()
+        report = advisors.reconcile(ws, pin=PIN)
+        self.assertEqual(report["risky_one"], "registered-undeclared->removed")
+        ledger = self._ledger(ws)
+        self.assertNotIn("risky_one", ledger.get(advisors.REGISTRATIONS_KEY, {}), "the stamp went with the definition")
+        self.assertNotIn(advisors.ACCEPTANCES_KEY, ledger, "and so did the acceptance")
+        (ws / ".vibe-suite" / "agents" / "risky_one.md").write_text(text)      # the identical file comes back
+        report = advisors.reconcile(ws, pin=PIN)
+        self.assertIn("danger-unaccepted (not registered", report["risky_one"], "held: a new registration, not a resumed one")
+        self.assertNotIn("risky_one", self._servers(ws))
+        # a record whose definition AND store entries are gone is still dropped (the classifier never visits it)
+        advisors.add(ws, "risky_one", pin=PIN, confirm_danger=True)
+        (ws / ".vibe-suite" / "agents" / "risky_one.md").unlink()
+        doc = json.loads((ws / ".mcp.json").read_text()); del doc["mcpServers"]["risky_one"]
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        toml_path = ws / ".codex" / "config.toml"; toml_path.write_text(bridge.text_block_remove(toml_path.read_text(), "server:risky_one"))
+        self.assertIn("risky_one", self._ledger(ws)[advisors.REGISTRATIONS_KEY], "precondition: the orphan record is on disk")
+        advisors.reconcile(ws, pin=PIN)
+        self.assertNotIn("risky_one", self._ledger(ws).get(advisors.REGISTRATIONS_KEY, {}))
+        self.assertNotIn(advisors.ACCEPTANCES_KEY, self._ledger(ws))
+
+    # --- add --all gives every advisor its timeline, and a refused bulk add leaves no residue ---
+
+    def test_add_all_creates_every_timeline_and_a_refused_bulk_add_leaves_no_residue(self):
+        ws = self._ws("alpha_one", "beta_two", "risky_one", extra={"risky_one": "permission_mode: auto\n"})
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.add_all(ws, pin=PIN)                                       # refused: risky_one needs the flag
+        for n in ("alpha_one", "beta_two", "risky_one"):
+            self.assertFalse((ws / ".vibe-suite" / "agents" / n).exists(), f"{n}: no timeline residue after a refused bulk add")
+        self.assertEqual(self._servers(ws), {})
+        report = advisors.add_all(ws, pin=PIN, confirm_danger=True)
+        for n in ("alpha_one", "beta_two", "risky_one"):
+            self.assertEqual(report[n], "declared-unregistered->registered")
+            self.assertTrue((ws / ".vibe-suite" / "agents" / n / "timeline").is_dir(), f"{n}: timeline created")
+        self.assertEqual(set(self._ledger(ws)[advisors.REGISTRATIONS_KEY]), {"alpha_one", "beta_two", "risky_one"})
+        # an existing timeline is kept (never recreated) by a later add --all
+        (ws / ".vibe-suite" / "agents" / "alpha_one" / "timeline" / "note.md").write_text("history\n")
+        advisors.add_all(ws, pin=PIN, confirm_danger=True)
+        self.assertTrue((ws / ".vibe-suite" / "agents" / "alpha_one" / "timeline" / "note.md").is_file())
+
+    # --- disclosure: listing and list rows ---------------------------------------------------------------
+
+    def test_listing_and_list_rows_disclose_the_registration_state_and_what_a_registration_would_hand_over(self):
+        ws = self._ws("alpha_one", "risky_one", extra={"risky_one": "permission_mode: bypassPermissions\nallowed_tools: [Bash]\ncwd: docs\nadditional_dirs: [src]\n"})
+        rows = {r["name"]: r for r in advisors.listing(ws)}
+        self.assertEqual(set(rows), {"alpha_one", "risky_one"})
+        risky = rows["risky_one"]
+        self.assertEqual(risky["allowed_tools"], ["Bash"])
+        self.assertEqual(risky["permission_mode"], "bypassPermissions")
+        self.assertEqual(risky["cwd"], "docs")
+        self.assertEqual(risky["additional_dirs"], ["src"])
+        body = advisors.parse_definition((ws / ".vibe-suite" / "agents" / "risky_one.md").read_text(), "risky_one.md")["body"]
+        self.assertEqual(risky["prompt_bytes"], len(body.encode("utf-8")))
+        self.assertEqual(risky["registration"], "unregistered")
+        self.assertEqual(risky["dangerous"], ["permission_mode"])
+        self.assertEqual(rows["alpha_one"]["dangerous"], [])
+        advisors.add(ws, "alpha_one", pin=PIN)
+        self.assertEqual({r["name"]: r["registration"] for r in advisors.listing(ws)}, {"alpha_one": "registered", "risky_one": "unregistered"})
+        self.assertEqual({r["name"]: r["registration"] for r in advisors.list_advisors(ws, pin=PIN)}, {"alpha_one": "registered", "risky_one": "unregistered"})
+        out = self._cli(ws, "list").stdout
+        self.assertIn("registered", out)
+        self.assertIn("unregistered", out)
 
 
 if __name__ == "__main__":
@@ -1124,19 +1538,32 @@ class TestCrashMatrix(unittest.TestCase):
             self.assertEqual(r.returncode, 9, (point, r.stderr))
             self.assert_converges(ws, before)
             doc = json.loads((ws / ".mcp.json").read_text())
-            # journal-point rollback leaves nothing; toml-point rollback also rolls back,
-            # and the converging reconcile re-registers from the surviving definition.
-            self.assertIn("probe_advisor", doc["mcpServers"])
+            # journal-point rollback leaves nothing; toml-point rollback also rolls back. vibe-185:
+            # the converging reconcile HOLDS the surviving, never-stamped definition — registration
+            # is the operator's act — and a second `add` registers it.
+            self.assertNotIn("probe_advisor", doc["mcpServers"], point)
+            self.assertEqual(self.run_cli(ws, "add", "probe_advisor", "--pin", PIN).returncode, 0, point)
+            self.assertIn("probe_advisor", json.loads((ws / ".mcp.json").read_text())["mcpServers"], point)
 
     def test_stale_update_crash_at_json_and_toml(self):
+        # vibe-185: an edited registered definition is HELD by a flag-less reconcile (no write, so no
+        # seam fires); the re-confirming `add` is the write that can crash — it rolls back to the
+        # registered content, and the next `add` completes.
         for point in ("json", "toml"):
             ws = self.ws()
             self.run_cli(ws, "add", "probe_advisor", "--pin", PIN)
             add_definition(ws, extra="effort: high\n")
-            r = self.run_cli(ws, "reconcile", fail_after=point)
+            held = self.run_cli(ws, "reconcile", fail_after=point)
+            self.assertEqual(held.returncode, 0, (point, held.stderr))
+            self.assertIn("changed-unconfirmed", held.stdout, point)
+            self.assertIsNone(json.loads((ws / ".mcp.json").read_text())["mcpServers"]["probe_advisor"]["env"].get("CLAUDE_EFFORT"), point)
+            r = self.run_cli(ws, "add", "probe_advisor", "--pin", PIN, fail_after=point)
             self.assertEqual(r.returncode, 9, (point, r.stderr))
             r2 = self.run_cli(ws, "reconcile")
             self.assertEqual(r2.returncode, 0, r2.stderr)
+            self.assertIsNone(json.loads((ws / ".mcp.json").read_text())["mcpServers"]["probe_advisor"]["env"].get("CLAUDE_EFFORT"),
+                              f"{point}: the crashed re-confirmation rolled back to the registered content")
+            self.assertEqual(self.run_cli(ws, "add", "probe_advisor", "--pin", PIN).returncode, 0, point)
             doc = json.loads((ws / ".mcp.json").read_text())
             self.assertEqual(doc["mcpServers"]["probe_advisor"]["env"].get("CLAUDE_EFFORT"),
                              "high", point)

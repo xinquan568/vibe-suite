@@ -280,22 +280,40 @@ class TestAdvisorReconcile(RepairCase):
         after = json.loads(mcp.read_text())
         self.assertNotIn("orphan_advisor", after.get("mcpServers", {}))
 
-    def test_a_declared_advisor_registers_at_the_shipped_default(self):
-        # Pre-E7.1 this was the recorded-failure case: a declared advisor with the pending pin
-        # refused to register and repair recorded the refusal. The shipped pin (vibe-53) is
-        # exactly the activation that turns the refusal into a zero-flag registration — the
-        # behavior commands/advisor.md promised for E7.1. The pending-refusal contract remains
-        # covered by explicit pending-file cases in tests/test_advisors.py.
-        self.install()
+    def _declare(self):
         agents = self.ws / ".vibe-suite" / "agents"
         agents.mkdir(parents=True, exist_ok=True)
         (agents / "probe_advisor.md").write_text(
             "---\ndescription: |\n  Judges probe things.\nmodel: sonnet\n---\n\nValue truth.\n",
             encoding="utf-8")
+
+    def test_a_declared_but_never_registered_advisor_is_held_by_repair_not_registered(self):
+        # vibe-185: registration is the operator's act (`advisor add <name>`); repair converges
+        # only what was registered. Pre-vibe-185 this test asserted zero-flag registration here.
+        self.install()
+        self._declare()
         report = json.loads(self.repair().stdout)
         outcome = {s["step"]: s["outcome"] for s in report["steps"]}.get("advisors", "")
         self.assertTrue(outcome.startswith("ok"), outcome)
-        self.assertIn("declared-unregistered->registered", outcome)
+        self.assertIn("declared-unregistered (not registered; register with advisor add probe_advisor)", outcome)
+        doc = json.loads((self.ws / ".mcp.json").read_text())
+        self.assertNotIn("probe_advisor", doc.get("mcpServers", {}))
+
+    def test_a_registered_advisor_whose_registration_drifted_is_converged_by_repair_at_the_shipped_default(self):
+        self.install()
+        self._declare()
+        r = subprocess.run(["python3", str(REPO_ROOT / "scripts" / "advisor_cli.py"), "--workspace", str(self.ws),
+                            "add", "probe_advisor"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        toml = self.ws / ".codex" / "config.toml"
+        text = toml.read_text()
+        start, end = text.index("# >>> vibe-suite:server:probe_advisor"), text.index("# <<< vibe-suite:server:probe_advisor <<<")
+        toml.write_text(text[:start] + text[end + len("# <<< vibe-suite:server:probe_advisor <<<\n"):])
+        report = json.loads(self.repair().stdout)
+        outcome = {s["step"]: s["outcome"] for s in report["steps"]}.get("advisors", "")
+        self.assertTrue(outcome.startswith("ok"), outcome)
+        self.assertIn("half-registered->registered", outcome)
         doc = json.loads((self.ws / ".mcp.json").read_text())
         args = doc["mcpServers"]["probe_advisor"]["args"]
         self.assertRegex(args[-1], r"^claude-octopus@\d+\.\d+\.\d+")
+        self.assertIn("probe_advisor", toml.read_text())

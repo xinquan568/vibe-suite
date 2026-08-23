@@ -111,9 +111,9 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-agent-design/SKILL.md",
-      "mirror_sha256": "1289aa236ddffee6bb5a441a1a7d7a2e7ae66af29bf42d18f140cc12b848cb3d",
+      "mirror_sha256": "e9db2696d02c917e128084a990357a2d8f555966612449cfcc98c5858b50844c",
       "source": "skills/agent-design/SKILL.md",
-      "source_sha256": "1032d80d521bae7662d3add34cc24ff349725390844751d48888666d2d38ea5e",
+      "source_sha256": "f7ebe79c45b720bfaa2d54762690d332825f03032345945c802fcdfeddfedc2f",
       "transform": "markdown"
     },
     {
@@ -470,7 +470,7 @@
     ],
     "slash_occurrences": {
       "skills/agent-design/SKILL.md": {
-        "advisor": 3,
+        "advisor": 4,
         "repair": 1,
         "update": 1
       },

@@ -9,6 +9,13 @@ advisor is `consistent` only when *both* stores hold exactly the desired registr
 divergent content is `stale-registered`; a target the stores cannot agree on (or a floating or
 malformed one) is `invalid-registration`, which converging refuses to guess about.
 
+**Registration is the operator's act (vibe-185 / grill H1b).** A definition is repository content:
+`add <name>` (or `add --all`) registers it and STAMPS the sha of its parsed content in the ledger;
+a flag-less `reconcile` — init, repair, update, remove's sibling pass — writes only definitions
+whose stamp matches their current content, holds and discloses the rest (never-stamped, changed,
+or stamp-less registrations), and drops the ledger records of a definition that no longer exists.
+`add <name>` preflights and writes only the named definition.
+
 **Identity is the bare name; ownership is structural.** The callable `mcp__<name>__<tool_name>`
 requires the server key to *be* the advisor name, so ownership travels inside the entry
 (`bridge.ADVISOR_MARKER`, type-exact) and in the `vibe-suite:server:<name>` fence. A name held by
@@ -60,6 +67,13 @@ DANGEROUS_PERMISSION_MODES = ("dontAsk", "auto", "bypassPermissions")
 DANGEROUS_FIELDS = ("permission_mode", "cwd", "additional_dirs")
 CONFIRM_DANGER_FLAG = "--confirm-danger"
 ACCEPTANCES_KEY = "danger_accepted"
+# vibe-185 / grill H1b: registration is an explicit operator act. The ledger stamps every
+# registered definition with the sha of its parsed content; a flag-less `reconcile` (init /
+# repair / update / remove's sibling pass) converges ONLY stamped, unchanged definitions and
+# holds everything else — disclosed, never written. `add <name>` (or `add --all`) stamps.
+REGISTRATIONS_KEY = "registered"
+LEDGER_RECORD_KEYS = (ACCEPTANCES_KEY, REGISTRATIONS_KEY)
+REGISTER_ALL = "*"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 EFFORTS = ("low", "medium", "high", "max")
@@ -377,14 +391,32 @@ def _save_ledger(ws, ledger):
         return
     # vibe-184: only provenance-image members carry a recorded mode; the acceptance map is keyed
     # by advisor names (NAME_RE admits "mode") and must never be read as one.
-    mode = _record_mode(v for k, v in ledger.items() if k != ACCEPTANCES_KEY)
+    mode = _record_mode(v for k, v in ledger.items() if k not in LEDGER_RECORD_KEYS)
     bridge.write_atomic(ws, Path(ws) / LEDGER_REL,
                         json.dumps(ledger, indent=2, sort_keys=True) + "\n", mode=mode)
 
 
 JOURNAL_KEYS = {"schema", "intent", "remove_name", "delete_timeline", "desired_sha",
                 "pre_images", "post_images", "prior_baseline", "post_baseline",
-                ACCEPTANCES_KEY}   # vibe-184: optional — {"prior": {...}, "post": {...}} acceptance maps
+                ACCEPTANCES_KEY,   # vibe-184: optional — {"prior": {...}, "post": {...}} acceptance maps
+                REGISTRATIONS_KEY}  # vibe-185: optional — {"prior": {...}, "post": {...}} registration stamps
+
+
+def _valid_image(v):
+    """A restorable pre-image record (or None): kind file, string fields, decodable content whose
+    sha matches. Shared by the journal validator and the ledger well-formedness check."""
+    if v is None:
+        return True
+    if not isinstance(v, dict) or v.get("kind") != "file":
+        return False
+    if not all(isinstance(v.get(k), str) for k in ("path", "mode", "sha256", "content_b64")):
+        return False
+    try:
+        raw = base64.b64decode(v["content_b64"], validate=True)
+        int(v["mode"], 8)
+    except Exception:
+        return False
+    return hashlib.sha256(raw).hexdigest() == v["sha256"]
 
 
 def _validated_journal(txn_path):
@@ -403,20 +435,6 @@ def _validated_journal(txn_path):
         refuse(f"unknown journal schema {txn.get('schema')!r}")
     if txn.get("intent") not in ("apply", "remove"):
         refuse(f"unknown intent {txn.get('intent')!r}")
-    def _valid_image(v):
-        if v is None:
-            return True
-        if not isinstance(v, dict) or v.get("kind") != "file":
-            return False
-        if not all(isinstance(v.get(k), str) for k in ("path", "mode", "sha256", "content_b64")):
-            return False
-        try:
-            raw = base64.b64decode(v["content_b64"], validate=True)
-            int(v["mode"], 8)
-        except Exception:
-            return False
-        return hashlib.sha256(raw).hexdigest() == v["sha256"]
-
     pre = txn.get("pre_images")
     if not isinstance(pre, dict) or set(pre) - {str(MCP_REL), str(TOML_REL), "definition"} \
             or str(MCP_REL) not in pre or str(TOML_REL) not in pre \
@@ -439,6 +457,8 @@ def _validated_journal(txn_path):
         refuse("post_images are not decodable")
     if ACCEPTANCES_KEY in txn and not _valid_acceptance_maps(txn[ACCEPTANCES_KEY]):
         refuse(f"{ACCEPTANCES_KEY} is not a pair of valid acceptance maps")
+    if REGISTRATIONS_KEY in txn and not _valid_registration_maps(txn[REGISTRATIONS_KEY]):
+        refuse(f"{REGISTRATIONS_KEY} is not a pair of valid registration maps")
     if txn["intent"] == "remove":
         if not NAME_RE.match(txn.get("remove_name") or ""):
             refuse(f"remove journal names no valid advisor ({txn.get('remove_name')!r})")
@@ -477,17 +497,124 @@ def _valid_acceptance_maps(member):
             and _valid_acceptance_map(member["prior"]) and _valid_acceptance_map(member["post"]))
 
 
-def _install_acceptances(baseline, member, which):
-    """Put the journal's `prior` (apply rollback) or `post` (remove roll-forward) acceptance map into
+_IMAGE_KEYS = frozenset({"path", "kind", "mode", "sha256", "content_b64"})
+
+
+def _expected_path(recorded, ws, rel):
+    """A recorded pre-image path names exactly the workspace file it should: the relative store path
+    (a CLI run from the workspace) or the absolute one (a library caller)."""
+    p = Path(recorded)
+    if p == Path(rel) or p == Path(ws) / rel:
+        return True
+    try:
+        return p.resolve() == (Path(ws) / rel).resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+def _writer_image(v, ws, rel):
+    """A file pre-image exactly as `bridge.record_pre_image` writes it for `rel` under `ws`: the five
+    fields, kind file, restorable, and the expected path — nothing more, nothing else."""
+    return (isinstance(v, dict) and set(v) == _IMAGE_KEYS and v.get("kind") == "file"
+            and _valid_image(v) and _expected_path(v["path"], ws, rel))
+
+
+def ledger_is_well_formed(doc, ws):
+    """The advisor ledger exactly as this module writes it: a non-empty dict whose every member is the
+    `.mcp.json` pre-image (`_writer_image` for the workspace's store), `danger_accepted` (a valid,
+    non-empty acceptance map) or `registered` (a valid, non-empty registration map). What `unbridge`
+    requires before deleting the file; a lookalike fails."""
+    if not isinstance(doc, dict) or not doc:
+        return False
+    for key, value in doc.items():
+        if key == str(MCP_REL):
+            if not _writer_image(value, ws, MCP_REL):
+                return False
+        elif key == ACCEPTANCES_KEY:
+            if not _valid_acceptance_map(value) or not value:
+                return False
+        elif key == REGISTRATIONS_KEY:
+            if not _valid_registration_map(value) or not value:
+                return False
+        else:
+            return False
+    return True
+
+
+def journal_is_well_formed(path, ws):
+    """A journal exactly as `_transact` writes it — the fail-closed validator PLUS the intent-dependent
+    writer shape: every key present (both record members included), an `apply` journal with a null
+    `remove_name`, `delete_timeline` false and pre-images for exactly the two stores, a `remove`
+    journal with a valid name, a boolean and a `definition` pre-image under the agents directory,
+    every image `_writer_image`-exact for its expected path. What `unbridge` requires before deleting
+    a journal; a full-key near-miss fails."""
+    try:
+        txn = _validated_journal(Path(path))
+    except (AdvisorError, OSError):
+        return False
+    if set(txn) != JOURNAL_KEYS:
+        return False
+    pre = txn["pre_images"]
+    if txn["intent"] == "apply":
+        if txn["remove_name"] is not None or txn["delete_timeline"] is not False:
+            return False
+        if set(pre) != {str(MCP_REL), str(TOML_REL)}:
+            return False
+    else:
+        if set(pre) != {str(MCP_REL), str(TOML_REL), "definition"}:
+            return False
+        d = pre["definition"]
+        if d is not None and not _writer_image(d, ws, AGENTS_REL / f"{txn['remove_name']}.md"):
+            return False
+    for rel in (MCP_REL, TOML_REL):
+        v = pre[str(rel)]
+        if v is not None and not _writer_image(v, ws, rel):
+            return False
+    for key in ("prior_baseline", "post_baseline"):
+        v = txn[key]
+        if v is not None and not _writer_image(v, ws, MCP_REL):
+            return False
+    return True
+
+
+def _valid_registration(entry):
+    """One registration stamp: the sha of the parsed definition the operator registered, and when."""
+    if not isinstance(entry, dict) or set(entry) != {"definition_sha256", "registered_at"}:
+        return False
+    if not isinstance(entry["definition_sha256"], str) or not _SHA256_RE.match(entry["definition_sha256"]):
+        return False
+    return isinstance(entry["registered_at"], str) and bool(_ISO_Z_RE.match(entry["registered_at"]))
+
+
+def _valid_registration_map(m):
+    return isinstance(m, dict) and all(
+        isinstance(name, str) and NAME_RE.match(name) and _valid_registration(entry) for name, entry in m.items())
+
+
+def _valid_registration_maps(member):
+    """The journal's optional `registered` member: exactly {"prior": map, "post": map}."""
+    return (isinstance(member, dict) and set(member) == {"prior", "post"}
+            and _valid_registration_map(member["prior"]) and _valid_registration_map(member["post"]))
+
+
+def _install_record(baseline, member, which, key):
+    """Put the journal's `prior` (apply rollback) or `post` (remove roll-forward) map for `key` into
     the ledger dict — or drop the key when that map is empty. A journal without the member (written
-    before vibe-184) leaves the ledger's acceptances untouched."""
+    before the member existed) leaves that ledger record untouched."""
     if member is None:
         return
     chosen = member[which]
     if chosen:
-        baseline[ACCEPTANCES_KEY] = chosen
+        baseline[key] = chosen
     else:
-        baseline.pop(ACCEPTANCES_KEY, None)
+        baseline.pop(key, None)
+
+
+def _install_records(baseline, txn, which):
+    """Both ledger records — the danger acceptances (vibe-184) and the registration stamps
+    (vibe-185) — restored (`prior`) or installed (`post`) from the journal together."""
+    _install_record(baseline, txn.get(ACCEPTANCES_KEY), which, ACCEPTANCES_KEY)
+    _install_record(baseline, txn.get(REGISTRATIONS_KEY), which, REGISTRATIONS_KEY)
 
 
 def recover(ws):
@@ -535,7 +662,7 @@ def recover(ws):
             baseline.pop(str(MCP_REL), None)
         else:
             baseline[str(MCP_REL)] = post_base
-        _install_acceptances(baseline, txn.get(ACCEPTANCES_KEY), "post")   # vibe-184: roll forward
+        _install_records(baseline, txn, "post")   # vibe-184/185: roll the records forward
         _save_ledger(ws, baseline)
         _ignore_block(ws, load_definitions(ws))
         bridge.unlink_at(ws, TXN_REL)
@@ -548,7 +675,7 @@ def recover(ws):
             baseline.pop(str(MCP_REL), None)
         else:
             baseline[str(MCP_REL)] = prior
-        _install_acceptances(baseline, txn.get(ACCEPTANCES_KEY), "prior")   # vibe-184: roll back
+        _install_records(baseline, txn, "prior")   # vibe-184/185: roll the records back
         _save_ledger(ws, baseline)
         bridge.unlink_at(ws, TXN_REL)
     return {"intent": txn.get("intent"), "remove_name": txn.get("remove_name")}
@@ -618,6 +745,81 @@ def _classify(ws, defs, doc, toml_text, pin=None, pin_file=None, pending_file=No
 
 
 # --------------------------------------------------------------------------------------------
+# Registration stamps (vibe-185 / grill H1b)
+# --------------------------------------------------------------------------------------------
+
+def registration_state(ledger, name, defn):
+    """`registered` — the ledger stamps this exact parsed definition; `changed` — it stamps an
+    earlier content of it; `unregistered` — no stamp (never added, or registered before stamps
+    existed). Only `registered` definitions converge without an operator naming them."""
+    entry = (ledger.get(REGISTRATIONS_KEY) or {}).get(name)
+    if not isinstance(entry, dict) or not isinstance(entry.get("definition_sha256"), str):
+        return "unregistered"
+    return "registered" if entry["definition_sha256"] == definition_sha(defn) else "changed"
+
+
+def _hold_report(ws, name, defn, state, ledger):
+    """The report line for a definition this call does not write. `state` is the classification
+    of the stores; the registration state decides the remedy."""
+    rstate = registration_state(ledger, name, defn)
+    dangerous = ", ".join(f for f, _, _ in dangerous_fields(ws, defn))
+    if rstate == "changed":
+        line = (f"changed-unconfirmed (held; existing store content left unchanged; re-confirm "
+                f"with advisor add {name})")
+    elif state == "declared-unregistered" and dangerous and not _accepted(ledger, name, definition_sha(defn)):
+        line = (f"danger-unaccepted (not registered; dangerous: {dangerous}; pass "
+                f"{CONFIRM_DANGER_FLAG} to advisor add {name})")
+        return line
+    elif state == "declared-unregistered":
+        line = f"declared-unregistered (not registered; register with advisor add {name})"
+    else:
+        line = (f"unstamped (held; existing store content left unchanged; confirm with "
+                f"advisor add {name})")
+    if dangerous:
+        line += f"; dangerous: {dangerous}"
+    return line
+
+
+def registration_label(ledger, name, defn, in_stores):
+    """The four-way registration vocabulary init, `list`, `reconcile` and `doctor` share: `registered`
+    (stamp matches the content), `changed` (stamp of an earlier content), `unstamped` (a registration
+    the stores hold but the ledger never stamped — written before vibe-185), `unregistered`."""
+    rstate = registration_state(ledger, name, defn)
+    if rstate != "unregistered":
+        return rstate
+    return "unstamped" if in_stores else "unregistered"
+
+
+def listing(ws, pin=None, pin_file=None, pending_file=None):
+    """What `init` discloses and `doctor`/`list` draw on: every declared definition with the values
+    that decide what a registration would hand the advisor, and whether the operator registered
+    it. Read-only; never resolves the backend."""
+    ws = Path(ws)
+    defs = load_definitions(ws)
+    ledger = _load_json_file(ws / LEDGER_REL)
+    doc = bridge.load_json(ws / MCP_REL)
+    servers = doc.get("mcpServers", {}) if isinstance(doc, dict) else {}
+    toml_text = bridge.read_text_verbatim(ws / TOML_REL)
+    rows = []
+    for name in sorted(defs):
+        d = defs[name]
+        in_stores = is_owned_entry(servers.get(name)) or bridge.toml_server_has(toml_text, name)
+        rows.append({
+            "name": name,
+            "allowed_tools": list(d["allowed_tools"]),
+            "disallowed_tools": list(d["disallowed_tools"]),
+            "permission_mode": d["permission_mode"],
+            "cwd": d["cwd"],
+            "additional_dirs": list(d["additional_dirs"]),
+            "prompt_bytes": len(d["body"].encode("utf-8")),
+            "model": d["model"],
+            "registration": registration_label(ledger, name, d, in_stores),
+            "dangerous": [f for f, _, _ in dangerous_fields(ws, d)],
+        })
+    return rows
+
+
+# --------------------------------------------------------------------------------------------
 # Danger gate (vibe-184 / grill H1a)
 # --------------------------------------------------------------------------------------------
 
@@ -658,7 +860,7 @@ def _accepted(ledger, name, sha):
     return isinstance(entry, dict) and entry.get("definition_sha256") == sha
 
 
-def danger_gate(ws, defs, confirm_danger=False, now=None):
+def danger_gate(ws, defs, confirm_danger=False, now=None, names=None):
     """Refuse — before anything is written — every definition that declares a dangerous field
     unless it is accepted, and return the acceptances this transaction must record.
 
@@ -671,7 +873,9 @@ def danger_gate(ws, defs, confirm_danger=False, now=None):
     ledger = _load_json_file(Path(ws) / LEDGER_REL)
     new_acceptances = {}
     dangerous_seen = False
-    for name in sorted(defs):
+    # vibe-185: the gate guards WRITES. A definition this call will not register or refresh (an
+    # unstamped or changed one held by the registration rule) is disclosed, not refused here.
+    for name in sorted(defs if names is None else names):
         fields = dangerous_fields(ws, defs[name])
         if not fields:
             continue
@@ -725,23 +929,47 @@ def _collision_check(defs, doc, toml_text):
                 "advisor or remove the conflicting table — nothing has been written")
 
 
-def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False):
-    """Converge both stores to the definitions. Returns `{name: transition}`."""
+def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False,
+              register=None, now=None):
+    """Converge both stores to the definitions the operator REGISTERED. Returns `{name: transition}`.
+
+    vibe-185: `register` names the definitions this call stamps and registers (`add <name>` passes
+    `{name}`; `add --all` passes `REGISTER_ALL`; init / repair / update pass nothing). Every other
+    declared definition converges only while the ledger stamps its exact parsed content; an
+    unstamped or changed definition is HELD — reported with its remedy, excluded from the collision
+    and danger preflights, never written — and a registration nobody owns (`registered-undeclared`)
+    is still removed.
+    """
     ws = Path(ws)
     bridge.assert_root(ws)
     bridge.pin_root(ws)
     recover(ws)
     defs = load_definitions(ws)
+    if register == REGISTER_ALL:
+        register = set(defs)
+    register = set(register or ())
+    unknown = sorted(register - set(defs))
+    if unknown:
+        raise AdvisorError(f"no definition to register for {unknown[0]!r}; nothing has been written")
+    ledger = _load_json_file(ws / LEDGER_REL)
+    # vibe-185 (round 2): an explicit `add` acts on exactly the names it was given — it never
+    # preflights, refuses over, accepts for, or writes an unrelated definition, stamped or not; the
+    # flag-less callers act on every stamped, unchanged definition (background convergence).
+    explicit = bool(register)
+    acting = set(register) if explicit else {
+        n for n in defs if registration_state(ledger, n, defs[n]) == "registered"}
+    acting_defs = {n: defs[n] for n in acting}
     doc = bridge.load_json(ws / MCP_REL)
     toml_before = bridge.read_text_verbatim(ws / TOML_REL)
-    _collision_check(defs, doc, toml_before)
-    # vibe-184: a dangerous definition is refused here — after the collision check, before any
-    # classification can write — unless accepted now or previously; the new acceptances ride the
-    # same transaction as the registrations they authorise.
-    acceptances = danger_gate(ws, defs, confirm_danger=confirm_danger)
+    _collision_check(acting_defs, doc, toml_before)
+    # vibe-184: a dangerous definition this call would write is refused here — after the collision
+    # check, before any classification can write — unless accepted now or previously; the new
+    # acceptances ride the same transaction as the registrations they authorise.
+    acceptances = danger_gate(ws, defs, confirm_danger=confirm_danger, now=now, names=sorted(acting))
 
     classified = _classify(ws, defs, doc, toml_before, pin, pin_file, pending_file)
-    invalid = {n: d for n, (s, _, _, d) in classified.items() if s == "invalid-registration"}
+    invalid = {n: d for n, (s_, _, _, d) in classified.items()
+               if s_ == "invalid-registration" and n in acting}
     if invalid:
         name, detail = next(iter(invalid.items()))
         raise AdvisorError(
@@ -752,14 +980,24 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=Fal
     toml_text = toml_before
     report = {}
     for name, (state, desired_entry, desired_body, _) in classified.items():
-        if state == "consistent":
-            report[name] = "consistent"
-        elif state == "registered-undeclared":
+        if state == "registered-undeclared":
+            if explicit:
+                # An explicit add writes only its named definition — an orphaned registration
+                # is the flag-less callers' (and remove's) convergence, not this call's.
+                report[name] = "registered-undeclared (not converged by an explicit add; run advisor reconcile)"
+                continue
             if is_owned_entry(servers.get(name)):
                 del servers[name]
             if bridge.toml_server_has(toml_text, name):
                 toml_text = bridge.toml_server_remove(toml_text, name)
             report[name] = "registered-undeclared->removed"
+        elif name not in acting:
+            if explicit and registration_state(ledger, name, defs[name]) == "registered":
+                report[name] = "registered (not converged by an explicit add; init/repair/update converge it)"
+            else:
+                report[name] = _hold_report(ws, name, defs[name], state, ledger)
+        elif state == "consistent":
+            report[name] = "consistent"
         else:
             if desired_entry is None:
                 # Presence-only classification carries no content; a write needs it, so the
@@ -770,8 +1008,12 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=Fal
             servers[name] = desired_entry
             toml_text = bridge.toml_server_upsert(toml_text, name, desired_body)
             report[name] = f"{state}->registered"
+    stamp_at = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    registrations = {n: {"definition_sha256": definition_sha(defs[n]), "registered_at": stamp_at}
+                     for n in sorted(register)}
 
-    _transact(ws, doc, toml_before, toml_text, defs, acceptances=acceptances)
+    _transact(ws, doc, toml_before, toml_text, defs, acceptances=acceptances,
+              registrations=registrations)
     return report
 
 
@@ -781,7 +1023,7 @@ def _endstate_bytes(doc):
 
 def _transact(ws, doc, toml_before, toml_after, defs,
               intent="apply", remove_name=None, delete_timeline=False, definition_pre=None,
-              acceptances=None):
+              acceptances=None, registrations=None):
     """Journal → JSON → TOML → baseline → ignore-block, with rollback (apply) or the journal left
     for roll-forward (remove — the caller finishes deletions and cleanup)."""
     ws = Path(ws)
@@ -828,7 +1070,25 @@ def _transact(ws, doc, toml_before, toml_after, defs,
     if intent == "remove" and remove_name in accepted_after:
         del accepted_after[remove_name]
     acceptances_changed = accepted_after != accepted_before
-    if not (json_changed or toml_changed or acceptances_changed) and intent == "apply":
+    # vibe-185: the registration stamps, journaled and kept exactly like the acceptances.
+    registered_before = dict(baseline.get(REGISTRATIONS_KEY) or {})
+    registered_after = dict(registered_before)
+    if registrations:
+        registered_after.update(registrations)
+    if intent == "remove" and remove_name in registered_after:
+        del registered_after[remove_name]
+    # vibe-185 (round 2): a record whose definition no longer exists — deleted by hand, never
+    # through remove — is dropped by every transaction, with its acceptance: restoring the same
+    # file later is a new registration, not a resumed one. `defs` is the set of definitions this
+    # transaction converges (all declared; for remove, all but the target).
+    for stale in [n for n in registered_after if n not in defs]:
+        del registered_after[stale]
+    for stale in [n for n in accepted_after if n not in defs]:
+        del accepted_after[stale]
+    acceptances_changed = accepted_after != accepted_before
+    registrations_changed = registered_after != registered_before
+    if not (json_changed or toml_changed or acceptances_changed or registrations_changed) \
+            and intent == "apply":
         _ignore_block(ws, defs)
         return
 
@@ -853,6 +1113,10 @@ def _transact(ws, doc, toml_before, toml_after, defs,
         post_baseline[ACCEPTANCES_KEY] = accepted_after
     else:
         post_baseline.pop(ACCEPTANCES_KEY, None)
+    if registered_after:
+        post_baseline[REGISTRATIONS_KEY] = registered_after
+    else:
+        post_baseline.pop(REGISTRATIONS_KEY, None)
     journal = {
         "schema": 1, "intent": intent, "remove_name": remove_name,
         "delete_timeline": delete_timeline,
@@ -864,6 +1128,7 @@ def _transact(ws, doc, toml_before, toml_after, defs,
         "prior_baseline": prior_baseline,
         "post_baseline": post_baseline.get(str(MCP_REL)),
         ACCEPTANCES_KEY: {"prior": accepted_before, "post": accepted_after},   # vibe-184
+        REGISTRATIONS_KEY: {"prior": registered_before, "post": registered_after},   # vibe-185
     }
     mode = _record_mode(pre_images.values())
     bridge.write_atomic(ws, ws / TXN_REL, json.dumps(journal) + "\n", mode=mode)
@@ -892,7 +1157,7 @@ def _transact(ws, doc, toml_before, toml_after, defs,
             # `_ignore_block` could raise — the in-process rollback restores the journaled prior
             # map exactly as `recover` does, so a rolled-back apply authorises nothing and a
             # failed remove keeps what it had.
-            _install_acceptances(restored, journal[ACCEPTANCES_KEY], "prior")
+            _install_records(restored, journal, "prior")
             _save_ledger(ws, restored)
             bridge.unlink_at(ws, TXN_REL)
         raise
@@ -968,7 +1233,7 @@ def add(ws, name, pin=None, plugin_root=None, custom_text=None,
     try:
         bridge.ensure_dir_at(ws, tl_rel)
         return reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file,
-                         confirm_danger=confirm_danger)
+                         confirm_danger=confirm_danger, register={name})
     except BaseException:
         try:
             if created_tl:
@@ -983,6 +1248,37 @@ def add(ws, name, pin=None, plugin_root=None, custom_text=None,
                     pass
         except (OSError, bridge.BridgeError):
             pass
+        raise
+
+
+def add_all(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False):
+    """`advisor add --all`: register (stamp) every declared definition at once — the explicit bulk
+    act the init listing offers. Refuses when nothing is declared."""
+    ws = Path(ws)
+    bridge.assert_root(ws)
+    bridge.pin_root(ws)
+    recover(ws)
+    defs = load_definitions(ws)
+    if not defs:
+        raise AdvisorError("no advisor definitions declared under .vibe-suite/agents/; nothing to register")
+    # Every registered advisor gets its timeline directory, exactly as a single `add` gives one; a
+    # refused bulk add leaves no residue — only the directories this call created are removed.
+    created = []
+    try:
+        for name in sorted(defs):
+            tl_rel = timeline_rel(name)
+            if not (ws / tl_rel).exists():
+                bridge.ensure_dir_at(ws, tl_rel)
+                created.append(name)
+        return reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file,
+                         confirm_danger=confirm_danger, register=REGISTER_ALL)
+    except BaseException:
+        for name in reversed(created):
+            try:
+                bridge.remove_tree_at(ws, timeline_rel(name))
+                bridge.unlink_at(ws, AGENTS_REL / name)
+            except (OSError, bridge.BridgeError):
+                pass
         raise
 
 
@@ -1013,7 +1309,11 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
     # not yet accepted is HELD: excluded from the collision and invalid-registration preflights
     # (neither may block this removal on its account), never registered or refreshed below, and
     # reported; the post-removal convergence says the same in its warning.
-    held = unaccepted_dangerous(ws, defs_after)
+    ledger = _load_json_file(ws / LEDGER_REL)
+    # vibe-185: a sibling converges through a removal only on the same terms as through
+    # reconcile — stamped at its current content; every other declared sibling is held too.
+    held = unaccepted_dangerous(ws, defs_after) | {
+        k for k, v in defs_after.items() if registration_state(ledger, k, v) != "registered"}
     _collision_check({k: v for k, v in defs_after.items() if k not in held}, doc, toml_before)
     classified = _classify(ws, defs_after, doc, toml_before, pin, pin_file, pending_file)
     for other, (state, _, _, detail) in classified.items():
@@ -1029,8 +1329,7 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
     report = {}
     for other, (state, desired_entry, desired_body, _) in classified.items():
         if other in held:
-            report[other] = (f"danger-unaccepted (not converged; pass {CONFIRM_DANGER_FLAG} to "
-                             "advisor reconcile)")
+            report[other] = _hold_report(ws, other, defs_after[other], state, ledger)
             continue
         if state == "consistent":
             continue
@@ -1106,6 +1405,7 @@ def list_advisors(ws, pin=None, pin_file=None, pending_file=None):
     doc = bridge.load_json(ws / MCP_REL)
     toml_text = bridge.read_text_verbatim(ws / TOML_REL)
     classified = _classify(ws, defs, doc, toml_text, pin, pin_file, pending_file)
+    ledger = _load_json_file(ws / LEDGER_REL)
     rows = []
     for name, (state, _, _, detail) in sorted(classified.items()):
         defn = defs.get(name)
@@ -1113,6 +1413,8 @@ def list_advisors(ws, pin=None, pin_file=None, pending_file=None):
             "name": name,
             "state": state,
             "detail": detail,
+            "registration": (registration_label(ledger, name, defn, state != "declared-unregistered")
+                             if defn is not None else None),
             "model": (defn or {}).get("model"),
             "tool_name": (defn or {}).get("tool_name"),
             "max_turns": (defn or {}).get("max_turns"),

@@ -126,7 +126,9 @@ def run(workspace, plugin_root, env=None, probe_timeout=30):
         report.add("bridges", FAIL, f"bridge refresh did not complete: {exc}")
 
     # Advisors reconcile in every pin state (E6.1) — removal and consistency need no backend, and
-    # the engine resolves one lazily only when a new registration must be written.
+    # the engine resolves one lazily only when a registered advisor's registration must be
+    # rewritten. vibe-185: update registers nothing the operator has not added; a never-registered
+    # or edited definition is held and reported.
     try:
         import advisors
         rep = advisors.reconcile(ws)

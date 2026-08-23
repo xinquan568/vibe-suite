@@ -396,7 +396,14 @@ Value the smallest true answer.
 class TestAdvisorState(DoctorCase):
     """E6.1: a non-consistent advisor is a fixable finding — repair reconciles it."""
 
-    def test_a_declared_unregistered_advisor_is_a_fixable_finding(self):
+    def _add(self, name="probe_advisor"):
+        r = subprocess.run(["python3", str(REPO_ROOT / "scripts" / "advisor_cli.py"), "--workspace", str(self.ws),
+                            "add", name], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_declared_unregistered_advisor_is_a_low_finding_that_names_add_and_is_not_fixable(self):
+        # vibe-185: the expected state of a definition the operator never registered — repair must
+        # not "fix" it; the remedy is the explicit add. Pre-vibe-185 this was a fixable finding.
         self.install()
         agents = self.ws / ".vibe-suite" / "agents"
         agents.mkdir(parents=True, exist_ok=True)
@@ -404,8 +411,43 @@ class TestAdvisorState(DoctorCase):
         report = self.report()
         rows = [f for f in report["findings"] if f["check"] == "advisor-state"]
         self.assertEqual(len(rows), 1, report["findings"])
-        self.assertTrue(rows[0]["auto_fixable"])
-        self.assertIn("declared-unregistered", rows[0]["finding"])
+        self.assertFalse(rows[0]["auto_fixable"])
+        self.assertEqual(rows[0]["severity"], "[LOW]")
+        self.assertIn("not registered", rows[0]["finding"])
+        self.assertIn("/vibe-suite:advisor add probe_advisor", rows[0]["finding"])
+
+    def test_an_edited_registered_advisor_is_a_medium_finding_that_names_add_and_is_not_fixable(self):
+        self.install()
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "probe_advisor.md").write_text(ADVISOR_DEFN, encoding="utf-8")
+        self._add()
+        self.assertEqual([f for f in self.report()["findings"] if f["check"] == "advisor-state"], [])
+        (agents / "probe_advisor.md").write_text(ADVISOR_DEFN.replace("model: sonnet", "model: opus"), encoding="utf-8")
+        rows = [f for f in self.report()["findings"] if f["check"] == "advisor-state"]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertFalse(rows[0]["auto_fixable"])
+        self.assertEqual(rows[0]["severity"], "[MEDIUM]")
+        self.assertIn("changed since it was registered", rows[0]["finding"])
+        self.assertIn("/vibe-suite:advisor add probe_advisor", rows[0]["finding"])
+
+    def test_a_registration_without_a_stamp_is_a_medium_finding_that_names_add_and_is_not_fixable(self):
+        self.install()
+        self._declare_and_register_unstamped()
+        rows = [f for f in self.report()["findings"] if f["check"] == "advisor-state"]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertFalse(rows[0]["auto_fixable"])
+        self.assertIn("without a registration stamp", rows[0]["finding"])
+        self.assertIn("/vibe-suite:advisor add probe_advisor", rows[0]["finding"])
+
+    def _declare_and_register_unstamped(self):
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "probe_advisor.md").write_text(ADVISOR_DEFN, encoding="utf-8")
+        self._add()
+        ledger = self.ws / ".vibe-suite-state" / "advisor-preimages.json"
+        data = json.loads(ledger.read_text()); data.pop("registered")
+        ledger.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
     def test_a_consistent_workspace_has_no_advisor_finding(self):
         self.install()
@@ -425,19 +467,21 @@ class TestAdvisorStateVariants(DoctorCase):
         agents.mkdir(parents=True, exist_ok=True)
         (agents / "probe_advisor.md").write_text(ADVISOR_DEFN, encoding="utf-8")
 
+    def _stamp(self):
+        # vibe-185: drift is fixable only for a REGISTERED (stamped) advisor; register it first.
+        r = subprocess.run(["python3", str(REPO_ROOT / "scripts" / "advisor_cli.py"), "--workspace", str(self.ws),
+                            "add", "probe_advisor"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_stale_registered_is_fixable(self):
         self.install()
         self._declare()
+        self._stamp()
         mcp = self.ws / ".mcp.json"
         doc = json.loads(mcp.read_text())
         doc.setdefault("mcpServers", {})["probe_advisor"] = dict(self.ENTRY)
         mcp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
-        toml = self.ws / ".codex" / "config.toml"
-        block = ("# >>> vibe-suite:server:probe_advisor v1 >>>\n"
-                 '[mcp_servers.probe_advisor]\ncommand = "npx"\n'
-                 'args = ["-y", "claude-octopus@9.9.9"]\n'
-                 "# <<< vibe-suite:server:probe_advisor <<<\n")
-        toml.write_text(toml.read_text() + block)
+        # vibe-185: `add` already wrote the TOML block; the stale .mcp.json entry above is the drift.
         rows = [f for f in self.report()["findings"] if f["check"] == "advisor-state"]
         self.assertEqual(len(rows), 1, rows)
         self.assertIn("stale-registered", rows[0]["finding"])
@@ -450,6 +494,7 @@ class TestAdvisorStateVariants(DoctorCase):
         # remains covered by explicit pending-file cases in tests/test_advisors.py.
         self.install()
         self._declare()
+        self._stamp()
         mcp = self.ws / ".mcp.json"
         doc = json.loads(mcp.read_text())
         entry = dict(self.ENTRY, args=["-y", "claude-octopus@latest"])

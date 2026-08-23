@@ -348,6 +348,68 @@ class TestCrashConvergence(InitCase):
         self.assertEqual(len(markers), 1, "the baseline snapshot was appended twice")
 
 
+class TestInitListsAdvisorsAndRegistersNone(InitCase):
+    """vibe-185 / grill H1b: a definition under .vibe-suite/agents/ is repository content. init
+    discloses every declared definition and registers none; `advisor add <name>` registers exactly
+    that one, `add --all` the rest."""
+
+    ADVISOR = ("---\ndescription: |\n  Judges probe things.\nmodel: sonnet\n"
+               "allowed_tools: [Read, Grep]\ncwd: docs\nadditional_dirs: [src]\n---\n\n"
+               "Value the smallest true answer.\n")
+    RISKY = ("---\ndescription: |\n  Judges risky things.\nmodel: sonnet\n"
+             "permission_mode: bypassPermissions\nallowed_tools: [Bash]\n---\n\nDo things.\n")
+
+    def _declare(self):
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "probe_advisor.md").write_text(self.ADVISOR, encoding="utf-8")
+        (agents / "risky_advisor.md").write_text(self.RISKY, encoding="utf-8")
+        return agents
+
+    def _cli(self, *args):
+        return subprocess.run(["python3", str(REPO_ROOT / "scripts" / "advisor_cli.py"),
+                               "--workspace", str(self.ws), *args], capture_output=True, text=True)
+
+    def test_init_lists_every_declared_definition_and_registers_none(self):
+        self._declare()
+        r = run_init(self.ws, *self.answers())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        listing = [l for l in r.stderr.splitlines() if l.startswith("note: advisor ")]
+        self.assertEqual(len(listing), 2, r.stderr)
+        probe = next(l for l in listing if "probe_advisor" in l)
+        for piece in ("tools=Read,Grep", "permission_mode=default", "cwd=docs", "additional_dirs=src",
+                      "prompt=31B", "registration=unregistered"):   # the parsed body: no trailing newline
+            self.assertIn(piece, probe, probe)
+        risky = next(l for l in listing if "risky_advisor" in l)
+        self.assertIn("permission_mode=bypassPermissions", risky)
+        self.assertIn("DANGEROUS: permission_mode", risky)
+        self.assertIn("init registers no advisor", r.stderr)
+        doc = json.loads((self.ws / ".mcp.json").read_text())
+        self.assertNotIn("probe_advisor", doc["mcpServers"])
+        self.assertNotIn("risky_advisor", doc["mcpServers"])
+        toml = (self.ws / ".codex" / "config.toml").read_text()
+        self.assertNotIn("probe_advisor", toml)
+        self.assertNotIn("risky_advisor", toml)
+        self.assertFalse((self.ws / ".vibe-suite-state" / "advisor-preimages.json").exists(), "no ledger: nothing registered, nothing stamped")
+
+    def test_add_registers_exactly_one_and_a_rerun_of_init_keeps_the_other_unregistered(self):
+        self._declare()
+        self.assertEqual(run_init(self.ws, *self.answers()).returncode, 0)
+        r = self._cli("add", "probe_advisor")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        doc = json.loads((self.ws / ".mcp.json").read_text())
+        self.assertIn("probe_advisor", doc["mcpServers"])
+        self.assertNotIn("risky_advisor", doc["mcpServers"])
+        ledger = json.loads((self.ws / ".vibe-suite-state" / "advisor-preimages.json").read_text())
+        self.assertEqual(set(ledger["registered"]), {"probe_advisor"})
+        rerun = run_init(self.ws, *self.answers())
+        self.assertEqual(rerun.returncode, 0, rerun.stderr)
+        self.assertIn("registration=registered", next(l for l in rerun.stderr.splitlines() if "note: advisor probe_advisor" in l))
+        doc = json.loads((self.ws / ".mcp.json").read_text())
+        self.assertIn("probe_advisor", doc["mcpServers"], "a re-run converges what the operator registered")
+        self.assertNotIn("risky_advisor", doc["mcpServers"], "and still registers nothing else")
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -691,7 +753,8 @@ class ConfigValidationDoesNotWidenTheWindow(unittest.TestCase):
 
 
 class TestAdvisorsCheckpoint(InitCase):
-    """E6.1: init converges pre-declared advisors; an interrupt at the checkpoint re-runs clean."""
+    """E6.1 / vibe-185: init lists pre-declared advisors, registers none, and converges what the
+    operator registered; an interrupt at the checkpoint re-runs clean."""
 
     ADVISOR = ("---\ndescription: |\n  Judges probe things.\nmodel: sonnet\n---\n\n"
                "Value the smallest true answer.\n")

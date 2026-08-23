@@ -286,6 +286,13 @@ class TestAdvisorCommandContract(unittest.TestCase):
         self.assertIn("--delete-timeline", self.text)
         self.assertIn("--keep-timeline", self.text)
 
+    def test_documents_explicit_registration_and_the_stamp(self):
+        # vibe-185: init lists, add registers (and --all), the ledger stamps, a changed definition is held
+        self.assertIn("add --all", self.text)
+        self.assertIn("registers none", self.text)
+        self.assertIn("changed-unconfirmed", self.text)
+        self.assertIn("declared-unregistered", self.text)
+
 
 class TestTrendCommandContract(unittest.TestCase):
     """E6.2: /vibe-suite:trend orchestrates scope_tag -> score (no --history) -> trend_engine."""

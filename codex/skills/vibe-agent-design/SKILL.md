@@ -282,8 +282,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/advisor_cli.py" --workspace . reconcile
 ```
 
 Reconciliation happens automatically inside `/vibe-suite:advisor add` and
-`/vibe-suite:advisor remove`; init, `/vibe-suite:repair` and `/vibe-suite:update`
-run the same reconcile as part of their normal flow.
+`/vibe-suite:advisor remove`; `/vibe-suite:repair` and `/vibe-suite:update` run the
+same reconcile as part of their normal flow, and init runs it after **listing** the
+declared definitions. A flag-less reconcile converges only definitions the operator
+registered (`/vibe-suite:advisor add <name>`, which stamps the parsed content in the
+advisor ledger) and whose content is unchanged since — an edited advisor is held at
+its registered content until you re-run `advisor add <name>`; a never-registered one
+is listed and left alone.
 
 Propagation differs by client: Claude reads `.mcp.json` at session startup, so a new
 or renamed advisor appears only after a session restart; Codex re-reads

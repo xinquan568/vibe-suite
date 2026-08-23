@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: ISC
 """CLI for `/vibe-suite:advisor` (E6.1 / vibe-47) — add | list | remove | reconcile.
 
+vibe-185: registration is an explicit operator act. `add <name>` (or `add --all`) registers and
+stamps the definition; a flag-less `reconcile` — what init / repair / update run — converges only
+stamped, unchanged definitions and holds everything else, disclosed and unwritten.
+
 Non-interactive by design: the command doc runs the interview in the host session and calls this
 with explicit flags, so every behavior here is scriptable and testable. Exit codes: 0 success,
 2 refusal (nothing written on refusal — `advisors.AdvisorError` is raised before any mutation).
@@ -56,8 +60,10 @@ def main(argv=None):
     parser.add_argument("--workspace", default=".", help="workspace root (default: cwd)")
     sub = parser.add_subparsers(dest="op", required=True)
 
-    p_add = sub.add_parser("add", help="add an advisor from a preset or custom flags")
-    p_add.add_argument("name", help="advisor name (preset name unless --custom)")
+    p_add = sub.add_parser("add", help="add an advisor from a preset or custom flags, or register declared ones")
+    p_add.add_argument("name", nargs="?", help="advisor name (preset name unless --custom; a declared definition to register)")
+    p_add.add_argument("--all", dest="register_all", action="store_true",
+                       help="register (stamp) every declared definition under .vibe-suite/agents/ — the explicit bulk act after init's listing")
     p_add.add_argument("--custom", action="store_true")
     p_add.add_argument("--pin", help="exact claude-octopus version (P9 escape hatch)")
     p_add.add_argument("--description")
@@ -81,10 +87,8 @@ def main(argv=None):
     group.add_argument("--delete-timeline", action="store_true")
     group.add_argument("--keep-timeline", action="store_true")
 
-    p_rec = sub.add_parser("reconcile", help="converge registrations to definitions")
+    p_rec = sub.add_parser("reconcile", help="converge REGISTERED definitions (stamped, unchanged) to both stores; held ones are reported")
     p_rec.add_argument("--pin")
-    p_rec.add_argument("--confirm-danger", dest="confirm_danger", action="store_true",
-                       help="accept every declared definition with a dangerous field (vibe-184)")
 
     args = parser.parse_args(argv)
     ws = Path(args.workspace)
@@ -105,12 +109,22 @@ def main(argv=None):
             print("note: an advisor transaction is pending recovery; run "
                   "/vibe-suite:advisor reconcile (or any add/remove) to heal it")
         if args.op == "add":
-            custom_text = _compose_custom(args) if args.custom else None
-            report = advisors.add(ws, args.name, pin=args.pin, plugin_root=_plugin_root(),
-                                  custom_text=custom_text, confirm_danger=args.confirm_danger)
-            for name, transition in sorted(report.items()):
-                print(f"{name}: {transition}")
-            print(f"✓ advisor {args.name!r} bridged into .mcp.json + .codex/config.toml")
+            if args.register_all == bool(args.name):
+                raise advisors.AdvisorError("add takes exactly one of <name> or --all")
+            if args.register_all:
+                if args.custom:
+                    raise advisors.AdvisorError("--all registers declared definitions; it cannot be combined with --custom")
+                report = advisors.add_all(ws, pin=args.pin, confirm_danger=args.confirm_danger)
+                for name, transition in sorted(report.items()):
+                    print(f"{name}: {transition}")
+                print("✓ every declared advisor registered into .mcp.json + .codex/config.toml")
+            else:
+                custom_text = _compose_custom(args) if args.custom else None
+                report = advisors.add(ws, args.name, pin=args.pin, plugin_root=_plugin_root(),
+                                      custom_text=custom_text, confirm_danger=args.confirm_danger)
+                for name, transition in sorted(report.items()):
+                    print(f"{name}: {transition}")
+                print(f"✓ advisor {args.name!r} bridged into .mcp.json + .codex/config.toml")
             print("Claude picks it up at next session start; Codex on next invocation.")
         elif args.op == "list":
             rows = advisors.list_advisors(ws)
@@ -121,7 +135,7 @@ def main(argv=None):
             else:
                 for r in rows:
                     tier = r["model"] or "caller-default"
-                    print(f"{r['name']:24} {r['state']:24} {tier:8} "
+                    print(f"{r['name']:24} {r['state']:24} {(r.get('registration') or '-'):13} {tier:8} "
                           f"turns={r['max_turns'] or '-'} budget={r['max_budget_usd'] or '-'}")
         elif args.op == "remove":
             report = advisors.remove(ws, args.name, delete_timeline=args.delete_timeline)
@@ -132,7 +146,7 @@ def main(argv=None):
             print(f"✓ advisor {args.name!r} removed{kept}")
             print("Restart Claude so the MCP loader drops the server; Codex sees it immediately.")
         elif args.op == "reconcile":
-            report = advisors.reconcile(ws, pin=args.pin, confirm_danger=args.confirm_danger)
+            report = advisors.reconcile(ws, pin=args.pin)
             if not report:
                 print("no advisors declared or registered; nothing to reconcile")
             for name, transition in sorted(report.items()):

@@ -490,6 +490,12 @@ class TestAdvisorReconcileStage(unittest.TestCase):
             "max_turns: 4\n"
             "max_budget_usd: 0.40\n"
             "---\n\nValue the smallest true answer.\n", encoding="utf-8")
+        # vibe-185: only a REGISTERED advisor takes part in the collision preflight — register it
+        # first (the stamp), then let an unowned server squat on its name.
+        (ws / ".mcp.json").write_text('{"mcpServers": {}}\n')
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import advisors as advisors_mod
+        advisors_mod.add(ws, "floaty")
         squatter = {"command": "their-server"}
         (ws / ".mcp.json").write_text(json.dumps(
             {"mcpServers": {"floaty": squatter}}, indent=2, sort_keys=True) + "\n")
@@ -501,3 +507,19 @@ class TestAdvisorReconcileStage(unittest.TestCase):
         self.assertEqual(stages["advisors"]["status"], "fail")
         self.assertIn("floaty", stages["advisors"]["detail"])
         self.assertIn("unowned", stages["advisors"]["detail"])
+
+    def test_a_declared_but_never_registered_advisor_is_held_by_update(self):
+        # vibe-185: update converges only what the operator registered.
+        ws = Path(tempfile.mkdtemp(prefix="vibe-update-advisors-"))
+        self.addCleanup(__import__("shutil").rmtree, ws, ignore_errors=True)
+        (ws / ".vibe-suite" / "agents").mkdir(parents=True)
+        (ws / ".vibe-suite" / "agents" / "quiet.md").write_text(
+            "---\ndescription: |\n  Judges quiet things.\nmodel: sonnet\n---\n\nValue truth.\n", encoding="utf-8")
+        (ws / ".mcp.json").write_text('{"mcpServers": {}}\n')
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import update as update_mod
+        report = update_mod.run(ws, REPO_ROOT, probe_timeout=1)
+        stages = {s["stage"]: s for s in report.stages}
+        self.assertEqual(stages["advisors"]["status"], "ok")
+        self.assertIn("quiet: declared-unregistered (not registered; register with advisor add quiet)", stages["advisors"]["detail"])
+        self.assertNotIn("quiet", json.loads((ws / ".mcp.json").read_text()).get("mcpServers", {}))

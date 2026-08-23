@@ -84,6 +84,19 @@ class TestDelegateContentContract(unittest.TestCase):
         verify = self.text.split("<!-- canonical-verify -->", 1)[1].split("```", 2)[1]
         self.assertIn("set -euo pipefail", verify,
                       "every verification command's failure must fail the block")
+        # grill S3: repo-resident test scripts the run touched are refused before any branch
+        # executes them — modified or created (porcelain, not only diff) — unless confirmed
+        self.assertIn("git status --porcelain -- run-tests.sh package.json", verify)
+        self.assertIn('[ -z "${DELEGATE_VERIFY_CONFIRMED:-}" ]', verify)
+        self.assertIn("exit 3", verify)
+        self.assertIn("verify: refusing to execute repo-resident test scripts", verify,
+                      "the refusal marker line — how a refusal is told from a target's own exit status")
+        self.assertIn("diff --no-index -- /dev/null", verify,
+                      "a created (untracked) script is shown whole before the operator is asked")
+        guard = verify.index("DELEGATE_VERIFY_CONFIRMED")
+        self.assertLess(guard, verify.index("./run-tests.sh"), "the guard precedes the script branch")
+        self.assertLess(guard, verify.index("npm test"))
+        self.assertLess(guard, verify.index("unittest discover"))
 
     def _section(self, start, end):
         return self.text.split(start, 1)[1].split(end, 1)[0]
@@ -111,6 +124,26 @@ class TestDelegateContentContract(unittest.TestCase):
         self.assertIn("apply the same `status` branching", verify_section,
                       "background mode branches on status too")
         self.assertIn("operator-invoked", verify_section)
+
+    def test_verify_refuses_touched_scripts_then_asks_and_needs_an_explicit_yes(self):
+        # grill S3: the prose matches the block — refuse, show, ask, explicit yes → flag, never
+        # re-run unconfirmed; an untracked (engine-created) script counts
+        verify_section = self._section("## 5. Verify", "## 6.")
+        self.assertIn("refuses", verify_section)
+        self.assertIn("`??`", verify_section, "an engine-created script is `??` in porcelain")
+        self.assertIn("`git diff` does not show", verify_section)
+        self.assertIn("addition diff", verify_section, "a created script is shown whole, not confirmed unseen")
+        self.assertIn("refusal marker", verify_section)
+        prose = verify_section.split("```", 2)[2]   # the prose AFTER the canonical block
+        ask = prose.find("AskUserQuestion")
+        flag = prose.find("DELEGATE_VERIFY_CONFIRMED=1")
+        self.assertGreater(ask, -1); self.assertGreater(flag, -1)
+        self.assertLess(ask, flag, "the question is described BEFORE the flag it authorises")
+        self.assertIn("explicit yes", verify_section)
+        self.assertIn("never\nre-run unconfirmed", verify_section.replace("**", ""))
+        self.assertIn("never absorbed", verify_section)
+        background = verify_section.split("`--background` mode", 1)[1]
+        self.assertIn("DELEGATE_VERIFY_CONFIRMED=1", background, "the background follow-up carries the same rule")
 
     def test_fallback_covers_no_terminal_event_and_no_header_case(self):
         fallback = self.text.split("## 6.", 1)[1]

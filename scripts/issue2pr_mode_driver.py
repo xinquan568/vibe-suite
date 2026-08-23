@@ -266,6 +266,7 @@ class Chain:
         self.data = load_json(self.path)
         self.timeline = self.path.parent / "timeline.md"
         self.pending_lines = []
+        self.result_events = None      # vibe-188: set when the applied branch declares its own
 
     @property
     def link(self):
@@ -365,6 +366,65 @@ class Chain:
                 # while round <= cap.
                 if "runs while round <= cap" not in semantics:
                     raise DeclarationGap("chain-operations", "babysit_round_semantics")
+                # vibe-188: ACTIONABLE activity may run a babysit round only when its author is
+                # one of the DECLARED associations; anyone else is notified about, never acted
+                # upon, and auto-merge is never re-armed on their account — the decision is
+                # recorded. Fail-closed against the declaration: an absent `author_gate` is a
+                # gap (exit 4), an explicit null is the declared opt-out (exit 4's alias — a
+                # failing check has no author), and every member the gate needs must be present.
+                if "author_gate" not in effect:
+                    raise DeclarationGap("watcher-exit-actions", "3.effect.author_gate")
+                gate = effect["author_gate"]
+                if gate is not None:
+                    # Every member is validated — shape AND value — before anything persists, so
+                    # an unsupported declaration is a gap naming the exact member (exit 4), never
+                    # a half-applied branch.
+                    G = "3.effect.author_gate"
+                    if not isinstance(gate, dict):
+                        raise DeclarationGap("watcher-exit-actions", G)
+                    if gate.get("applies_to") != "actionable":
+                        raise DeclarationGap("watcher-exit-actions", G + ".applies_to")
+                    allowed = gate.get("babysit_allowed")
+                    if (not isinstance(allowed, list) or not allowed
+                            or not all(isinstance(a, str) and a.strip() for a in allowed)):
+                        raise DeclarationGap("watcher-exit-actions", G + ".babysit_allowed")
+                    otherwise = gate.get("otherwise")
+                    if not isinstance(otherwise, dict):
+                        raise DeclarationGap("watcher-exit-actions", G + ".otherwise")
+
+                    def _text(value):
+                        return isinstance(value, str) and bool(value.strip())
+
+                    def _scalar(value):
+                        return value is None or isinstance(value, (bool, int, float, str))
+
+                    flags = otherwise.get("link_flag")
+                    events_declared = self.decl.need("chain-operations", "events")
+                    checks = (
+                        ("report", _text(otherwise.get("report"))),
+                        ("link_flag", isinstance(flags, dict) and bool(flags)
+                         and all(_text(k) and _scalar(v) for k, v in flags.items())),
+                        ("timeline_note", _text(otherwise.get("timeline_note"))),
+                        ("cursor", otherwise.get("cursor") == "advance"),
+                        ("result_events", isinstance(otherwise.get("result_events"), list)
+                         and all(isinstance(e, str) and e in events_declared
+                                 for e in otherwise["result_events"])),
+                    )
+                    for member, ok in checks:
+                        if member not in otherwise or not ok:
+                            raise DeclarationGap("watcher-exit-actions",
+                                                 G + ".otherwise." + member)
+                    # The flag must be present (the watcher's exit-3 line carries it); an EMPTY
+                    # value means the API supplied none — not a collaborator.
+                    if args.author_association is None:
+                        raise Refusal("actionable activity requires --author-association "
+                                      "(the watcher's exit-3 line carries it)")
+                    assoc = args.author_association.strip().upper()
+                    if assoc not in [a.upper() for a in allowed]:
+                        branch = dict(otherwise)
+                        note = branch.pop("timeline_note", None)
+                        extra = [f"{note} (author_association={assoc or 'UNKNOWN'})"] if note else []
+                        return self.apply_effect(branch, args, list(notes) + extra)
                 within = int(args.babysit_round) <= int(args.babysit_cap)
                 cls = f"actionable_{'within' if within else 'beyond'}_cap"
             sub = effect["by_classification"].get(cls)
@@ -389,6 +449,13 @@ class Chain:
             self.link["cursor"] = args.cursor
             self.pending_lines.append(f"cursor -> {args.cursor}")
             wrote = True
+        if "link_flag" in effect:
+            # vibe-188: a declared per-link record (e.g. auto_merge_rearm=false) — persisted in
+            # chain.json and named in the timeline, so the decision outlives the session.
+            for key, value in effect["link_flag"].items():
+                self.link[key] = value
+                self.pending_lines.append(f"link flag {key} = {json.dumps(value)}")
+            wrote = True
         if "chain" in effect:
             self.set_chain(effect["chain"])
             wrote = True
@@ -397,6 +464,10 @@ class Chain:
             wrote = True
         if "report" in effect:
             print(f"required action: {effect['report']}")
+        if "result_events" in effect:
+            # vibe-188: a branch may declare its OWN result events (the notify-only branch
+            # declares none) — mode_chain awaits these instead of the record's.
+            self.result_events = list(effect["result_events"])
         for note in notes:
             self.pending_lines.append(note)
         if self.pending_lines:
@@ -449,8 +520,14 @@ def mode_chain(decl, args):
         if event not in events:
             raise DeclarationGap("chain-operations", f"events.{event}")
     rc = chain.apply_effect(record["effect"], args, notes)
-    if record["result_events"]:
-        print("awaiting result events: " + ", ".join(record["result_events"]))
+    # vibe-188: the branch that ran may have declared its own result events (the notify-only
+    # branch declares none); those are validated and awaited instead of the record's.
+    awaited = record["result_events"] if chain.result_events is None else chain.result_events
+    for event in awaited:
+        if event not in events:
+            raise DeclarationGap("chain-operations", f"events.{event}")
+    if awaited:
+        print("awaiting result events: " + ", ".join(awaited))
     return rc
 
 
@@ -542,6 +619,9 @@ def main(argv=None):
                         choices=("true", "false"))
     parser.add_argument("--classification",
                         choices=("actionable", "question", "status-noise"))
+    parser.add_argument("--author-association", dest="author_association",
+                        help="the triggering activity's GitHub author_association, as the watcher "
+                             "printed it (vibe-188); exit 3 requires it")
     parser.add_argument("--babysit-round", dest="babysit_round")
     parser.add_argument("--babysit-cap", dest="babysit_cap")
     parser.add_argument("--cursor")

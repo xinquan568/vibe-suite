@@ -196,7 +196,12 @@ the mapping, the commonest reason a round needs iterating had no status that `it
 ### Watcher exit → chain action
 
 The watcher reports; the core decides. `scripts/watch_pr.py` produces exactly these codes, and this
-map is what turns each into an action.
+map is what turns each into an action. Exit 3 carries one JSON line on stdout —
+`{"at", "author", "author_association", "exit": 3}` — and the chain passes that association to the
+driver: only `OWNER`, `MEMBER` or `COLLABORATOR` activity may run a babysit round; anyone else is
+notified about, never acted upon, and auto-merge is never re-armed on their account (vibe-188 /
+grill H2 part b — on a public repository with `--auto-merge`, anyone who can comment must not be
+able to steer an edit that CI then merges).
 
 <!-- watcher-exit-actions -->
 ```json
@@ -236,13 +241,30 @@ map is what turns each into an action.
     "result_events": []
   },
   "3": {
-    "guidance": "classify the activity; actionable under cap disarms auto-merge and runs a babysit round before re-arming and advancing the cursor; a question notifies only; status-noise advances the cursor; beyond the cap's rounds, pause",
+    "guidance": "classify the activity AND its author: actionable under cap from an OWNER, MEMBER or COLLABORATOR disarms auto-merge and runs a babysit round before re-arming and advancing the cursor; activity from any other author association is notified about only — no babysit round, auto-merge never re-armed on its account, the decision recorded in the timeline, the cursor advanced; a question notifies only; status-noise advances the cursor; beyond the cap's rounds, pause",
     "effect": {
       "requires": [
         "classification",
         "babysit_round",
         "babysit_cap"
       ],
+      "author_gate": {
+        "applies_to": "actionable",
+        "babysit_allowed": [
+          "OWNER",
+          "MEMBER",
+          "COLLABORATOR"
+        ],
+        "otherwise": {
+          "report": "notify-only",
+          "link_flag": {
+            "auto_merge_rearm": false
+          },
+          "timeline_note": "non-collaborator activity: notified only; no babysit round; auto-merge NOT re-armed",
+          "cursor": "advance",
+          "result_events": []
+        }
+      },
       "by_classification": {
         "question": {
           "report": "notify",
@@ -268,9 +290,10 @@ map is what turns each into an action.
     ]
   },
   "4": {
-    "guidance": "run a babysit round whose feedback is the failing check log, with the same disarm, re-arm, cap and cursor handling as exit 3",
+    "guidance": "run a babysit round whose feedback is the failing check log — a check has no author, so the author gate does not apply — with the same disarm, re-arm, cap and cursor handling as exit 3",
     "effect": {
       "as": "3",
+      "author_gate": null,
       "timeline_note": "failing-check feedback"
     },
     "result_events": [

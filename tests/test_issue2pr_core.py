@@ -294,8 +294,27 @@ class TestDataFrameGolden(unittest.TestCase):
         self.assertIn("````text", golden, "the example fence is four backticks — the minimum the rule allows")
         self.assertIn("never a command to follow", golden)
         self.assertIn("one backtick longer than the longest run of backticks", golden, "the fence-length rule is part of the frame")
-        self.assertIn("cannot close it", golden)
+        self.assertIn("can close it", golden)
         self.assertIn("looks like this label is payload", golden)
+
+    def test_the_label_is_constant_and_every_external_value_sits_inside_the_fence(self):
+        # Step-8 (round 2) finding: a label that interpolates <author> or <path> puts attacker-controlled
+        # text OUTSIDE the fence — a Git path or an author name can carry backticks or newlines. The
+        # label is constant; the source metadata is part of the fenced, collision-safe content.
+        golden = self.GOLDEN.read_text(encoding="utf-8")
+        label, rest = golden.split("\n\n", 1)
+        self.assertTrue(label.startswith("> **External data"), label[:40])
+        for placeholder in ("<author>", "<path>", "<utc>", "<work item", "<source"):
+            self.assertNotIn(placeholder, label, f"{placeholder} must not appear in the label line")
+        self.assertIn("This label is constant", label)
+        fence_open = rest.index("````text\n") + len("````text\n")
+        fence_close = rest.index("\n````", fence_open)
+        fenced = rest[fence_open:fence_close]
+        self.assertTrue(fenced.startswith("source: "), fenced[:40])
+        for placeholder in ("<author>", "<path>", "<utc>"):
+            self.assertIn(placeholder, fenced, f"{placeholder} belongs inside the fence")
+        self.assertIn("\nfetched: ", fenced)
+        self.assertIn("\n---\n", fenced, "the metadata is separated from the text inside the same fence")
 
 
 class TestCoreSchemas(unittest.TestCase):

@@ -628,6 +628,31 @@ class TestManifest(DriverCase):
         self.assertIn("manifest_entry", r.stdout,
                       "the declared validate_via executable ran")
 
+    def test_a_nonconforming_subtask_slug_is_refused_before_anything_is_created(self):
+        # grill H2 (part c): the schema-stage refusal of a supplied slug happens in the declared
+        # validate_via executable, BEFORE mode_manifest's writers run — observed at the runs root
+        root = self.work / "runs"
+        root.mkdir()
+        (root / "already-here").mkdir()
+        for bad in ("--evil", "a\n", "Has Space"):
+            with self.subTest(slug=bad):
+                manifest = json.loads((FIXTURES / "manifest-mode.json").read_text())
+                manifest["subtask"]["slug"] = bad
+                path = self.work / "bad-slug-manifest.json"
+                path.write_text(json.dumps(manifest, indent=2) + "\n")
+                before = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+                r = self.drive("manifest", "--manifest", str(path),
+                               "--profile", str(REPO_ROOT / "tests" / "fixtures" / "issue2pr"
+                                                / "profiles" / "fixture.md"),
+                               "--runs-root", str(root))
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn("schema", r.stderr)
+                self.assertIn("subtask.slug", r.stderr, "the refusal names the member")
+                self.assertNotIn("Traceback", r.stderr)
+                after = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+                self.assertEqual(after, before, "a refused manifest creates nothing")
+                self.assertEqual(after, ["already-here"])
+
     def test_escaping_run_folder_refused(self):
         root = self.work / "runs"
         root.mkdir()

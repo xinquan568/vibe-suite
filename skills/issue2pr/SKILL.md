@@ -229,6 +229,17 @@ fetched: <utc>
 (The prompt's own instructions resume after this line.)
 `````
 
+**The slug is the one title-derived token that reaches an argument.** The body travels on stdin
+(`--body-file -`); the work branch — `branch_template` rendered with `{id}` and `{slug}` — is an
+argument of `open_change` and of whatever creates the branch. The slug is therefore made under the
+**slug rule the profile contract declares** ([`profile-contract.md` § Required
+fields](references/profile-contract.md), `<!-- slug-rule -->`), by `python3 scripts/issue2pr_slug.py --
+"<title>"` at run start (the `--` keeps a `-`-led title out of the options): stdout is the slug; exit 2
+is a refusal with the reason (a title that leaves nothing after the declared normalisation), and the
+run does not start. A manifest's `subtask.slug` meets the same rule at the entry path. The pattern is
+stated in the contract's block and nowhere else in prose — a second statement is how two statements
+diverge.
+
 ## The source driver
 
 Every touch of the source system goes through one **driver protocol**. The core names the operations

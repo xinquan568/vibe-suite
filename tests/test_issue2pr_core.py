@@ -51,6 +51,7 @@ OPERATIONAL_MODES = REPO_ROOT / "skills" / "issue2pr" / "references" / "operatio
 WATCH = REPO_ROOT / "scripts" / "watch_pr.py"
 MANIFEST_SCHEMA = REPO_ROOT / "schemas" / "manifest.schema.json"
 MANIFEST_ENTRY = REPO_ROOT / "scripts" / "manifest_entry.py"
+SLUG_TOOL = REPO_ROOT / "scripts" / "issue2pr_slug.py"
 EXAMPLE_MANIFEST = REPO_ROOT / "skills" / "issue2pr" / "examples" / "manifests" / "example.json"
 EXAMPLE_BRIEF = REPO_ROOT / "skills" / "issue2pr" / "examples" / "manifests" / "brief.md"
 REVIEWER_CONTRACT = REPO_ROOT / "skills" / "vibe-core" / "references" / "reviewer-contract.md"
@@ -64,7 +65,7 @@ MANIFESTS = FIXTURES / "manifests"
 #: side: it is the inventory *of* the forbidden literals and so contains every one of them.
 CORE_FILES = (SKILL, CONTRACT_REF, COMMAND, PR_TEMPLATE, LINT, MANIFEST,
               DRIVER_CONTRACT, OPERATIONAL_MODES, WATCH,
-              MANIFEST_SCHEMA, MANIFEST_ENTRY)
+              MANIFEST_SCHEMA, MANIFEST_ENTRY, SLUG_TOOL)
 
 #: Everything the port must have produced. Wider than `CORE_FILES` — membership here is "this file
 #: must exist", not "this file must be project-neutral".
@@ -315,6 +316,263 @@ class TestDataFrameGolden(unittest.TestCase):
             self.assertIn(placeholder, fenced, f"{placeholder} belongs inside the fence")
         self.assertIn("\nfetched: ", fenced)
         self.assertIn("\n---\n", fenced, "the metadata is separated from the text inside the same fence")
+
+
+class TestSlugRule(unittest.TestCase):
+    """grill H2 (part c): `{slug}` has one declared shape — `[a-z0-9-]{1,40}`, never `-`-led — stated
+    once in the profile contract (`<!-- slug-rule -->`), derived by `scripts/issue2pr_slug.py` from a
+    title (the declared steps, or a refusal with a reason) and enforced on a supplied `subtask.slug`
+    by the manifest schema. The two statements are pinned equal; the script reads the contract and
+    every declared member is consumed; the pattern's semantics are pinned by boundary cases, never by
+    a third copy of the regex."""
+
+    MARKER = "slug-rule"
+    ACCEPTED = ("a", "0", "a" * 40, "0-9", "a-b-c", "widget-cache-eviction")
+    REJECTED = ("", "-x", "A", "a" * 41, "a\n", "a\r\n", "\na", "ä", "a b", "a_b", "a.b", "x\ty", "--")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.contract = CONTRACT_REF.read_text(encoding="utf-8")
+        cls.rule = json_block(cls.contract, cls.MARKER)
+        cls.schema = json.loads(MANIFEST_SCHEMA.read_text(encoding="utf-8"))
+
+    def slug(self, title=None, check=None, contract=None):
+        # the documented invocation: options first, then `--`, then the title — so a title that
+        # begins with `-` (the acceptance's own example) is never read as an option
+        cmd = [sys.executable, str(SLUG_TOOL)]
+        if contract is not None:
+            cmd += ["--contract", str(contract)]
+        if check is not None:
+            cmd += ["--check=" + check]
+        if title is not None:
+            cmd += ["--", title]
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+    def contract_with(self, mutate):
+        """A temp copy of the contract whose <!-- slug-rule --> block is re-serialised after
+        `mutate(rule)` — no regex literal is needed to edit a member. `mutate` may return a
+        replacement text for the whole block (a string) to model a malformed block."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        text = self.contract
+        m = re.search(r"(?s)(<!--\s*%s\s*-->\s*```json\s*)(.*?)(```)" % re.escape(self.MARKER), text)
+        self.assertIsNotNone(m)
+        rule = json.loads(m.group(2))
+        out = mutate(rule)
+        body = out if isinstance(out, str) else json.dumps(rule, indent=2) + "\n"
+        text = text[:m.start(2)] + body + text[m.end(2):]
+        p = Path(d) / "profile-contract.md"
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_the_contract_declares_the_rule_once_and_the_schema_enforces_the_same_pattern(self):
+        self.assertIsNotNone(self.rule, "profile-contract.md declares no <!-- slug-rule --> block")
+        self.assertEqual(self.contract.count("<!-- slug-rule -->"), 1, "the rule is declared exactly once")
+        self.assertEqual(set(self.rule), {"pattern", "max_length", "normalise", "empty"})
+        pattern = self.rule["pattern"]
+        re.compile(pattern)
+        self.assertEqual(self.rule["max_length"], 40)
+        self.assertEqual(self.rule["empty"], "refuse")
+        self.assertEqual(self.rule["normalise"], ["nfkd-ascii-fold", "lowercase", "non-alnum-runs-to-hyphen",
+                                                  "strip-hyphens", "truncate-then-strip-hyphens"])
+        slug_schema = self.schema["properties"]["subtask"]["properties"]["slug"]
+        self.assertEqual(slug_schema.get("pattern"), pattern,
+                         "the manifest schema must carry the contract's pattern on subtask.slug")
+        # the domain, pinned by boundary cases under the validator's own predicate (re.search) and
+        # the script's (re.fullmatch) — the two must agree on every case, trailing newline included
+        for good in self.ACCEPTED:
+            with self.subTest(accepted=good):
+                self.assertTrue(re.search(pattern, good) and re.fullmatch(pattern, good))
+        for bad in self.REJECTED:
+            with self.subTest(rejected=bad):
+                self.assertFalse(re.search(pattern, bad), "re.search (the validator) must reject it")
+                self.assertFalse(re.fullmatch(pattern, bad), "re.fullmatch (the script) must reject it")
+        skill = SKILL.read_text(encoding="utf-8")
+        self.assertNotIn(pattern, skill, "the skill cites the rule; it does not restate the pattern")
+        self.assertIn("issue2pr_slug.py", skill)
+        self.assertIn("slug-rule", skill)
+        self.assertIn("issue2pr_slug.py", self.contract)
+        self.assertNotIn(pattern, SLUG_TOOL.read_text(encoding="utf-8"),
+                         "the script reads the declaration; it carries no pattern of its own")
+        self.assertNotIn(pattern, Path(__file__).read_text(encoding="utf-8"),
+                         "this test pins semantics by cases, not by a third copy of the regex")
+        row = next(l for l in self.contract.splitlines() if l.startswith("| `branch_template` |"))
+        self.assertIn("{slug}", row)
+        self.assertIn("never `-`-led", row)
+
+    def test_titles_normalise_to_conforming_slugs_or_are_refused_with_a_reason(self):
+        pattern = self.rule["pattern"]
+        table = (
+            ("-- rm -rf /", "rm-rf"),
+            ("  Hello, World!  ", "hello-world"),
+            ("Ünïcödé  Tïtle", "unicode-title"),
+            ("[grill] H2 — issue2pr: constrain {slug}", "grill-h2-issue2pr-constrain-slug"),
+            ("tab\ttitles truncate\n", "tab-titles-truncate"),
+            ("title\n", "title"),
+            ("a" * 50, "a" * 40),
+            ("ab-" * 20, ("ab-" * 20)[:40]),          # the 40th character is `a`: 40 stay
+            ("a-" * 30, ("a-" * 19) + "a"),            # the 40th character is `-`: 39 stay
+            ("---leading and trailing---", "leading-and-trailing"),
+            ("E0.1 repo scaffold", "e0-1-repo-scaffold"),
+            ("`rm` $(whoami) ; echo \"x\" | cat", "rm-whoami-echo-x-cat"),
+            ("--help", "help"),
+            ("-v --version", "v-version"),
+        )
+        self.assertEqual(len(("ab-" * 20)[:40]), 40)
+        self.assertEqual(len(("a-" * 19) + "a"), 39)
+        for title, expected in table:
+            with self.subTest(title=title):
+                r = self.slug(title)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                slug = r.stdout.rstrip("\n")
+                self.assertEqual(slug, expected)
+                self.assertTrue(re.fullmatch(pattern, slug))
+                self.assertLessEqual(len(slug), 40)
+                self.assertFalse(slug.startswith("-"))
+                again = self.slug(slug)
+                self.assertEqual(again.stdout.rstrip("\n"), slug, "normalisation is idempotent")
+        for title in ("", "   ", "—", "\U0001f642\U0001f642", "----", "--", "-", "\n", "中文标题"):
+            with self.subTest(refused=title):
+                r = self.slug(title)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertEqual(r.stdout, "", "a refusal prints no slug")
+                self.assertIn("refused", r.stderr)
+                self.assertIn("no slug can be made", r.stderr)
+                self.assertIn(repr(title), r.stderr, "the reason names the title")
+                self.assertNotIn("Traceback", r.stderr)
+
+    def test_a_supplied_slug_is_checked_against_the_same_rule(self):
+        for good in self.ACCEPTED:
+            with self.subTest(slug=good):
+                r = self.slug(check=good)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout.rstrip("\n"), good)
+        for bad in self.REJECTED + ("Has Space", "ünï", "Upper", "under_score"):
+            with self.subTest(slug=bad):
+                r = self.slug(check=bad)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertEqual(r.stdout, "")
+                self.assertIn("does not match the declared slug rule", r.stderr)
+                self.assertIn(self.rule["pattern"], r.stderr, "the refusal names the pattern")
+
+    def test_a_supplied_manifest_slug_outside_the_rule_is_refused_at_the_entry(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        profile = Path(d) / "profile.md"
+        profile.write_text("repo_id: example-repo\nbase_branch: trunk\n", encoding="utf-8")
+        example = json.loads(EXAMPLE_MANIFEST.read_text(encoding="utf-8"))
+
+        def entry(manifest):
+            path = Path(d) / "manifest.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            return subprocess.run([sys.executable, str(MANIFEST_ENTRY), str(path),
+                                   "--profile", str(profile)],
+                                  capture_output=True, text=True, timeout=60, cwd=REPO_ROOT)
+
+        ok = entry(example)
+        self.assertEqual(ok.returncode, 0, ok.stderr)   # the shipped example conforms
+        for bad in ("--evil", "has space", "ünï", "x" * 41, "Upper-Case", "-lead", "a\n"):
+            with self.subTest(slug=bad):
+                manifest = json.loads(json.dumps(example))
+                manifest["subtask"]["slug"] = bad
+                r = entry(manifest)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)   # EXIT_SCHEMA
+                self.assertIn("schema", r.stderr)
+                self.assertIn("subtask.slug", r.stderr, "the refusal names the member")
+                self.assertEqual(r.stdout, "", "no run settings are printed for a refused manifest")
+
+    def test_the_script_derives_the_rule_from_the_contract_fail_closed(self):
+        def gap(contract, *named, title="hello world"):
+            r = self.slug(title, contract=contract)
+            self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+            self.assertIn("declaration gap", r.stderr)
+            for n in named:
+                self.assertIn(n, r.stderr, "the gap names the member")
+            self.assertEqual(r.stdout, "")
+            self.assertNotIn("Traceback", r.stderr)
+
+        def removed(member):
+            def mutate(rule):
+                del rule[member]
+            return mutate
+
+        def set_to(member, value):
+            def mutate(rule):
+                rule[member] = value
+            return mutate
+
+        with self.subTest(removed="the whole block (a readable contract with no marker)"):
+            d = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, d, True)
+            no_marker = re.sub(r"(?s)<!--\s*%s\s*-->\s*```json\s*.*?```\n?" % re.escape(self.MARKER), "", self.contract)
+            self.assertNotIn(self.MARKER, no_marker)
+            p = Path(d) / "profile-contract.md"
+            p.write_text(no_marker, encoding="utf-8")
+            gap(p, "block", "slug-rule")
+        with self.subTest(removed="every member (an empty object)"):
+            gap(self.contract_with(lambda rule: "{}\n"), "pattern")   # the first member is missing
+        with self.subTest(malformed="not JSON"):
+            gap(self.contract_with(lambda rule: "{not json\n"), "block")
+        with self.subTest(malformed="not an object"):
+            gap(self.contract_with(lambda rule: "[1]\n"), "block")
+        for member in ("pattern", "max_length", "normalise", "empty"):
+            with self.subTest(removed=member):
+                gap(self.contract_with(removed(member)), member)
+        for member, value in (("pattern", ""), ("pattern", 7), ("pattern", "^[a-z("),
+                              ("max_length", 0), ("max_length", -1), ("max_length", "40"),
+                              ("max_length", True), ("max_length", 4.5),
+                              ("normalise", "lowercase"), ("normalise", []), ("normalise", ["shout"]),
+                              ("normalise", [1]), ("normalise", ["lowercase", "lowercase", "nope"]),
+                              ("empty", "allow"), ("empty", None)):
+            with self.subTest(unsupported=(member, value)):
+                gap(self.contract_with(set_to(member, value)), member)
+        with self.subTest(unexpected="note"):
+            gap(self.contract_with(set_to("note", "documentation")), "unexpected member", "note")
+        with self.subTest(absent="contract"):
+            gap(Path(tempfile.mkdtemp()) / "absent.md", "contract")
+        # behaviour follows the declaration: a shorter max_length cuts shorter
+        r = self.slug("hello wonderful world", contract=self.contract_with(set_to("max_length", 9)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.rstrip("\n"), "hello-won")
+        # ... dropping the lowercase step changes what a title becomes
+        without_lower = self.contract_with(lambda rule: rule["normalise"].remove("lowercase"))
+        r = self.slug("Hello World", contract=without_lower)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.rstrip("\n"), "ello-orld")
+        # ... the declared ORDER is executed, not a canonical one: with `lowercase` moved after
+        # `non-alnum-runs-to-hyphen`, an upper-case letter is still a separator when the runs are
+        # replaced, so the same title yields a different slug than under the shipped order
+        def swap_lower_after_runs(rule):
+            steps = rule["normalise"]
+            steps.remove("lowercase")
+            steps.insert(steps.index("non-alnum-runs-to-hyphen") + 1, "lowercase")
+        reordered = self.contract_with(swap_lower_after_runs)
+        r = self.slug("Hello World", contract=reordered)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.rstrip("\n"), "ello-orld", "the altered order is what ran")
+        self.assertEqual(self.slug("Hello World").stdout.rstrip("\n"), "hello-world", "the shipped order")
+        # ... dropping the strip step lets a leading hyphen through to the pattern, which refuses it
+        # (the final truncate step strips on the RIGHT only — rstrip — so the leading `-` survives)
+        without_strip = self.contract_with(lambda rule: rule["normalise"].remove("strip-hyphens"))
+        r = self.slug("--x", contract=without_strip)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("does not match the declared slug rule", r.stderr)
+        # ... and a pattern the declaration narrows is what --check enforces
+        narrowed = self.contract_with(set_to("pattern", "^[a-c]+(?![\\s\\S])"))
+        self.assertEqual(self.slug(check="abc", contract=narrowed).returncode, 0)
+        self.assertEqual(self.slug(check="abd", contract=narrowed).returncode, 2)
+
+    def test_the_cli_refuses_an_ambiguous_or_unseparated_invocation(self):
+        neither = self.slug()
+        self.assertNotEqual(neither.returncode, 0)
+        both = self.slug("title", check="slug")
+        self.assertNotEqual(both.returncode, 0)
+        # a `-`-led title passed WITHOUT the documented `--` is an option to argparse: the call
+        # fails before any slug exists (no run starts on it), and it fails in words
+        raw = subprocess.run([sys.executable, str(SLUG_TOOL), "-x"], capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(raw.returncode, 0)
+        self.assertEqual(raw.stdout, "", "no slug is printed")
+        self.assertNotIn("Traceback", neither.stderr + both.stderr + raw.stderr)
 
 
 class TestCoreSchemas(unittest.TestCase):

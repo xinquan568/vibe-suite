@@ -43,6 +43,49 @@ def tree(root):
     return out
 
 
+def plant_dangling_registrations(ws):
+    """The three registrations an earlier revision of init wrote — a bare `vibe-suite` command in
+    each host-read file — beside a user's own entries, which must survive their removal."""
+    ws = Path(ws)
+    (ws / ".codex").mkdir(exist_ok=True)
+    toml = ws / ".codex" / "config.toml"
+    existing = toml.read_text(encoding="utf-8") if toml.is_file() else ""
+    toml.write_text(bridge.toml_server_upsert(existing, "vibe-mcp",
+                                              '[mcp_servers.vibe-mcp]\ncommand = "vibe-suite"'),
+                    encoding="utf-8")
+    mcp = ws / ".mcp.json"
+    doc = json.loads(mcp.read_text(encoding="utf-8")) if mcp.is_file() else {}
+    doc.setdefault("mcpServers", {})["mine"] = {"command": "x"}
+    doc["mcpServers"]["vibe-mcp"] = {"command": "vibe-suite", "args": []}
+    mcp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    hooks = ws / ".codex" / "hooks.json"
+    hdoc = json.loads(hooks.read_text(encoding="utf-8")) if hooks.is_file() else {}
+    hdoc.setdefault("hooks", {}).setdefault("Stop", []).append({"type": "command", "command": "my-hook"})
+    hdoc = bridge.json_hook_entry_upsert(hdoc, "Stop", {"type": "command", "command": "vibe-suite stop-gate"})
+    hooks.write_text(json.dumps(hdoc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def bare_registrations(ws):
+    """Which of the three files still reference `vibe-suite` as a command."""
+    ws = Path(ws)
+    out = []
+    toml = ws / ".codex" / "config.toml"
+    if toml.is_file() and 'command = "vibe-suite"' in toml.read_text(encoding="utf-8"):
+        out.append(".codex/config.toml")   # the bare SHAPE, not the server name: a non-bare vibe-mcp is legitimate
+    mcp = ws / ".mcp.json"
+    if mcp.is_file():
+        servers = json.loads(mcp.read_text(encoding="utf-8")).get("mcpServers") or {}
+        if any(isinstance(s, dict) and s.get("command") == "vibe-suite" for s in servers.values()):
+            out.append(".mcp.json")
+    hooks = ws / ".codex" / "hooks.json"
+    if hooks.is_file():
+        for event in (json.loads(hooks.read_text(encoding="utf-8")).get("hooks") or {}).values():
+            if any(isinstance(e, dict) and str(e.get("command") or "").startswith("vibe-suite") for e in event):
+                out.append(".codex/hooks.json")
+                break
+    return out
+
+
 class UnbridgeCase(unittest.TestCase):
     def setUp(self):
         self.ws = Path(tempfile.mkdtemp(prefix="vibe-unbridge-"))
@@ -112,13 +155,16 @@ class TestUserContent(UnbridgeCase):
 
     def test_user_servers_in_mcp_json_survive(self):
         self.install()
-        doc = json.loads((self.ws / ".mcp.json").read_text())
-        doc["mcpServers"]["mine"] = {"command": "x"}
-        (self.ws / ".mcp.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        plant_dangling_registrations(self.ws)   # grill S4: init no longer writes vibe-mcp; an old one is planted
         self.unbridge("--confirm")
         after = json.loads((self.ws / ".mcp.json").read_text())
         self.assertIn("mine", after["mcpServers"])
         self.assertNotIn("vibe-mcp", after["mcpServers"])
+        # retained behaviour (init no longer writes the owned Stop hook, so this branch must be
+        # asserted explicitly): the owned entry goes, the user's sibling hook survives
+        stop = json.loads((self.ws / ".codex" / "hooks.json").read_text())["hooks"]["Stop"]
+        self.assertEqual([e.get("command") for e in stop], ["my-hook"],
+                         "unbridge removes the owned Stop hook and keeps the user's")
 
     def test_a_parent_holding_user_files_is_not_pruned(self):
         self.install()
@@ -138,6 +184,7 @@ class TestConfirmation(UnbridgeCase):
 
     def test_without_confirm_it_reports_what_would_go(self):
         self.install()
+        plant_dangling_registrations(self.ws)   # grill S4: an old registration is what would go
         self.assertIn("vibe-mcp", self.unbridge().stdout + self.unbridge().stderr)
 
     def test_legacy_sentinels_go_under_the_same_confirmation(self):
@@ -244,6 +291,7 @@ class TestBlockerRegressions(UnbridgeCase):
 
     def test_a_toml_registration_is_actually_removed(self):
         self.install()
+        plant_dangling_registrations(self.ws)   # grill S4: init no longer writes it; an old one is planted
         text = (self.ws / ".codex" / "config.toml").read_text(encoding="utf-8")
         self.assertIn("vibe-mcp", text)
         self.unbridge("--confirm")

@@ -28,6 +28,74 @@ import config as config_mod  # noqa: E402
 
 STRICTNESS = {"relaxed": 60, "standard": 70, "strict": 80}
 
+#: grill S4 (vibe-191): no `vibe-suite` executable ships with the plugin, so nothing registers one.
+#: A host that honoured a bare `vibe-suite` command would resolve it on the operator's PATH to
+#: whatever happens to be there. Until the binary ships, init and repair register NOTHING under this
+#: name and REMOVE a registration an earlier revision left (it is dangling); when it ships, the
+#: registration is an absolute `${CLAUDE_PLUGIN_ROOT}`-based path, never a bare name.
+BARE_COMMAND = "vibe-suite"
+DANGLING_SERVER = "vibe-mcp"
+DANGLING_FILES = (".codex/config.toml", ".mcp.json", ".codex/hooks.json")
+
+
+def dangling_registrations(ws):
+    """The owned registrations that name the bare `vibe-suite` command, by file — what doctor reports
+    and what init/repair remove. A `vibe-mcp` entry whose command is something else (an absolute
+    path, say) is NOT dangling: that is the shape a shipped binary registers under."""
+    ws = Path(ws)
+    found = []
+    def loaded(rel):
+        # an unreadable store is not a dangling registration — doctor reports it as its own finding
+        try:
+            return bridge.load_json(ws / rel)
+        except Exception:
+            return {}
+    toml = bridge.read_text_verbatim(ws / ".codex" / "config.toml")
+    block = bridge._block_re(f"server:{DANGLING_SERVER}", "#", "").search(toml)
+    if block and f'command = "{BARE_COMMAND}"' in block.group(0):
+        found.append(".codex/config.toml")
+    entry = (loaded(".mcp.json").get("mcpServers") or {}).get(DANGLING_SERVER)
+    if isinstance(entry, dict) and entry.get("command") == BARE_COMMAND:
+        found.append(".mcp.json")
+    for hook in (loaded(".codex/hooks.json").get("hooks") or {}).get("Stop") or []:
+        if (isinstance(hook, dict) and hook.get(f"_{bridge.MARKER}_owned") is not None
+                and str(hook.get("command") or "").split()[:1] == [BARE_COMMAND]):
+            found.append(".codex/hooks.json")
+            break
+    return found
+
+
+def remove_dangling(ws, only=None):
+    """Remove the dangling registrations — all, or those among `only` — through the audited
+    writers; returns the files changed. Nothing is created: a file that does not carry one is not
+    touched."""
+    ws = Path(ws)
+    removed = []
+    for rel in dangling_registrations(ws):
+        if only is not None and rel not in only:
+            continue
+        if rel == ".codex/config.toml":
+            text = bridge.read_text_verbatim(ws / rel)
+            bridge.write_atomic(ws, ws / rel, bridge.toml_server_remove(text, DANGLING_SERVER))
+        elif rel == ".mcp.json":
+            _upsert_json(ws, rel, lambda d: bridge.json_server_remove(d, DANGLING_SERVER))
+        elif rel == ".codex/hooks.json":
+            _upsert_json(ws, rel, _drop_bare_owned_stop_hooks)
+        removed.append(rel)
+    return removed
+
+
+def _drop_bare_owned_stop_hooks(doc):
+    """Remove ONLY the owned `Stop` entries whose command is the bare `vibe-suite` — an owned entry
+    with any other command (an absolute path, say) and every user entry stay. `json_hook_entry_remove`
+    drops every owned entry, which is teardown's job, not this cleanup's."""
+    events = (doc.get("hooks") or {}).get("Stop") or []
+    kept = [e for e in events
+            if not (isinstance(e, dict) and e.get(f"_{bridge.MARKER}_owned") is not None
+                    and str(e.get("command") or "").split()[:1] == [BARE_COMMAND])]
+    doc.setdefault("hooks", {})["Stop"] = kept
+    return doc
+
 #: Every artefact init owns. The codec table names seven; `config-fill` and `history-baseline` add
 #: two more, and those two merge into content migration may just have written.
 TARGETS = (".gitignore", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".codex/config.toml",
@@ -208,6 +276,24 @@ def _upsert_json(ws, rel, mutate):
         bridge.write_atomic(ws, dest, after + "\n")
 
 
+def _ensure_document(ws, rel, empty):
+    """Create a target file with its empty document only when nothing is there; never rewrite,
+    replace or write through what exists (a user's file stays byte- and mtime-identical; a symlink
+    or a directory is left alone). `publish_new` is the tree's create-only primitive: O_EXCL, so a
+    file that appears between the probe and the publication wins and is not clobbered; `classify`
+    (lstat-based) keeps a symlink — which publish_new would refuse — and a directory out of its way."""
+    dest = Path(ws) / rel
+    if bridge.classify(dest) == "absent":
+        bridge.publish_new(ws, dest, empty)
+
+
+def _dangling_note(removed):
+    if not removed:
+        return None
+    return (f"removed dangling `{BARE_COMMAND}` registration from " + ", ".join(removed)
+            + " (no such binary ships; nothing is registered until it does)")
+
+
 def repair_step(ws, step, values):
     """One bridge step, by name, from stored settings.
 
@@ -225,13 +311,13 @@ def repair_step(ws, step, values):
         for name in ("CLAUDE.md", "GEMINI.md"):
             _upsert_text(ws, name, "import", "@AGENTS.md", markdown=True)
     elif step == "codex":
-        _upsert_text(ws, ".codex/config.toml", "server:vibe-mcp",
-                     '[mcp_servers.vibe-mcp]\ncommand = "vibe-suite"')
+        # grill S4: nothing is registered until the binary ships; a dangling registration an
+        # earlier revision left is removed and REPORTED (the outcome carries the note).
+        removed = remove_dangling(ws, only=(".codex/config.toml",))
+        return _dangling_note(removed)
     elif step == "mcp":
-        _upsert_json(ws, ".mcp.json", lambda d: bridge.json_server_upsert(
-            d, "vibe-mcp", {"command": "vibe-suite", "args": []}))
-        _upsert_json(ws, ".codex/hooks.json", lambda d: bridge.json_hook_entry_upsert(
-            d, "Stop", {"type": "command", "command": "vibe-suite stop-gate"}))
+        removed = remove_dangling(ws, only=(".mcp.json", ".codex/hooks.json"))
+        return _dangling_note(removed)
     elif step == "gitignore":
         _upsert_text(ws, ".gitignore", "ignore", ".vibe-suite-state/\n.claude/vibe-reports/")
     elif step == "history":
@@ -292,17 +378,21 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
         _upsert_text(ws, name, "import", "@AGENTS.md", markdown=True)
     checkpoint("memory")
 
-    # Marked `server:vibe-mcp`, the same name `toml_server_has`/`_remove` use. An earlier revision
-    # wrote it under a generic `codex` marker, so the codec that is supposed to manage it could not
-    # find it — the inventory would have been complete and the teardown still incomplete.
-    _upsert_text(ws, ".codex/config.toml", "server:vibe-mcp",
-                 '[mcp_servers.vibe-mcp]\ncommand = "vibe-suite"')
+    # grill S4 (vibe-191): no `vibe-suite` binary ships, so NOTHING is registered under that name —
+    # a bare command would be resolved on the host's PATH. A registration an earlier revision wrote
+    # (`[mcp_servers.vibe-mcp] command = "vibe-suite"`, the `.mcp.json` server, the `Stop` hook
+    # `vibe-suite stop-gate`) is dangling and is removed here; the two checkpoints keep their names
+    # for VIBE_FAIL_AFTER. When the binary ships it registers an absolute path, never a bare name.
+    # The three files stay among the nine targets init creates (empty documents when absent — the
+    # provenance record and teardown are built on that set; a file init created is pruned by
+    # unbridge exactly as before); only the registration content is gone.
+    _ensure_document(ws, ".codex/config.toml", "")
+    remove_dangling(ws, only=(".codex/config.toml",))
     checkpoint("codex")
 
-    _upsert_json(ws, ".mcp.json", lambda d: bridge.json_server_upsert(
-        d, "vibe-mcp", {"command": "vibe-suite", "args": []}))
-    _upsert_json(ws, ".codex/hooks.json", lambda d: bridge.json_hook_entry_upsert(
-        d, "Stop", {"type": "command", "command": "vibe-suite stop-gate"}))
+    _ensure_document(ws, ".mcp.json", '{"mcpServers": {}}\n')
+    _ensure_document(ws, ".codex/hooks.json", '{"hooks": {}}\n')
+    remove_dangling(ws, only=(".mcp.json", ".codex/hooks.json"))
     checkpoint("mcp")
 
     _upsert_text(ws, ".gitignore", "ignore", ".vibe-suite-state/\n.claude/vibe-reports/")

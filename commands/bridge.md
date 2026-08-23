@@ -36,15 +36,15 @@ Three different things are called hooks here, and this mirrors the third:
 | | Where | Whose |
 |---|---|---|
 | the plugin's registrations | the plugin's own `hooks/hooks.json` | vibe-suite's |
-| the owned `Stop` entry | your `.codex/hooks.json` | written by `/vibe-suite:init` |
+| the owned `Stop` entry | your `.codex/hooks.json` | none is written until the `vibe-suite` binary ships — an older init's bare `vibe-suite stop-gate` entry is dangling, and `/vibe-suite:repair` removes it |
 | **the project's hooks** | your `.claude/settings.json` | **yours — this is what is mirrored** |
 
 Only the five events both tools share cross: `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 `PostToolUse`, `Stop`. Claude-only events are skipped and named in the output.
 
 **Your entries are never overwritten.** Where `.codex/hooks.json` holds anything of yours, the mirror
-goes to `.codex/hooks.vibe-suite.json` instead, and says so. Where it holds only our owned entry,
-that entry is preserved through the mirror.
+goes to `.codex/hooks.vibe-suite.json` instead, and says so. Where it holds only an owned entry of
+ours, that entry is preserved through the mirror.
 
 ## `skills`
 

@@ -422,6 +422,18 @@ def validate_record(ws, record):
     return problems
 
 
+def _owned_artefacts_present(ws):
+    """Any owned block among the targets, or the config file's ownership marker — what an install
+    leaves besides registrations."""
+    for rel, name, style in bridge.OWNED_BLOCKS:
+        text = bridge.read_text_verbatim(ws / rel)
+        has = bridge.md_block_has if style == "md" else bridge.text_block_has
+        if text and has(text, name):
+            return True
+    config = bridge.read_text_verbatim(ws / ".vibe-suite.md")
+    return bool(config) and bridge.md_block_has(config, "config")
+
+
 def main(argv):
     ws = Path(argv[1]).resolve()
     confirm = argv[2] == "1"
@@ -433,7 +445,10 @@ def main(argv):
         print(f"error: {ws} could not be opened safely ({exc})", file=sys.stderr)
         return 1
     provenance = ws / init_bridge.PROVENANCE
-    if not provenance.is_file() and not bridge.inventory_enumerate(ws):
+    # grill S4 (vibe-191): init registers no MCP sentinel any more, so an enumerated sentinel is
+    # no longer the sign of an install — the owned blocks and the config marker are.
+    if (not provenance.is_file() and not bridge.inventory_enumerate(ws)
+            and not _owned_artefacts_present(ws)):
         print("nothing to remove: no vibe-suite artefacts are registered here")
         return 0
     record = bridge.load_json(provenance)

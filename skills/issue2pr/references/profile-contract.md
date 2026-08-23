@@ -26,8 +26,42 @@ needs to know what to work on, where to cut from, and what must pass.
 | `source_driver` | enum | which system holds the work item. `github` is implemented |
 | `id_pattern` | regex | recognises a work-item id, e.g. `^proj-(\d+)$` |
 | `url_regex` | regex | recognises a work-item URL and extracts its number |
-| `branch_template` | string | the work branch, with `{id}` and `{slug}` placeholders |
+| `branch_template` | string | the work branch, with `{id}` and `{slug}` placeholders; `{slug}` has the shape the slug rule below declares — lower-case ASCII letters, digits and `-`, at most 40 characters, never `-`-led |
 | `gates` | list of strings | commands that must pass before a PR opens |
+
+**`{slug}` has one shape, and the core owns it.** The slug is the only title-derived token that
+reaches a `git` or `gh` argument — the work branch is argv, the body travels on stdin — so its domain
+is not a profile field (it is the same for every project) but a core rule, declared once here and read
+from here at runtime. Every member below is executed or validated by its consumer:
+
+<!-- slug-rule -->
+```json
+{
+  "pattern": "^[a-z0-9][a-z0-9-]{0,39}(?![\\s\\S])",
+  "max_length": 40,
+  "empty": "refuse",
+  "normalise": [
+    "nfkd-ascii-fold",
+    "lowercase",
+    "non-alnum-runs-to-hyphen",
+    "strip-hyphens",
+    "truncate-then-strip-hyphens"
+  ]
+}
+```
+
+`pattern` ends in a negative lookahead rather than `$` because the schema validator applies a
+pattern with `re.search`, under which `$` admits a trailing newline; `(?![\s\S])` is end-of-input in
+Python `re` and ECMA-262 alike. `normalise` names, in order, the steps `scripts/issue2pr_slug.py`
+executes from its registry (NFKD-fold to ASCII; lowercase; every run of characters outside
+`[a-z0-9]` becomes one `-`; strip leading and trailing `-`; cut to `max_length`, then strip a trailing
+`-` again); `empty` is what happens when nothing remains (`refuse`: the title is named, a run does not
+start). `python3 scripts/issue2pr_slug.py -- "<title>"` prints the slug (the `--` keeps a `-`-led
+title out of the options) or refuses with the reason (exit 2); a missing, unsupported or unexpected
+member of this block is a declaration gap naming it (exit 4) — the script carries no pattern of its
+own. `schemas/manifest.schema.json` carries the same `pattern` on `subtask.slug`, so a slug an
+orchestrator supplies is refused at the manifest entry before anything is created; a test pins the two
+statements equal.
 
 ## Optional fields
 

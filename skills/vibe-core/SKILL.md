@@ -153,7 +153,14 @@ schema and the two will diverge.
 | `score_threshold` | int | `0-100` | `70` |
 | `rule_overrides` | map | closed | empty |
 | `issue2pr_profile` | string | id | unset |
-| `gate` | map | closed | unset |
+
+The three `gate.*` settings are **not** in this schema: they are store-only runtime toggles (see
+*Runtime state* below) — a `gate` block in `.vibe-suite.md` is ignored with a warning that names
+the rule. `sandbox` above `read-only` in the project file is honoured but **noticed**: the reader
+emits one line (`notice: sandbox 'workspace-write' in .vibe-suite.md raises every codex dispatch
+from this workspace above read-only`) that the config command's `--show` lists under *Warnings*
+and every Node dispatcher (`scripts/lib/config-bridge.mjs`) forwards to stderr; `danger-full-access`
+additionally requires `--confirm-danger` at dispatch.
 
 Every model-valued key's stored default is **absent**. Absence means *defer to the tool's own
 default*, which is how P9 is honoured at rest: a populated default here would be a pinned model in
@@ -169,7 +176,7 @@ A `/` or `.` in it is rejected before any path is constructed.
 | top level | open | warns; the load continues |
 | `model_overrides` | closed to `codex`, `agy` | errors |
 | `rule_overrides` (both levels) | closed | errors |
-| `gate` | closed | errors |
+| `gate` (store-only) | ignored | warns naming the rule; the load continues |
 
 Unknown top-level keys warn rather than fail because the file is user-authored and a newer suite
 version will add keys an older reader has not seen. Every other failure — an invalid value,
@@ -207,10 +214,12 @@ with settings under a top-level `config` member. One state file per workspace.
 **Only these three keys are shadowable.** A runtime write to anything else is rejected: the rest of
 the schema belongs to the project file, which a user edits deliberately.
 
-Where both name a setting, **runtime state wins for the session**. The `gate` block in
-`.vibe-suite.md` supplies defaults and display only — the store owns live values, and setting one
-leaves the project file byte-identical. An unset key is *absent* from the JSON rather than null, and
-a write preserves every sibling member of `state.json`.
+**The three `gate.*` keys are store-only** (vibe-186 / grill S2). `.vibe-suite.md` cannot set
+them — a `gate` block there is ignored with a warning naming the rule — so a cloned repository can
+never switch the Stop-review gate on, fail it closed, or choose its model; only the config
+command's `--set` (`scripts/config_cli.py`) and init's explicit opt-in write them, the store owns the
+live values, and setting one leaves the project file byte-identical. An unset key is *absent* from the JSON
+rather than null, and a write preserves every sibling member of `state.json`.
 
 **Job records are not in `state.json`.** They are one file per job at
 `<workspace>/.vibe-suite-state/jobs/<jobId>.json`, written by the codex-runner engine (E1.1) and read

@@ -42,6 +42,19 @@ Accepted for booleans: `on`/`off`, `true`/`false`, `yes`/`no`, `1`/`0`.
 anything else is refused by name rather than silently ignored. To change `effort`, `engine` or
 `skip_patterns`, edit the file.
 
+## What `.vibe-suite.md` cannot do
+
+**Set the gate.** The three `gate.*` keys are **store-only** (vibe-186 / grill S2): the project file
+is repository content a clone inherits, so it must not be able to switch the Stop-review gate on,
+fail it closed, or choose its model. A `gate` block in `.vibe-suite.md` is ignored and `--show`
+lists a warning naming the rule; the toggles come from `--set` (and init's explicit opt-in) alone.
+
+**Raise the sandbox silently.** `sandbox: workspace-write` (or `danger-full-access`) in the project
+file is honoured, and **noticed**: `--show` lists `notice: sandbox 'workspace-write' in
+.vibe-suite.md raises every codex dispatch from this workspace above read-only` under Warnings, and
+every codex dispatch prints the same line to stderr. `danger-full-access` still needs
+`--confirm-danger` at dispatch.
+
 ## Reading the output
 
 - **A fresh project is a complete answer.** With no `.vibe-suite.md` you get schema defaults and the

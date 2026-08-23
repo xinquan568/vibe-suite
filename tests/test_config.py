@@ -69,8 +69,9 @@ EXPECTED_SCHEMA = {
     "score_threshold":          ("int",    "0-100",                                  "70"),
     "rule_overrides":           ("map",    "closed",                                 "empty-map"),
     "issue2pr_profile":         ("string", "id",                                     "unset"),
-    "gate":                     ("map",    "closed",                                 "unset"),
 }
+# vibe-186 / grill S2: the three gate.* keys are STORE-ONLY — they are deliberately absent from the
+# project schema above (see TestStoreOnlyGateAndSandboxNotice); the store's own contract is below.
 
 SHADOWABLE = {"gate.stop_review_gate", "gate.model", "gate.fail_policy"}
 PATH_VALUED = {"rule_overrides.R51.vocabulary_skill", "issue2pr_profile"}
@@ -170,6 +171,13 @@ class TestSchemaAgreement(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIn(key, documented, f"{key} undocumented in vibe-core")
                 self.assertEqual(documented[key], want)
+
+    def test_vibe_core_table_has_no_extra_keys(self):
+        # vibe-186: the documented key SET equals the oracle's — an obsolete row (the store-only
+        # `gate`) would otherwise survive in the skill unnoticed, since the loop above reads the
+        # oracle's keys only.
+        documented = config.parse_schema_table(VIBE_CORE.read_text(encoding="utf-8"))
+        self.assertEqual(set(documented) - set(EXPECTED_SCHEMA), set())
 
     def test_model_selection_partial_matches_the_oracle(self):
         # The merged contract from #74. A divergence in either artifact fails here.
@@ -332,7 +340,7 @@ class TestFailureModes(unittest.TestCase):
 
     def test_unknown_key_inside_a_closed_map_errors(self):
         with tempfile.TemporaryDirectory() as root:
-            write_config(root, "gate:\n  nonsense: true\n")
+            write_config(root, "rule_overrides:\n  R51:\n    nonsense: true\n")
             with self.assertRaises(config.ConfigValueError):
                 config.load(root)
 
@@ -357,6 +365,86 @@ class TestFailureModes(unittest.TestCase):
             write_config(root, "score_threshold: high\n")
             with self.assertRaises(config.ConfigValueError):
                 config.load(root)
+
+
+class TestStoreOnlyGateAndSandboxNotice(unittest.TestCase):
+    """vibe-186 / grill S2 (B3): the project file cannot set the gate; a raised sandbox is noticed.
+
+    `.vibe-suite.md` is repository content a clone inherits. The three `gate.*` keys are runtime
+    toggles that only the store holds; a `gate` block in the file is ignored with a warning that
+    names the rule (never a value). `sandbox` above `read-only` is honoured but produces one notice
+    line, so the operator sees on `--show` and on dispatch what the file decided.
+    """
+
+    def test_gate_is_not_a_project_schema_key(self):
+        self.assertNotIn("gate", config.SCHEMA)
+        self.assertNotIn("gate", config.CLOSED_MAPS)
+        self.assertIn("gate", config.STORE_ONLY)
+
+    def test_a_gate_block_in_the_file_is_ignored_with_a_warning_naming_the_rule_not_the_values(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "engine: codex\ngate:\n  stop_review_gate: true\n  fail_policy: closed\n  model: sekrit-model\n")
+            cfg, warnings = config.load_with_warnings(root)
+            self.assertNotIn("gate", cfg, "the file's gate block never reaches the resolved configuration")
+            self.assertEqual(cfg["engine"], "codex", "the rest of the file still loads")
+            gate_warnings = [w for w in warnings if "'gate'" in w]
+            self.assertEqual(len(gate_warnings), 1, warnings)
+            self.assertIn("store-only", gate_warnings[0])
+            self.assertIn("--set", gate_warnings[0])
+            for value in ("true", "closed", "sekrit-model"):
+                self.assertNotIn(value, gate_warnings[0], "a warning names the key, never a value")
+            self.assertEqual(config.load(root)["engine"], "codex", "load() does not raise on it")
+
+    def test_a_gate_block_is_not_an_unknown_key(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "gate:\n  stop_review_gate: true\n")
+            _, warnings = config.load_with_warnings(root)
+            self.assertFalse(any("unknown key" in w for w in warnings), warnings)
+
+    def test_render_refuses_a_gate_block_naming_the_rule(self):
+        with self.assertRaises(config.ConfigValueError) as caught:
+            config.render({"gate": {"stop_review_gate": True}})
+        self.assertIn("store-only", str(caught.exception))
+
+    def test_sandbox_above_read_only_produces_exactly_one_notice_and_read_only_none(self):
+        for level in ("workspace-write", "danger-full-access"):
+            with self.subTest(level=level), tempfile.TemporaryDirectory() as root:
+                write_config(root, f"sandbox: {level}\n")
+                cfg, warnings = config.load_with_warnings(root)
+                self.assertEqual(cfg["sandbox"], level, "the level is honoured — this is a notice, not a refusal")
+                notices = [w for w in warnings if w.startswith("notice: sandbox")]
+                self.assertEqual(len(notices), 1, warnings)
+                self.assertIn(repr(level), notices[0])
+                self.assertIn("read-only", notices[0])
+                self.assertIn(config.CONFIG_FILENAME, notices[0])
+        for frontmatter in ("sandbox: read-only\n", "engine: codex\n"):
+            with self.subTest(frontmatter=frontmatter), tempfile.TemporaryDirectory() as root:
+                write_config(root, frontmatter)
+                _, warnings = config.load_with_warnings(root)
+                self.assertEqual([w for w in warnings if w.startswith("notice:")], [])
+        with tempfile.TemporaryDirectory() as root:        # no file at all: no notice
+            self.assertEqual(config.load_with_warnings(root)[1], [])
+
+    def test_the_reader_cli_prints_the_notice_on_stderr_and_json_on_stdout(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, "sandbox: workspace-write\ngate:\n  stop_review_gate: true\n")
+            r = subprocess.run([sys.executable, str(CONFIG_PY), root], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("config: notice: sandbox 'workspace-write'", r.stderr)
+            self.assertIn("config: 'gate' in .vibe-suite.md is ignored", r.stderr)
+            doc = json.loads(r.stdout)
+            self.assertEqual(doc["sandbox"], "workspace-write")
+            self.assertNotIn("gate", doc)
+
+    def test_the_vibe_core_openness_row_says_ignored_not_errors(self):
+        # the map-openness table in the skill (and its generated mirror) must carry the store-only row
+        # and no longer the old "closed | errors" row
+        for rel in (VIBE_CORE, REPO_ROOT / "codex" / "skills" / "vibe-vibe-core" / "SKILL.md"):
+            with self.subTest(doc=str(rel.relative_to(REPO_ROOT))):
+                text = rel.read_text(encoding="utf-8")
+                self.assertNotIn("| `gate` | closed | errors |", text)
+                self.assertIn("| `gate` (store-only) | ignored |", text)
+                self.assertNotIn("| `gate` | map | closed | unset |", text, "the schema-table row is gone")
 
 
 class TestRuleOverridesPerRule(unittest.TestCase):
@@ -607,8 +695,8 @@ class TestRender(unittest.TestCase):
 
     def test_nested_map_renders_indented_with_sorted_keys(self):
         self.assertEqual(
-            config.render({"gate": {"stop_review_gate": True, "model": "x"}}),
-            "---\ngate:\n  model: x\n  stop_review_gate: true\n---\n")
+            config.render({"rule_overrides": {"R51": {"suppress": True, "max_penalty": -3}}}),
+            "---\nrule_overrides:\n  R51:\n    max_penalty: -3\n    suppress: true\n---\n")
 
     def test_multiline_string_renders_as_a_literal_block(self):
         self.assertEqual(config.render({"focus_instructions": "one\ntwo\n"}),
@@ -660,7 +748,7 @@ class TestRenderRoundTrip(unittest.TestCase):
             "score_threshold": 42,
             "skip_patterns": ["a/**", "b/*.py"],
             "focus_instructions": "one\ntwo\n",
-            "gate": {"stop_review_gate": True, "model": "x"},
+            "rule_overrides": {"R51": {"suppress": True, "max_penalty": -3}},
         }
         loaded = self._round_trip(mapping)
         for key, want in mapping.items():

@@ -4,8 +4,9 @@
 
 `.vibe-suite.md` is human-edited project configuration; this is machine-managed runtime state,
 resolved once per workspace. A user flipping a toggle must see it take effect without editing a
-file, so the store wins for the session — but only over the three `gate.*` keys, and it never
-writes project configuration.
+file, so the store is the ONE source of the three `gate.*` keys (vibe-186 / grill S2: the project
+file cannot set them — repository content must not switch the gate on or fail it closed), and it
+never writes project configuration.
 
 **The on-disk layout is part of the contract**, not an implementation detail: settings live under a
 top-level `config` member of `<workspace>/.vibe-suite-state/state.json`, an unset key is *absent*
@@ -166,7 +167,11 @@ def effective_config(workspace):
             config.ConfigContainmentError) as error:
         resolved = {}
         config_error = f"config: {error}"
-    gate = dict(resolved.get("gate") or {})
+    # vibe-186 / grill S2 (B3): the gate is STORE-ONLY. The reader ignores a `gate` block in the
+    # project file (with a warning naming the rule), so the effective gate is exactly the runtime
+    # overrides over the fresh defaults — repository content a clone inherits can neither switch the
+    # gate on, nor fail it closed, nor choose its model.
+    gate = {}
     for leaf, value in overrides.items():
         gate[leaf] = value
     for key, value in FRESH.items():

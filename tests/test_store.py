@@ -177,17 +177,37 @@ class TestValidationAndShadowing(unittest.TestCase):
 
 
 class TestEffectiveConfig(unittest.TestCase):
-    """Runtime state wins for the session; the file is never rewritten."""
+    """The store is the sole source of the three gate.* values (vibe-186); the rest of the
+    configuration comes from the file; the file is never rewritten."""
 
     def _project(self, root, frontmatter):
         (Path(root) / ".vibe-suite.md").write_text(f"---\n{frontmatter}---\n", encoding="utf-8")
 
-    def test_runtime_state_overrides_the_file(self):
+    def test_the_project_file_cannot_enable_the_gate_or_close_its_policy(self):
+        # vibe-186 / grill S2 (B3): a cloned repository's `.vibe-suite.md` carrying a gate block
+        # must leave the gate exactly where the store and the fresh defaults put it.
         with tempfile.TemporaryDirectory() as ws:
-            self._project(ws, "gate:\n  fail_policy: closed\n")
-            self.assertEqual(store.effective_config(ws)["gate"]["fail_policy"], "closed")
-            store.Store(ws).set("gate.fail_policy", "open")
-            self.assertEqual(store.effective_config(ws)["gate"]["fail_policy"], "open")
+            self._project(ws, "gate:\n  stop_review_gate: true\n  fail_policy: closed\n  model: from-the-file\n")
+            before = (Path(ws) / ".vibe-suite.md").read_bytes()
+            effective = store.effective_config(ws)
+            self.assertEqual(effective["gate"], {"stop_review_gate": False, "fail_policy": "open"},
+                             "the file's gate block is not consulted: store + fresh defaults only")
+            self.assertNotIn("model", effective["gate"])
+            self.assertIsNone(effective.get("config_error"), "a gate block is not a config error")
+            store.Store(ws).set("gate.fail_policy", "closed")
+            self.assertEqual(store.effective_config(ws)["gate"]["fail_policy"], "closed", "the store decides")
+            store.Store(ws).set("gate.stop_review_gate", True)
+            self.assertIs(store.effective_config(ws)["gate"]["stop_review_gate"], True)
+            self.assertEqual((Path(ws) / ".vibe-suite.md").read_bytes(), before, "the project file is never rewritten")
+
+    def test_the_cli_resolver_reports_the_gate_from_the_store_alone(self):
+        with tempfile.TemporaryDirectory() as ws:
+            self._project(ws, "gate:\n  stop_review_gate: true\n  fail_policy: closed\n")
+            r = subprocess.run([sys.executable, str(STORE_PY), "effective-config", ws],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            doc = json.loads(r.stdout)
+            self.assertEqual(doc["gate"], {"stop_review_gate": False, "fail_policy": "open"})
 
     def test_the_file_supplies_values_the_store_has_not_set(self):
         with tempfile.TemporaryDirectory() as ws:
@@ -197,8 +217,9 @@ class TestEffectiveConfig(unittest.TestCase):
             self.assertEqual(effective["score_threshold"], 55)
 
     def test_a_live_gate_write_leaves_the_config_file_byte_identical(self):
-        # The gate block in `.vibe-suite.md` is defaults-and-display only; the store owns live
-        # values. This replaces an earlier unfalsifiable "read but never written".
+        # vibe-186: the store is the SOLE source of the gate (a gate block in `.vibe-suite.md` is
+        # ignored); a store write must still leave the project file byte-identical. This replaces
+        # an earlier unfalsifiable "read but never written".
         with tempfile.TemporaryDirectory() as ws:
             self._project(ws, "gate:\n  fail_policy: closed\n")
             path = Path(ws) / ".vibe-suite.md"

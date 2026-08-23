@@ -32,6 +32,19 @@
 // flag. Checking the flag while a different value reaches the spawn is how round 1 shipped a
 // confirmation gate that did not gate.
 //
+// **Nothing secret travels on a worker's argv, and nothing secret is left at rest** (vibe-193 /
+// grill S7+S15). `ps` and `/proc/<pid>/cmdline` are readable by every local user, and the detached
+// worker lives for the whole job. The one-time claim token and the prompt both go down an inherited
+// pipe (fd 3: the token on the first line, the prompt after it) that the launcher ends right after
+// writing; the worker argv carries the fd NUMBER. A pipe dies with its two processes, so no ending
+// path — a refused claim, a crash on either side, a timeout, a launcher throw after the record exists —
+// leaves a file carrying the prompt or a live token behind (the per-job log persists, and carries the
+// worker's stderr, not the hand-off). The engine argv gets `--` before the prompt (a prompt that
+// begins with `-` is a prompt, never a flag), `--effort` is allow-listed (`-c reasoning.effort=` takes
+// a free string), and `--skip-git-repo-check` is passed only for `read-only`: a sandbox that can write
+// keeps codex's own non-repository refusal ("Not inside a trusted directory and
+// --skip-git-repo-check was not specified.").
+//
 // **Testing seam:** `VIBE_SUITE_CODEX_BIN` overrides the executable so the suite runs hermetically
 // against fixtures. It selects the binary only — it does not relax sandbox arguments — and anyone who
 // can set it already controls the process environment.
@@ -60,7 +73,15 @@ import {
 const SELF = fileURLToPath(import.meta.url);
 const SANDBOXES = new Set(["read-only", "workspace-write", "danger-full-access"]);
 const WORKER_FLAG = "--__worker";
-const CLAIM_FLAG = "--__claim";
+// vibe-193: the worker is told the NUMBER of an inherited pipe carrying the one-time claim token
+// (first line) and the prompt (the rest) — never the token or the prompt themselves.
+const HANDOFF_FLAG = "--__handoff";
+const HANDOFF_FD = 3;
+// vibe-193: the effort vocabulary the suite speaks — the same `low|medium|high` enum
+// `scripts/lib/config.py` enforces for a CONFIGURED effort (the `--effort` flag bypassed that check
+// and reached `-c reasoning.effort=` as a free string, an injection surface rather than a setting).
+// One vocabulary, enforced at both doors; `tests/test_codex_runner.py` pins the two lists equal.
+const EFFORTS = new Set(["low", "medium", "high"]);
 
 class UsageError extends Error {}
 
@@ -136,7 +157,7 @@ function parseArgs(argv) {
       // is exactly the kind of platform-dependent break a file removes).
       case "--prompt-file": options.promptFile = next(); break;
       case WORKER_FLAG: options.worker = next(); break;
-      case CLAIM_FLAG: options.claim = next(); break;
+      case HANDOFF_FLAG: options.handoff = next(); break;
       default:
         if (arg.startsWith("-")) throw new UsageError(`unknown option ${arg}`);
         rest.push(arg);
@@ -174,6 +195,9 @@ function validateShape(options) {
   if (options.sandbox !== null && !SANDBOXES.has(options.sandbox)) {
     throw new UsageError(`--sandbox expects one of ${[...SANDBOXES].join("|")}`);
   }
+  if (options.effort !== null && !EFFORTS.has(options.effort)) {
+    throw new UsageError(`--effort expects one of ${[...EFFORTS].join("|")}, got '${options.effort}'`);
+  }
   if (options.background && options.wait) {
     throw new UsageError("--wait and --background are mutually exclusive");
   }
@@ -203,6 +227,15 @@ function assertSandboxAllowed(effective, { confirmDanger }) {
   }
 }
 
+/** The effective effort (after config defaults and resume inheritance) must be one codex accepts. */
+function assertEffortAllowed(effective) {
+  if (effective !== null && effective !== undefined && !EFFORTS.has(effective)) {
+    throw new UsageError(
+      `resolved effort '${effective}' is not one of ${[...EFFORTS].join("|")} ` +
+      "(it resolved from your --effort flag, .vibe-suite.md, or the resumed job)");
+  }
+}
+
 /** Build the `codex exec` argument vector. No model flag unless one was explicitly chosen (P9). */
 function codexArgs({ sandbox, effort, model, threadId, prompt }) {
   const args = ["exec"];
@@ -214,10 +247,17 @@ function codexArgs({ sandbox, effort, model, threadId, prompt }) {
   } else {
     args.push("-s", sandbox);
   }
-  args.push("--skip-git-repo-check", "--json");
+  // vibe-193 / grill S7: codex's own non-repository check stays armed for any sandbox that can
+  // write. `--skip-git-repo-check` is passed only when nothing can be written anyway; a
+  // workspace-write or danger-full-access run outside a git repository fails fast with codex's own
+  // message. For a resume the record's sandbox decides, as it does for the danger gate.
+  if (sandbox === "read-only") args.push("--skip-git-repo-check");
+  args.push("--json");
   if (effort) args.push("-c", `reasoning.effort=${effort}`);
   if (model) args.push("-m", model);
-  args.push(prompt);
+  // `--` ends option parsing (verified on codex-cli 0.146.1 for `exec` and `exec resume`): a prompt
+  // that begins with `-` is a prompt, never a flag.
+  args.push("--", prompt);
   return args;
 }
 
@@ -337,6 +377,7 @@ async function prepareRecord(workspace, options, timeoutMs, claimDigest) {
     });
     if (options.noModel) defaults.model = null;      // past the config fallback, deliberately
     assertSandboxAllowed(defaults.sandbox, { confirmDanger: options.confirmDanger });
+    assertEffortAllowed(defaults.effort);
     return createRecord(workspace, newRecord({
       jobId: newJobId(), kind: options.kind ?? "exec", background: options.background,
       timeoutMs, claimDigest, ...defaults,
@@ -348,6 +389,7 @@ async function prepareRecord(workspace, options, timeoutMs, claimDigest) {
   const prior = await readRecord(workspace, options.resume);
   if (!prior.threadId) throw new UsageError(`job ${options.resume} has no thread id to resume`);
   assertSandboxAllowed(prior.sandbox, { confirmDanger: options.confirmDanger });
+  assertEffortAllowed(prior.effort);
   return createRecord(workspace, {
     ...newRecord({
       jobId: newJobId(), kind: prior.kind, sandbox: prior.sandbox, effort: prior.effort,
@@ -438,10 +480,22 @@ async function runBackground(workspace, options, timeoutMs) {
   // tail on the record. The `pre-spawn` latch is a test seam, inert outside the suite.
   await signalLatch("pre-spawn");
   await awaitLatch("pre-spawn");
+  // vibe-193 / grill S7+S15: neither the prompt nor the one-time claim token travels on the
+  // worker's argv, and neither is written to disk (see the header). Both go down an inherited pipe
+  // the launcher ends right after writing — the token on the first line, the prompt after it; the
+  // argv carries the fd NUMBER. A worker that never reads (died before the claim) simply never
+  // claims — the launcher's existing no-claim path below reaps it; the pipe dies with the processes.
   const { child, warning } = await withWorkerSink(workspace, record.jobId, (stderr) => spawn(
-    process.execPath, [SELF, WORKER_FLAG, record.jobId, CLAIM_FLAG, token, "--", options.prompt],
-    { cwd: workspace, env: process.env, detached: true, stdio: ["ignore", "ignore", stderr] }));
+    process.execPath, [SELF, WORKER_FLAG, record.jobId, HANDOFF_FLAG, String(HANDOFF_FD)],
+    { cwd: workspace, env: process.env, detached: true, stdio: ["ignore", "ignore", stderr, "pipe"] }));
   if (warning) process.stderr.write(`codex-runner: ${warning}\n`);
+  const handoff = child.stdio[HANDOFF_FD];
+  handoff.on("error", () => { /* the worker died before reading: no claim; the reaper below runs */ });
+  // `end(payload, cb)`: the callback fires once the payload is flushed to the kernel and EOF is sent
+  // — the worker reads everything to EOF before it claims, so nothing is lost — and only THEN is the
+  // launcher's end destroyed. Without that, a `stdio` pipe stays half-open until the worker exits and
+  // the launcher — which "hands off and leaves" — would sit on the job for its whole lifetime.
+  handoff.end(`${token}\n${options.prompt}`, () => handoff.destroy());
   child.unref();
 
   const claimed = await awaitWorkerClaim(workspace, record.jobId);
@@ -524,12 +578,43 @@ async function awaitWorkerClaim(workspace, jobId, { timeoutMs = 5000, pollMs = 2
   return null;
 }
 
+/**
+ * The one-time claim token and the prompt arrive on an inherited fd (vibe-193), never on argv and
+ * never on disk: the token is the first line, the prompt is everything after it. An fd that is not
+ * an integer, is below 3, is unreadable, carries no newline, or carries an empty token yields no
+ * hand-off — and no hand-off means no claim (the existing refusal), so a forged or broken hand-off
+ * fails closed.
+ */
+function readHandoff(handoffFd) {
+  const fd = Number(handoffFd);
+  if (!Number.isInteger(fd) || fd < HANDOFF_FD) return null;
+  let raw;
+  try {
+    raw = readFileSync(fd, "utf8");
+  } catch {
+    return null;
+  }
+  const newline = raw.indexOf("\n");
+  if (newline === -1) return null;
+  const token = raw.slice(0, newline).trim();
+  if (!token) return null;
+  return { token, prompt: raw.slice(newline + 1) };
+}
+
 /** The worker owns the whole lifecycle and speaks to nobody: its output is the record. */
-async function runWorker(workspace, jobId, token, prompt) {
+async function runWorker(workspace, jobId, handoffFd) {
   await signalLatch("pre-claim");
   await awaitLatch("pre-claim");
 
-  const claimed = await claimWith(workspace, jobId, token);
+  const handoff = readHandoff(handoffFd);
+  if (handoff === null) {
+    // No usable hand-off (absent, non-integer or below-3 fd, unreadable, no newline, empty token):
+    // nothing to claim with. Spawn nothing — the same fail-closed outcome as a refused claim.
+    process.stderr.write(`codex-runner: worker hand-off unreadable for ${jobId}
+`);
+    return 1;
+  }
+  const claimed = await claimWith(workspace, jobId, handoff.token);
   if (claimed === null) {
     // No valid one-time token, or already claimed, or already terminal. Spawn nothing.
     process.stderr.write(`codex-runner: worker claim refused for ${jobId}\n`);
@@ -538,7 +623,7 @@ async function runWorker(workspace, jobId, token, prompt) {
   await signalLatch("post-claim");
 
   try {
-    await execute(workspace, claimed, prompt);
+    await execute(workspace, claimed, handoff.prompt);
     return 0;
   } catch (error) {
     await finaliseRecord(workspace, jobId, {
@@ -563,7 +648,7 @@ async function main() {
   }
 
   try {
-    if (options.worker) return await runWorker(workspace, options.worker, options.claim, options.prompt);
+    if (options.worker) return await runWorker(workspace, options.worker, options.handoff);
     if (options.background) return await runBackground(workspace, options, timeoutMs);
     return await runForeground(workspace, options, timeoutMs);
   } catch (error) {

@@ -58,6 +58,13 @@ template itself), `DELEGATE_EFFORT` / `DELEGATE_MODEL` (only when the operator p
 unset means omit), `DELEGATE_BACKGROUND=1` for background mode, and `DELEGATE_CONFIRM_DANGER=1`
 **only after the explicit yes** from §2.
 
+**Not inside a git repository?** The engine passes codex's `--skip-git-repo-check` only for
+`read-only` runs. A `workspace-write` (or `danger-full-access`) delegate started in a directory that
+is not inside a git repository fails fast with codex's own message — `Not inside a trusted directory
+and --skip-git-repo-check was not specified.` — and that is intended: a lane that can write keeps
+codex's own non-repository safety net. Run the delegate from inside a repository, or run it
+`--sandbox read-only`.
+
 <!-- canonical-dispatch -->
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --kind delegate --sandbox "${DELEGATE_SANDBOX:-workspace-write}" ${DELEGATE_EFFORT:+--effort "$DELEGATE_EFFORT"} ${DELEGATE_MODEL:+--model "$DELEGATE_MODEL"} ${DELEGATE_BACKGROUND:+--background} ${DELEGATE_CONFIRM_DANGER:+--confirm-danger} -- "$(cat "$DELEGATE_PROMPT_FILE")"

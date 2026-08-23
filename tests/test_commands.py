@@ -93,6 +93,8 @@ class TestDelegateContentContract(unittest.TestCase):
                       "the refusal marker line — how a refusal is told from a target's own exit status")
         self.assertIn("diff --no-index -- /dev/null", verify,
                       "a created (untracked) script is shown whole before the operator is asked")
+        self.assertIn("git diff --cached -- run-tests.sh package.json", verify,
+                      "a STAGED change (incl. a staged new file) is shown — a plain git diff omits it")
         guard = verify.index("DELEGATE_VERIFY_CONFIRMED")
         self.assertLess(guard, verify.index("./run-tests.sh"), "the guard precedes the script branch")
         self.assertLess(guard, verify.index("npm test"))
@@ -133,6 +135,7 @@ class TestDelegateContentContract(unittest.TestCase):
         self.assertIn("`??`", verify_section, "an engine-created script is `??` in porcelain")
         self.assertIn("`git diff` does not show", verify_section)
         self.assertIn("addition diff", verify_section, "a created script is shown whole, not confirmed unseen")
+        self.assertIn("staged", verify_section, "staged changes are named as refused and shown")
         self.assertIn("refusal marker", verify_section)
         prose = verify_section.split("```", 2)[2]   # the prose AFTER the canonical block
         ask = prose.find("AskUserQuestion")

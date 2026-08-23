@@ -84,14 +84,16 @@ set -euo pipefail
 git status --porcelain
 git diff
 # The branches below execute repo-resident scripts as the operator, unsandboxed, right after an
-# engine had write access to this tree. Refuse when the run touched them — modified OR created
-# (an untracked script is `??`, which git diff does not show) — unless the operator confirmed
-# after seeing what changed. The `verify: refusing …` line is the refusal marker: it is how a
-# refusal is told from a target command's own exit status (which may itself be 3).
+# engine had write access to this tree. Refuse when the run touched them — modified, staged OR
+# created (an untracked script is `??`, which git diff does not show; a staged one is invisible
+# to a plain git diff) — unless the operator confirmed after seeing what changed. The
+# `verify: refusing …` line is the refusal marker: it is how a refusal is told from a target
+# command's own exit status (which may itself be 3).
 changed="$(git status --porcelain -- run-tests.sh package.json)"
 if [ -n "$changed" ] && [ -z "${DELEGATE_VERIFY_CONFIRMED:-}" ]; then
   printf 'verify: refusing to execute repo-resident test scripts changed since the baseline:\n%s\n' "$changed"
-  git diff -- run-tests.sh package.json
+  git diff -- run-tests.sh package.json            # unstaged changes to a tracked script
+  git diff --cached -- run-tests.sh package.json   # staged changes — incl. a staged NEW file, whole
   for f in run-tests.sh package.json; do
     if [ -f "$f" ] && ! git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
       git --no-pager diff --no-index -- /dev/null "$f" || true   # a created file, shown whole as an addition
@@ -114,10 +116,12 @@ branches execute `./run-tests.sh`, `npm test` (`package.json#scripts.test`) or
 `python3 -m unittest discover` as the operator, in this shell, with no sandbox — right after an
 engine with `workspace-write` had the tree, and repo content can steer that engine into writing
 the very script that runs next. So the block itself **refuses** (exit 3, nothing executed) when
-`run-tests.sh` or `package.json` appears in `git status --porcelain` — modified **or** created by
-the run (an untracked script shows as `??`, which `git diff` does not show) — and prints the
-porcelain lines, the diff of a modified script and, for a created one, the whole new file as an
-addition diff (`git diff --no-index -- /dev/null <file>`), so nothing is confirmed unseen. The line
+`run-tests.sh` or `package.json` appears in `git status --porcelain` — modified, **staged or**
+created by the run (an untracked script shows as `??`, which `git diff` does not show; a staged
+change is invisible to a plain `git diff`) — and prints the porcelain lines, the unstaged diff, the
+staged diff (`git diff --cached`, which shows a staged new file whole) and, for an untracked one,
+the whole new file as an addition diff (`git diff --no-index -- /dev/null <file>`), so nothing is
+confirmed unseen. The line
 `verify: refusing to execute repo-resident test scripts …` is the refusal marker: it tells a refusal
 from a target command's own non-zero exit (a target test may itself exit 3; it prints no such line).
 Then: show the operator what the block printed, ask with

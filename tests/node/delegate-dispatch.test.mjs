@@ -153,6 +153,28 @@ test("the artifact's canonical dispatch runs the plan at workspace-write in the 
   assert.ok(pkgRefused.stdout.includes("?? package.json"));
   assert.ok(pkgRefused.stdout.includes("touch PWNED"), "the created package.json's content is shown");
 
+  // (e) a STAGED modification (git add after the engine edited it): a plain `git diff` shows
+  // nothing, so the staged diff must be what the operator sees — refused, shown, not run
+  const staged = scratchRepo();
+  writeFileSync(path.join(staged, "run-tests.sh"), "#!/bin/sh\n# staged by the engine\necho ok > TESTS-RAN\nexit 0\n");
+  assert.equal(spawnSync("git", ["-C", staged, "add", "run-tests.sh"], { encoding: "utf8" }).status, 0);
+  const stagedRefused = spawnSync("bash", ["-c", verifyBlock], { cwd: staged, encoding: "utf8", timeout: 30_000 });
+  assert.equal(stagedRefused.status, 3, `a staged-modified run-tests.sh must refuse verification:\n${stagedRefused.stdout}`);
+  assert.ok(!existsSync(path.join(staged, "TESTS-RAN")), "the staged-modified script must not have run");
+  assert.ok(stagedRefused.stdout.includes("M  run-tests.sh"), "porcelain names the staged change");
+  assert.ok(stagedRefused.stdout.includes("+# staged by the engine"), "the STAGED diff is shown");
+  // (f) a STAGED NEW script (created by the engine, then git add): `git ls-files` now calls it
+  // tracked, so the no-index path does not apply — `git diff --cached` must show it whole
+  const stagedNew = scratchRepo({ withTests: false });
+  writeFileSync(path.join(stagedNew, "run-tests.sh"), "#!/bin/sh\necho ok > TESTS-RAN\nexit 0\n");
+  chmodSync(path.join(stagedNew, "run-tests.sh"), 0o755);
+  assert.equal(spawnSync("git", ["-C", stagedNew, "add", "run-tests.sh"], { encoding: "utf8" }).status, 0);
+  const stagedNewRefused = spawnSync("bash", ["-c", verifyBlock], { cwd: stagedNew, encoding: "utf8", timeout: 30_000 });
+  assert.equal(stagedNewRefused.status, 3, `a staged-new run-tests.sh must refuse verification:\n${stagedNewRefused.stdout}`);
+  assert.ok(!existsSync(path.join(stagedNew, "TESTS-RAN")), "the staged-new script must not have run");
+  assert.ok(stagedNewRefused.stdout.includes("A  run-tests.sh"), "porcelain names the staged addition");
+  assert.ok(stagedNewRefused.stdout.includes("+echo ok > TESTS-RAN"), "the staged-new file's CONTENT is shown");
+
   // Faithful failure: a failing target test fails the verify block — reported, never absorbed.
   // (confirmed, so the script actually executes and its own failure is what fails the block)
   writeFileSync(path.join(scratch, "run-tests.sh"), "#!/bin/sh\nexit 1\n");

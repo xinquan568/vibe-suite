@@ -45,8 +45,10 @@ explicit yes re-run with `--confirm-danger`; the acceptance is recorded (journal
 transaction and kept in the advisor ledger, bound to that exact definition) so a later `init` /
 `repair` / `update` converges the same definition without the flag, and a changed definition asks
 again. `default` / `acceptEdits` / `plan` and in-workspace directories are unaffected; passing the
-flag when nothing is dangerous is refused. `remove` never registers a dangerous definition on the
-way out and never blocks on one.
+flag when nothing is dangerous is refused. On the way out, `remove` never registers or refreshes a
+dangerous **unaccepted** sibling and never blocks on one (it is reported held, and converges only
+after an explicit `reconcile --confirm-danger`); an accepted dangerous sibling converges as usual,
+and removing a dangerous definition itself — accepted or not — needs no flag.
 
 ## The backend pin
 

@@ -35,6 +35,21 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/advisor_cli.py" add <name> --custom \
 
 The CLI itself never prompts — every behavior is flag-driven and testable.
 
+## Dangerous definitions need `--confirm-danger`
+
+A definition is repository content. One that declares `permission_mode: dontAsk | auto |
+bypassPermissions`, or a `cwd` / `additional_dirs` entry that resolves outside the workspace
+(`~`, an absolute path outside it, `..` that escapes), is **refused** by `add` and by `reconcile` —
+the refusal names the field and the flag, and nothing is written. Ask the user, and only after an
+explicit yes re-run with `--confirm-danger`; the acceptance is recorded (journaled with the
+transaction and kept in the advisor ledger, bound to that exact definition) so a later `init` /
+`repair` / `update` converges the same definition without the flag, and a changed definition asks
+again. `default` / `acceptEdits` / `plan` and in-workspace directories are unaffected; passing the
+flag when nothing is dangerous is refused. On the way out, `remove` never registers or refreshes a
+dangerous **unaccepted** sibling and never blocks on one (it is reported held, and converges only
+after an explicit `reconcile --confirm-danger`); an accepted dangerous sibling converges as usual,
+and removing a dangerous definition itself — accepted or not — needs no flag.
+
 ## The backend pin
 
 A registration executes the pinned `claude-octopus` package. Until **E7.1** ships the default pin,

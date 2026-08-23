@@ -67,6 +67,10 @@ def main(argv=None):
     p_add.add_argument("--max-budget-usd", dest="max_budget_usd")
     p_add.add_argument("--allowed-tools", dest="allowed_tools")
     p_add.add_argument("--body-file", dest="body_file")
+    p_add.add_argument("--confirm-danger", dest="confirm_danger", action="store_true",
+                       help="accept a definition that declares permission_mode dontAsk/auto/"
+                            "bypassPermissions or a cwd/additional_dirs entry outside the workspace "
+                            "(vibe-184; the acceptance is recorded)")
 
     p_list = sub.add_parser("list", help="list advisors with their state")
     p_list.add_argument("--json", action="store_true")
@@ -79,6 +83,8 @@ def main(argv=None):
 
     p_rec = sub.add_parser("reconcile", help="converge registrations to definitions")
     p_rec.add_argument("--pin")
+    p_rec.add_argument("--confirm-danger", dest="confirm_danger", action="store_true",
+                       help="accept every declared definition with a dangerous field (vibe-184)")
 
     args = parser.parse_args(argv)
     ws = Path(args.workspace)
@@ -101,7 +107,7 @@ def main(argv=None):
         if args.op == "add":
             custom_text = _compose_custom(args) if args.custom else None
             report = advisors.add(ws, args.name, pin=args.pin, plugin_root=_plugin_root(),
-                                  custom_text=custom_text)
+                                  custom_text=custom_text, confirm_danger=args.confirm_danger)
             for name, transition in sorted(report.items()):
                 print(f"{name}: {transition}")
             print(f"✓ advisor {args.name!r} bridged into .mcp.json + .codex/config.toml")
@@ -126,7 +132,7 @@ def main(argv=None):
             print(f"✓ advisor {args.name!r} removed{kept}")
             print("Restart Claude so the MCP loader drops the server; Codex sees it immediately.")
         elif args.op == "reconcile":
-            report = advisors.reconcile(ws, pin=args.pin)
+            report = advisors.reconcile(ws, pin=args.pin, confirm_danger=args.confirm_danger)
             if not report:
                 print("no advisors declared or registered; nothing to reconcile")
             for name, transition in sorted(report.items()):

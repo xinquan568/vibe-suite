@@ -32,6 +32,7 @@ already agree on — never a floating value, never a guess between disagreeing o
 
 import base64
 import hashlib
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -50,6 +51,17 @@ TOML_REL = Path(".codex/config.toml")
 TIERS = ("opus", "sonnet", "haiku")
 PROMPT_MODES = ("append", "replace")
 PERMISSION_MODES = ("default", "acceptEdits", "plan", "dontAsk", "auto", "bypassPermissions")
+# vibe-184 / grill H1a: a definition is repository content. These modes hand the advisor the
+# operator's authority without a prompt, and a cwd/additional_dirs entry outside the workspace
+# hands it files the workspace never contained — neither registers without an explicit, logged
+# acceptance (`--confirm-danger`, the codex lane's precedent). default/acceptEdits/plan and
+# in-workspace directories are unchanged.
+DANGEROUS_PERMISSION_MODES = ("dontAsk", "auto", "bypassPermissions")
+DANGEROUS_FIELDS = ("permission_mode", "cwd", "additional_dirs")
+CONFIRM_DANGER_FLAG = "--confirm-danger"
+ACCEPTANCES_KEY = "danger_accepted"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 EFFORTS = ("low", "medium", "high", "max")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 BUDGET_RE = re.compile(r"^\d+(\.\d+)?$")
@@ -340,7 +352,7 @@ def _record_mode(entries):
     mode = 0o600
     for entry in entries:
         raw = entry.get("mode") if isinstance(entry, dict) else None
-        if raw:
+        if isinstance(raw, str) and raw:   # a recorded mode is an octal string, nothing else
             mode &= int(raw, 8)
     return mode
 
@@ -363,13 +375,16 @@ def _save_ledger(ws, ledger):
         except (OSError, bridge.BridgeError):
             pass
         return
-    mode = _record_mode(ledger.values())
+    # vibe-184: only provenance-image members carry a recorded mode; the acceptance map is keyed
+    # by advisor names (NAME_RE admits "mode") and must never be read as one.
+    mode = _record_mode(v for k, v in ledger.items() if k != ACCEPTANCES_KEY)
     bridge.write_atomic(ws, Path(ws) / LEDGER_REL,
                         json.dumps(ledger, indent=2, sort_keys=True) + "\n", mode=mode)
 
 
 JOURNAL_KEYS = {"schema", "intent", "remove_name", "delete_timeline", "desired_sha",
-                "pre_images", "post_images", "prior_baseline", "post_baseline"}
+                "pre_images", "post_images", "prior_baseline", "post_baseline",
+                ACCEPTANCES_KEY}   # vibe-184: optional — {"prior": {...}, "post": {...}} acceptance maps
 
 
 def _validated_journal(txn_path):
@@ -422,6 +437,8 @@ def _validated_journal(txn_path):
         base64.b64decode(post[str(MCP_REL)], validate=True)
     except Exception:
         refuse("post_images are not decodable")
+    if ACCEPTANCES_KEY in txn and not _valid_acceptance_maps(txn[ACCEPTANCES_KEY]):
+        refuse(f"{ACCEPTANCES_KEY} is not a pair of valid acceptance maps")
     if txn["intent"] == "remove":
         if not NAME_RE.match(txn.get("remove_name") or ""):
             refuse(f"remove journal names no valid advisor ({txn.get('remove_name')!r})")
@@ -430,6 +447,47 @@ def _validated_journal(txn_path):
         if "definition" not in pre:
             refuse("remove journal carries no definition provenance")
     return txn
+
+
+def _valid_acceptance(entry):
+    """One recorded acceptance: the definition sha it is bound to, the fields it covers, when."""
+    if not isinstance(entry, dict) or set(entry) != {"definition_sha256", "fields", "accepted_at"}:
+        return False
+    if not isinstance(entry["definition_sha256"], str) or not _SHA256_RE.match(entry["definition_sha256"]):
+        return False
+    fields = entry["fields"]
+    if not isinstance(fields, list) or not fields:
+        return False
+    for f in fields:
+        if not isinstance(f, dict) or set(f) != {"field", "value", "reason"}:
+            return False
+        if f["field"] not in DANGEROUS_FIELDS or not all(isinstance(f[k], str) for k in ("value", "reason")):
+            return False
+    return isinstance(entry["accepted_at"], str) and bool(_ISO_Z_RE.match(entry["accepted_at"]))
+
+
+def _valid_acceptance_map(m):
+    return isinstance(m, dict) and all(
+        isinstance(name, str) and NAME_RE.match(name) and _valid_acceptance(entry) for name, entry in m.items())
+
+
+def _valid_acceptance_maps(member):
+    """The journal's optional `danger_accepted` member: exactly {"prior": map, "post": map}."""
+    return (isinstance(member, dict) and set(member) == {"prior", "post"}
+            and _valid_acceptance_map(member["prior"]) and _valid_acceptance_map(member["post"]))
+
+
+def _install_acceptances(baseline, member, which):
+    """Put the journal's `prior` (apply rollback) or `post` (remove roll-forward) acceptance map into
+    the ledger dict — or drop the key when that map is empty. A journal without the member (written
+    before vibe-184) leaves the ledger's acceptances untouched."""
+    if member is None:
+        return
+    chosen = member[which]
+    if chosen:
+        baseline[ACCEPTANCES_KEY] = chosen
+    else:
+        baseline.pop(ACCEPTANCES_KEY, None)
 
 
 def recover(ws):
@@ -477,6 +535,7 @@ def recover(ws):
             baseline.pop(str(MCP_REL), None)
         else:
             baseline[str(MCP_REL)] = post_base
+        _install_acceptances(baseline, txn.get(ACCEPTANCES_KEY), "post")   # vibe-184: roll forward
         _save_ledger(ws, baseline)
         _ignore_block(ws, load_definitions(ws))
         bridge.unlink_at(ws, TXN_REL)
@@ -489,6 +548,7 @@ def recover(ws):
             baseline.pop(str(MCP_REL), None)
         else:
             baseline[str(MCP_REL)] = prior
+        _install_acceptances(baseline, txn.get(ACCEPTANCES_KEY), "prior")   # vibe-184: roll back
         _save_ledger(ws, baseline)
         bridge.unlink_at(ws, TXN_REL)
     return {"intent": txn.get("intent"), "remove_name": txn.get("remove_name")}
@@ -558,6 +618,95 @@ def _classify(ws, defs, doc, toml_text, pin=None, pin_file=None, pending_file=No
 
 
 # --------------------------------------------------------------------------------------------
+# Danger gate (vibe-184 / grill H1a)
+# --------------------------------------------------------------------------------------------
+
+def _outside_workspace(ws, raw):
+    """True when `raw` (a cwd or additional_dirs entry, `~` expanded, anchored at the workspace when
+    relative) resolves outside the workspace — `bridge.assert_inside`'s realpath containment."""
+    expanded = os.path.expanduser(str(raw))
+    candidate = Path(expanded) if os.path.isabs(expanded) else Path(ws) / expanded
+    try:
+        bridge.assert_inside(ws, candidate)
+    except bridge.BridgeError:
+        return True
+    return False
+
+
+def dangerous_fields(ws, defn):
+    """The fields of `defn` that need an explicit acceptance: `[(field, value, reason)]`."""
+    out = []
+    if defn["permission_mode"] in DANGEROUS_PERMISSION_MODES:
+        out.append(("permission_mode", defn["permission_mode"],
+                    "runs the advisor without permission prompts"))
+    if _outside_workspace(ws, defn["cwd"]):
+        out.append(("cwd", defn["cwd"], "resolves outside the workspace"))
+    for entry in defn["additional_dirs"]:
+        if _outside_workspace(ws, entry):
+            out.append(("additional_dirs", entry, "resolves outside the workspace"))
+    return out
+
+
+def definition_sha(defn):
+    """A stable digest of the parsed definition — the identity an acceptance is bound to."""
+    canon = json.dumps(defn, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def _accepted(ledger, name, sha):
+    entry = (ledger.get(ACCEPTANCES_KEY) or {}).get(name)
+    return isinstance(entry, dict) and entry.get("definition_sha256") == sha
+
+
+def danger_gate(ws, defs, confirm_danger=False, now=None):
+    """Refuse — before anything is written — every definition that declares a dangerous field
+    unless it is accepted, and return the acceptances this transaction must record.
+
+    A field is accepted when `confirm_danger` is passed now, or when the ledger already holds an
+    acceptance for this exact definition (same sha) — a flag-less `reconcile` from init/repair/
+    update then converges an advisor the operator accepted once; a changed definition needs the
+    flag again. Passing the flag when nothing is dangerous is refused, like `--confirm-danger` on
+    the codex lane. Returns `{name: acceptance}` for the NEW acceptances (empty when none).
+    """
+    ledger = _load_json_file(Path(ws) / LEDGER_REL)
+    new_acceptances = {}
+    dangerous_seen = False
+    for name in sorted(defs):
+        fields = dangerous_fields(ws, defs[name])
+        if not fields:
+            continue
+        dangerous_seen = True
+        sha = definition_sha(defs[name])
+        if _accepted(ledger, name, sha):
+            continue
+        if not confirm_danger:
+            field, value, reason = fields[0]
+            raise AdvisorError(
+                f"{name}: {field} {value!r} {reason}; pass {CONFIRM_DANGER_FLAG} to accept it "
+                f"(the acceptance is recorded) — nothing has been written")
+        new_acceptances[name] = {
+            "definition_sha256": sha,
+            "fields": [{"field": f, "value": str(v), "reason": r} for f, v, r in fields],
+            "accepted_at": now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    if confirm_danger and not dangerous_seen:
+        raise AdvisorError(
+            f"{CONFIRM_DANGER_FLAG} is only meaningful when a definition declares a dangerous field "
+            "(permission_mode dontAsk/auto/bypassPermissions, or a cwd/additional_dirs entry outside "
+            "the workspace) — none does; nothing has been written")
+    return new_acceptances
+
+
+def unaccepted_dangerous(ws, defs):
+    """The names in `defs` that declare a dangerous field without a recorded acceptance — what
+    `remove` must leave untouched (never register, refresh, or refuse over) while it removes
+    something else."""
+    ledger = _load_json_file(Path(ws) / LEDGER_REL)
+    return {name for name in defs
+            if dangerous_fields(ws, defs[name]) and not _accepted(ledger, name, definition_sha(defs[name]))}
+
+
+# --------------------------------------------------------------------------------------------
 # Reconcile — the one engine
 # --------------------------------------------------------------------------------------------
 
@@ -576,7 +725,7 @@ def _collision_check(defs, doc, toml_text):
                 "advisor or remove the conflicting table — nothing has been written")
 
 
-def reconcile(ws, pin=None, pin_file=None, pending_file=None):
+def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False):
     """Converge both stores to the definitions. Returns `{name: transition}`."""
     ws = Path(ws)
     bridge.assert_root(ws)
@@ -586,6 +735,10 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None):
     doc = bridge.load_json(ws / MCP_REL)
     toml_before = bridge.read_text_verbatim(ws / TOML_REL)
     _collision_check(defs, doc, toml_before)
+    # vibe-184: a dangerous definition is refused here — after the collision check, before any
+    # classification can write — unless accepted now or previously; the new acceptances ride the
+    # same transaction as the registrations they authorise.
+    acceptances = danger_gate(ws, defs, confirm_danger=confirm_danger)
 
     classified = _classify(ws, defs, doc, toml_before, pin, pin_file, pending_file)
     invalid = {n: d for n, (s, _, _, d) in classified.items() if s == "invalid-registration"}
@@ -618,7 +771,7 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None):
             toml_text = bridge.toml_server_upsert(toml_text, name, desired_body)
             report[name] = f"{state}->registered"
 
-    _transact(ws, doc, toml_before, toml_text, defs)
+    _transact(ws, doc, toml_before, toml_text, defs, acceptances=acceptances)
     return report
 
 
@@ -627,7 +780,8 @@ def _endstate_bytes(doc):
 
 
 def _transact(ws, doc, toml_before, toml_after, defs,
-              intent="apply", remove_name=None, delete_timeline=False, definition_pre=None):
+              intent="apply", remove_name=None, delete_timeline=False, definition_pre=None,
+              acceptances=None):
     """Journal → JSON → TOML → baseline → ignore-block, with rollback (apply) or the journal left
     for roll-forward (remove — the caller finishes deletions and cleanup)."""
     ws = Path(ws)
@@ -665,7 +819,16 @@ def _transact(ws, doc, toml_before, toml_after, defs,
         mcp_final = _endstate_bytes(doc)
     json_changed = mcp_before != mcp_final
     toml_changed = toml_after != toml_before
-    if not (json_changed or toml_changed) and intent == "apply":
+    # vibe-184: the acceptance maps before and after this transaction — journaled whole, so that
+    # recovery can restore (apply) or install (remove) them exactly; kept in the ledger.
+    accepted_before = dict(baseline.get(ACCEPTANCES_KEY) or {})
+    accepted_after = dict(accepted_before)
+    if acceptances:
+        accepted_after.update(acceptances)
+    if intent == "remove" and remove_name in accepted_after:
+        del accepted_after[remove_name]
+    acceptances_changed = accepted_after != accepted_before
+    if not (json_changed or toml_changed or acceptances_changed) and intent == "apply":
         _ignore_block(ws, defs)
         return
 
@@ -686,6 +849,10 @@ def _transact(ws, doc, toml_before, toml_after, defs,
         post_baseline[str(MCP_REL)] = pre_images[str(MCP_REL)]
     if not advisors_left:
         post_baseline.pop(str(MCP_REL), None)
+    if accepted_after:
+        post_baseline[ACCEPTANCES_KEY] = accepted_after
+    else:
+        post_baseline.pop(ACCEPTANCES_KEY, None)
     journal = {
         "schema": 1, "intent": intent, "remove_name": remove_name,
         "delete_timeline": delete_timeline,
@@ -696,6 +863,7 @@ def _transact(ws, doc, toml_before, toml_after, defs,
                         str(TOML_REL): toml_after},
         "prior_baseline": prior_baseline,
         "post_baseline": post_baseline.get(str(MCP_REL)),
+        ACCEPTANCES_KEY: {"prior": accepted_before, "post": accepted_after},   # vibe-184
     }
     mode = _record_mode(pre_images.values())
     bridge.write_atomic(ws, ws / TXN_REL, json.dumps(journal) + "\n", mode=mode)
@@ -719,7 +887,13 @@ def _transact(ws, doc, toml_before, toml_after, defs,
                 bridge.unlink_at(ws, MCP_REL)
             if toml_changed and (ws / TOML_REL).is_file():
                 bridge.write_atomic(ws, ws / TOML_REL, toml_before)
-            _save_ledger(ws, _restore_baseline(ws, prior_baseline))
+            restored = _restore_baseline(ws, prior_baseline)
+            # vibe-184: the ledger was written with the post-transaction acceptance map before
+            # `_ignore_block` could raise — the in-process rollback restores the journaled prior
+            # map exactly as `recover` does, so a rolled-back apply authorises nothing and a
+            # failed remove keeps what it had.
+            _install_acceptances(restored, journal[ACCEPTANCES_KEY], "prior")
+            _save_ledger(ws, restored)
             bridge.unlink_at(ws, TXN_REL)
         raise
     if intent == "apply":
@@ -762,7 +936,7 @@ def _write_toml_store(ws, text):
 # --------------------------------------------------------------------------------------------
 
 def add(ws, name, pin=None, plugin_root=None, custom_text=None,
-        pin_file=None, pending_file=None):
+        pin_file=None, pending_file=None, confirm_danger=False):
     """Preflight everything fallible — backend included — before creating anything."""
     ws = Path(ws)
     bridge.assert_root(ws)
@@ -793,7 +967,8 @@ def add(ws, name, pin=None, plugin_root=None, custom_text=None,
     created_tl = not (ws / tl_rel).exists()
     try:
         bridge.ensure_dir_at(ws, tl_rel)
-        return reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file)
+        return reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file,
+                         confirm_danger=confirm_danger)
     except BaseException:
         try:
             if created_tl:
@@ -834,9 +1009,16 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
     definition_pre = bridge.record_pre_image(def_path) if def_path.is_file() else None
     defs_after = {k: v for k, v in defs.items() if k != name}
     toml_before = bridge.read_text_verbatim(ws / TOML_REL)
-    _collision_check(defs_after, doc, toml_before)
+    # vibe-184: a removal authorises nothing. Another advisor whose definition is dangerous and
+    # not yet accepted is HELD: excluded from the collision and invalid-registration preflights
+    # (neither may block this removal on its account), never registered or refreshed below, and
+    # reported; the post-removal convergence says the same in its warning.
+    held = unaccepted_dangerous(ws, defs_after)
+    _collision_check({k: v for k, v in defs_after.items() if k not in held}, doc, toml_before)
     classified = _classify(ws, defs_after, doc, toml_before, pin, pin_file, pending_file)
     for other, (state, _, _, detail) in classified.items():
+        if other in held:
+            continue
         if state == "invalid-registration":
             raise AdvisorError(
                 f"advisor {other!r}: {detail}; pass --pin <exact version> to settle the target — "
@@ -846,6 +1028,10 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
     toml_text = toml_before
     report = {}
     for other, (state, desired_entry, desired_body, _) in classified.items():
+        if other in held:
+            report[other] = (f"danger-unaccepted (not converged; pass {CONFIRM_DANGER_FLAG} to "
+                             "advisor reconcile)")
+            continue
         if state == "consistent":
             continue
         if state == "registered-undeclared":

@@ -14,6 +14,8 @@ placeholders would pass a naive round-trip test while delivering nothing.
 import hashlib
 import base64
 import json
+import re
+import shutil
 import os
 import subprocess
 import sys
@@ -1193,6 +1195,210 @@ class TestRegistrationStamp(unittest.TestCase):
         (ws / ".vibe-suite" / "agents" / "alpha_one" / "timeline" / "note.md").write_text("history\n")
         advisors.add_all(ws, pin=PIN, confirm_danger=True)
         self.assertTrue((ws / ".vibe-suite" / "agents" / "alpha_one" / "timeline" / "note.md").is_file())
+
+    # --- round 3/4: a targeted add vs unreadable siblings; add --all timeline safety; the strict loader -------------
+
+    def test_add_of_one_definition_is_not_refused_by_an_unreadable_sibling_whose_records_survive(self):
+        ws = self._ws("alpha_one", "beta_two", "gamma_3", "delta_4", extra={"beta_two": "permission_mode: bypassPermissions\n"})
+        advisors.add(ws, "beta_two", pin=PIN, confirm_danger=True)             # beta: dangerous, accepted, stamped, registered ...
+        beta_entry = dict(self._servers(ws)["beta_two"])
+        toml_p = ws / ".codex" / "config.toml"
+        block_re = re.compile(r"# >>> [^\n]*server:beta_two [^\n]*\n.*?# <<< [^\n]*server:beta_two [^\n]*\n", re.S)
+        beta_block = block_re.search(toml_p.read_text(encoding="utf-8")).group(0)
+        ledger_before = self._ledger(ws)
+        agents = ws / ".vibe-suite" / "agents"
+        (agents / "beta_two.md").write_text("no frontmatter at all\n", encoding="utf-8")        # ... then made unreadable (parse failure)
+        (agents / "gamma_3.md").write_text(defn_text(name="gamma_3", extra="name: other_1\n"), encoding="utf-8")   # frontmatter name != filename
+        (agents / "delta_4.md").write_bytes(b"---\ndescription: |\n  \xff\xfe broken\n---\nbody\n")           # not valid UTF-8
+        add_definition(ws, name="epsilon_5")                                                   # readable on disk, but ...
+        original_read_text = Path.read_text
+
+        def flaky_read_text(self_, *a, **kw):                                                 # ... a read failure (EACCES) injected for it
+            if self_.name == "epsilon_5.md":
+                raise PermissionError(13, "Permission denied", str(self_))
+            return original_read_text(self_, *a, **kw)
+
+        with mock.patch.object(Path, "read_text", flaky_read_text):
+            report = advisors.add(ws, "alpha_one", pin=PIN)                     # never refused on account of any of the four
+        self.assertEqual(report["alpha_one"], "declared-unregistered->registered")
+        for n, needle in (("beta_two", "beta_two.md"), ("gamma_3", "does not match"), ("delta_4", "not valid UTF-8"), ("epsilon_5", "cannot be read")):
+            self.assertIn("unreadable (held", report[n])
+            self.assertIn(f"{n}.md", report[n])
+            self.assertIn(needle, report[n])
+            self.assertIn(f"advisor add {n}", report[n])
+        self.assertEqual(self._servers(ws)["beta_two"], beta_entry, "beta's .mcp.json entry is untouched")
+        self.assertIn(beta_block, toml_p.read_text(encoding="utf-8"), "beta's TOML block is byte-identical")
+        ledger = self._ledger(ws)
+        self.assertEqual(set(ledger[advisors.REGISTRATIONS_KEY]), {"alpha_one", "beta_two"}, "beta's stamp survives")
+        self.assertEqual(ledger[advisors.REGISTRATIONS_KEY]["beta_two"], ledger_before[advisors.REGISTRATIONS_KEY]["beta_two"])
+        self.assertEqual(ledger[advisors.ACCEPTANCES_KEY], ledger_before[advisors.ACCEPTANCES_KEY], "beta's danger acceptance survives")
+        # the acting definition itself unreadable: refused with an AdvisorError naming its file, for every family
+        with mock.patch.object(Path, "read_text", flaky_read_text):
+            for bad, needle in (("beta_two", "beta_two.md"), ("gamma_3", "does not match"), ("delta_4", "not valid UTF-8"), ("epsilon_5", "cannot be read")):
+                with self.assertRaises(advisors.AdvisorError) as cm:
+                    advisors.add(ws, bad, pin=PIN)
+                self.assertIn(f"{bad}.md", str(cm.exception))
+                self.assertIn(needle, str(cm.exception))
+        self.assertEqual(set(self._ledger(ws)[advisors.REGISTRATIONS_KEY]), {"alpha_one", "beta_two"})
+        # the strict callers stay strict (pinned): a definition that does not parse refuses the whole operation, naming the first unreadable file in name order
+        for call in (lambda: advisors.add_all(ws, pin=PIN), lambda: advisors.reconcile(ws, pin=PIN), lambda: advisors.listing(ws),
+                     lambda: advisors.list_advisors(ws, pin=PIN), lambda: advisors.remove(ws, "alpha_one", pin=PIN)):
+            with self.assertRaises(advisors.AdvisorError) as cm:
+                call()
+            self.assertIn("beta_two.md", str(cm.exception))
+        self.assertIn("alpha_one", self._servers(ws), "the refused remove removed nothing")
+        # CLI: exit 0 for a targeted add beside unreadable siblings (report printed), exit 2 for an unreadable acting name
+        (agents / "gamma_3.md").write_text(defn_text(name="gamma_3"), encoding="utf-8")
+        r = self._cli(ws, "add", "gamma_3", "--pin", PIN)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("unreadable (held", r.stdout + r.stderr)
+        r = self._cli(ws, "add", "delta_4", "--pin", PIN)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("delta_4.md", r.stdout + r.stderr)
+
+    def test_load_definitions_is_strict_in_name_order_and_names_the_file_for_every_unreadable_family(self):
+        ws = self._ws("alpha_one")
+        agents = ws / ".vibe-suite" / "agents"
+        (agents / "b_bad.md").write_text("no frontmatter at all\n", encoding="utf-8")
+        (agents / "c_mismatch.md").write_text(defn_text(name="c_mismatch", extra="name: other_1\n"), encoding="utf-8")
+        (agents / "d_utf.md").write_bytes(b"---\ndescription: |\n  \xff\xfe\n---\nbody\n")
+        add_definition(ws, name="e_os")
+        original_read_text = Path.read_text
+
+        def flaky_read_text(self_, *a, **kw):
+            if self_.name == "e_os.md":
+                raise PermissionError(13, "Permission denied", str(self_))
+            return original_read_text(self_, *a, **kw)
+
+        with mock.patch.object(Path, "read_text", flaky_read_text):
+            for first, needle in (("b_bad.md", "b_bad.md"), ("c_mismatch.md", "does not match"),
+                                  ("d_utf.md", "not valid UTF-8"), ("e_os.md", "cannot be read")):
+                with self.assertRaises(advisors.AdvisorError) as cm:          # the FIRST unreadable file in name order, an AdvisorError naming it
+                    advisors.load_definitions(ws)
+                self.assertIn(first, str(cm.exception))
+                self.assertIn(needle, str(cm.exception))
+                (agents / first).unlink()
+            self.assertEqual(set(advisors.load_definitions(ws)), {"alpha_one"})
+
+    def test_a_pending_remove_recovery_never_reads_definitions_so_a_targeted_add_beside_an_unreadable_sibling_completes_it(self):
+        ws = self._ws("alpha_one", "beta_two", "gamma_3", "delta_4", "epsilon_5", extra={"beta_two": "permission_mode: bypassPermissions\n"})
+        advisors.add(ws, "beta_two", confirm_danger=True)                      # beta: dangerous, accepted, stamped, registered (the shipped pin throughout:
+        for n in ("gamma_3", "delta_4", "epsilon_5"):                          # a CLI remove takes no --pin and converges siblings to the shipped target)
+            advisors.add(ws, n)
+        beta_entry = dict(self._servers(ws)["beta_two"])
+        ledger_before = self._ledger(ws)
+        agents = ws / ".vibe-suite" / "agents"
+        txn = ws / ".vibe-suite-state" / "advisor-txn.json"
+        beta_text = (agents / "beta_two.md").read_text(encoding="utf-8")
+
+        def beta_unreadable():                                                   # beta overwritten with no frontmatter (a parse failure)
+            (agents / "beta_two.md").write_text("no frontmatter at all\n", encoding="utf-8")
+
+        def beta_restored():                                                     # the exact registered text again (same sha: the stamp still matches)
+            (agents / "beta_two.md").write_text(beta_text, encoding="utf-8")
+
+        def crash_remove(name):                                                 # a remove interrupted after its journal write: a pending remove journal
+            r = self._cli(ws, "remove", name, "--delete-timeline", fail_after="json")
+            self.assertEqual(r.returncode, 9, (name, r.stderr))
+            self.assertTrue(txn.is_file(), "the remove journal is pending")
+
+        crash_remove("gamma_3")                                                 # (remove itself loads strictly: the journal is made while beta still parses)
+        beta_unreadable()                                                       # beta made unreadable AFTER the journal
+        # (1) direct library: the targeted add completes the recovery and registers alpha; beta survives untouched
+        report = advisors.add(ws, "alpha_one")
+        self.assertEqual(report["alpha_one"], "declared-unregistered->registered")
+        self.assertIn("unreadable (held", report["beta_two"])
+        self.assertFalse(txn.exists(), "recovery completed: no journal left")
+        self.assertNotIn("gamma_3", self._servers(ws), "the interrupted removal was rolled forward")
+        self.assertFalse((agents / "gamma_3.md").exists())
+        self.assertFalse((agents / "gamma_3").exists(), "--delete-timeline honoured by recovery")
+        self.assertEqual(self._servers(ws)["beta_two"], beta_entry, "beta's registration untouched")
+        ledger = self._ledger(ws)
+        self.assertEqual(ledger[advisors.REGISTRATIONS_KEY]["beta_two"], ledger_before[advisors.REGISTRATIONS_KEY]["beta_two"], "beta's stamp survives")
+        self.assertEqual(ledger[advisors.ACCEPTANCES_KEY], ledger_before[advisors.ACCEPTANCES_KEY], "beta's danger acceptance survives")
+        self.assertNotIn("gamma_3", ledger[advisors.REGISTRATIONS_KEY], "gamma's stamp rolled forward (dropped)")
+        # (2) the CLI path: pre-dispatch recovery completes, the targeted add succeeds, beta survives
+        beta_restored()
+        crash_remove("delta_4")
+        beta_unreadable()
+        r = self._cli(ws, "add", "alpha_one")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("recovered an interrupted advisor transaction", r.stdout + r.stderr)
+        self.assertIn("unreadable (held", r.stdout + r.stderr)
+        self.assertFalse(txn.exists())
+        self.assertNotIn("delta_4", self._servers(ws))
+        self.assertEqual(self._servers(ws)["beta_two"], beta_entry)
+        self.assertEqual(self._ledger(ws)[advisors.ACCEPTANCES_KEY], ledger_before[advisors.ACCEPTANCES_KEY])
+        # (3) the strict callers: recovery completes for them too (the journal is gone; epsilon's removal rolled forward), THEN their own strict
+        #     loading refuses, naming the unreadable file — the declared strictness is preserved, the pending journal is not
+        beta_restored()
+        crash_remove("epsilon_5")
+        beta_unreadable()
+        with self.assertRaises(advisors.AdvisorError) as cm:
+            advisors.add_all(ws)
+        self.assertIn("beta_two.md", str(cm.exception))
+        self.assertFalse(txn.exists(), "recovery completed before the strict refusal")
+        self.assertNotIn("epsilon_5", self._servers(ws))
+        self.assertEqual(self._servers(ws)["beta_two"], beta_entry)
+        self.assertIn("alpha_one", self._servers(ws))
+        # the privacy block stays while definitions exist (alpha, beta, an unreadable one among them)
+        self.assertTrue(bridge.text_block_has((ws / ".gitignore").read_text(encoding="utf-8"), advisors.IGNORE_BLOCK))
+
+    def test_add_all_validates_every_timeline_path_and_refuses_a_file_or_a_symlink_there(self):
+        ws = self._ws("alpha_one", "beta_two")
+        agents = ws / ".vibe-suite" / "agents"
+        (agents / "beta_two").mkdir()
+        (agents / "beta_two" / "timeline").write_text("not a directory\n", encoding="utf-8")
+        with self.assertRaises(advisors.AdvisorError) as cm:                  # (1) a regular file at the leaf
+            advisors.add_all(ws, pin=PIN)
+        self.assertIn("beta_two", str(cm.exception))
+        self.assertIn("timeline", str(cm.exception))
+        self.assertEqual(self._servers(ws), {})
+        self.assertFalse((ws / ".vibe-suite-state").exists(), "nothing registered: no ledger")
+        self.assertEqual((agents / "beta_two" / "timeline").read_text(encoding="utf-8"), "not a directory\n",
+                         "the file is left exactly as it was")
+        self.assertFalse((agents / "alpha_one").exists(), "alpha's timeline — created by this call — is rolled back")
+        # (2) a symlink at the leaf to a directory outside the workspace: Path.exists() is true; the descent refuses it; the target is untouched
+        outside = Path(tempfile.mkdtemp(prefix="vibe185-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (outside / "keep.txt").write_text("external\n", encoding="utf-8")
+        (agents / "beta_two" / "timeline").unlink()
+        (agents / "beta_two" / "timeline").symlink_to(outside)
+        with self.assertRaises(advisors.AdvisorError):
+            advisors.add_all(ws, pin=PIN)
+        self.assertEqual(self._servers(ws), {})
+        self.assertFalse((ws / ".vibe-suite-state").exists())
+        self.assertTrue((outside / "keep.txt").is_file(), "the external target is untouched")
+        self.assertTrue((agents / "beta_two" / "timeline").is_symlink(), "the link is not ours to remove")
+        self.assertFalse((agents / "alpha_one").exists(), "alpha rolled back again")
+        with self.assertRaises((advisors.AdvisorError, bridge.BridgeError)):   # the single add refuses the same path (existing rule), zero residue
+            advisors.add(ws, "beta_two", pin=PIN)
+        self.assertEqual(self._servers(ws), {})
+        # (3) the advisor DIRECTORY itself a symlink to an external directory that contains timeline/keep.txt: a different descent component
+        (agents / "beta_two" / "timeline").unlink()
+        (agents / "beta_two").rmdir()
+        outside2 = Path(tempfile.mkdtemp(prefix="vibe185-outside2-"))
+        self.addCleanup(shutil.rmtree, outside2, ignore_errors=True)
+        (outside2 / "timeline").mkdir()
+        (outside2 / "timeline" / "keep.txt").write_text("external\n", encoding="utf-8")
+        (agents / "beta_two").symlink_to(outside2)
+        self.assertTrue((agents / "beta_two" / "timeline").exists(), "Path.exists() follows the directory link")
+        with self.assertRaises(advisors.AdvisorError) as cm:
+            advisors.add_all(ws, pin=PIN)
+        self.assertIn("beta_two", str(cm.exception))
+        self.assertEqual(self._servers(ws), {})
+        self.assertFalse((ws / ".vibe-suite-state").exists())
+        self.assertFalse((agents / "alpha_one").exists(), "alpha rolled back")
+        self.assertTrue((agents / "beta_two").is_symlink(), "the directory link is not ours to remove")
+        self.assertTrue((outside2 / "timeline" / "keep.txt").is_file(), "the external tree is untouched")
+        # (4) a real directory is accepted and kept; an absent one is created
+        (agents / "beta_two").unlink()
+        (agents / "beta_two" / "timeline").mkdir(parents=True)
+        (agents / "beta_two" / "timeline" / "note.md").write_text("history\n", encoding="utf-8")
+        report = advisors.add_all(ws, pin=PIN)
+        self.assertEqual(report["beta_two"], "declared-unregistered->registered")
+        self.assertTrue((agents / "beta_two" / "timeline" / "note.md").is_file())
+        self.assertTrue((agents / "alpha_one" / "timeline").is_dir())
 
     # --- disclosure: listing and list rows ---------------------------------------------------------------
 

@@ -215,20 +215,64 @@ def parse_definition(text, filename):
     }
 
 
-def load_definitions(ws):
-    out = {}
+def _scan_definitions(ws):
+    """`(defs, unreadable)`: every declared definition that parses, keyed by name, and — keyed by
+    file stem — the exception for every `*.md` that does not (a parse failure, a frontmatter name
+    that disagrees with the filename, an unreadable file). vibe-185 (round 3): a targeted
+    `add <name>` acts on exactly its names, so an unrelated definition it cannot read is
+    disclosed and held, never a refusal; the strict loader below is every other caller's."""
+    out, unreadable = {}, {}
     agents = Path(ws) / AGENTS_REL
     if agents.is_symlink():
         raise AdvisorError(f"{agents} is a symlink; refusing to read definitions through it")
     if not agents.is_dir():
-        return out
+        return out, unreadable
     for path in sorted(agents.glob("*.md")):
-        defn = parse_definition(path.read_text(encoding="utf-8"), path.name)
-        if defn["name"] != path.stem:
-            raise AdvisorError(f"{path.name}: frontmatter name {defn['name']!r} does not match "
-                               "the filename; rename one of them")
+        try:
+            defn = parse_definition(path.read_text(encoding="utf-8"), path.name)
+            if defn["name"] != path.stem:
+                raise AdvisorError(f"{path.name}: frontmatter name {defn['name']!r} does not "
+                                   "match the filename; rename one of them")
+        except AdvisorError as exc:
+            unreadable[path.stem] = exc
+            continue
+        except UnicodeDecodeError as exc:
+            unreadable[path.stem] = AdvisorError(f"{path.name}: not valid UTF-8 ({exc})")
+            continue
+        except OSError as exc:
+            unreadable[path.stem] = AdvisorError(f"{path.name}: cannot be read ({exc})")
+            continue
         out[defn["name"]] = defn
+    return out, unreadable
+
+
+def load_definitions(ws):
+    """Every declared definition, strictly: the first unreadable file in name order refuses the
+    caller with an `AdvisorError` naming it — a parse failure, a frontmatter name that disagrees
+    with the filename, invalid UTF-8 (`not valid UTF-8`) or a read failure (`cannot be read`; the
+    last two used to propagate raw). `add --all`, `remove`, `list`, init, repair and update read
+    this way."""
+    out, unreadable = _scan_definitions(ws)
+    if unreadable:
+        raise unreadable[sorted(unreadable)[0]]
     return out
+
+
+def _unreadable_report(name, exc):
+    return (f"unreadable (held; {exc}; existing store content left unchanged; not converged by an "
+            f"explicit add — fix the file, then advisor add {name})")
+
+
+def _declared_stems(ws):
+    """The file stems of every declared `*.md` under the agents directory, WITHOUT parsing any of
+    them — what a caller that only needs to know whether definitions exist (recovery's ignore-block
+    decision) may read. The symlinked-directory refusal is the loader's, kept here."""
+    agents = Path(ws) / AGENTS_REL
+    if agents.is_symlink():
+        raise AdvisorError(f"{agents} is a symlink; refusing to read definitions through it")
+    if not agents.is_dir():
+        return set()
+    return {p.stem for p in agents.glob("*.md")}
 
 
 # --------------------------------------------------------------------------------------------
@@ -664,7 +708,10 @@ def recover(ws):
             baseline[str(MCP_REL)] = post_base
         _install_records(baseline, txn, "post")   # vibe-184/185: roll the records forward
         _save_ledger(ws, baseline)
-        _ignore_block(ws, load_definitions(ws))
+        # vibe-185 (round 5): the privacy block stays while any definition file or timeline exists;
+        # recovery asks only that (no parsing) — an unreadable definition must not leave a journal
+        # pending, and a targeted add of an unrelated name is never refused at recovery.
+        _ignore_block(ws, _declared_stems(ws))
         bridge.unlink_at(ws, TXN_REL)
     else:
         for rel in (str(MCP_REL), str(TOML_REL)):
@@ -944,7 +991,16 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=Fal
     bridge.assert_root(ws)
     bridge.pin_root(ws)
     recover(ws)
-    defs = load_definitions(ws)
+    # vibe-185 (round 3): a targeted add reads strictly only what it acts on — an unrelated
+    # definition that does not parse is held and reported, never a refusal; its records survive.
+    # Every other caller (add --all, remove, init, repair, update, list) loads strictly, as before.
+    if register and register != REGISTER_ALL:
+        defs, unreadable = _scan_definitions(ws)
+        unreadable_acting = sorted(set(register) & set(unreadable))
+        if unreadable_acting:
+            raise unreadable[unreadable_acting[0]]
+    else:
+        defs, unreadable = load_definitions(ws), {}
     if register == REGISTER_ALL:
         register = set(defs)
     register = set(register or ())
@@ -980,6 +1036,11 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=Fal
     toml_text = toml_before
     report = {}
     for name, (state, desired_entry, desired_body, _) in classified.items():
+        if name in unreadable:
+            # vibe-185 (round 3): a declared definition this targeted add could not read — its
+            # stores, stamp and acceptance are left exactly as they are.
+            report[name] = _unreadable_report(name, unreadable[name])
+            continue
         if state == "registered-undeclared":
             if explicit:
                 # An explicit add writes only its named definition — an orphaned registration
@@ -1008,12 +1069,14 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=Fal
             servers[name] = desired_entry
             toml_text = bridge.toml_server_upsert(toml_text, name, desired_body)
             report[name] = f"{state}->registered"
+    for name in sorted(unreadable):
+        report.setdefault(name, _unreadable_report(name, unreadable[name]))
     stamp_at = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     registrations = {n: {"definition_sha256": definition_sha(defs[n]), "registered_at": stamp_at}
                      for n in sorted(register)}
 
     _transact(ws, doc, toml_before, toml_text, defs, acceptances=acceptances,
-              registrations=registrations)
+              registrations=registrations, also_declared=set(unreadable))
     return report
 
 
@@ -1023,7 +1086,7 @@ def _endstate_bytes(doc):
 
 def _transact(ws, doc, toml_before, toml_after, defs,
               intent="apply", remove_name=None, delete_timeline=False, definition_pre=None,
-              acceptances=None, registrations=None):
+              acceptances=None, registrations=None, also_declared=()):
     """Journal → JSON → TOML → baseline → ignore-block, with rollback (apply) or the journal left
     for roll-forward (remove — the caller finishes deletions and cleanup)."""
     ws = Path(ws)
@@ -1080,10 +1143,13 @@ def _transact(ws, doc, toml_before, toml_after, defs,
     # vibe-185 (round 2): a record whose definition no longer exists — deleted by hand, never
     # through remove — is dropped by every transaction, with its acceptance: restoring the same
     # file later is a new registration, not a resumed one. `defs` is the set of definitions this
-    # transaction converges (all declared; for remove, all but the target).
-    for stale in [n for n in registered_after if n not in defs]:
+    # transaction converges (all declared; for remove, all but the target). Round 3: a declared
+    # definition a targeted add could not READ (`also_declared`) still exists — its records are
+    # not this transaction's to drop.
+    declared = set(defs) | set(also_declared)
+    for stale in [n for n in registered_after if n not in declared]:
         del registered_after[stale]
-    for stale in [n for n in accepted_after if n not in defs]:
+    for stale in [n for n in accepted_after if n not in declared]:
         del accepted_after[stale]
     acceptances_changed = accepted_after != accepted_before
     registrations_changed = registered_after != registered_before
@@ -1263,12 +1329,21 @@ def add_all(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False
         raise AdvisorError("no advisor definitions declared under .vibe-suite/agents/; nothing to register")
     # Every registered advisor gets its timeline directory, exactly as a single `add` gives one; a
     # refused bulk add leaves no residue — only the directories this call created are removed.
+    # vibe-185 (round 3): every path goes through the audited descent, present or not — a regular
+    # file or a symlink at `<name>/timeline` (which `Path.exists()` would have followed) refuses
+    # the whole bulk add; presence for rollback ownership is read without following (`lstat_at`).
     created = []
     try:
         for name in sorted(defs):
             tl_rel = timeline_rel(name)
-            if not (ws / tl_rel).exists():
+            try:
+                absent = bridge.lstat_at(ws, tl_rel) is None
                 bridge.ensure_dir_at(ws, tl_rel)
+            except bridge.BridgeError as exc:
+                raise AdvisorError(
+                    f"{name}: timeline path {tl_rel} cannot be created safely ({exc}); "
+                    "nothing has been registered") from exc
+            if absent:
                 created.append(name)
         return reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file,
                          confirm_danger=confirm_danger, register=REGISTER_ALL)

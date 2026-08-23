@@ -263,6 +263,32 @@ class TestRetiredCommandNames(unittest.TestCase):
                          + "\n".join(offenders))
 
 
+class TestAgentDesignSkillPostEditGuidance(unittest.TestCase):
+    """vibe-185 (round 3): the authoritative skill's post-edit guidance names the explicit
+    registration (`advisor add <name>`), not a flag-less reconcile — and the codex mirror agrees."""
+
+    FILES = ("skills/agent-design/SKILL.md", "codex/skills/vibe-agent-design/SKILL.md")
+
+    @staticmethod
+    def _section(text):
+        start = text.index("## After editing an advisor")
+        nxt = text.find("\n## ", start + 1)
+        return text[start: nxt if nxt != -1 else len(text)]
+
+    def test_post_edit_section_instructs_advisor_add_not_a_flag_less_reconcile(self):
+        for rel in self.FILES:
+            with self.subTest(file=rel):
+                sec = self._section((REPO_ROOT / rel).read_text(encoding="utf-8"))
+                blocks = re.findall(r"```bash\n(.*?)```", sec, re.S)
+                self.assertTrue(blocks, "the section carries a copyable command")
+                commands = "\n".join(blocks)
+                self.assertRegex(commands, r'advisor_cli\.py" --workspace \. add <name>')
+                self.assertNotRegex(commands, r'advisor_cli\.py" --workspace \. reconcile\b')
+                prose = " ".join(sec.split())                      # the skill wraps at 80 columns
+                self.assertIn("held at its registered content", prose)
+                self.assertIn("advisor add <name>", prose)
+
+
 if __name__ == "__main__":
     unittest.main()
 

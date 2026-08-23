@@ -17,6 +17,7 @@ The workspace is a fresh temp directory per test and the runner resolves its sta
 process CWD, so nothing here writes into the repository.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -283,6 +284,97 @@ class Invocation(RunnerCase):
         self.run_runner(*self.base_args()[:4], "--sandbox", "workspace-write",
                         "--timeout-ms", "10000", "--", "p")
         self.assertIn("workspace-write", self.read_probe()["argv"])
+
+    def test_skip_git_repo_check_only_for_read_only_on_exec_and_resume(self):
+        """vibe-193 / grill S7: codex's own non-repository check stays armed for any sandbox that can
+        write — on a fresh exec and on a resume, whose effective sandbox is the record's."""
+        for sandbox in ("read-only", "workspace-write", "danger-full-access"):
+            with self.subTest(sandbox=sandbox, mode="exec"):
+                self.setUp()
+                confirm = ["--confirm-danger"] if sandbox == "danger-full-access" else []
+                first = self.result_line(self.run_runner(
+                    "--kind", "review", "--effort", "low", "--sandbox", sandbox, *confirm,
+                    "--timeout-ms", "10000", "--", "p"))
+                argv = self.read_probe()["argv"]
+                self.assertEqual("--skip-git-repo-check" in argv, sandbox == "read-only", argv)
+            with self.subTest(sandbox=sandbox, mode="resume"):
+                self.probe.unlink()
+                self.run_runner("--kind", "review", "--effort", "low", *confirm,
+                                "--timeout-ms", "10000", "--resume", first["jobId"], "--", "again")
+                argv = self.read_probe()["argv"]
+                self.assertIn("resume", argv)
+                self.assertEqual("--skip-git-repo-check" in argv, sandbox == "read-only", argv)
+
+    def test_the_prompt_follows_a_double_dash_for_exec_and_resume(self):
+        """vibe-193: `--` ends codex's option parsing — a prompt that begins with `-` is a prompt."""
+        first = self.result_line(self.run_runner(*self.base_args()))
+        argv = self.read_probe()["argv"]
+        self.assertEqual(argv[-2:], ["--", "fixture prompt"], argv)
+        self.probe.unlink()                      # same workspace: the resume needs the first record
+        self.run_runner("--kind", "review", "--effort", "low", "--timeout-ms", "10000",
+                        "--resume", first["jobId"], "--", "follow-up")
+        argv = self.read_probe()["argv"]
+        self.assertIn("resume", argv)
+        self.assertEqual(argv[-2:], ["--", "follow-up"], argv)
+
+    def test_effort_outside_the_allow_list_is_refused_and_each_allowed_value_passes(self):
+        """vibe-193: `-c reasoning.effort=` takes a free string; the runner allow-lists it."""
+        completed = self.run_runner("--kind", "review", "--effort", "bogus", "--sandbox", "read-only",
+                                    "--timeout-ms", "10000", "--", "p", expect_ok=False)
+        self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+        self.assertIn("--effort expects one of", completed.stderr)
+        self.assertFalse(self.probe.exists(), "a refused effort must spawn nothing")
+        for effort in ("low", "medium", "high"):
+            with self.subTest(effort=effort):
+                self.setUp()
+                self.run_runner("--kind", "review", "--effort", effort, "--sandbox", "read-only",
+                                "--timeout-ms", "10000", "--", "p")
+                self.assertIn(f"reasoning.effort={effort}", self.read_probe()["argv"])
+
+    def test_an_effort_from_project_config_outside_the_vocabulary_spawns_nothing(self):
+        """A CONFIGURED effort is refused by config.py's own enum before the runner's gate; either
+        door refusing means nothing is spawned (declared: config.py's refusal is the one observed)."""
+        (self.ws / ".vibe-suite.md").write_text("---\neffort: bogus\n---\n")
+        completed = self.run_runner("--kind", "review", "--sandbox", "read-only",
+                                    "--timeout-ms", "10000", "--", "p", expect_ok=False)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("effort", completed.stderr)
+        self.assertFalse(self.probe.exists(), "an unknown effort must spawn nothing")
+
+    def test_a_resumed_record_carrying_an_out_of_vocabulary_effort_is_refused(self):
+        """vibe-193: a record written by an earlier build carries whatever --effort it was given; the
+        resume path inherits it, so the gate must read the EFFECTIVE effort, not just the flag."""
+        jobs = self.ws / STATE_DIRNAME / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        prior = {
+            "jobId": "job_prior0000000000000", "version": 1, "kind": "review", "status": "completed",
+            "sandbox": "read-only", "effort": "xhigh", "model": None, "background": False,
+            "threadId": "thread_fixture_0001", "workerPid": None, "pgid": None, "claimDigest": None,
+            "createdAt": "2026-01-01T00:00:00Z", "startedAt": "2026-01-01T00:00:00Z",
+            "endedAt": "2026-01-01T00:00:01Z", "updatedAt": "2026-01-01T00:00:01Z",
+            "heartbeatAt": None, "timeoutMs": 5000, "exitCode": 0, "rawOutput": "", "error": None,
+            "tokens": None, "verdictText": None, "verdictState": "absent", "errorClass": None,
+        }
+        (jobs / f"{prior['jobId']}.json").write_text(json.dumps(prior))
+        before = sorted(p.name for p in jobs.iterdir())
+        completed = self.run_runner("--kind", "review", "--timeout-ms", "10000",
+                                    "--resume", prior["jobId"], "--", "again", expect_ok=False)
+        self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+        self.assertIn("resolved effort 'xhigh'", completed.stderr)
+        self.assertFalse(self.probe.exists(), "a refused resume must spawn nothing")
+        self.assertEqual(sorted(p.name for p in jobs.iterdir()), before,
+                         "a refused resume must create no execution record")
+
+    def test_the_runner_effort_vocabulary_equals_config_py_s_enum(self):
+        """One vocabulary at both doors (vibe-193): the runner's allow-list is config.py's enum."""
+        runner = RUNNER.read_text(encoding="utf-8")
+        match = re.search(r'const EFFORTS = new Set\(\[([^\]]*)\]\);', runner)
+        self.assertIsNotNone(match, "the runner must declare its EFFORTS allow-list")
+        runner_values = sorted(v.strip().strip('"') for v in match.group(1).split(","))
+        config_py = (REPO_ROOT / "scripts" / "lib" / "config.py").read_text(encoding="utf-8")
+        enum = re.search(r'"effort":\s*Row\("enum",\s*"([^"]+)"', config_py)
+        self.assertIsNotNone(enum, "config.py must declare the effort enum")
+        self.assertEqual(runner_values, sorted(enum.group(1).split("|")))
 
     def test_model_omitted_by_default(self):
         """P9: no model id unless the caller explicitly pinned one."""
@@ -703,6 +795,14 @@ class SourceConventions(unittest.TestCase):
         self.assertIn("export const KNOWN = new Set();", source,
                       "KNOWN gained an entry — that is a new claim, not a ratchet step")
 
+    def test_delegate_documents_the_non_git_fast_failure_as_intended(self):
+        """vibe-193 acceptance: a workspace-write delegate outside a git repository fails fast with
+        codex's own message — documented, so nobody reads it as a bug."""
+        text = (REPO_ROOT / "commands" / "delegate.md").read_text(encoding="utf-8")
+        self.assertIn("Not inside a trusted directory", text)
+        self.assertIn("--skip-git-repo-check", text)
+        self.assertIn("only for\n`read-only`", text.replace("only for `read-only`", "only for\n`read-only`"))
+
     def test_config_bridge_invokes_python(self):
         """Narrow by design: assert the bridge shells to config.py, not that no parser exists."""
         bridge = REPO_ROOT / "scripts" / "lib" / "config-bridge.mjs"
@@ -766,12 +866,74 @@ class ClaimToken(RunnerCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertFalse(self.probe.exists(), "a worker without a valid token must spawn nothing")
 
+    def test_worker_without_a_handoff_flag_refuses_to_spawn_with_the_handoff_diagnostic(self):
+        self.make_record(claimDigest="0" * 64)
+        completed = self.run_runner("--__worker", "job_forged", expect_ok=False)
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        self.assertIn("worker hand-off unreadable for job_forged", completed.stderr)
+        self.assertFalse(self.probe.exists())
+
+    def run_worker_with_handoff(self, job_id, payload, fixture="emitter.mjs", handoff_arg=None):
+        """vibe-193: a worker takes the claim token and the prompt from an inherited fd (argv names
+        the NUMBER); `payload` is the raw text the launcher would write — token, newline, prompt."""
+        read_end, write_end = os.pipe()
+        os.write(write_end, payload.encode("utf-8"))
+        os.close(write_end)
+        self._spawned_fixtures.append(fixture)
+        env = dict(os.environ)
+        env["VIBE_SUITE_CODEX_BIN"] = str(FIXTURES / fixture)
+        env["VIBE_TEST_PROBE"] = str(self.probe)
+        try:
+            return subprocess.run(
+                ["node", str(RUNNER), "--__worker", job_id, "--__handoff",
+                 str(read_end) if handoff_arg is None else handoff_arg],
+                cwd=self.ws, env=env, capture_output=True, text=True, timeout=30,
+                pass_fds=(read_end,))
+        finally:
+            os.close(read_end)
+
     def test_worker_with_wrong_token_refuses_to_spawn(self):
         self.make_record(claimDigest="0" * 64)
-        completed = self.run_runner("--__worker", "job_forged", "--__claim", "not-the-token",
-                                    "--", "p", expect_ok=False)
-        self.assertNotEqual(completed.returncode, 0)
+        completed = self.run_worker_with_handoff("job_forged", "not-the-token\np")
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        self.assertIn("worker claim refused for job_forged", completed.stderr)
         self.assertFalse(self.probe.exists())
+
+    def test_worker_with_the_right_token_on_the_fd_claims_and_runs_the_piped_prompt(self):
+        token = "t" * 64
+        self.make_record(claimDigest=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                         sandbox="read-only")
+        completed = self.run_worker_with_handoff("job_forged", f"{token}\npiped prompt\nline two")
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        argv = self.read_probe()["argv"]
+        self.assertEqual(argv[-2:], ["--", "piped prompt\nline two"],
+                         "the prompt came down the pipe, whole, after `--`")
+        record = self.wait_for_terminal("job_forged")
+        self.assertEqual(record["status"], "completed")
+        self.assertIsNone(record["claimDigest"], "consumed at claim")
+
+    def test_a_handoff_fd_that_is_not_a_number_or_not_readable_refuses_to_spawn(self):
+        token = "t" * 64
+        for handoff_arg in ("not-a-number", "2", "999"):
+            with self.subTest(handoff_arg=handoff_arg):
+                self.setUp()
+                self.make_record(claimDigest=hashlib.sha256(token.encode("utf-8")).hexdigest())
+                completed = self.run_worker_with_handoff("job_forged", f"{token}\np",
+                                                         handoff_arg=handoff_arg)
+                self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+                self.assertIn("worker hand-off unreadable for job_forged", completed.stderr)
+                self.assertFalse(self.probe.exists(), "a broken hand-off must spawn nothing")
+
+    def test_a_handoff_without_a_newline_or_with_an_empty_token_refuses_to_spawn(self):
+        token = "t" * 64
+        for payload in (token, "\np", ""):
+            with self.subTest(payload=payload[:8]):
+                self.setUp()
+                self.make_record(claimDigest=hashlib.sha256(token.encode("utf-8")).hexdigest())
+                completed = self.run_worker_with_handoff("job_forged", payload)
+                self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+                self.assertIn("worker hand-off unreadable for job_forged", completed.stderr)
+                self.assertFalse(self.probe.exists(), "a malformed hand-off must spawn nothing")
 
     def test_claim_token_is_single_use(self):
         """The digest is consumed at claim, so a replayed command line cannot re-claim."""
@@ -993,6 +1155,41 @@ class LifecycleRaces(RunnerCase):
 
     def release(self, name):
         (self.latch / f"{name}.release").write_text("1")
+
+    def test_the_worker_argv_carries_neither_the_prompt_nor_the_token_and_nothing_is_at_rest(self):
+        """vibe-193 / grill S7+S15: `ps` is readable by every local user; the detached worker lives
+        for the whole job. Its argv names only the hand-off FD; the prompt and the token travel down
+        that pipe and are never written to disk — after the job, no file under the jobs directory
+        carries the prompt."""
+        marker = "SECRET-PROMPT-MARKER-vibe-193"
+        proc = self.run_latched("--kind", "review", "--effort", "low", "--sandbox", "read-only",
+                                "--timeout-ms", "10000", "--background", "--", marker)
+        try:
+            self.wait_signal("pre-claim")
+            listing = subprocess.run(["ps", "-axwwo", "pid=,args="], capture_output=True,
+                                     text=True, check=True).stdout
+            workers = [line for line in listing.splitlines()
+                       if "--__worker" in line and str(RUNNER) in line]
+            self.assertEqual(len(workers), 1, listing)
+            line = workers[0]
+            self.assertNotIn(marker, line, "the prompt text must not be on the worker argv")
+            self.assertIsNone(re.search(r"[0-9a-f]{64}", line),
+                              "no 64-hex token on the worker argv: " + line)
+            self.assertIn("--__handoff", line)
+            self.assertNotIn("--prompt-file", line, "no prompt file: nothing at rest")
+        finally:
+            self.release("pre-claim")
+            out, _err = proc.communicate(timeout=60)
+        parsed = json.loads([line for line in out.splitlines() if line.strip()][-1])
+        record = self.wait_for_terminal(parsed["jobId"])
+        self.assertEqual(record["status"], "completed", record)
+        self.assertIsNone(record["claimDigest"], "the token is consumed at claim")
+        self.assertEqual(self.read_probe()["argv"][-2:], ["--", marker],
+                         "the engine still receives the prompt, after `--`")
+        jobs_dir = self.ws / STATE_DIRNAME / "jobs"
+        at_rest = [p.name for p in jobs_dir.iterdir() if p.is_file()
+                   and marker.encode("utf-8") in p.read_bytes()]
+        self.assertEqual(at_rest, [], "no runner-owned file may carry the prompt after the job")
 
     def test_a_worker_crash_before_claim_leaves_its_stack_in_the_job_log(self):
         """vibe-182 / grill H7: the worker's stderr was /dev/null, so a pre-claim crash left nothing

@@ -19,7 +19,9 @@ Add `--json` for the structured form; the command itself takes no arguments.
 ## What it repairs, and what it deliberately does not
 
 `/vibe-suite:doctor` marks findings `auto-fixable`, and that flag means exactly one thing: **a
-no-prompt repair clears it**. Four checks qualify — `sentinels`, `memory`, `gitignore`, `hooks`.
+no-prompt repair clears it**. Three checks qualify — `sentinels` (a dangling registration of the
+bare `vibe-suite` command, which no shipped binary backs — repair removes it from the file that
+carries it and says so in the step's outcome), `memory`, `gitignore`.
 
 Five look repairable and are not:
 
@@ -29,6 +31,7 @@ Five look repairable and are not:
 | `legacy-sentinels` | §7A row 6 requires **explicit confirmation** | `/vibe-suite:init` |
 | `pins` | provenance is **write-once**; re-installing does not re-stamp the version | a fresh install |
 | `not-initialised` | the fix is `init`, which asks questions | `/vibe-suite:init` |
+| `hooks` | no owned `Stop` hook is written until the `vibe-suite` binary ships, so there is nothing to restore; an owned entry whose absolute command does not resolve is yours to fix | you |
 
 None of these is flagged auto-fixable. A flag promising what no command delivers is worse than no
 flag.

@@ -70,6 +70,83 @@ def mtimes(root):
     return {str(p.relative_to(root)): p.lstat().st_mtime_ns for p in sorted(root.rglob("*"))}
 
 
+def plant_dangling_registrations(ws):
+    """The three registrations an earlier revision of init wrote — a bare `vibe-suite` command in
+    each host-read file — beside a user's own entries, which must survive their removal."""
+    ws = Path(ws)
+    (ws / ".codex").mkdir(exist_ok=True)
+    toml = ws / ".codex" / "config.toml"
+    existing = toml.read_text(encoding="utf-8") if toml.is_file() else ""
+    toml.write_text(bridge.toml_server_upsert(existing, "vibe-mcp",
+                                              '[mcp_servers.vibe-mcp]\ncommand = "vibe-suite"'),
+                    encoding="utf-8")
+    mcp = ws / ".mcp.json"
+    doc = json.loads(mcp.read_text(encoding="utf-8")) if mcp.is_file() else {}
+    doc.setdefault("mcpServers", {})["mine"] = {"command": "x"}
+    doc["mcpServers"]["vibe-mcp"] = {"command": "vibe-suite", "args": []}
+    mcp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    hooks = ws / ".codex" / "hooks.json"
+    hdoc = json.loads(hooks.read_text(encoding="utf-8")) if hooks.is_file() else {}
+    hdoc.setdefault("hooks", {}).setdefault("Stop", []).append({"type": "command", "command": "my-hook"})
+    hdoc = bridge.json_hook_entry_upsert(hdoc, "Stop", {"type": "command", "command": "vibe-suite stop-gate"})
+    hooks.write_text(json.dumps(hdoc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def bare_registrations(ws):
+    """Which of the three files still reference `vibe-suite` as a command."""
+    ws = Path(ws)
+    out = []
+    toml = ws / ".codex" / "config.toml"
+    if toml.is_file() and 'command = "vibe-suite"' in toml.read_text(encoding="utf-8"):
+        out.append(".codex/config.toml")   # the bare SHAPE, not the server name: a non-bare vibe-mcp is legitimate
+    mcp = ws / ".mcp.json"
+    if mcp.is_file():
+        servers = json.loads(mcp.read_text(encoding="utf-8")).get("mcpServers") or {}
+        if any(isinstance(s, dict) and s.get("command") == "vibe-suite" for s in servers.values()):
+            out.append(".mcp.json")
+    hooks = ws / ".codex" / "hooks.json"
+    if hooks.is_file():
+        for event in (json.loads(hooks.read_text(encoding="utf-8")).get("hooks") or {}).values():
+            if any(isinstance(e, dict) and str(e.get("command") or "").startswith("vibe-suite") for e in event):
+                out.append(".codex/hooks.json")
+                break
+    return out
+
+NON_BARE = "/opt/vibe-suite/bin/vibe-suite"
+
+
+def plant_non_bare_registrations(ws):
+    """A legitimate `vibe-mcp` — an absolute command (the shape a shipped binary registers under,
+    or what the row-6 migration keeps from a legacy install) — in BOTH stores, plus an owned Stop
+    hook with an absolute command, beside the user's own entries. None of these is dangling."""
+    ws = Path(ws)
+    (ws / ".codex").mkdir(exist_ok=True)
+    toml = ws / ".codex" / "config.toml"
+    existing = toml.read_text(encoding="utf-8") if toml.is_file() else ""
+    toml.write_text(bridge.toml_server_upsert(existing, "vibe-mcp",
+                                              '[mcp_servers.vibe-mcp]\ncommand = "%s"' % NON_BARE),
+                    encoding="utf-8")
+    mcp = ws / ".mcp.json"
+    doc = json.loads(mcp.read_text(encoding="utf-8")) if mcp.is_file() else {}
+    doc.setdefault("mcpServers", {})["mine"] = {"command": "x"}
+    doc["mcpServers"]["vibe-mcp"] = {"command": NON_BARE, "args": []}
+    mcp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    hooks = ws / ".codex" / "hooks.json"
+    hdoc = json.loads(hooks.read_text(encoding="utf-8")) if hooks.is_file() else {}
+    hdoc.setdefault("hooks", {}).setdefault("Stop", []).append({"type": "command", "command": "my-hook"})
+    hdoc = bridge.json_hook_entry_upsert(hdoc, "Stop", {"type": "command", "command": NON_BARE + " stop-gate"})
+    hooks.write_text(json.dumps(hdoc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def host_files_snapshot(ws):
+    ws = Path(ws)
+    out = {}
+    for rel in (".codex/config.toml", ".mcp.json", ".codex/hooks.json"):
+        p = ws / rel
+        out[rel] = (p.read_bytes(), p.lstat().st_mtime_ns) if p.is_file() else None
+    return out
+
+
 class InitCase(unittest.TestCase):
     def setUp(self):
         self.ws = Path(tempfile.mkdtemp(prefix="vibe-init-"))
@@ -246,6 +323,98 @@ class TestDecisions(InitCase):
         result = run_init(self.ws, *self.answers(), "--non-interactive")
         self.assertEqual(result.returncode, 3)
         self.assertIn("migration-conflicts.json", result.stderr)
+
+
+# ---------------------------------------------------------------------------------------------
+# grill S4 (vibe-191): no bare `vibe-suite` registrations until the binary ships
+# ---------------------------------------------------------------------------------------------
+
+class TestNoBareRegistrations(InitCase):
+    def test_init_registers_no_vibe_suite_command_in_any_of_the_three_files(self):
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(bare_registrations(self.ws), [],
+                         "after init, none of .mcp.json / .codex/config.toml / .codex/hooks.json may "
+                         "reference `vibe-suite` as a command — no such binary ships")
+
+    def test_init_removes_a_dangling_registration_an_earlier_revision_left_and_keeps_the_users_entries(self):
+        plant_dangling_registrations(self.ws)
+        self.assertEqual(len(bare_registrations(self.ws)), 3, "fixture: all three planted")
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(bare_registrations(self.ws), [], "init must remove the dangling registrations")
+        servers = json.loads((self.ws / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+        self.assertIn("mine", servers, "a user's server survives")
+        stop = json.loads((self.ws / ".codex" / "hooks.json").read_text(encoding="utf-8"))["hooks"]["Stop"]
+        self.assertEqual([e.get("command") for e in stop], ["my-hook"], "a user's hook survives; the owned one is gone")
+        self.assertNotIn("mcp_servers.vibe-mcp", (self.ws / ".codex" / "config.toml").read_text(encoding="utf-8"))
+
+    def test_a_second_init_is_still_free_of_bare_registrations(self):
+        run_init(self.ws, *self.answers())
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(bare_registrations(self.ws), [])
+
+    def test_a_non_bare_vibe_mcp_and_a_non_bare_owned_hook_survive_init_verbatim(self):
+        # the defect is the exact bare shapes, not the name: a legitimate registration in both
+        # stores and a non-bare owned hook are neither removed nor rewritten — bytes and mtimes
+        # of all three host files are identical across the init (the cleanup touched nothing)
+        plant_non_bare_registrations(self.ws)
+        before = host_files_snapshot(self.ws)
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(host_files_snapshot(self.ws), before,
+                         "a non-bare vibe-mcp / owned hook must survive init byte- and mtime-identical")
+        self.assertEqual(bare_registrations(self.ws), [])
+
+    def test_only_the_bare_shapes_go_when_bare_and_non_bare_registrations_coexist(self):
+        # a bare .mcp.json entry beside a non-bare TOML block and a non-bare owned hook: init
+        # removes exactly the bare one
+        plant_non_bare_registrations(self.ws)
+        mcp = self.ws / ".mcp.json"
+        doc = json.loads(mcp.read_text(encoding="utf-8"))
+        doc["mcpServers"]["vibe-mcp"] = {"command": "vibe-suite", "args": []}
+        mcp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        toml_before = (self.ws / ".codex" / "config.toml").read_bytes()
+        hooks_before = (self.ws / ".codex" / "hooks.json").read_bytes()
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        servers = json.loads(mcp.read_text(encoding="utf-8"))["mcpServers"]
+        self.assertNotIn("vibe-mcp", servers, "the bare .mcp.json entry is removed")
+        self.assertIn("mine", servers)
+        self.assertEqual((self.ws / ".codex" / "config.toml").read_bytes(), toml_before, "the non-bare TOML block stays")
+        self.assertEqual((self.ws / ".codex" / "hooks.json").read_bytes(), hooks_before, "the non-bare owned hook stays")
+
+    def test_a_fresh_init_creates_the_three_host_files_as_empty_documents(self):
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.ws / ".codex" / "config.toml").read_text(encoding="utf-8"), "")
+        self.assertEqual(json.loads((self.ws / ".mcp.json").read_text(encoding="utf-8")), {"mcpServers": {}})
+        self.assertEqual(json.loads((self.ws / ".codex" / "hooks.json").read_text(encoding="utf-8")), {"hooks": {}})
+        self.assertEqual((self.ws / ".mcp.json").read_text(encoding="utf-8"), '{"mcpServers": {}}\n')
+        self.assertEqual((self.ws / ".codex" / "hooks.json").read_text(encoding="utf-8"), '{"hooks": {}}\n')
+
+    def test_pre_existing_host_files_without_a_dangling_registration_are_not_rewritten(self):
+        (self.ws / ".codex").mkdir()
+        (self.ws / ".codex" / "config.toml").write_text("[general]\nkeep = true\n", encoding="utf-8")
+        (self.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {"mine": {"command": "x"}}}, indent=2) + "\n", encoding="utf-8")
+        (self.ws / ".codex" / "hooks.json").write_text(json.dumps({"hooks": {"Stop": [{"type": "command", "command": "my-hook"}]}}, indent=2) + "\n", encoding="utf-8")
+        before = host_files_snapshot(self.ws)
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(host_files_snapshot(self.ws), before, "a pre-existing host file with nothing dangling is neither rewritten nor touched")
+
+    def test_a_symlinked_host_path_is_left_alone_not_created_through(self):
+        # `_ensure_document` creates only what is ABSENT: a symlink (even to a user's file) is
+        # "something is there" — neither replaced nor written through
+        target = self.ws / "my-servers.json"
+        target.write_text(json.dumps({"mcpServers": {"mine": {"command": "x"}}}) + "\n", encoding="utf-8")
+        (self.ws / ".mcp.json").symlink_to(target)
+        before = target.read_bytes()
+        result = run_init(self.ws, *self.answers())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.ws / ".mcp.json").is_symlink(), "the symlink is left in place")
+        self.assertEqual(target.read_bytes(), before, "the symlink's target is untouched")
 
 
 # ---------------------------------------------------------------------------------------------

@@ -81,8 +81,8 @@ def repair(ws):
                                "threshold": None, "skip": []}
             else:
                 step_values = values
-            init_bridge.repair_step(ws, name, step_values)
-            record(name, "ok")
+            note = init_bridge.repair_step(ws, name, step_values)
+            record(name, "ok" + (f" ({note})" if note else ""))
         except Exception as exc:
             record(name, f"failed: {exc}")
 

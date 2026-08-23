@@ -126,8 +126,14 @@ def check_bridge(ws, out):
         names = []
     mcp, _ = safe_json(ws / ".mcp.json", out, "sentinels")
     toml = bridge.read_text_verbatim(ws / ".codex" / "config.toml")
-    if "vibe-mcp" not in names:
-        out.append(finding("[HIGH]", "sentinels", "no vibe-mcp registration found", True))
+    # grill S4 (vibe-191): no `vibe-suite` binary ships, so no `vibe-mcp` registration is expected
+    # and its absence is healthy. One that names the bare `vibe-suite` command is dangling (an
+    # earlier revision wrote it; a host would resolve the name on PATH) — repair removes it.
+    for rel in init_bridge.dangling_registrations(ws):
+        out.append(finding("[MEDIUM]", "sentinels",
+                           f"{rel} carries a dangling registration of the bare "
+                           f"`{init_bridge.BARE_COMMAND}` command (no such binary ships) — "
+                           "repair removes it", True))
     for name in names:
         # The enumerator unions the two stores, so a name registered in one and missing from the
         # other is invisible unless both are asked separately.
@@ -151,8 +157,8 @@ def check_bridge(ws, out):
             out.append(finding("[MEDIUM]", "memory", f"{name} carries no owned block", True))
     if not bridge.text_block_has(bridge.read_text_verbatim(ws / ".gitignore"), "ignore"):
         out.append(finding("[LOW]", "gitignore", ".gitignore carries no owned block", True))
-    if not bridge.json_hook_entry_has(hooks, "Stop"):
-        out.append(finding("[MEDIUM]", "hooks", "no owned Stop hook entry is registered", True))
+    # grill S4: no owned Stop hook is registered until the binary that would serve it ships, so
+    # its absence is healthy; an owned entry that IS present is checked below.
     for entry in (hooks.get("hooks") or {}).get("Stop") or []:
         if isinstance(entry, dict) and entry.get(f"_{bridge.MARKER}_owned") is not None:
             command = (entry.get("command") or "").split()[0] if entry.get("command") else ""

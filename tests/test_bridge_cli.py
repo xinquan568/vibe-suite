@@ -123,6 +123,15 @@ class TestHooks(BridgeCase):
         self.assertNotIn("Notification", self.written().get("hooks", {}))
         self.assertIn("Notification", result.stdout)
 
+    def test_the_command_does_not_claim_init_writes_the_owned_stop_entry(self):
+        # grill S4 (vibe-191): no owned Stop hook is written until the binary ships; an older
+        # init's bare `vibe-suite stop-gate` is dangling and repair removes it — the doc says so
+        text = (REPO_ROOT / "commands" / "bridge.md").read_text(encoding="utf-8")
+        self.assertNotIn("written by `/vibe-suite:init`", text)
+        self.assertIn("none is written until the `vibe-suite` binary ships", text)
+        self.assertIn("dangling", text)
+        self.assertIn("/vibe-suite:repair", text)
+
     def test_an_owned_entry_is_preserved(self):
         """#18 writes an owned Stop entry into the same file. Mirroring must not drop it."""
         (self.ws / ".codex").mkdir(exist_ok=True)

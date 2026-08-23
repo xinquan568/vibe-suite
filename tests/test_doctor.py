@@ -27,6 +27,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCTOR = REPO_ROOT / "scripts" / "doctor.py"
 INIT = REPO_ROOT / "scripts" / "init.sh"
+import sys  # noqa: E402
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+import bridge  # noqa: E402
 
 
 def tree(root):
@@ -39,6 +42,49 @@ def tree(root):
             out[rel] = ("d", None)
         else:
             out[rel] = ("f", path.read_bytes())
+    return out
+
+
+def plant_dangling_registrations(ws):
+    """The three registrations an earlier revision of init wrote — a bare `vibe-suite` command in
+    each host-read file — beside a user's own entries, which must survive their removal."""
+    ws = Path(ws)
+    (ws / ".codex").mkdir(exist_ok=True)
+    toml = ws / ".codex" / "config.toml"
+    existing = toml.read_text(encoding="utf-8") if toml.is_file() else ""
+    toml.write_text(bridge.toml_server_upsert(existing, "vibe-mcp",
+                                              '[mcp_servers.vibe-mcp]\ncommand = "vibe-suite"'),
+                    encoding="utf-8")
+    mcp = ws / ".mcp.json"
+    doc = json.loads(mcp.read_text(encoding="utf-8")) if mcp.is_file() else {}
+    doc.setdefault("mcpServers", {})["mine"] = {"command": "x"}
+    doc["mcpServers"]["vibe-mcp"] = {"command": "vibe-suite", "args": []}
+    mcp.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    hooks = ws / ".codex" / "hooks.json"
+    hdoc = json.loads(hooks.read_text(encoding="utf-8")) if hooks.is_file() else {}
+    hdoc.setdefault("hooks", {}).setdefault("Stop", []).append({"type": "command", "command": "my-hook"})
+    hdoc = bridge.json_hook_entry_upsert(hdoc, "Stop", {"type": "command", "command": "vibe-suite stop-gate"})
+    hooks.write_text(json.dumps(hdoc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def bare_registrations(ws):
+    """Which of the three files still reference `vibe-suite` as a command."""
+    ws = Path(ws)
+    out = []
+    toml = ws / ".codex" / "config.toml"
+    if toml.is_file() and 'command = "vibe-suite"' in toml.read_text(encoding="utf-8"):
+        out.append(".codex/config.toml")   # the bare SHAPE, not the server name: a non-bare vibe-mcp is legitimate
+    mcp = ws / ".mcp.json"
+    if mcp.is_file():
+        servers = json.loads(mcp.read_text(encoding="utf-8")).get("mcpServers") or {}
+        if any(isinstance(s, dict) and s.get("command") == "vibe-suite" for s in servers.values()):
+            out.append(".mcp.json")
+    hooks = ws / ".codex" / "hooks.json"
+    if hooks.is_file():
+        for event in (json.loads(hooks.read_text(encoding="utf-8")).get("hooks") or {}).values():
+            if any(isinstance(e, dict) and str(e.get("command") or "").startswith("vibe-suite") for e in event):
+                out.append(".codex/hooks.json")
+                break
     return out
 
 
@@ -239,22 +285,32 @@ class TestInitialisationStates(DoctorCase):
 
 
 class TestBreakageClasses(DoctorCase):
-    def test_a_removed_mcp_sentinel_is_detected_and_flagged_fixable(self):
+    def test_a_dangling_bare_registration_is_detected_and_flagged_fixable_per_file(self):
+        # grill S4 (vibe-191): the old `command = "vibe-suite"` registrations name a binary that
+        # does not ship — each file carrying one is a fixable `sentinels` finding that names it
         self.install()
-        doc = json.loads((self.ws / ".mcp.json").read_text())
-        doc["mcpServers"].pop("vibe-mcp")
-        (self.ws / ".mcp.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-        finding = [f for f in self.report()["findings"] if f["check"] == "sentinels"][0]
-        self.assertTrue(finding["auto_fixable"])
+        plant_dangling_registrations(self.ws)
+        findings = [f for f in self.report()["findings"] if f["check"] == "sentinels"]
+        named = {f["finding"].split(" ")[0] for f in findings if "dangling" in f["finding"]}
+        self.assertEqual(named, {".codex/config.toml", ".mcp.json", ".codex/hooks.json"}, findings)
+        self.assertTrue(all(f["auto_fixable"] for f in findings if "dangling" in f["finding"]))
+
+    def test_the_absence_of_a_vibe_mcp_registration_is_healthy(self):
+        # nothing is registered until the binary ships; a fresh install must not be flagged
+        self.install()
+        self.assertEqual(self.severities(self.report()), ["[GOOD]"])
 
     def test_a_name_in_one_store_but_not_the_other_is_detected(self):
         """`inventory_enumerate` unions the two stores, so a half-registration is invisible unless
-        both are asked."""
+        both are asked. (A non-bare command — an absolute path — so this is the symmetry finding,
+        not the dangling one.)"""
         self.install()
-        text = (self.ws / ".codex" / "config.toml").read_text(encoding="utf-8")
-        (self.ws / ".codex" / "config.toml").write_text(
-            text.replace("[mcp_servers.vibe-mcp]", "[mcp_servers.other]"), encoding="utf-8")
-        self.assertIn("sentinels", self.checks(self.report()))
+        (self.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {
+            "vibe-mcp": {"command": "/opt/vibe-suite/bin/vibe-suite", "args": []}}}, indent=2) + "\n",
+            encoding="utf-8")
+        report = self.report()
+        self.assertIn("sentinels", self.checks(report))
+        self.assertTrue(any("registered only in .mcp.json" in f["finding"] for f in report["findings"]), report["findings"])
 
     def test_a_deleted_memory_block_is_detected(self):
         self.install()
@@ -269,13 +325,12 @@ class TestBreakageClasses(DoctorCase):
         self.assertIn("symlinks", self.checks(self.report()))
 
     def test_a_hook_entry_whose_command_does_not_resolve_is_detected(self):
+        # an OWNED Stop entry with an absolute command that does not exist (the shape a shipped
+        # binary would register under, pointing nowhere) — init registers no hook today, so plant it
         self.install()
-        doc = json.loads((self.ws / ".codex" / "hooks.json").read_text())
-        for entry in doc["hooks"]["Stop"]:
-            if entry.get("_vibe-suite_owned"):
-                entry["command"] = "/nonexistent/vibe-suite-binary"
-        (self.ws / ".codex" / "hooks.json").write_text(json.dumps(doc, indent=2) + "\n",
-                                                       encoding="utf-8")
+        (self.ws / ".codex").mkdir(exist_ok=True)
+        doc = bridge.json_hook_entry_upsert({}, "Stop", {"type": "command", "command": "/nonexistent/vibe-suite-binary stop-gate"})
+        (self.ws / ".codex" / "hooks.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
         self.assertIn("hooks", self.checks(self.report()))
 
     def test_a_pin_mismatch_is_detected(self):

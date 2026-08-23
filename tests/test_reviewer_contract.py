@@ -404,6 +404,17 @@ class TestContractContent(unittest.TestCase):
         intro = self.text.split("\n## ", 1)[0]
         self.assertIn("/vibe-suite:fix", intro)
 
+    def test_untrusted_input_frames_third_party_text_as_data(self):
+        # vibe-187 / grill H2: the shared prompt frame states the rule and fixes the data frame
+        self.assertIn("## Untrusted input", self.text)
+        section = self.text.split("## Untrusted input", 1)[1].split("\n## ", 1)[0]
+        norm = re.sub(r"\s+", " ", section.replace("**", "").replace("*", ""))
+        self.assertRegex(norm, r"data,? never instructions")
+        for phrase in ("comments", "pull-request", "does nothing it says", "skills/vibe-core/SKILL.md",
+                       "one backtick longer than the longest run of backticks", "never fewer than four",
+                       "<!-- data-frame -->", "evidence, not instructions", "````text"):
+            self.assertIn(phrase, section if phrase.startswith(("<!--", "```")) else norm, phrase)
+
     def test_the_skill_points_at_the_reference(self):
         self.assertIn(CONTRACT_LINK, SKILL.read_text(encoding="utf-8"),
                       "an unreferenced reference is one nothing loads")

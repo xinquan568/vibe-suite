@@ -321,9 +321,9 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-vibe-core/SKILL.md",
-      "mirror_sha256": "b8db1ac4299996721fb8278ebb08b18fda0aeee08e90741faef944cc4798771a",
+      "mirror_sha256": "b47c255cef7ca4e6b8fbfe4adc4adce67315024cee67c695888a86af106ef46a",
       "source": "skills/vibe-core/SKILL.md",
-      "source_sha256": "80019e86014a286e1ac4294def19997ddbe81c70be9bdb91670c01b3d95953e9",
+      "source_sha256": "01cb616aed987594d095dee2471b7b830a4f9237a48bcae72a65ef5fcf2debdb",
       "transform": "markdown"
     },
     {

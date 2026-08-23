@@ -40,6 +40,13 @@ export function loadConfig(root = process.cwd(), { python = "python3" } = {}) {
       `config.py exited ${result.status}: ${(result.stderr || "").trim() || "no diagnostic"}`);
   }
 
+  // vibe-186: the reader's notices — a `sandbox` raised above read-only by `.vibe-suite.md`, a
+  // store-only `gate` block ignored — arrive on its stderr with exit 0. They are the operator's to
+  // see on dispatch, so they are forwarded verbatim; the JSON contract on stdout is untouched.
+  if (result.stderr && result.stderr.trim()) {
+    process.stderr.write(result.stderr.endsWith("\n") ? result.stderr : `${result.stderr}\n`);
+  }
+
   let parsed;
   try {
     parsed = JSON.parse(result.stdout);

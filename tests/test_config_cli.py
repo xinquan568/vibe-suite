@@ -187,5 +187,43 @@ class TestNamespace(ConfigCase):
         self.assertNotIn("/vibe:", text.replace("/vibe-suite:", ""))
 
 
+class TestStoreOnlyGateAndSandboxNotice(ConfigCase):
+    """vibe-186 / grill S2: --show reflects the store-only gate and the sandbox notice."""
+
+    def test_a_gate_block_in_the_project_file_does_not_enable_the_gate_and_is_warned(self):
+        (self.ws / ".vibe-suite.md").write_text(
+            "---\ngate:\n  stop_review_gate: true\n  fail_policy: closed\n---\n", encoding="utf-8")
+        view = self.show()
+        self.assertIs(view["gate"]["stop_review_gate"], False)
+        self.assertEqual(view["gate"]["fail_policy"], "open")
+        self.assertNotIn("gate", view["config"], "the project table carries no gate row")
+        self.assertTrue(any("'gate'" in w and "store-only" in w for w in view["warnings"]), view["warnings"])
+        self.assertEqual(self.stored(), {}, "nothing was written to the store by a read")
+
+    def test_sandbox_workspace_write_in_the_file_is_noticed_on_show(self):
+        (self.ws / ".vibe-suite.md").write_text("---\nsandbox: workspace-write\n---\n", encoding="utf-8")
+        view = self.show()
+        self.assertEqual(view["config"]["sandbox"], "workspace-write")
+        notices = [w for w in view["warnings"] if w.startswith("notice: sandbox 'workspace-write'")]
+        self.assertEqual(len(notices), 1, view["warnings"])
+        rendered = self.run_cli("--show")
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        self.assertIn("## Warnings", rendered.stdout)
+        self.assertIn("notice: sandbox 'workspace-write' in .vibe-suite.md raises every codex dispatch", rendered.stdout)
+
+    def test_read_only_in_the_file_produces_no_notice(self):
+        (self.ws / ".vibe-suite.md").write_text("---\nsandbox: read-only\n---\n", encoding="utf-8")
+        self.assertEqual([w for w in self.show()["warnings"] if w.startswith("notice:")], [])
+
+    def test_the_docs_state_the_store_only_rule_and_the_sandbox_notice(self):
+        # acceptance bullet 3: commands/config.md and the vibe-core skill (and its generated mirror) state the rule
+        for rel in ("commands/config.md", "skills/vibe-core/SKILL.md", "codex/skills/vibe-vibe-core/SKILL.md"):
+            with self.subTest(doc=rel):
+                text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+                self.assertIn("store-only", text)
+                self.assertIn("notice: sandbox 'workspace-write' in", text)
+                self.assertNotIn("supplies defaults and display only", text, "the superseded sentence is gone")
+
+
 if __name__ == "__main__":
     unittest.main()

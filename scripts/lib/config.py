@@ -78,7 +78,6 @@ SCHEMA = {
     "score_threshold":          Row("int",    "0-100",                 70),
     "rule_overrides":           Row("map",    "closed",                {}),
     "issue2pr_profile":         Row("string", "id",                    None),
-    "gate":                     Row("map",    "closed",                None),
 }
 
 #: The per-rule override leaves every `R<n>` key under `rule_overrides` accepts (E3.3 / vibe-28).
@@ -94,10 +93,26 @@ _RULE_ID = re.compile(r"R(?:0[1-9]|[1-4][0-9]|5[01])")
 
 CLOSED_MAPS = {
     "rule_overrides": {"R51": {**RULE_OVERRIDE_LEAVES, "vocabulary_skill": "string"}},
-    "gate": {"stop_review_gate": "bool", "model": "string", "fail_policy": "open|closed"},
 }
 OPEN_MAPS = {"model_overrides": ("codex", "agy")}
 PATH_VALUED = {("rule_overrides", "R51", "vocabulary_skill")}
+
+#: vibe-186 / grill S2 (B3): the three `gate.*` settings — `stop_review_gate`, `model`,
+#: `fail_policy` — are STORE-ONLY: runtime toggles that `/vibe-suite:config --set` (and init's
+#: explicit opt-in) write to `.vibe-suite-state/state.json`, resolved by `scripts/lib/store.py`.
+#: The project file cannot set them: `.vibe-suite.md` is repository content a clone inherits, and
+#: it must not be able to switch the Stop-review gate on, fail it closed, or pick its model. A
+#: `gate` block in the file is IGNORED with a warning that names the rule — never the values.
+STORE_ONLY = {
+    "gate": ("the gate.* settings are runtime toggles (store-only) — set them with "
+             "`/vibe-suite:config --set`; a `gate` block in the project file is ignored"),
+}
+#: vibe-186: the sandbox levels above `read-only`. A project file that selects one widens what every
+#: codex dispatch from this workspace may touch, so `_resolve` emits a one-line NOTICE — visible on
+#: `/vibe-suite:config --show` (warnings) and, forwarded by `config-bridge.mjs`, on dispatch. It is
+#: a notice, not a refusal: `codex-runner.mjs:assertSandboxAllowed` still refuses
+#: `danger-full-access` without `--confirm-danger`.
+RAISED_SANDBOXES = ("workspace-write", "danger-full-access")
 
 
 # ----------------------------------------------------------------------------- grammar
@@ -568,6 +583,8 @@ def render(mapping):
     omission is that value's only representation, not an optimisation.
     """
     for key in mapping:
+        if key in STORE_ONLY:
+            raise ConfigValueError(f"{key}: {STORE_ONLY[key]}")   # vibe-186: not renderable
         if key not in SCHEMA:
             raise ConfigValueError(f"{key}: not a key of the .vibe-suite.md schema")
     out = []
@@ -616,6 +633,11 @@ def _resolve(data, root):
     warnings = []
     resolved = {}
     for key, value in data.items():
+        if key in STORE_ONLY:
+            # vibe-186: a store-only block is not an unknown key — the warning names the rule and
+            # the remedy, and (like every warning) never echoes a value.
+            warnings.append(f"{key!r} in {CONFIG_FILENAME} is ignored — {STORE_ONLY[key]}")
+            continue
         row = SCHEMA.get(key)
         if row is None:
             warnings.append(f"unknown key {key!r} in {CONFIG_FILENAME} — ignored")
@@ -628,6 +650,10 @@ def _resolve(data, root):
             _check_scalar(key, value, row)
         resolved[key] = value
     _check_containment(root, resolved)
+    if resolved.get("sandbox") in RAISED_SANDBOXES:
+        # vibe-186: the level is a closed enum, not user text — naming it is the point.
+        warnings.append(f"notice: sandbox {resolved['sandbox']!r} in {CONFIG_FILENAME} raises "
+                        "every codex dispatch from this workspace above read-only")
     for key, row in SCHEMA.items():
         resolved.setdefault(key, _fresh(row.default))
     return resolved, warnings

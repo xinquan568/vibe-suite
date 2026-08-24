@@ -379,3 +379,153 @@ class TestValidatorRefusalMatrix(unittest.TestCase):
         ]
         for mutate, why in cases:
             self._refused(mutate, why)
+
+
+# The Node harness for TestRepoReportXSSHardening: a minimal DOM stub whose innerHTML
+# setter throws, so any HTML-parsing construction in the asset fails by construction.
+# __ASSET__ / __DATA__ are replaced with JSON string literals before execution.
+_DOM_STUB_JS = r"""
+const fs = require("fs");
+const assetPath = __ASSET__;
+const dataText = __DATA__;
+class El {
+  constructor(tag) { this.tagName = tag; this.children = []; this._text = ""; this.className = ""; }
+  appendChild(c) { this.children.push(c); return c; }
+  set textContent(v) { this._text = String(v); this.children = []; }
+  get textContent() {
+    return this.children.length ? this.children.map(c => c.textContent).join("") : this._text;
+  }
+  set innerHTML(v) { throw new Error("innerHTML used"); }
+  get innerHTML() { throw new Error("innerHTML used"); }
+}
+const audit = new El("script"); audit._text = dataText;
+const findings = new El("tbody");
+const byId = { "audit-data": audit, "findings": findings };
+globalThis.document = {
+  getElementById: (id) => byId[id] || null,
+  createElement: (t) => new El(t),
+};
+eval(fs.readFileSync(assetPath, "utf8"));
+const out = findings.children.map(row => ({
+  tag: row.tagName,
+  cells: row.children.map(td => ({
+    tag: td.tagName,
+    text: td.textContent,
+    child: td.children[0]
+      ? { tag: td.children[0].tagName, className: td.children[0].className,
+          text: td.children[0].textContent }
+      : null,
+  })),
+}));
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+class TestRepoReportXSSHardening(unittest.TestCase):
+    """vibe-195 (grill H3): the per-repository audit page renders hostile audited-repo
+    strings as text, never as markup.
+
+    This class lives here because the issue's acceptance names this file; its subject is
+    the auditor's repo-audit surface (templates/report/repo-audit.html +
+    assets/vibe-report.js + auditor/scripts/render-repo-report.py), beside — not part of —
+    the E6.3 `bin/vibe-report` surface the classes above cover. The fixture mirrors
+    test_auditor_reporting_helpers.Test_render_repo_report's harness shape.
+    """
+
+    AUDITOR_SCRIPTS = REPO_ROOT / "auditor" / "scripts"
+    ASSET = REPO_ROOT / "templates" / "report" / "assets" / "vibe-report.js"
+    AUDITOR_PAGES = (
+        REPO_ROOT / "templates" / "report" / "repo-audit.html",
+        REPO_ROOT / "templates" / "report" / "dashboard.html",
+        REPO_ROOT / "templates" / "report" / "docs" / "index.html",
+    )
+    # script-src 'self' (not the issue's 'unsafe-inline': these pages have no inline
+    # executable script, and 'unsafe-inline' would permit exactly the injected-script
+    # class H3 describes while blocking the legitimate external renderer); style-src
+    # keeps 'unsafe-inline' tolerance for the vendored G6 library's runtime styles.
+    CSP_META = ("<meta http-equiv=\"Content-Security-Policy\" content=\"default-src "
+                "'none'; script-src 'self'; style-src 'self' 'unsafe-inline'\">")
+    HOSTILE_REPO = "acme/<img src=x onerror=alert(1)>"
+    HOSTILE_FILE = "docs/<img src=x onerror=alert(1)>.md"
+    STAMP = "2026-08-24T00:00:00Z"
+
+    def _render(self, repo):
+        d = Path(tempfile.mkdtemp(prefix="vibe195-"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        (d / "registry").mkdir()
+        (d / "ledgers").mkdir()
+        (d / "registry" / "repos.json").write_text(json.dumps({"repos": {
+            self.HOSTILE_REPO: {"status": "audited", "score": 10, "security": "probe"},
+            "acme/widget": {"status": "audited", "score": 71, "security": "OK"},
+        }}), encoding="utf-8")
+        (d / "ledgers" / "findings.jsonl").write_text("\n".join(json.dumps(f) for f in [
+            {"repo": repo, "rule_id": "R01", "confidence": "high",
+             "file": self.HOSTILE_FILE, "line": 3},
+            {"repo": repo, "rule_id": "R</script>02", "confidence": "medium",
+             "file": "a.md", "line": None},
+        ]) + "\n", encoding="utf-8")
+        (d / "ledgers" / "vocab-advisories.jsonl").write_text("", encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, str(self.AUDITOR_SCRIPTS / "render-repo-report.py"),
+             "--data-dir", str(d), "--repo", repo, "--generated-at", self.STAMP],
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        slug = repo.replace("/", "-")
+        return (d / "reports" / (slug + ".html")).read_text(encoding="utf-8")
+
+    def test_project_markup_renders_as_literal_text(self):
+        page = self._render(self.HOSTILE_REPO)
+        marker = '<script type="application/json" id="audit-data">'
+        head, sep, tail = page.partition(marker)
+        self.assertTrue(sep, "audit-data block missing")
+        self.assertIn("&lt;img", head, "escaped repo name must appear in title/h1")
+        self.assertNotIn("<img", head, "raw repo markup reached the document head")
+        after_block = tail.partition("</script>")[2]
+        self.assertNotIn("<img", after_block, "raw markup after the data block")
+
+    def test_finding_rows_are_built_as_text_under_a_dom_stub(self):
+        data = {"findings": [
+            {"severity": "high", "rule_id": "R01", "file": self.HOSTILE_FILE,
+             "line": 3, "summary": "<b>bold</b> claim"},
+            {"severity": "info", "rule_id": "R02", "file": "a.md",
+             "line": None, "summary": "plain"},
+        ]}
+        script = (_DOM_STUB_JS
+                  .replace("__ASSET__", json.dumps(str(self.ASSET)))
+                  .replace("__DATA__", json.dumps(json.dumps(data))))
+        r = subprocess.run(["node", "-"], input=script, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0,
+                         "asset failed under the DOM stub (an HTML-parsing sink throws "
+                         "here by construction): " + r.stdout + r.stderr)
+        rows = json.loads(r.stdout)
+        self.assertEqual(len(rows), 2)
+        first, second = rows
+        self.assertEqual([c["tag"] for c in first["cells"]], ["td", "td", "td", "td"])
+        sev = first["cells"][0]["child"]
+        self.assertEqual((sev["tag"], sev["className"], sev["text"]),
+                         ("span", "sev sev-high", "high"))
+        self.assertEqual(first["cells"][1]["child"]["tag"], "code")
+        self.assertEqual(first["cells"][1]["child"]["text"], "R01")
+        self.assertEqual(first["cells"][2]["child"]["text"], self.HOSTILE_FILE + ":3")
+        self.assertEqual(first["cells"][3]["text"], "<b>bold</b> claim")
+        self.assertEqual(second["cells"][2]["child"]["text"], "a.md")
+        source = self.ASSET.read_text(encoding="utf-8")
+        for sink in ("innerHTML", "insertAdjacentHTML", "document.write"):
+            self.assertNotIn(sink, source, sink + " present in vibe-report.js")
+        self.assertIn("textContent", source)
+
+    def test_auditor_templates_carry_the_csp_meta(self):
+        for page in self.AUDITOR_PAGES:
+            with self.subTest(template=page.name):
+                text = page.read_text(encoding="utf-8")
+                self.assertEqual(text.count(self.CSP_META), 1,
+                                 "exactly one CSP meta expected in " + page.name)
+
+    def test_payload_split_guard_retained(self):
+        # Declared retained-behaviour pin (GREEN before and after vibe-195): the </ split
+        # keeps a hostile rule_id from closing the data block.
+        page = self._render(self.HOSTILE_REPO)
+        marker = '<script type="application/json" id="audit-data">'
+        block = page.partition(marker)[2].partition("</script>")[0]
+        self.assertIn("R<\\/script>02", block)
+        self.assertNotIn("</script>", block)

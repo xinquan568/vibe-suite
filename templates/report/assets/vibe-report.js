@@ -24,13 +24,28 @@
     var d = (order[a.severity] ?? 9) - (order[b.severity] ?? 9);
     return d !== 0 ? d : String(a.file || "").localeCompare(String(b.file || ""));
   }).forEach(function (f) {
+    // Every field originates in a third-party audited repository: text nodes only,
+    // never HTML parsing (vibe-195 / grill H3).
     var row = document.createElement("tr");
-    row.innerHTML =
-      '<td><span class="sev sev-' + String(f.severity || "info") + '">' +
-      String(f.severity || "info") + "</span></td>" +
-      "<td><code>" + String(f.rule_id || "") + "</code></td>" +
-      "<td><code>" + String(f.file || "") + (f.line == null ? "" : ":" + f.line) + "</code></td>" +
-      "<td>" + String(f.summary || "") + "</td>";
+    var sevCell = document.createElement("td");
+    var sev = document.createElement("span");
+    sev.className = "sev sev-" + String(f.severity || "info");
+    sev.textContent = String(f.severity || "info");
+    sevCell.appendChild(sev);
+    row.appendChild(sevCell);
+    var ruleCell = document.createElement("td");
+    var rule = document.createElement("code");
+    rule.textContent = String(f.rule_id || "");
+    ruleCell.appendChild(rule);
+    row.appendChild(ruleCell);
+    var fileCell = document.createElement("td");
+    var file = document.createElement("code");
+    file.textContent = String(f.file || "") + (f.line == null ? "" : ":" + f.line);
+    fileCell.appendChild(file);
+    row.appendChild(fileCell);
+    var summaryCell = document.createElement("td");
+    summaryCell.textContent = String(f.summary || "");
+    row.appendChild(summaryCell);
     host.appendChild(row);
   });
 })();

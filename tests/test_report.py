@@ -499,16 +499,24 @@ class TestRepoReportXSSHardening(unittest.TestCase):
                          "here by construction): " + r.stdout + r.stderr)
         rows = json.loads(r.stdout)
         self.assertEqual(len(rows), 2)
-        first, second = rows
-        self.assertEqual([c["tag"] for c in first["cells"]], ["td", "td", "td", "td"])
-        sev = first["cells"][0]["child"]
-        self.assertEqual((sev["tag"], sev["className"], sev["text"]),
-                         ("span", "sev sev-high", "high"))
-        self.assertEqual(first["cells"][1]["child"]["tag"], "code")
-        self.assertEqual(first["cells"][1]["child"]["text"], "R01")
-        self.assertEqual(first["cells"][2]["child"]["text"], self.HOSTILE_FILE + ":3")
-        self.assertEqual(first["cells"][3]["text"], "<b>bold</b> claim")
-        self.assertEqual(second["cells"][2]["child"]["text"], "a.md")
+        # (severity class+text, rule_id, file[:line], summary) per row, in severity order.
+        expected = [
+            ("sev sev-high", "high", "R01", self.HOSTILE_FILE + ":3", "<b>bold</b> claim"),
+            ("sev sev-info", "info", "R02", "a.md", "plain"),
+        ]
+        for row, (sev_class, sev_text, rule, file_text, summary) in zip(rows, expected):
+            self.assertEqual(row["tag"], "tr")
+            self.assertEqual([c["tag"] for c in row["cells"]], ["td", "td", "td", "td"])
+            sev = row["cells"][0]["child"]
+            self.assertEqual((sev["tag"], sev["className"], sev["text"]),
+                             ("span", sev_class, sev_text))
+            self.assertEqual((row["cells"][1]["child"]["tag"],
+                              row["cells"][1]["child"]["text"]), ("code", rule))
+            self.assertEqual((row["cells"][2]["child"]["tag"],
+                              row["cells"][2]["child"]["text"]), ("code", file_text))
+            self.assertIsNone(row["cells"][3]["child"],
+                              "summary must be a direct text node, not an element")
+            self.assertEqual(row["cells"][3]["text"], summary)
         source = self.ASSET.read_text(encoding="utf-8")
         for sink in ("innerHTML", "insertAdjacentHTML", "document.write"):
             self.assertNotIn(sink, source, sink + " present in vibe-report.js")

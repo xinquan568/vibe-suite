@@ -35,6 +35,9 @@ import os
 import sys
 from collections import Counter
 from datetime import datetime, timezone
+# Aliased on purpose: main() binds a local `html` (the rendered page text), so the bare
+# module name is unusable there (vibe-195).
+from html import escape as html_escape
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -177,8 +180,9 @@ def main(argv=None):
     # have the rest of the payload parsed as markup.
     payload = json.dumps(data, ensure_ascii=False, sort_keys=True,
                          separators=(",", ":")).replace("</", "<\\/")
+    # {{PROJECT}} lands in markup context (<title>, <h1>); the repo name is external input.
     html = (template_path.read_text(encoding="utf-8")
-            .replace("{{PROJECT}}", args.repo)
+            .replace("{{PROJECT}}", html_escape(args.repo))
             .replace("{{GENERATED_AT}}", generated_at)
             .replace("{{DATA_JSON}}", payload))
 

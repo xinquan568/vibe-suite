@@ -1,7 +1,13 @@
 # vibe-suite CI (E0.1 / vibe-3).
 #
-# Three jobs: manifest validation, lint (Python + Node, with shell as a separate step), and test
-# execution. At scaffold time most discovery sets are empty by design — every job prints what it
+# Jobs: manifest validation · lint (Python + Node, with shell as a separate step) · loop bounds
+# (AC-4) · test · coverage (AC-1) · legacy strings (AC-6).
+# Per branch protection, the required status contexts on main are `manifest validation`, `lint (python + node)`, `test`, and `coverage (AC-1)`.
+# The loop-bounds and legacy-strings jobs are advisory attributable duplicates of checks that also
+# run inside the required `test` job — kept for attributable signal, not extra coverage; their
+# failure does not block a merge.
+#
+# At scaffold time most discovery sets were empty by design — every job prints what it
 # found and exits 0 on zero targets, so "nothing to check" is visibly distinct from a broken matcher.
 #
 # Discovery must never fail open. `mapfile < <(find ...)` silently discards find's exit status, so a
@@ -30,6 +36,7 @@ jobs:
   manifest-validation:
     name: manifest validation
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +78,7 @@ jobs:
   lint:
     name: lint (python + node)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -132,9 +140,10 @@ jobs:
         # two: it covered `gpt-<digit>` and `gemini-<digit>` but missed `o<digit>-` and the dated
         # `claude-*-20*` forms entirely, and reported success the whole time (#67, #68).
         #
-        # This step runs inside `lint (python + node)` rather than as a job of its own because the
-        # three job names are required status contexts on main. A fourth job would not be one, so
-        # it could fail without blocking a merge — a gate that exists and does not gate.
+        # This step runs inside `lint (python + node)` rather than as a job of its own because
+        # `lint (python + node)` is a required status context on main and a new job would not be,
+        # so a standalone job could fail without blocking a merge — a gate that exists and does
+        # not gate.
         run: |
           set -euo pipefail
           python3 tools/model-pin-lint.py
@@ -142,6 +151,7 @@ jobs:
   loop-bounds:
     name: loop bounds (AC-4)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -165,6 +175,7 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -220,9 +231,10 @@ jobs:
           python3 -m unittest discover -s tests -v
 
       - name: Run the Node suite
-        # A step inside this job rather than a job of its own: the three job names are required
-        # status contexts on main, so a fourth job could fail without blocking a merge — a gate that
-        # exists and does not gate. As a step it inherits `test`'s required status.
+        # A step inside this job rather than a job of its own: `test` is a required status
+        # context on main and a new job would not be, so a separate job could fail without
+        # blocking a merge — a gate that exists and does not gate. As a step it inherits
+        # `test`'s required status.
         #
         # The glob is explicit because `--test <dir>` resolves the directory as a module on some Node
         # versions, and because `tests/node/` also holds `no-top-level-await.mjs`, which is a checker
@@ -243,6 +255,7 @@ jobs:
   coverage:
     name: coverage (AC-1)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -262,6 +275,7 @@ jobs:
   legacy-strings:
     name: legacy strings (AC-6)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       # No retired command namespace in any shipped runtime-reachable string. The sweep's

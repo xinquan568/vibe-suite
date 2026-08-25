@@ -4,6 +4,14 @@ Test suites and their fixtures. Run the full suite — exactly what CI's `test` 
 
     python3 -m unittest discover -s tests
 
+The Node suite (hooks, job store, …) runs separately:
+
+    node --test tests/node/*.test.mjs
+
+CI runs the Python suite **sharded four ways** (`ci.yml`'s `test shard N` jobs, fanned in to
+the required `test` context); locally `tests/run-parallel.sh` runs the modules in parallel.
+The auditor workflow-YAML gate needs **`ruby`** on `PATH` (it parses with `ruby -ryaml`); without it those YAML-validity assertions green-skip.
+
 Per TDD/P6 a failing test is written before the behaviour it covers.
 
 ## Fast inner loop (skip the auditor contract tier)

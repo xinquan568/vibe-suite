@@ -15,12 +15,18 @@ scaffolding · `auditor/` the S8 audit unit · `tests/` the suite · `tools/` de
 ## The gate battery (run before any commit)
 
 ```bash
-python3 -m unittest discover -s tests    # the whole suite — CI's test job runs exactly this
+python3 -m unittest discover -s tests    # the whole suite (CI runs it sharded 4-way; see below)
+node --test tests/node/*.test.mjs        # the Node suite (~238 tests: hooks, job store, …)
 python3 tools/model-pin-lint.py          # P9: no pinned model ids in shipped artifacts
 bash tools/legacy-string-sweep.sh        # AC-6: no retired namespace in shipped text
 bin/vibe-check .                         # structural checks
 bin/vibe-check . --mirrors               # codex/ staleness (both hash directions)
 ```
+
+> **Prerequisites for the full local run:** `node` (the Node suite) and `ruby` (the auditor
+> workflow-YAML gate in `tests/test_auditor_workflows.py` parses with `ruby -ryaml`; without
+> ruby those YAML-validity assertions green-skip rather than run). `tests/run-parallel.sh`
+> runs the Python modules in parallel locally (the same modules CI shards four ways).
 
 ## Load-bearing invariants
 

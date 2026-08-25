@@ -30,7 +30,9 @@ EXPECTED_TIMEOUTS = {
     "manifest-validation": 10,
     "lint": 10,
     "loop-bounds": 10,
-    "test": 25,
+    "pinned-trees": 10,   # vibe-199: fetches + caches the pinned upstream trees once
+    "test-shard": 15,     # vibe-199: the 4-way Python matrix (+ Node suite in shard 0)
+    "test": 5,            # vibe-199: the fan-in required context over the shards
     "coverage": 10,
     "legacy-strings": 10,
 }

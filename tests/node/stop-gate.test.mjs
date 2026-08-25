@@ -75,6 +75,14 @@ function runHook(dir, { fixture = null, input = {}, probe = null, env = {} } = {
 }
 
 const decisionOf = (result) => (result.stdout.trim() ? JSON.parse(result.stdout.trim()) : null);
+// vibe-203: the Stop fail-open ALLOW now emits {systemMessage: "… — failing open"} on stdout (still
+// an allow — no decision:"block"), so decisionOf returns that object, not null. Assert the visible notice.
+const assertFailOpen = (result, why = "") => {
+  const d = decisionOf(result);
+  assert.ok(d && typeof d.systemMessage === "string" && d.systemMessage.includes("failing open"),
+    `${why}: fail-open must carry a visible systemMessage, got stdout=${JSON.stringify(result.stdout)}`);
+  assert.notEqual(d.decision, "block", `${why}: fail-open must still ALLOW (no block decision)`);
+};
 /** The prompt the engine actually received. It travels in a file, so argv's tail is what the
  *  runner passed on — the fixtures record their own argv, whose last token is the prompt text. */
 const promptSentTo = (probe) => JSON.parse(readFileSync(probe, "utf8")).argv.at(-1);
@@ -161,7 +169,7 @@ test("codex absent: fails OPEN by default, and CLOSED when the policy says so", 
   seedDefect(open);
   const openResult = runHook(open, { env: { VIBE_SUITE_CODEX_BIN: "/nonexistent/codex" } });
   assert.equal(openResult.status, 0);
-  assert.equal(decisionOf(openResult), null, "fail-open allows the stop");
+  assertFailOpen(openResult, "fail-open allows the stop");
   assert.ok(openResult.stderr.includes("failing open"), openResult.stderr);
 
   const closed = repo({ enabled: true, failPolicy: "closed" });
@@ -190,7 +198,7 @@ test("verdicts are read structurally: last assistant message, first non-empty li
   const mute = repo({ enabled: true });
   seedDefect(mute);
   const muteResult = runHook(mute, { fixture: "gate-mute.mjs" });
-  assert.equal(decisionOf(muteResult), null, "a non-assistant event cannot carry a verdict");
+  assertFailOpen(muteResult, "a non-assistant event cannot carry a verdict");
   assert.ok(muteResult.stderr.includes("no parseable ALLOW/BLOCK verdict"), muteResult.stderr);
 
   // Two assistant messages: the LAST one decides (an earlier BLOCK must not win).
@@ -204,15 +212,13 @@ test("verdicts are read structurally: last assistant message, first non-empty li
   const prose = repo({ enabled: true });
   seedDefect(prose);
   const proseResult = runHook(prose, { fixture: "gate-chatty.mjs", env: { VIBE_TEST_GATE_CASE: "prose" } });
-  assert.equal(decisionOf(proseResult), null);
+  assertFailOpen(proseResult);
   assert.ok(proseResult.stderr.includes("no parseable"), proseResult.stderr);
 
   // A verdict-looking marker on a later line is ignored for the same reason.
   const later = repo({ enabled: true });
   seedDefect(later);
-  assert.equal(
-    decisionOf(runHook(later, { fixture: "gate-chatty.mjs", env: { VIBE_TEST_GATE_CASE: "later-line" } })),
-    null);
+  assertFailOpen(runHook(later, { fixture: "gate-chatty.mjs", env: { VIBE_TEST_GATE_CASE: "later-line" } }));
 });
 
 test("P9 both directions: unset gate.model sends no -m even with a project override; set sends exactly one", () => {
@@ -251,7 +257,7 @@ test("a damaged runtime store is an infra failure, not a verdict", () => {
   writeFileSync(path.join(dir, ".vibe-suite-state", "state.json"), "not json at all");
   const result = runHook(dir, { fixture: "gate-marker.mjs" });
   assert.equal(result.status, 0);
-  assert.equal(decisionOf(result), null, "unreadable config fails open by default");
+  assertFailOpen(result, "unreadable config fails open by default");
   assert.ok(result.stderr.includes("runtime store could not be read"), result.stderr);
   assert.ok(!existsSync(path.join(dir, ".vibe-suite-state", "state.json.tmp")),
     "a damaged store must never be rewritten");
@@ -282,7 +288,7 @@ test("a collection failure is indeterminate, never a silent ALLOW", () => {
     `import store; store.Store(${JSON.stringify(dir)}).set("gate.stop_review_gate", True)`;
   spawnSync("python3", ["-c", enable], { encoding: "utf8" });
   const open = runHook(dir, { fixture: "gate-allower.mjs" });
-  assert.equal(decisionOf(open), null);
+  assertFailOpen(open);
   assert.ok(open.stderr.includes("could not be collected"), open.stderr);
 
   const closedDir = tmpWorkspace("stop-gate-nogit-closed-");
@@ -371,7 +377,7 @@ test("outside a git repository, rev-parse's 128 is a fault, not 'no commits yet'
   ], { encoding: "utf8" });
   seedDefect(dir);
   const result = runHook(dir, { fixture: "gate-marker.mjs" });
-  assert.equal(decisionOf(result), null);
+  assertFailOpen(result);
   assert.ok(result.stderr.includes("could not be collected"),
     `a non-repository must be indeterminate, not an unborn repo: ${result.stderr}`);
 });
@@ -389,7 +395,7 @@ test("the absolute deadline governs the collection loop, not just the child proc
     env: { VIBE_TEST_GATE_BUDGET_MS: "1" },        // no budget left the moment collection starts
   });
   assert.equal(result.status, 0);
-  assert.equal(decisionOf(result), null, "fail-open is still the default posture");
+  assertFailOpen(result, "fail-open is still the default posture");
   assert.ok(/budget|could not be collected|no time left/.test(result.stderr),
     `an exhausted budget must be reported, not guessed: ${result.stderr}`);
 });
@@ -419,7 +425,7 @@ test("a broken .vibe-suite.md with no stored policy ALLOWS, with the store's war
   const dir = repo({ enabled: true, brokenProject: true });
   const result = runHook(dir, { fixture: "gate-marker.mjs" });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(decisionOf(result), null, "fail-open by default is unchanged");
+  assertFailOpen(result, "fail-open by default is unchanged");
   assert.match(result.stderr, /project configuration could not be read/);
   assert.match(result.stderr, /store: config: .*frontmatter/, "the cause is the store's stderr line");
   assert.match(result.stderr, /gate resolved from runtime state and defaults/);
@@ -442,7 +448,7 @@ test("a damaged runtime store still fails open by default — and now carries th
   writeFileSync(path.join(dir, ".vibe-suite-state", "state.json"), "not json at all");
   const result = runHook(dir, { fixture: "gate-marker.mjs" });
   assert.equal(result.status, 0);
-  assert.equal(decisionOf(result), null);
+  assertFailOpen(result);
   assert.match(result.stderr, /runtime store could not be read \(store: .*not valid JSON/, "the store's first stderr line is the cause");
 });
 
@@ -454,7 +460,7 @@ test("no python3 on PATH: the hook fails open with the spawn cause, not a stack 
   const empty = tmpWorkspace("no-python-");
   const result = runHook(dir, { fixture: "gate-marker.mjs", env: { PATH: empty } });
   assert.equal(result.status, 0, `the hook never exits non-zero:\n${result.stderr}`);
-  assert.equal(decisionOf(result), null, "with no store reader at all the stored policy is unrecoverable: fail open by default");
+  assertFailOpen(result, "with no store reader at all the stored policy is unrecoverable: fail open by default");
   assert.match(result.stderr, /runtime store could not be read \(.*ENOENT/, `the spawn cause is reported:\n${result.stderr}`);
   assert.match(result.stderr, /failing open/);
   assert.ok(!/\n\s+at /.test(result.stderr), `no stack trace — the ENOENT path is handled, not crashed:\n${result.stderr}`);
@@ -489,7 +495,7 @@ test("a hung reviewer INSIDE the budget: the hook still decides (fail-open) and 
   assert.equal(r.error, undefined, `the hook must return its own decision, not hit the outer spawn timeout: ${r.error}`);
   assert.equal(r.status, 0, `the hook must exit 0 with its own decision, got ${r.status}: ${r.stderr}`);
   assert.ok(elapsedMs < 15_000, `the hook must return WITHIN its 15 s budget (the deadline path), took ${elapsedMs} ms`);
-  assert.equal(decisionOf(r), null, `a timed-out reviewer must fail open (allow): ${r.stdout}${r.stderr}`);
+  assertFailOpen(r, `a timed-out reviewer must fail open (allow): ${r.stdout}${r.stderr}`);
   assert.ok(existsSync(pidFile), `the reviewer must actually have been dispatched: ${r.stderr}`);
   const pid = Number(readFileSync(pidFile, "utf8").trim());
   assert.ok(Number.isInteger(pid) && pid > 0, `a reviewer pid must be recorded, got: ${pid}`);

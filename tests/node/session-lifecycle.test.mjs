@@ -21,6 +21,10 @@ const HOOK = path.join(REPO_ROOT, "scripts", "session-lifecycle-hook.mjs");
 const runHook = (cwd, event) => spawnSync(process.execPath, [HOOK, "--event", event],
   { cwd, encoding: "utf8", timeout: 30_000 });
 
+// vibe-203: SessionStart reports go to stdout (the harness adds it to context); SessionEnd reports
+// stay on stderr (SessionEnd stdout is not shown). The report channel therefore depends on the event.
+const reportChan = (result, event) => (event === "start" ? result.stdout : result.stderr);
+
 function abandonedRecord(jobId) {
   const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
   return {
@@ -51,10 +55,10 @@ test("BOTH events reap orphan temps and report abandoned jobs WITHOUT rewriting 
 
     const result = runHook(ws, event);
     assert.equal(result.status, 0, `${event}: ${result.stderr}`);
-    assert.ok(result.stderr.includes("reaped 1 orphan temp"), `${event}: ${result.stderr}`);
+    assert.ok(reportChan(result, event).includes("reaped 1 orphan temp"), `${event}: ${reportChan(result, event)}`);
     assert.ok(readdirSync(jobsDir(ws)).includes(path.basename(foreign)),
       `${event}: an unstamped file matching the temp pattern must survive`);
-    assert.ok(result.stderr.includes("looks abandoned"), `${event}: ${result.stderr}`);
+    assert.ok(reportChan(result, event).includes("looks abandoned"), `${event}: ${reportChan(result, event)}`);
 
     const after = await readRecord(ws, "job_aaaaaaaaaaaaaaaaaaaa");
     assert.equal(after.version, before.version, `${event}: reporting must not bump the version`);
@@ -70,7 +74,8 @@ test("end additionally reports still-running jobs; start does not", async () => 
     workerPid: process.pid, pgid: process.pid,
     startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
   });
-  assert.ok(!runHook(ws, "start").stderr.includes("still running"));
+  const startRes = runHook(ws, "start");
+  assert.ok(!startRes.stderr.includes("still running") && !startRes.stdout.includes("still running"));
   const end = runHook(ws, "end");
   assert.equal(end.status, 0);
   assert.ok(end.stderr.includes("still running"), end.stderr);
@@ -83,7 +88,7 @@ test("a damaged JOB RECORD is reported, and both events still exit 0", () => {
   for (const event of ["start", "end"]) {
     const result = runHook(ws, event);
     assert.equal(result.status, 0, `${event}: ${result.stderr}`);
-    assert.ok(result.stderr.includes("unreadable"), result.stderr);
+    assert.ok(reportChan(result, event).includes("unreadable"), reportChan(result, event));
   }
 });
 
@@ -92,6 +97,7 @@ test("an empty workspace is silent and successful", () => {
   const result = runHook(ws, "start");
   assert.equal(result.status, 0);
   assert.equal(result.stderr.trim(), "");
+  assert.equal(result.stdout.trim(), "", "an empty workspace is silent on the SessionStart stdout channel too");
 });
 
 // vibe-201 (M29): an unknown --event is a usage error, not a silent "start".

@@ -77,6 +77,13 @@ const remainingMs = () => HOOK_BUDGET_MS - (Date.now() - START) - SHUTDOWN_RESER
 class Indeterminate extends Error {}
 
 const allow = () => 0;
+// vibe-203 (observability): an ALLOW that the operator should actually SEE. Emitting a stdout JSON
+// with a `systemMessage` (and NO `decision:"block"`) is still an allow to the harness, but the
+// message is surfaced — unlike a bare stderr line at exit 0, which stays transcript-only.
+function allowWithNotice(message) {
+  process.stdout.write(JSON.stringify({ systemMessage: message }) + "\n");
+  return 0;
+}
 const byteLength = (text) => Buffer.byteLength(text, "utf8");
 const clampBytes = (text, cap) => Buffer.from(text, "utf8").subarray(0, cap).toString("utf8");
 
@@ -265,8 +272,9 @@ function applyFailPolicy(gate, why) {
   if ((gate?.fail_policy ?? "open") === "closed") {
     return blockDecision(`stop-review gate could not reach a verdict (${why}) and fail_policy is closed`);
   }
-  process.stderr.write(`stop-review gate: ${why} — failing open\n`);
-  return allow();
+  const notice = `stop-review gate: ${why} — failing open`;
+  process.stderr.write(notice + "\n");   // transcript record (kept)
+  return allowWithNotice(notice);        // vibe-203: also surfaced to the operator via systemMessage
 }
 
 // vibe-103: async because the prompt file now goes through the audited write primitive, whose API

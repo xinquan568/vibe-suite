@@ -143,7 +143,11 @@ class HookIO(unittest.TestCase):
         for label, stdin_text, jq, expect_reminder in IO_CASES:
             with self.subTest(case=label):
                 proc, _ = run_hook(stdin_text, jq_available=jq)
-                self.assertEqual(proc.returncode, 0, f"{label}: hook must never block")
+                # vibe-203: the advisory now exits 1 (a non-2, non-zero exit) so the harness SHOWS the
+                # stderr line to the operator; a silent run still exits 0. Non-2 never BLOCKS the tool.
+                self.assertEqual(proc.returncode, 1 if expect_reminder else 0,
+                                 f"{label}: advisory -> exit 1 (non-blocking, shown); silence -> exit 0")
+                self.assertNotEqual(proc.returncode, 2, f"{label}: must never BLOCK (exit 2)")
                 self.assertEqual(proc.stdout, "", f"{label}: stdout must stay empty")
                 if expect_reminder:
                     # the EXACT line, not a substring: changing the fallback branch's
@@ -196,7 +200,7 @@ class HookClassification(unittest.TestCase):
         for label, path, should_match, category in CLASSIFICATION:
             with self.subTest(case=label, category=category):
                 proc, _ = run_hook(json.dumps({"tool_input": {"file_path": path}}))
-                self.assertEqual(proc.returncode, 0)
+                self.assertEqual(proc.returncode, 1 if should_match else 0)  # vibe-203: advisory -> exit 1
                 self.assertEqual(proc.stdout, "")
                 got = "Run /vibe-suite:score" in proc.stderr
                 self.assertEqual(

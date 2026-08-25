@@ -156,6 +156,72 @@ class PrivacyAnchors(unittest.TestCase):
         self.assertIn("value is withheld", bridge_cli.replace("*", ""))
 
 
+
+class ReadmeAuditorStatus(unittest.TestCase):
+    """vibe-197: the Status blockquote must not call the (implemented, tested) auditor undelivered."""
+
+    def test_status_drops_the_undelivered_claim(self):
+        text = README.read_text(encoding="utf-8")
+        self.assertNotIn("documentation only", text,
+                         "README still calls the auditor tree 'documentation only'")
+        self.assertNotIn("has not shipped", text,
+                         "README still says stage S8 'has not shipped'")
+
+    def test_status_states_implemented_tested_and_points_to_auditor_readme(self):
+        text = README.read_text(encoding="utf-8")
+        self.assertIn("[`auditor/README.md`](auditor/README.md)", text,
+                      "README status does not point to auditor/README.md")
+        self.assertRegex(text, r"implemented and tested",
+                         "README status does not state the auditor is implemented and tested")
+        self.assertIn("wiring it into", text,
+                      "README status does not frame the remaining work as deployment wiring")
+        self.assertIn(".github/workflows", text,
+                      "README status does not name .github/workflows as the deployment target")
+
+
+class FastTestTier(unittest.TestCase):
+    """vibe-197: tests/README documents a local fast tier, and the tier boundary is honest."""
+
+    TESTS = REPO_ROOT / "tests"
+
+    # The auditor contract tier, enumerated independently of the runtime `test_auditor_` filter.
+    # The fast command in tests/README.md skips `test_auditor_*`; this frozen manifest is the
+    # reviewed source of truth for what that tier contains. The equality assertion below compares
+    # this hard-coded set to the on-disk prefix set (rather than re-deriving one from the other),
+    # so it is not a tautology: a new `test_auditor_x.py` that is not in the manifest, or a manifest
+    # entry deleted from disk, fails here — and a non-auditor module can never acquire the prefix
+    # (and be silently skipped by the fast command) without a reviewer updating this list.
+    AUDITOR_TIER = frozenset({
+        "test_auditor_batch_helpers.py", "test_auditor_composition.py",
+        "test_auditor_context.py", "test_auditor_findings_helpers.py",
+        "test_auditor_fixture.py", "test_auditor_fork.py", "test_auditor_gates.py",
+        "test_auditor_graph.py", "test_auditor_manifest.py",
+        "test_auditor_no_supplied_derivations.py", "test_auditor_propose.py",
+        "test_auditor_quota.py", "test_auditor_reporting_helpers.py",
+        "test_auditor_reservation.py", "test_auditor_rulebook_helpers.py",
+        "test_auditor_schema.py", "test_auditor_scripts.py",
+        "test_auditor_state_machine.py", "test_auditor_submit.py",
+        "test_auditor_workflows.py",
+    })
+
+    def test_tests_readme_documents_the_full_and_fast_commands(self):
+        readme = (self.TESTS / "README.md").read_text(encoding="utf-8")
+        self.assertIn("discover -s tests", readme, "the full-suite command is not documented")
+        self.assertIn("test_auditor_", readme, "the fast tier does not name the auditor prefix")
+        self.assertIn("grep -v", readme, "the fast command does not document the exclusion")
+
+    def test_the_prefix_filter_matches_the_reviewed_tier_manifest(self):
+        on_disk_prefixed = {p.name for p in self.TESTS.glob("test_auditor_*.py")}
+        self.assertEqual(
+            on_disk_prefixed, self.AUDITOR_TIER,
+            "the test_auditor_*.py files on disk differ from the reviewed AUDITOR_TIER manifest; "
+            "a non-auditor module must not acquire the prefix (the fast command would silently "
+            "skip it), and a new auditor module must be added to the manifest deliberately")
+
+    def test_every_manifest_member_exists_on_disk(self):
+        missing = sorted(n for n in self.AUDITOR_TIER if not (self.TESTS / n).is_file())
+        self.assertFalse(missing, f"AUDITOR_TIER names modules absent from disk: {missing}")
+
 if __name__ == "__main__":
     unittest.main()
 

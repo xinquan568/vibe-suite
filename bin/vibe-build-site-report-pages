@@ -17,6 +17,11 @@ import re
 import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from site_markdown import md_escape  # noqa: E402  (corpus strings render as text — vibe-196)
+
 BUILDER = "vibe-build-site-report-pages"
 SLUG = "reports"
 PAGE = "reports/index.md"
@@ -103,23 +108,25 @@ def render_index(entries):
                 "for each repo as its results land.\n")
     lines = ["# Audit reports", "", f"{len(entries)} repositor(y/ies) published.", "",
              "| Repo | Score | Findings |", "| --- | --- | --- |"]
-    lines += [f"| [{e['repo']}]({e['slug']}.md) | {e['score'] if e['score'] is not None else '—'}"
+    lines += [f"| [{md_escape(e['repo'])}]({e['slug']}.md)"
+              f" | {md_escape(e['score']) if e['score'] is not None else '—'}"
               f" | {e['findings']} |" for e in entries]
     return "\n".join(lines) + "\n"
 
 
 def render_report(entry):
-    score = entry["score"] if entry["score"] is not None else "unscored"
-    lines = [f"# {entry['repo']}", "", f"Score: **{score}**  ",
+    score = md_escape(entry["score"]) if entry["score"] is not None else "unscored"
+    lines = [f"# {md_escape(entry['repo'])}", "", f"Score: **{score}**  ",
              f"Findings: **{entry['findings']}**", ""]
     if entry["severities"]:
         lines += ["| Severity | Count |", "| --- | --- |"]
-        lines += [f"| {name} | {count} |" for name, count in entry["severities"].items()]
+        lines += [f"| {md_escape(name)} | {count} |" for name, count in entry["severities"].items()]
         lines.append("")
     if entry["detail"]:
         lines += ["## Findings", ""]
-        lines += [f"- `{f.get('id', '?')}` — {f.get('severity', 'unrated')}"
-                  f"{': ' + str(f['title']) if f.get('title') else ''}" for f in entry["detail"]]
+        # Bold, not a code span: a code span cannot be escaped and a backtick in the id would end it.
+        lines += [f"- **{md_escape(f.get('id', '?'))}** — {md_escape(f.get('severity', 'unrated'))}"
+                  f"{': ' + md_escape(f['title']) if f.get('title') else ''}" for f in entry["detail"]]
     return "\n".join(lines).rstrip() + "\n"
 
 

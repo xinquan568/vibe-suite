@@ -18,6 +18,11 @@ export default defineConfig({
   lastUpdated: true,
   ignoreDeadLinks: false,
   head: [["meta", { name: "theme-color", content: "#5319e7" }]],
+  // Corpus strings are third-party text (vibe-196 / M23). VitePress defaults markdown-it to
+  // html:true, which renders a `<script>` in a repo name as an element; off, it renders as text.
+  // Vue mustaches are a separate channel: the builders escape them (scripts/site_markdown.py)
+  // and wrap corpus prose in `::: v-pre`. No tracked page uses raw HTML.
+  markdown: { html: false },
   themeConfig: {
     siteTitle: "vibe-suite",
     nav: [

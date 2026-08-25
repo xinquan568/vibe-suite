@@ -118,7 +118,9 @@ class HookRegistration(unittest.TestCase):
 
 
 class HookIO(unittest.TestCase):
-    """Exit 0 on every path, never a byte on stdout, at most one line on stderr."""
+    """Never a byte on stdout; at most one line on stderr. An advisory (NL-artifact) edit exits 1 —
+    a non-2, non-zero exit the harness shows to the operator, never blocking (only exit 2 blocks) —
+    while a silent path exits 0 (vibe-203)."""
 
     @classmethod
     def setUpClass(cls):

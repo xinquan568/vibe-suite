@@ -6,9 +6,11 @@ loops, bridged to Codex CLI.
 Commands are namespaced `/vibe-suite:*`, which follows from `name` in
 [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json).
 
-> **Status:** stage S7 complete — the suite installs and runs. The catalog below is what
-> ships today; stage S8 (the auditor unit and the public site) has not shipped, and the
-> `auditor/` tree carries documentation only.
+> **Status:** the suite installs and runs. The `auditor/` unit — workflows, helper scripts
+> and rulebook (see [`auditor/README.md`](auditor/README.md)) — is **implemented and tested**
+> under the repo's strictest test contract (an oracle plus a no-op and a wrong-behaviour
+> mutant per helper): working code, not a docs stub. What remains is wiring it into
+> `.github/workflows/` for deployment, tracked separately. The catalog below is what ships today.
 
 ## Platform support
 

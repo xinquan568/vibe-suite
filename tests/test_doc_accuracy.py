@@ -156,6 +156,50 @@ class PrivacyAnchors(unittest.TestCase):
         self.assertIn("value is withheld", bridge_cli.replace("*", ""))
 
 
+
+class ReadmeAuditorStatus(unittest.TestCase):
+    """vibe-197: the Status blockquote must not call the (implemented, tested) auditor undelivered."""
+
+    def test_status_drops_the_undelivered_claim(self):
+        text = README.read_text(encoding="utf-8")
+        self.assertNotIn("documentation only", text,
+                         "README still calls the auditor tree 'documentation only'")
+        self.assertNotIn("has not shipped", text,
+                         "README still says stage S8 'has not shipped'")
+
+    def test_status_states_implemented_tested_and_points_to_auditor_readme(self):
+        text = README.read_text(encoding="utf-8")
+        self.assertIn("[`auditor/README.md`](auditor/README.md)", text,
+                      "README status does not point to auditor/README.md")
+        self.assertRegex(text, r"implemented and tested",
+                         "README status does not state the auditor is implemented and tested")
+        self.assertIn("wiring it into", text,
+                      "README status does not frame the remaining work as deployment wiring")
+        self.assertIn(".github/workflows", text,
+                      "README status does not name .github/workflows as the deployment target")
+
+
+class FastTestTier(unittest.TestCase):
+    """vibe-197: tests/README documents a local fast tier, and the tier boundary is honest."""
+
+    TESTS = REPO_ROOT / "tests"
+
+    def test_tests_readme_documents_the_full_and_fast_commands(self):
+        readme = (self.TESTS / "README.md").read_text(encoding="utf-8")
+        self.assertIn("discover -s tests", readme, "the full-suite command is not documented")
+        self.assertIn("test_auditor_", readme, "the fast tier does not name the auditor prefix")
+        self.assertIn("grep -v", readme, "the fast command does not document the exclusion")
+
+    def test_the_auditor_prefix_is_a_complete_tier_boundary(self):
+        names = sorted(p.name for p in self.TESTS.glob("test_*.py"))
+        auditor = [n for n in names if n.startswith("test_auditor_")]
+        others = [n for n in names if not n.startswith("test_auditor_")]
+        self.assertTrue(auditor, "no auditor test modules found under tests/")
+        self.assertTrue(all(n.startswith("test_auditor_") for n in auditor))
+        self.assertFalse(any(n.startswith("test_auditor_") for n in others),
+                         "a non-auditor module carries the test_auditor_ prefix; the documented "
+                         "exclusion would wrongly skip it")
+
 if __name__ == "__main__":
     unittest.main()
 

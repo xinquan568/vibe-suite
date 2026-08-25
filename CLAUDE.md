@@ -16,7 +16,7 @@ scaffolding · `auditor/` the S8 audit unit · `tests/` the suite · `tools/` de
 
 ```bash
 python3 -m unittest discover -s tests    # the whole suite (CI runs it sharded 4-way; see below)
-node --test tests/node/*.test.mjs        # the Node suite (~238 tests: hooks, job store, …)
+node --test tests/node/*.test.mjs        # the Node suite (hooks, job store, events, …)
 python3 tools/model-pin-lint.py          # P9: no pinned model ids in shipped artifacts
 bash tools/legacy-string-sweep.sh        # AC-6: no retired namespace in shipped text
 bin/vibe-check .                         # structural checks

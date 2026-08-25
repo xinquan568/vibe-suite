@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -90,7 +91,10 @@ class WorkflowShape(unittest.TestCase):
         self.assertEqual(text.count("actions/cache/save@v4"), 1, "there must be exactly one cache writer")
         self.assertRegex(text, r"steps\.fetch\.outputs\.complete == 'true'")
         self.assertRegex(text, r"cache-hit != 'true'")
-        # the fetch hard-fails on an empty/broken pin list so an empty tree is never cached
+        # the fetch hard-fails on an empty/broken pin list so an empty tree is never cached: the
+        # extraction validates PINS in Python BEFORE printing (the `-s` guard alone is fooled by an
+        # empty mapping, which prints one blank line) — PinExtractionHardFail exercises the behaviour.
+        self.assertRegex(text, r"not isinstance\(pins, dict\) or not pins")
         self.assertRegex(text, r'\[ -s "\$RUNNER_TEMP/pins\.txt" \]')
 
     def test_fanin_grants_no_token(self):
@@ -99,6 +103,45 @@ class WorkflowShape(unittest.TestCase):
         m = re.search(r"\n  test:\n(?P<body>(?:.*\n)*?)\n  \w", text)
         self.assertTrue(m, "could not isolate the test fan-in job body")
         self.assertRegex(m.group("body"), r"permissions:\s*\{\}")
+
+
+class PinExtractionHardFail(unittest.TestCase):
+    """The pinned-trees fetch step extracts PINS from tools/coverage-check.py with an embedded
+    Python snippet. That snippet must HARD-fail (nonzero, so `set -e` aborts the job) on an empty
+    or malformed PINS — an empty mapping otherwise prints one blank line, passes the `[ -s ]`
+    guard, and lets the job "succeed" with nothing cached. This lifts the ACTUAL snippet out of
+    ci.yml and runs it against a fake tools/coverage-check.py, so it regresses shipped behaviour."""
+
+    def _snippet(self):
+        text = CI.read_text(encoding="utf-8")
+        m = re.search(r"python3 - <<'PY'[^\n]*\n(.*?)\n\s*PY(?:\n|$)", text, re.S)
+        self.assertTrue(m, "pin-extraction heredoc not found in ci.yml")
+        return textwrap.dedent(m.group(1))
+
+    def _run(self, pins_literal):
+        root = Path(tempfile.mkdtemp(prefix="pins-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "tools").mkdir()
+        (root / "tools" / "coverage-check.py").write_text(
+            f"PINS = {pins_literal}\n", encoding="utf-8")
+        return subprocess.run([sys.executable, "-"], input=self._snippet(),
+                              cwd=root, capture_output=True, text=True)
+
+    def test_empty_pins_hard_fails(self):
+        r = self._run("{}")
+        self.assertNotEqual(r.returncode, 0,
+                            "empty PINS must hard-fail extraction (nonzero):\n" + r.stdout + r.stderr)
+
+    def test_malformed_pin_hard_fails(self):
+        r = self._run("{'repoA': ''}")
+        self.assertNotEqual(r.returncode, 0,
+                            "a blank pin must hard-fail extraction:\n" + r.stdout + r.stderr)
+
+    def test_valid_pins_extract_and_print(self):
+        r = self._run("{'repoA': 'abc123', 'repoB': 'def456'}")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("repoA abc123", r.stdout)
+        self.assertIn("repoB def456", r.stdout)
 
 
 class BatteryDocs(unittest.TestCase):

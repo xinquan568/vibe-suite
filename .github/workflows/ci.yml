@@ -212,11 +212,20 @@ jobs:
           # Extracting the pins MUST hard-fail: a broken tools/coverage-check.py or an empty pin
           # list must never be treated as a "complete" tree set and cached under the immutable key.
           python3 - <<'PY' > "$RUNNER_TEMP/pins.txt"
-          import importlib.util
+          import importlib.util, sys
           spec = importlib.util.spec_from_file_location("cc", "tools/coverage-check.py")
           cc = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(cc)
-          print("\n".join(f"{r} {c}" for r, c in cc.PINS.items()))
+          pins = getattr(cc, "PINS", None)
+          # Hard-fail (nonzero, aborting the step under `set -e`) on an empty or malformed pin
+          # set BEFORE printing — an empty mapping would otherwise print one blank line, pass the
+          # `-s` guard, and let the job "succeed" with nothing to cache.
+          if not isinstance(pins, dict) or not pins:
+              sys.exit("PINS is empty or not a mapping — refusing to proceed with no pins")
+          for r, c in pins.items():
+              if not (isinstance(r, str) and r.strip() and isinstance(c, str) and c.strip()):
+                  sys.exit(f"invalid PINS entry: {r!r} {c!r}")
+          print("\n".join(f"{r} {c}" for r, c in pins.items()))
           PY
           [ -s "$RUNNER_TEMP/pins.txt" ] || { echo "no pins extracted from tools/coverage-check.py"; exit 1; }
           set +e   # from here individual network fetches may fail softly; `complete` records the outcome

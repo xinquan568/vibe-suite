@@ -1,6 +1,6 @@
 # `tests/` — Tests and fixtures
 
-Test suites and their fixtures. Run the full suite — exactly what CI's `test` job runs:
+Test suites and their fixtures. Run the full suite locally (CI runs the same modules across its four `test shard` jobs, fanned in to the required `test` context):
 
     python3 -m unittest discover -s tests
 

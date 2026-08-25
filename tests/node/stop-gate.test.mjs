@@ -469,6 +469,7 @@ test("garbage (non-JSON) stdin: the gate allows and notes it on stderr instead o
     input: "this is not json {{{",                      // raw bytes readStdin() cannot parse
     env: { ...process.env },
   });
+  assert.equal(r.status, 0, `the hook must exit 0 on garbage stdin, got ${r.status}: ${r.stderr}`);
   assert.equal(decisionOf(r), null, `garbage stdin must still allow, got: ${r.stdout}${r.stderr}`);
   assert.match(r.stderr, /not valid JSON/i, `a stderr note must explain the empty-input fallback: ${r.stderr}`);
 });
@@ -479,10 +480,15 @@ test("a hung reviewer INSIDE the budget: the hook still decides (fail-open) and 
   const pidFile = path.join(dir, "reviewer.pid");
   // sleeper.mjs ignores SIGTERM and never returns; VIBE_TEST_GATE_BUDGET_MS shrinks the 900 s budget so
   // the deadline fires in seconds. The reviewer records its pid via the VIBE_TEST_PID_FILE seam.
+  const started = Date.now();
   const r = runHook(dir, {
     fixture: "sleeper.mjs",
     env: { VIBE_TEST_GATE_BUDGET_MS: "15000", VIBE_TEST_PID_FILE: pidFile },
   });
+  const elapsedMs = Date.now() - started;
+  assert.equal(r.error, undefined, `the hook must return its own decision, not hit the outer spawn timeout: ${r.error}`);
+  assert.equal(r.status, 0, `the hook must exit 0 with its own decision, got ${r.status}: ${r.stderr}`);
+  assert.ok(elapsedMs < 15_000, `the hook must return WITHIN its 15 s budget (the deadline path), took ${elapsedMs} ms`);
   assert.equal(decisionOf(r), null, `a timed-out reviewer must fail open (allow): ${r.stdout}${r.stderr}`);
   assert.ok(existsSync(pidFile), `the reviewer must actually have been dispatched: ${r.stderr}`);
   const pid = Number(readFileSync(pidFile, "utf8").trim());

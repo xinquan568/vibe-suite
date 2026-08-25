@@ -2,8 +2,9 @@
 #
 # Jobs: manifest validation · lint (Python + Node, with shell as a separate step) · loop bounds
 # (AC-4) · pinned trees (fetch + cache the pinned upstream trees) · the Python suite sharded
-# four ways as `test shard N`, fanned in to the required `test` context · coverage (AC-1) ·
-# legacy strings (AC-6). vibe-199 (M34).
+# four ways as `test shard N` and crossed with the documented python/node floors (3.11/3.x,
+# 18/lts), fanned in to the required `test` context and publishing advisory code-coverage
+# artifacts · coverage (AC-1) · legacy strings (AC-6). vibe-199 (M34) · vibe-200 (M34 b).
 # Per branch protection, the required status contexts on main are `manifest validation`, `lint (python + node)`, `test`, and `coverage (AC-1)`.
 # The loop-bounds and legacy-strings jobs are advisory attributable duplicates of checks that also
 # run inside the `test shard` jobs — kept for attributable signal, not extra coverage; their
@@ -18,7 +19,8 @@
 # reads null-delimited names so paths with spaces survive.
 #
 # No model identifiers appear anywhere in this workflow (principle P9): every tool uses its own
-# default. POSIX-only (bash/python3/node) — see README.
+# default. POSIX-only (bash/python3/node) — see README; the documented floors (python 3.11,
+# node 18) and macOS are exercised in CI — macOS runs weekly via self-check.yml.
 
 name: ci
 
@@ -262,20 +264,31 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    # vibe-200 (M34 b): the 4 shards are crossed with the documented floors/ceilings —
+    # python ['3.11','3.x'] and node ['18','lts/*'] — so the floors are actually EXERCISED. Only
+    # shard 0 runs the Node suite, so the node dimension is collapsed to a single value on shards
+    # 1-3 (the exclude below) to avoid running identical Python-only work twice. The `test` fan-in
+    # still needs only this job, so the required context and branch protection are unchanged.
     strategy:
       fail-fast: false
       matrix:
         shard: ['0', '1', '2', '3']
+        python: ['3.11', '3.x']
+        node: ['18', 'lts/*']
+        exclude:
+          - { shard: '1', node: '18' }
+          - { shard: '2', node: '18' }
+          - { shard: '3', node: '18' }
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: ${{ matrix.python }}
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 'lts/*'
+          node-version: ${{ matrix.node }}
 
       # Read-only restore of the trees the pinned-trees job cached. A miss (an incomplete fetch that
       # was not cached) leaves the trees absent, and the manifest-reproducibility tests report it —
@@ -305,24 +318,72 @@ jobs:
             fi
           done
           if [ ${#mods[@]} -eq 0 ]; then echo "shard ${{ matrix.shard }} has no modules"; exit 1; fi
-          printf 'shard %s: %d of %d module(s)\n' "${{ matrix.shard }}" "${#mods[@]}" "${#all[@]}"
-          python3 -m unittest -v "${mods[@]}"
+          printf 'shard %s (py%s node%s): %d of %d module(s)\n' \
+            "${{ matrix.shard }}" "${{ matrix.python }}" "${{ matrix.node }}" "${#mods[@]}" "${#all[@]}"
+          # Code coverage is measured on ONE leg per shard (the ceiling: python 3.x + node lts) and
+          # is strictly advisory — the authoritative pass/fail is ALWAYS a plain unittest run, so a
+          # coverage-tooling failure can never turn a green suite red (issue: "upload first, gate later").
+          if [ "${{ matrix.python }}" = "3.x" ] && [ "${{ matrix.node }}" = "lts/*" ] \
+               && python3 -m pip install --quiet coverage 2>/dev/null; then
+            mkdir -p "$RUNNER_TEMP/cov"
+            if python3 -m coverage run --data-file "$RUNNER_TEMP/cov/.coverage.${{ matrix.shard }}" -m unittest -v "${mods[@]}"; then
+              echo "shard ${{ matrix.shard }} passed under coverage"
+            else
+              echo "coverage run exited nonzero — rerunning PLAIN for the authoritative verdict"
+              python3 -m unittest -v "${mods[@]}"
+            fi
+          else
+            python3 -m unittest -v "${mods[@]}"
+          fi
+
+      - name: Python coverage report (advisory)
+        if: ${{ always() && matrix.python == '3.x' && matrix.node == 'lts/*' }}
+        continue-on-error: true
+        run: |
+          python3 -m coverage xml \
+            --data-file "$RUNNER_TEMP/cov/.coverage.${{ matrix.shard }}" \
+            -o "$RUNNER_TEMP/cov/coverage-shard-${{ matrix.shard }}.xml"
+
+      - name: Upload Python coverage (advisory)
+        if: ${{ always() && matrix.python == '3.x' && matrix.node == 'lts/*' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: py-coverage-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/cov/coverage-shard-${{ matrix.shard }}.xml
+          if-no-files-found: ignore
 
       - name: Run the Node suite
-        # In shard 0 only, so it runs exactly once and stays within the `test` lineage (the fan-in
-        # `needs` every shard). The glob is explicit because `--test <dir>` resolves the directory as
-        # a module on some Node versions, and tests/node/ also holds no-top-level-await.mjs.
+        # In shard 0 only, across BOTH its node legs (18 and lts) so both node floors are exercised;
+        # it stays within the `test` lineage (the fan-in needs every shard). A nullglob array-glob
+        # feeds `node --test` explicitly; the `*.test.mjs` glob skips tests/node/no-top-level-await.mjs.
         if: ${{ matrix.shard == '0' }}
         run: |
-          set -euo pipefail
-          tmp=$(mktemp)
-          if ! find tests/node -name '*.test.mjs' -print0 > "$tmp"; then
-            echo "node test discovery failed"; rm -f "$tmp"; exit 1
-          fi
-          mapfile -d '' -t files < "$tmp"; rm -f "$tmp"
+          set -euo pipefail   # includes pipefail, so the covered pipeline's node exit propagates
+          shopt -s nullglob
+          files=(tests/node/*.test.mjs)
           if [ ${#files[@]} -eq 0 ]; then echo "no Node tests found under tests/node/"; exit 0; fi
           printf 'discovered %d Node test file(s)\n' "${#files[@]}"
-          node --test "${files[@]}"
+          # Advisory coverage, symmetric with the Python path: attempt the covered run; if ANY part
+          # of it fails (coverage engine, mkdir, tee), fall back to a PLAIN `node --test` whose
+          # result is authoritative — so coverage tooling can never red a green Node suite.
+          if { mkdir -p "$RUNNER_TEMP/cov" \
+                 && node --test --experimental-test-coverage "${files[@]}" \
+                      | tee "$RUNNER_TEMP/cov/node-coverage.txt"; }; then
+            echo "Node suite passed under coverage"
+          else
+            echo "covered Node run failed — rerunning PLAIN for the authoritative verdict"
+            node --test "${files[@]}"
+          fi
+
+      - name: Upload Node coverage (advisory)
+        if: ${{ always() && matrix.shard == '0' && matrix.python == '3.x' && matrix.node == 'lts/*' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-coverage
+          path: ${{ runner.temp }}/cov/node-coverage.txt
+          if-no-files-found: ignore
 
   test:
     name: test

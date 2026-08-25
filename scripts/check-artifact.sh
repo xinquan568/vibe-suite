@@ -44,6 +44,11 @@ if [ "$is_artifact" = true ]; then
   # satisfies none of the patterns above).
   base="${file_path##*/}"
   echo "NL artifact edited: ${base}. Run /vibe-suite:score ${file_path} to check quality." >&2
+  # vibe-203 (observability): a non-2, non-zero exit makes the harness SHOW this stderr line to the
+  # operator (exit 0 would keep it transcript-only). It is advisory, never blocking — only exit 2
+  # blocks a PostToolUse; 1 does not. A JSON systemMessage was rejected: encoding a user-controlled
+  # file_path safely needs jq/python, which the hook must not depend on.
+  exit 1
 fi
 
 exit 0

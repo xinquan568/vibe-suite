@@ -39,17 +39,22 @@ async function main() {
   const { event } = parseArgs(process.argv.slice(2));
   const workspace = process.cwd();
 
+  // vibe-203 (observability): a SessionStart hook's stdout is added to the session context, so the
+  // operator actually sees these reports; SessionEnd stdout is not shown, so its reports stay on
+  // stderr (transcript). Routing by event is the whole point of the fix.
+  const report = (msg) => (event === "start" ? process.stdout : process.stderr).write(msg);
+
   const reaped = await reapOrphanTemps(workspace).catch(() => 0);
-  if (reaped > 0) process.stderr.write(`vibe-suite ${event}: reaped ${reaped} orphan temp file(s)\n`);
+  if (reaped > 0) report(`vibe-suite ${event}: reaped ${reaped} orphan temp file(s)\n`);
 
   const { records, invalid } = await listRecords(workspace).catch(() => ({ records: [], invalid: [] }));
   for (const entry of invalid) {
-    process.stderr.write(`vibe-suite ${event}: job ${entry.jobId} is unreadable (${entry.reason})\n`);
+    report(`vibe-suite ${event}: job ${entry.jobId} is unreadable (${entry.reason})\n`);
   }
 
   const live = records.filter((r) => !TERMINAL_STATUSES.has(r.status) && r.background);
   for (const record of live.filter((r) => isAbandoned(r))) {
-    process.stderr.write(
+    report(
       `vibe-suite ${event}: job ${record.jobId} looks abandoned (stale heartbeat, worker gone) — ` +
       `settle it with /vibe-suite:jobs status --settle-abandoned\n`);
   }

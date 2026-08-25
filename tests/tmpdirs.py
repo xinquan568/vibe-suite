@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: ISC
 """Throwaway-directory helpers for the Python test suite (vibe-198 / M32).
 
-Seven test modules called `tempfile.mkdtemp()` with no matching cleanup, leaking ~600 dirs into
+Thirteen test modules called `tempfile.mkdtemp()` with no matching cleanup, leaking ~600 dirs into
 $TMPDIR per full run. Two shapes replace them:
 
 * `TempDirMixin.mkdtemp(**kw)` — for a `TestCase` method: it registers `shutil.rmtree` via

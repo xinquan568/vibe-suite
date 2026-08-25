@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: ISC
 // Shared throwaway-directory helper for the Node test suite (vibe-198 / M32).
 //
-// Every `tests/node/*.test.mjs` used to call `mkdtempSync(path.join(tmpdir(), "…"))` and never
-// remove the directory, leaking ~600 dirs into $TMPDIR per full run. `workspace()` creates the
+// 19 of the `tests/node/*.test.mjs` files called `mkdtempSync(path.join(tmpdir(), "…"))` and never
+// remove the directory, leaking ~600 dirs into $TMPDIR per full run. `tmpWorkspace()` creates the
 // same kind of directory and registers it for synchronous removal at process exit, so a test that
 // throws still leaves nothing behind. Removal is idempotent: a directory a test already deleted is
 // skipped, never re-raised.
@@ -35,7 +35,7 @@ export function tmpWorkspace(prefix = "vibe-test-") {
   return dir;
 }
 
-// Explicit early removal for a workspace() dir a test wants gone before exit (idempotent).
+// Explicit early removal for a tmpWorkspace() dir a test wants gone before exit (idempotent).
 export function dispose(dir) {
   created.delete(dir);
   try {

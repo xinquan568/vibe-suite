@@ -17,6 +17,11 @@ import re
 import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from site_markdown import md_escape, v_pre  # noqa: E402  (corpus strings render as text — vibe-196)
+
 BUILDER = "vibe-build-reference-md"
 SLUG = "reference"
 PAGE = "reference/index.md"
@@ -93,12 +98,14 @@ def render_index(entries):
                 "fills in as soon as it lands.\n")
     lines = ["# Rules reference", "",
              f"{len(entries)} rule(s), one page each.", ""]
-    lines += [f"- [{e['id']} — {e['title']}]({e['slug']}.md)" for e in entries]
+    lines += [f"- [{md_escape(e['id'])} — {md_escape(e['title'])}]({e['slug']}.md)" for e in entries]
     return "\n".join(lines) + "\n"
 
 
 def render_rule(entry):
-    return f"# {entry['id']} — {entry['title']}\n\n{entry['body']}\n"
+    # The body is the rule's own Markdown and keeps it; v-pre stops the Vue compiler inside it and
+    # markdown.html=false (site config) renders any raw HTML in it as text.
+    return f"# {md_escape(entry['id'])} — {md_escape(entry['title'])}\n\n{v_pre(entry['body'])}\n"
 
 
 def write(path, text):

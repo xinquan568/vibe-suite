@@ -21,6 +21,11 @@ import re
 import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from site_markdown import md_escape  # noqa: E402  (corpus strings render as text — vibe-196)
+
 BUILDER = "vibe-build-case-studies-index"
 SLUG = "case-studies"
 PAGE = "case-studies/index.md"
@@ -106,14 +111,14 @@ def render(entries):
     lines = ["# Case studies", "",
              f"{len(entries)} study(ies), most recent first.", ""]
     for entry in entries:
-        head = f"- **{entry['title']}**"
+        head = f"- **{md_escape(entry['title'])}**"
         if entry["date"]:
-            head += f" — {entry['date']}"
+            head += f" — {md_escape(entry['date'])}"
         if entry["repo"]:
-            head += f" (`{entry['repo']}`)"
+            head += f" ({md_escape(entry['repo'])})"   # plain text, not a code span (see md_escape)
         lines.append(head)
         if entry["summary"]:
-            lines.append(f"  {entry['summary']}")
+            lines.append(f"  {md_escape(entry['summary'])}")
     return "\n".join(lines) + "\n"
 
 

@@ -80,9 +80,10 @@ jobs:
           set -euo pipefail
           bash tools/site-brand-check.sh "$SITE_DIST"
 
-      - name: Orchestrator and brand-check contracts
+      - name: Orchestrator, brand-check and builder contracts
         # The suites that own these contracts, invoked rather than restated, so this workflow
-        # cannot drift from them.
+        # cannot drift from them. test_site_builders' RenderedSite class needs the VitePress
+        # toolchain installed above (vibe-196): it skips in CI's `test` job and runs here.
         run: |
           set -euo pipefail
-          python3 -m unittest tests.test_site_build_orchestrator tests.test_site_brand -v
+          python3 -m unittest tests.test_site_build_orchestrator tests.test_site_brand tests.test_site_builders -v

@@ -21,6 +21,11 @@ import re
 import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from site_markdown import md_escape  # noqa: E402  (corpus strings render as text — vibe-196)
+
 BUILDER = "vibe-build-docs"
 SLUG = "docs"
 PAGE = "docs/index.md"
@@ -116,18 +121,18 @@ def render_index(entries):
                 "document is listed as soon as it lands.\n")
     lines = ["# Documentation", "", f"{len(entries)} document(s) in the framework reference.", ""]
     for entry in entries:
-        lines.append(f"- [{entry['title']}]({entry['slug']}.md)"
-                     + (f" — {entry['summary']}" if entry["summary"] else ""))
+        lines.append(f"- [{md_escape(entry['title'])}]({entry['slug']}.md)"
+                     + (f" — {md_escape(entry['summary'])}" if entry["summary"] else ""))
     return "\n".join(lines) + "\n"
 
 
 def render_doc(entry):
-    lines = [f"# {entry['title']}", ""]
+    lines = [f"# {md_escape(entry['title'])}", ""]
     if entry["summary"]:
-        lines += [entry["summary"], ""]
+        lines += [md_escape(entry["summary"]), ""]
     if entry["sections"]:
-        lines += ["## Contents", ""] + [f"- {name}" for name in entry["sections"]] + [""]
-    lines.append(f"Source: `{entry['source']}` ({entry['format']}).")
+        lines += ["## Contents", ""] + [f"- {md_escape(name)}" for name in entry["sections"]] + [""]
+    lines.append(f"Source: {md_escape(entry['source'])} ({entry['format']}).")
     return "\n".join(lines) + "\n"
 
 

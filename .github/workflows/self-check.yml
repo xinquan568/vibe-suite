@@ -1,6 +1,6 @@
 # Scheduled self-check (E8.4 / vibe-61).
 #
-# The suite auditing itself, on a schedule and on demand. Two jobs:
+# The suite auditing itself, on a schedule and on demand. Three jobs:
 #
 #   badge      refreshes the shields.io endpoint payload from the score history via
 #              `bin/vibe-badge`. The tool writes no files by design — the caller redirects —
@@ -12,8 +12,11 @@
 #              hand-edited `codex/` file is caught here even if no PR touched it. Mirror
 #              staleness is a drift defect: it appears with time, not with a commit, which is
 #              exactly what a scheduled run is for.
+#   macos      runs the Python and Node suites on macos-latest, exercising the documented
+#              POSIX/macOS support (README) on the weekly schedule — a compatibility smoke,
+#              off the PR path.
 #
-# Both jobs hold `contents: read` alone. This workflow reports; it changes nothing.
+# All three jobs hold `contents: read` alone. This workflow reports; it changes nothing.
 #
 # No model identifiers appear in this workflow (principle P9) — every tool uses its own
 # default.
@@ -100,3 +103,36 @@ jobs:
         run: |
           set -euo pipefail
           bin/vibe-check . --mirrors
+
+  macos:
+    name: macOS smoke (weekly)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Python suite on macOS
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests
+
+      - name: Node suite on macOS
+        # Bash 3.2 is the macOS default shell, which lacks the bash-4 array-read builtins. A
+        # nullglob array-glob is portable; the `*.test.mjs` glob skips no-top-level-await.mjs.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(tests/node/*.test.mjs)
+          if [ ${#files[@]} -eq 0 ]; then echo "no Node tests found under tests/node/"; exit 0; fi
+          printf 'discovered %d Node test file(s)\n' "${#files[@]}"
+          node --test "${files[@]}"

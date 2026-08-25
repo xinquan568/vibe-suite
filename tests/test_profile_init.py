@@ -357,7 +357,7 @@ class TestWriteDiscipline(WriteCase):
         before = "---\nscore_threshold: 80\neffort: high\n---\n\n# Notes\n\nkeep me\n"
         config.write_text(before, encoding="utf-8", newline="")
         self.assertEqual(self.write().returncode, 0)
-        after = config.read_text(encoding="utf-8", newline="")
+        after = config.read_bytes().decode("utf-8")
         self.assertEqual(after.replace("issue2pr_profile: demo\n", ""), before,
                          "everything except the inserted entry must be byte-identical")
 
@@ -366,7 +366,7 @@ class TestWriteDiscipline(WriteCase):
         config.write_text("---\r\nscore_threshold: 80\r\n---\r\n\r\nbody\r\n",
                           encoding="utf-8", newline="")
         self.assertEqual(self.write().returncode, 0)
-        after = config.read_text(encoding="utf-8", newline="")
+        after = config.read_bytes().decode("utf-8")
         self.assertIn("\r\n", after, "reading with translation would have destroyed these")
         self.assertNotIn("\n\n\n", after)
 
@@ -526,7 +526,7 @@ class TestCrlfPointer(WriteCase):
                           encoding="utf-8", newline="")
         result = self.write(None, "--force")
         self.assertEqual(result.returncode, 0, result.stderr)
-        after = config.read_text(encoding="utf-8", newline="")
+        after = config.read_bytes().decode("utf-8")
         self.assertEqual(after.count("issue2pr_profile:"), 1, "the entry must be replaced, not added")
         self.assertIn("demo", after)
         # The pattern consumes the CR, so the replacement must restore it. Otherwise the one line it

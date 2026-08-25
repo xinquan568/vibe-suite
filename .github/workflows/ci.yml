@@ -1,10 +1,12 @@
 # vibe-suite CI (E0.1 / vibe-3).
 #
 # Jobs: manifest validation · lint (Python + Node, with shell as a separate step) · loop bounds
-# (AC-4) · test · coverage (AC-1) · legacy strings (AC-6).
+# (AC-4) · pinned trees (fetch + cache the pinned upstream trees) · the Python suite sharded
+# four ways as `test shard N`, fanned in to the required `test` context · coverage (AC-1) ·
+# legacy strings (AC-6). vibe-199 (M34).
 # Per branch protection, the required status contexts on main are `manifest validation`, `lint (python + node)`, `test`, and `coverage (AC-1)`.
 # The loop-bounds and legacy-strings jobs are advisory attributable duplicates of checks that also
-# run inside the required `test` job — kept for attributable signal, not extra coverage; their
+# run inside the `test shard` jobs — kept for attributable signal, not extra coverage; their
 # failure does not block a merge.
 #
 # At scaffold time most discovery sets were empty by design — every job prints what it
@@ -172,10 +174,98 @@ jobs:
       - name: AC-4 loop bounds
         run: python3 -m unittest tests.test_loop_bounds -v
 
-  test:
-    name: test
+  # vibe-199 (M34): the pinned upstream trees are fetched ONCE in a dedicated job and cached, then
+  # the Python suite is sharded four ways. `test` stays a SINGLE required status context via the
+  # fan-in job below — the matrix produces `test shard N` contexts, which do not gate; the `test`
+  # job `needs` every shard and is green only when all four succeed, so branch protection is
+  # unchanged (no new required context; the required `test` context still means "all tests passed").
+  pinned-trees:
+    name: pinned trees
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # Restore keyed on the PINS in tools/coverage-check.py (the single source). The key is
+      # immutable, so a poisoned (incomplete) entry would persist — this job is the ONLY writer and
+      # saves ONLY a proven-complete tree set (below), so racing shards can never save a partial one.
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: ${{ runner.temp }}/pinned-trees
+          key: pinned-trees-${{ hashFiles('tools/coverage-check.py') }}
+
+      # vibe-132: the manifest-reproducibility check gates only where the pinned trees exist, and CI
+      # checks out none of them — so fetch each at its PINS commit into the runner temp (object
+      # database only). vibe-199: soft-fail — a bad fetch is left for the manifest-reproducibility
+      # tests to report, not to red this job; `complete` records whether every pin is present.
+      - name: Fetch pinned source trees (vibe-132; soft-fail per vibe-199)
+        id: fetch
+        run: |
+          set -euo pipefail
+          # Extracting the pins MUST hard-fail: a broken tools/coverage-check.py or an empty pin
+          # list must never be treated as a "complete" tree set and cached under the immutable key.
+          python3 - <<'PY' > "$RUNNER_TEMP/pins.txt"
+          import importlib.util, sys
+          spec = importlib.util.spec_from_file_location("cc", "tools/coverage-check.py")
+          cc = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(cc)
+          pins = getattr(cc, "PINS", None)
+          # Hard-fail (nonzero, aborting the step under `set -e`) on an empty or malformed pin
+          # set BEFORE printing — an empty mapping would otherwise print one blank line, pass the
+          # `-s` guard, and let the job "succeed" with nothing to cache.
+          if not isinstance(pins, dict) or not pins:
+              sys.exit("PINS is empty or not a mapping — refusing to proceed with no pins")
+          for r, c in pins.items():
+              if not (isinstance(r, str) and r.strip() and isinstance(c, str) and c.strip()):
+                  sys.exit(f"invalid PINS entry: {r!r} {c!r}")
+          print("\n".join(f"{r} {c}" for r, c in pins.items()))
+          PY
+          [ -s "$RUNNER_TEMP/pins.txt" ] || { echo "no pins extracted from tools/coverage-check.py"; exit 1; }
+          set +e   # from here individual network fetches may fail softly; `complete` records the outcome
+          complete=true; count=0
+          while read -r repo pin; do
+            count=$((count + 1))
+            dir="$RUNNER_TEMP/pinned-trees/$repo"
+            if git -C "$dir" cat-file -e "$pin^{commit}" 2>/dev/null; then
+              echo "present: $repo $pin"; continue
+            fi
+            git init -q "$dir"
+            git -C "$dir" remote add origin "https://github.com/xiaolai/$repo.git" 2>/dev/null || true
+            git -C "$dir" fetch -q --depth 1 origin "$pin" \
+              || git -C "$dir" fetch -q origin '+refs/heads/*:refs/remotes/origin/*' \
+              || echo "warning: could not fetch $repo $pin"
+            git -C "$dir" cat-file -e "$pin^{commit}" 2>/dev/null || { echo "MISSING after fetch: $repo $pin"; complete=false; }
+          done < "$RUNNER_TEMP/pins.txt"
+          # `complete` is true only when at least one pin was enumerated and every one is present.
+          [ "$count" -gt 0 ] || complete=false
+          echo "complete=$complete" >> "$GITHUB_OUTPUT"
+
+      # Save only on a cold miss AND a complete tree set — so the immutable key never holds a
+      # partial tree, and an unreachable upstream just means "no cache this run", not a poison.
+      - uses: actions/cache/save@v4
+        if: steps.cache.outputs.cache-hit != 'true' && steps.fetch.outputs.complete == 'true'
+        with:
+          path: ${{ runner.temp }}/pinned-trees
+          key: pinned-trees-${{ hashFiles('tools/coverage-check.py') }}
+
+  test-shard:
+    name: test shard ${{ matrix.shard }}
+    needs: [pinned-trees]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['0', '1', '2', '3']
     steps:
       - uses: actions/checkout@v4
 
@@ -187,58 +277,42 @@ jobs:
         with:
           node-version: 'lts/*'
 
-      # vibe-132: the manifest-reproducibility check gates only where the pinned trees
-      # exist, and CI checks out none of them — so fetch each at its PINS commit into the
-      # runner temp (object database only; --ref regeneration needs no working tree). The
-      # pins are read from tools/coverage-check.py, never restated here: two statements
-      # of one fact is the defect class this issue exists to end.
-      - name: Fetch pinned source trees (vibe-132)
-        run: |
-          set -euo pipefail
-          python3 - <<'PY' > "$RUNNER_TEMP/pins.txt"
-          import importlib.util
-          spec = importlib.util.spec_from_file_location("cc", "tools/coverage-check.py")
-          cc = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(cc)
-          print("\n".join(f"{r} {c}" for r, c in cc.PINS.items()))
-          PY
-          while read -r repo pin; do
-            dir="$RUNNER_TEMP/pinned-trees/$repo"
-            git init -q "$dir"
-            git -C "$dir" remote add origin "https://github.com/xiaolai/$repo.git"
-            if ! git -C "$dir" fetch -q --depth 1 origin "$pin"; then
-              # Server policy may refuse an unadvertised SHA: fall back to the remote
-              # heads (still no checkout), then require the object outright below.
-              git -C "$dir" fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
-            fi
-            git -C "$dir" cat-file -e "$pin^{commit}"
-          done < "$RUNNER_TEMP/pins.txt"
+      # Read-only restore of the trees the pinned-trees job cached. A miss (an incomplete fetch that
+      # was not cached) leaves the trees absent, and the manifest-reproducibility tests report it —
+      # the deliberate soft-fail path.
+      - uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/pinned-trees
+          key: pinned-trees-${{ hashFiles('tools/coverage-check.py') }}
 
-      - name: Run the suite
+      - name: Run this shard's Python modules
         env:
           VIBE_SUITE_PINNED_TREES: ${{ runner.temp }}/pinned-trees
         run: |
           set -euo pipefail
+          # Discovery must never fail open (ci.yml header): redirect find to a file inside an `if`
+          # so its exit status propagates, then read null-delimited names and sort.
           tmp=$(mktemp)
-          if ! find tests -name 'test_*.py' -print0 > "$tmp"; then
+          if ! find tests -maxdepth 1 -name 'test_*.py' -print0 > "$tmp"; then
             echo "test discovery failed"; rm -f "$tmp"; exit 1
           fi
-          mapfile -d '' -t files < "$tmp"; rm -f "$tmp"
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "no tests found under tests/"; exit 0
-          fi
-          printf 'discovered %d test module(s)\n' "${#files[@]}"
-          python3 -m unittest discover -s tests -v
+          mapfile -d '' -t all < <(sort -z < "$tmp"); rm -f "$tmp"
+          if [ ${#all[@]} -eq 0 ]; then echo "no tests found under tests/"; exit 1; fi
+          mods=()
+          for i in "${!all[@]}"; do
+            if [ $(( i % 4 )) -eq "${{ matrix.shard }}" ]; then
+              m="${all[$i]}"; m="${m#tests/}"; m="${m%.py}"; mods+=("tests.$m")
+            fi
+          done
+          if [ ${#mods[@]} -eq 0 ]; then echo "shard ${{ matrix.shard }} has no modules"; exit 1; fi
+          printf 'shard %s: %d of %d module(s)\n' "${{ matrix.shard }}" "${#mods[@]}" "${#all[@]}"
+          python3 -m unittest -v "${mods[@]}"
 
       - name: Run the Node suite
-        # A step inside this job rather than a job of its own: `test` is a required status
-        # context on main and a new job would not be, so a separate job could fail without
-        # blocking a merge — a gate that exists and does not gate. As a step it inherits
-        # `test`'s required status.
-        #
-        # The glob is explicit because `--test <dir>` resolves the directory as a module on some Node
-        # versions, and because `tests/node/` also holds `no-top-level-await.mjs`, which is a checker
-        # invoked with file arguments rather than a test.
+        # In shard 0 only, so it runs exactly once and stays within the `test` lineage (the fan-in
+        # `needs` every shard). The glob is explicit because `--test <dir>` resolves the directory as
+        # a module on some Node versions, and tests/node/ also holds no-top-level-await.mjs.
+        if: ${{ matrix.shard == '0' }}
         run: |
           set -euo pipefail
           tmp=$(mktemp)
@@ -246,11 +320,27 @@ jobs:
             echo "node test discovery failed"; rm -f "$tmp"; exit 1
           fi
           mapfile -d '' -t files < "$tmp"; rm -f "$tmp"
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "no Node tests found under tests/node/"; exit 0
-          fi
+          if [ ${#files[@]} -eq 0 ]; then echo "no Node tests found under tests/node/"; exit 0; fi
           printf 'discovered %d Node test file(s)\n' "${#files[@]}"
           node --test "${files[@]}"
+
+  test:
+    name: test
+    needs: [test-shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: All shards passed
+        # The single required status context on main. `if: always()` above so this job runs even
+        # when a shard fails; it then fails explicitly here — a skipped required check would not
+        # gate. `needs.test-shard.result` is "success" only when every matrix shard succeeded. This
+        # job checks out nothing and needs no token, so it grants none.
+        run: |
+          result='${{ needs.test-shard.result }}'
+          echo "test-shard result: $result"
+          [ "$result" = "success" ] || { echo "a test shard did not succeed"; exit 1; }
 
   coverage:
     name: coverage (AC-1)

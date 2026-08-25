@@ -9,8 +9,8 @@ input as untrusted.
 | Event | Script | Notes |
 |---|---|---|
 | `Stop` | `scripts/stop-review-gate-hook.mjs` | timeout 900 s; **ships disabled** |
-| `SessionStart` | `scripts/session-lifecycle-hook.mjs --event start` | hygiene; always exits 0 |
-| `SessionEnd` | `scripts/session-lifecycle-hook.mjs --event end` | hygiene; always exits 0 |
+| `SessionStart` | `scripts/session-lifecycle-hook.mjs --event start` | hygiene; exits 0 on runtime faults (unknown `--event` → 2) |
+| `SessionEnd` | `scripts/session-lifecycle-hook.mjs --event end` | hygiene; exits 0 on runtime faults (unknown `--event` → 2) |
 | `PostToolUse` | `scripts/check-artifact.sh` | matcher `Write\|Edit\|MultiEdit`; timeout 5 s; advisory only — fail-open, never blocks, one stderr line on NL-artifact edits |
 
 ## The stop-review gate is opt-in (D3)

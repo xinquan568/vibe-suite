@@ -93,3 +93,16 @@ test("an empty workspace is silent and successful", () => {
   assert.equal(result.status, 0);
   assert.equal(result.stderr.trim(), "");
 });
+
+// vibe-201 (M29): an unknown --event is a usage error, not a silent "start".
+
+test("an unknown --event is a usage error (exit 2), not a silent 'start'", () => {
+  const r = spawnSync(process.execPath, [HOOK, "--event", "bogus"], { encoding: "utf8" });
+  assert.equal(r.status, 2, `unknown --event must exit 2 (usage error), got ${r.status}: ${r.stderr}`);
+  assert.match(r.stderr, /--event/, `stderr must name the --event usage error: ${r.stderr}`);
+});
+
+test("a MISSING --event is likewise a usage error (exit 2)", () => {
+  const r = spawnSync(process.execPath, [HOOK], { encoding: "utf8" });
+  assert.equal(r.status, 2, `a missing --event must exit 2, got ${r.status}: ${r.stderr}`);
+});

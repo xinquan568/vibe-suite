@@ -19,7 +19,7 @@ async function main() {
   process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: THREAD_ID }) + "\n");
   process.stdout.write("\n");
   process.stdout.write("not json at all\n");
-  process.stdout.write(JSON.stringify({ type: "item.completed", text: "fixture output" }) + "\n");
+  process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "fixture output" } }) + "\n");
   process.stdout.write(JSON.stringify({
     type: "turn.completed",
     usage: { input_tokens: 100, cached_input_tokens: 60, output_tokens: 10, reasoning_output_tokens: 4 },

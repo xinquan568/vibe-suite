@@ -14,6 +14,7 @@ quick local loop you can run everything except that tier from the repo root:
 
     python3 -m unittest $(cd tests && ls test_*.py | grep -v '^test_auditor_' | sed 's/\.py$//' | sed 's/^/tests./')
 
-The exclusion keys on the `test_auditor_` filename prefix; `tests/test_doc_accuracy.py` pins
-that every slow module carries that prefix and no other module does, so the boundary cannot
-silently drift as tests are added.
+The exclusion keys on the `test_auditor_` filename prefix; `tests/test_doc_accuracy.py` pins the
+auditor tier against a reviewed manifest (`FastTestTier.AUDITOR_TIER`) and requires the on-disk
+`test_auditor_*.py` set to equal it, so a non-auditor module cannot silently acquire the prefix
+(and be skipped) and a new auditor module cannot be added without a deliberate manifest update.

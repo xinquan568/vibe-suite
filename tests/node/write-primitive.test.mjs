@@ -5,12 +5,10 @@
 // from being reachable with no command run, so a test that called `reapOrphanTemps` directly would
 // prove something weaker than what was reported.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import {
-  chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync,
-  utimesSync, writeFileSync,
-} from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -26,7 +24,7 @@ const HOOK = path.join(REPO_ROOT, "scripts", "session-lifecycle-hook.mjs");
 const SIX_HOURS_AGO = () => new Date(Date.now() - 7 * 60 * 60 * 1000);
 
 const mode = (p) => statSync(p).mode & 0o777;
-const scratchDir = () => mkdtempSync(path.join(tmpdir(), "write-prim-"));
+const scratchDir = () => tmpWorkspace("write-prim-");
 
 // --------------------------------------------------------------------- the live destructive defect
 
@@ -35,8 +33,8 @@ for (const event of ["start", "end"]) {
     // The issue's repro verbatim: <workspace>/.vibe-suite-state/jobs is a symlink to a directory
     // the user owns, holding a file whose NAME matches the reaper's pattern and whose age is past
     // the bound. Before vibe-103 the hook unlinked it.
-    const ws = mkdtempSync(path.join(tmpdir(), "repro-ws-"));
-    const outside = mkdtempSync(path.join(tmpdir(), "repro-outside-"));
+    const ws = tmpWorkspace("repro-ws-");
+    const outside = tmpWorkspace("repro-outside-");
     const victim = path.join(outside, "notes.tmp.archive");
     writeFileSync(victim, "the user's own notes\n", "utf8");
     utimesSync(victim, SIX_HOURS_AGO(), SIX_HOURS_AGO());
@@ -196,7 +194,7 @@ test("ensureDirAt refuses a symlinked path component", async () => {
 
 test("a parent-created owned temp root is recognised by a SPAWNED CHILD", async () => {
   const owned = await makeOwnedTempDir("vibe-cross");
-  const bare = mkdtempSync(path.join(tmpdir(), "vibe-bare-"));
+  const bare = tmpWorkspace("vibe-bare-");
   const probe = `
     import { isOwnedTempRoot } from ${JSON.stringify(path.join(REPO_ROOT, "scripts/lib/write.mjs"))};
     const [owned, bare] = process.argv.slice(2);
@@ -284,7 +282,7 @@ test("a symlinked root passed with a trailing separator is still refused", async
 });
 
 test("removeOwnedTree refuses a root it does not own", async () => {
-  const bare = mkdtempSync(path.join(tmpdir(), "vibe-unowned-"));
+  const bare = tmpWorkspace("vibe-unowned-");
   await assert.rejects(() => removeOwnedTree(bare), /not an owned temp root/);
   assert.ok(lstatSync(bare).isDirectory());
 });
@@ -293,7 +291,7 @@ test("removeOwnedTree refuses a root it does not own", async () => {
 
 test("a record published by createRecord is 0600, and the state dir is 0700", async () => {
   const { createRecord, jobsDir, newRecord, recordPath } = await import("../../scripts/lib/jobs.mjs");
-  const ws = mkdtempSync(path.join(tmpdir(), "routed-record-"));
+  const ws = tmpWorkspace("routed-record-");
   const record = newRecord({
     jobId: "job_00000000000000000000", kind: "review", sandbox: "read-only", effort: "low",
     model: null, background: false, timeoutMs: 1000, claimDigest: null,
@@ -309,7 +307,7 @@ test("a record published by createRecord is 0600, and the state dir is 0700", as
 test("an ALREADY-0644 canonical record becomes 0600 when the store updates it", async () => {
   const { createRecord, newRecord, recordPath, updateRecord } =
     await import("../../scripts/lib/jobs.mjs");
-  const ws = mkdtempSync(path.join(tmpdir(), "routed-upgrade-"));
+  const ws = tmpWorkspace("routed-upgrade-");
   await createRecord(ws, newRecord({
     jobId: "job_11111111111111111111", kind: "review", sandbox: "read-only", effort: "low",
     model: null, background: false, timeoutMs: 1000, claimDigest: null,
@@ -324,7 +322,7 @@ test("an ALREADY-0644 canonical record becomes 0600 when the store updates it", 
 
 test("an existing 0755 state directory is tightened on the next store use", async () => {
   const { createRecord, newRecord } = await import("../../scripts/lib/jobs.mjs");
-  const ws = mkdtempSync(path.join(tmpdir(), "routed-tighten-"));
+  const ws = tmpWorkspace("routed-tighten-");
   mkdirSync(path.join(ws, ".vibe-suite-state", "jobs"), { recursive: true, mode: 0o755 });
   chmodSync(path.join(ws, ".vibe-suite-state"), 0o755);
   chmodSync(path.join(ws, ".vibe-suite-state", "jobs"), 0o755);
@@ -341,7 +339,7 @@ test("the reaper trusts the WORKSPACE, not the last path component", async () =>
   // `.vibe-suite-state` is a symlink whose `jobs` child is a real directory outside the workspace:
   // asserting only the final component accepted it, and a stamped file there was deleted.
   const { reapOrphanTemps } = await import("../../scripts/lib/jobs.mjs");
-  const ws = mkdtempSync(path.join(tmpdir(), "reaper-anchor-"));
+  const ws = tmpWorkspace("reaper-anchor-");
   const outside = scratchDir();
   mkdirSync(path.join(outside, "jobs"));
   const bait = path.join(outside, "jobs", "job_x.tmp.1.aaa");
@@ -373,13 +371,13 @@ for (const umask of [0o077, 0o000]) {
 test("the latch signal is written 0600, and only inside an owned root", async () => {
   const { spawnSync: spawn } = await import("node:child_process");
   const owned = await makeOwnedTempDir("vibe-latch-mode");
-  const bare = mkdtempSync(path.join(tmpdir(), "vibe-latch-bare-"));
+  const bare = tmpWorkspace("vibe-latch-bare-");
   const runner = path.join(REPO_ROOT, "scripts", "codex-runner.mjs");
 
   for (const [dir, shouldWrite] of [[owned, true], [bare, false]]) {
     spawn(process.execPath, [runner, "--kind", "review", "--effort", "low", "--sandbox",
       "read-only", "--timeout-ms", "3000", "--", "probe"], {
-      cwd: mkdtempSync(path.join(tmpdir(), "latch-ws-")),
+      cwd: tmpWorkspace("latch-ws-"),
       env: { ...process.env, VIBE_SUITE_TEST_LATCH_DIR: dir,
         VIBE_SUITE_CODEX_BIN: path.join(REPO_ROOT, "tests/fixtures/fake-codex/emitter.mjs") },
       encoding: "utf8", timeout: 30_000,
@@ -399,7 +397,7 @@ test("the latch signal is written 0600, and only inside an owned root", async ()
 test("the gate record refuses an out-of-root and a symlinked destination", async () => {
   const { spawnSync: spawn } = await import("node:child_process");
   const probe = path.join(REPO_ROOT, "scripts", "agy-contract-probe.mjs");
-  const outside = mkdtempSync(path.join(tmpdir(), "gate-out-"));
+  const outside = tmpWorkspace("gate-out-");
   const target = path.join(outside, "gate-status.json");
 
   const run = (file) => spawn(process.execPath, [probe, "--write-record"], {

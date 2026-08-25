@@ -8,9 +8,10 @@
 // ordinary dependency (round-3 plan review, finding 1: module mocking is unavailable at the Node 18
 // floor), so these tests pass a recording stub and never touch a real process.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
-import { existsSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 
@@ -22,7 +23,7 @@ import {
 } from "../../scripts/lib/resolve.mjs";
 
 function workspace() {
-  return mkdtempSync(path.join(tmpdir(), "jobs-resolve-"));
+  return tmpWorkspace("jobs-resolve-");
 }
 
 function record(jobId, overrides = {}) {

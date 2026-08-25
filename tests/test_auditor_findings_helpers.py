@@ -15,9 +15,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from auditor_helpers_support import NOOP, REPO, SCRIPTS  # noqa: E402
+from tmpdirs import TempDirMixin, scratch_dir  # noqa: E402
 
 
-class Test_validate_rule_ids(unittest.TestCase):
+class Test_validate_rule_ids(TempDirMixin, unittest.TestCase):
     """`validate-rule-ids.py` — and the audit it exists because of.
 
     The scoring skill records the incident: a 2026-05-13 audit applied "R07 / -15" fourteen
@@ -40,7 +41,7 @@ class Test_validate_rule_ids(unittest.TestCase):
                "check": "no scope note / cross-references", "confidence": "high"}
 
     def _sidecar(self, findings, name="acme-widget.findings.jsonl"):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "audits").mkdir()
         path = d / "audits" / name
         path.write_text("\n".join(json.dumps(f) for f in findings) + "\n", encoding="utf-8")
@@ -49,7 +50,7 @@ class Test_validate_rule_ids(unittest.TestCase):
     def _run(self, argv, script_text=None):
         helper = self.HELPER
         if script_text is not None:
-            root = Path(tempfile.mkdtemp())
+            root = Path(self.mkdtemp())
             (root / "auditor" / "scripts").mkdir(parents=True)
             (root / "skills").symlink_to(REPO / "skills")
             helper = root / "auditor" / "scripts" / "validate-rule-ids.py"
@@ -118,7 +119,7 @@ class Test_validate_rule_ids(unittest.TestCase):
         self.assertIn("semantic-title-drift R04", r.stdout)
 
     def test_an_absent_audits_directory_is_not_a_failure(self):
-        r = self._run(["--data-dir", tempfile.mkdtemp()])
+        r = self._run(["--data-dir", self.mkdtemp()])
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("0 sidecar(s)", r.stdout)
 
@@ -133,14 +134,14 @@ class Test_validate_rule_ids(unittest.TestCase):
     def test_an_explicitly_named_missing_sidecar_is_refused(self):
         """Naming it asserts it exists. Skipping it silently would report "no drift" for a file
         that was never opened."""
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         r = self._run(["--data-dir", str(d), "--rubric", str(self.RUBRIC),
                        str(d / "audits" / "missing.findings.jsonl")])
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("REFUSE:validate-rule-ids:input-missing", r.stderr)
 
     def test_a_missing_rubric_is_refused(self):
-        r = self._run(["--data-dir", tempfile.mkdtemp(), "--rubric", "/nonexistent.md"])
+        r = self._run(["--data-dir", self.mkdtemp(), "--rubric", "/nonexistent.md"])
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("REFUSE:validate-rule-ids:rubric-missing", r.stderr)
 
@@ -200,7 +201,7 @@ class _FingerprintMixin:
         return r.stdout.strip()
 
 
-class Test_synthesize_sidecar(_FingerprintMixin, unittest.TestCase):
+class Test_synthesize_sidecar(TempDirMixin, _FingerprintMixin, unittest.TestCase):
     """`synthesize-sidecar.py` — rebuilding a sidecar without re-keying the ledger."""
 
     HELPER = SCRIPTS / "synthesize-sidecar.py"
@@ -208,14 +209,14 @@ class Test_synthesize_sidecar(_FingerprintMixin, unittest.TestCase):
     SLUG_MUTANT = '    words = list({w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in STOPWORDS})'
 
     def _report(self, text=REPORT):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "report.md").write_text(text, encoding="utf-8")
         return d / "report.md"
 
     def _run(self, report, script_text=None, extra=(), env=None):
         helper = self.HELPER
         if script_text is not None:
-            helper = Path(tempfile.mkdtemp()) / "synthesize-sidecar.py"
+            helper = Path(self.mkdtemp()) / "synthesize-sidecar.py"
             helper.write_text(script_text, encoding="utf-8")
         return subprocess.run([sys.executable, str(helper), "--repo", "acme/widget",
                                "--report", str(report), *extra],
@@ -360,7 +361,7 @@ class Test_synthesize_sidecar(_FingerprintMixin, unittest.TestCase):
                            "mutation ineffective: the mutant should vary with the hash seed")
 
 
-class Test_backfill_findings(_FingerprintMixin, unittest.TestCase):
+class Test_backfill_findings(TempDirMixin, _FingerprintMixin, unittest.TestCase):
     """`backfill-findings.py` — append what is missing, touch nothing else."""
 
     HELPER = SCRIPTS / "backfill-findings.py"
@@ -368,7 +369,7 @@ class Test_backfill_findings(_FingerprintMixin, unittest.TestCase):
     NL_MUTANT = '    ))'
 
     def _fixture(self, existing=None, trailing_newline=True):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "report.md").write_text(REPORT, encoding="utf-8")
         sidecar = d / "acme-widget.findings.jsonl"
         if existing is not None:
@@ -381,7 +382,7 @@ class Test_backfill_findings(_FingerprintMixin, unittest.TestCase):
     def _run(self, report, sidecar, apply=True, script_text=None, synth_text=None):
         helper = self.HELPER
         if script_text is not None or synth_text is not None:
-            root = Path(tempfile.mkdtemp()) / "scripts"
+            root = Path(self.mkdtemp()) / "scripts"
             root.mkdir(parents=True)
             (root / "backfill-findings.py").write_text(
                 script_text if script_text is not None else self.HELPER.read_text(),
@@ -499,7 +500,7 @@ class Test_backfill_findings(_FingerprintMixin, unittest.TestCase):
         self.assertIn(self.NL_ANCHOR, synth, "mutation anchor missing")
         mutant_src = synth.replace(self.NL_ANCHOR, self.NL_MUTANT, 1)
 
-        path = Path(tempfile.mkdtemp()) / "synthesize-sidecar.py"
+        path = Path(self.mkdtemp()) / "synthesize-sidecar.py"
         path.write_text(mutant_src, encoding="utf-8")
         spec = importlib.util.spec_from_file_location("_mutant", path)
         mutant = importlib.util.module_from_spec(spec)
@@ -522,7 +523,7 @@ class _GhFake:
 
     def gh(self, responses):
         """A directory holding a `gh` that replays `responses`, keyed by a substring of argv."""
-        d = Path(tempfile.mkdtemp())
+        d = Path(scratch_dir())
         (d / "responses.json").write_text(json.dumps(responses), encoding="utf-8")
         script = d / "gh"
         script.write_text(
@@ -550,7 +551,7 @@ class _GhFake:
         return dict(os.environ, PATH=f"{ghdir}:{os.environ['PATH']}")
 
 
-class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
+class Test_backfill_pr_fingerprints(TempDirMixin, _GhFake, unittest.TestCase):
     """`backfill-pr-fingerprints.py` — provenance for PRs older than the metadata block."""
 
     HELPER = SCRIPTS / "backfill-pr-fingerprints.py"
@@ -567,7 +568,7 @@ class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
     ]
 
     def _data_dir(self, prs=None):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "registry").mkdir()
         (d / "audits").mkdir()
         (d / "registry" / "repos.json").write_text(json.dumps({"repos": {"acme/widget": {
@@ -582,7 +583,7 @@ class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
     def _run(self, d, ghdir, apply=True, script_text=None):
         helper = self.HELPER
         if script_text is not None:
-            helper = Path(tempfile.mkdtemp()) / "backfill-pr-fingerprints.py"
+            helper = Path(self.mkdtemp()) / "backfill-pr-fingerprints.py"
             helper.write_text(script_text, encoding="utf-8")
         argv = [sys.executable, str(helper), "--data-dir", str(d)]
         if apply:
@@ -647,7 +648,7 @@ class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
         self.assertEqual((d / "registry" / "repos.json").read_text(), before)
 
     def test_a_missing_registry_is_refused(self):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         r = self._run(d, self.gh({}))
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("REFUSE:backfill-pr-fingerprints:registry-missing", r.stderr)
@@ -695,7 +696,7 @@ class Test_backfill_pr_fingerprints(_GhFake, unittest.TestCase):
                          "mutation ineffective: the mutant should attribute all three")
 
 
-class Test_scan_suppressions(_GhFake, unittest.TestCase):
+class Test_scan_suppressions(TempDirMixin, _GhFake, unittest.TestCase):
     """`scan-suppressions.py` — what maintainers turned off, and why that is evidence."""
 
     HELPER = SCRIPTS / "scan-suppressions.py"
@@ -725,7 +726,7 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
         return table
 
     def _data_dir(self, ledger=None):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "feedback").mkdir()
         if ledger is not None:
             (d / "feedback" / "suppressions.jsonl").write_text(
@@ -735,7 +736,7 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
     def _run(self, d, ghdir, apply=True, script_text=None, host=None):
         helper = self.HELPER
         if script_text is not None:
-            root = Path(tempfile.mkdtemp()) / "scripts"
+            root = Path(self.mkdtemp()) / "scripts"
             root.mkdir(parents=True)
             (root / "scan-suppressions.py").write_text(script_text, encoding="utf-8")
             (root / "parse-suppressions.py").write_text(
@@ -909,7 +910,7 @@ class Test_scan_suppressions(_GhFake, unittest.TestCase):
 
 
 
-class Test_diff_findings(unittest.TestCase):
+class Test_diff_findings(TempDirMixin, unittest.TestCase):
     """`diff-findings.py` — did the maintainer actually fix it?
 
     This helper decides whether a rule was VALIDATED, so its output feeds rule health. A wrong
@@ -936,7 +937,7 @@ class Test_diff_findings(unittest.TestCase):
     ]
 
     def _fixture(self, original=None, reaudit=None, events=None):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "registry").mkdir()
         (d / "audits").mkdir()
         (d / "ledgers").mkdir()
@@ -975,7 +976,7 @@ class Test_diff_findings(unittest.TestCase):
     def _run(self, d, script_text=None, **over):
         helper = self.HELPER
         if script_text is not None:
-            helper = Path(tempfile.mkdtemp()) / "diff-findings.py"
+            helper = Path(self.mkdtemp()) / "diff-findings.py"
             helper.write_text(script_text, encoding="utf-8")
         return subprocess.run([sys.executable, str(helper), *self._argv(d, **over)],
                               capture_output=True, text=True)

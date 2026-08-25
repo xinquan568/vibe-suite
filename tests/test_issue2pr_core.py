@@ -36,6 +36,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tmpdirs import TempDirMixin  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILL = REPO_ROOT / "skills" / "issue2pr" / "SKILL.md"
@@ -318,7 +320,7 @@ class TestDataFrameGolden(unittest.TestCase):
         self.assertIn("\n---\n", fenced, "the metadata is separated from the text inside the same fence")
 
 
-class TestSlugRule(unittest.TestCase):
+class TestSlugRule(TempDirMixin, unittest.TestCase):
     """grill H2 (part c): `{slug}` has one declared shape — `[a-z0-9-]{1,40}`, never `-`-led — stated
     once in the profile contract (`<!-- slug-rule -->`), derived by `scripts/issue2pr_slug.py` from a
     title (the declared steps, or a refusal with a reason) and enforced on a supplied `subtask.slug`
@@ -352,7 +354,7 @@ class TestSlugRule(unittest.TestCase):
         """A temp copy of the contract whose <!-- slug-rule --> block is re-serialised after
         `mutate(rule)` — no regex literal is needed to edit a member. `mutate` may return a
         replacement text for the whole block (a string) to model a malformed block."""
-        d = tempfile.mkdtemp()
+        d = self.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         text = self.contract
         m = re.search(r"(?s)(<!--\s*%s\s*-->\s*```json\s*)(.*?)(```)" % re.escape(self.MARKER), text)
@@ -456,7 +458,7 @@ class TestSlugRule(unittest.TestCase):
                 self.assertIn(self.rule["pattern"], r.stderr, "the refusal names the pattern")
 
     def test_a_supplied_manifest_slug_outside_the_rule_is_refused_at_the_entry(self):
-        d = tempfile.mkdtemp()
+        d = self.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         profile = Path(d) / "profile.md"
         profile.write_text("repo_id: example-repo\nbase_branch: trunk\n", encoding="utf-8")
@@ -502,7 +504,7 @@ class TestSlugRule(unittest.TestCase):
             return mutate
 
         with self.subTest(removed="the whole block (a readable contract with no marker)"):
-            d = tempfile.mkdtemp()
+            d = self.mkdtemp()
             self.addCleanup(shutil.rmtree, d, True)
             no_marker = re.sub(r"(?s)<!--\s*%s\s*-->\s*```json\s*.*?```\n?" % re.escape(self.MARKER), "", self.contract)
             self.assertNotIn(self.MARKER, no_marker)
@@ -529,7 +531,7 @@ class TestSlugRule(unittest.TestCase):
         with self.subTest(unexpected="note"):
             gap(self.contract_with(set_to("note", "documentation")), "unexpected member", "note")
         with self.subTest(absent="contract"):
-            gap(Path(tempfile.mkdtemp()) / "absent.md", "contract")
+            gap(Path(self.mkdtemp()) / "absent.md", "contract")
         # behaviour follows the declaration: a shorter max_length cuts shorter
         r = self.slug("hello wonderful world", contract=self.contract_with(set_to("max_length", 9)))
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -837,7 +839,7 @@ class LintCase(unittest.TestCase):
             capture_output=True, text=True, timeout=60)
 
 
-class TestProfileLint(LintCase):
+class TestProfileLint(TempDirMixin, LintCase):
     """Both directions. A lint tested only on rejection might reject everything."""
 
     def test_a_conformant_profile_passes(self):
@@ -902,14 +904,14 @@ class TestProfileLint(LintCase):
 
     def _write(self, text, name):
         import tempfile
-        directory = Path(tempfile.mkdtemp())
+        directory = Path(self.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
         path = directory / name
         path.write_text(text, encoding="utf-8")
         return path
 
 
-class TestValidationContexts(LintCase):
+class TestValidationContexts(TempDirMixin, LintCase):
     """Two contexts, because one would make the shipped reference unshippable.
 
     A reference profile cannot assume its project is checked out on the machine reading it. Structural
@@ -935,7 +937,7 @@ class TestValidationContexts(LintCase):
         broken = base.replace("repo_path: ./tests/fixtures/issue2pr/fixture-repo",
                               "repo_path: ./no/such/place")
         import tempfile
-        directory = Path(tempfile.mkdtemp())
+        directory = Path(self.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
         path = directory / "no-repo.md"
         path.write_text(broken, encoding="utf-8")
@@ -1131,11 +1133,11 @@ class TestGoldenRuns(unittest.TestCase):
         self.assertIn("approve_with_revisions", text)
 
 
-class TestParserIsClosed(LintCase):
+class TestParserIsClosed(TempDirMixin, LintCase):
     """The grammar rejects rather than guesses. A profile carries commands this pipeline will run."""
 
     def profile_text(self, text):
-        directory = Path(tempfile.mkdtemp())
+        directory = Path(self.mkdtemp())
         self.addCleanup(shutil.rmtree, directory, True)
         path = directory / "candidate.md"
         path.write_text(text, encoding="utf-8")
@@ -1188,7 +1190,7 @@ class TestParserIsClosed(LintCase):
         `skills/vibe-core/SKILL.md` in any consumer repository, so the check silently allowed anything.
         """
         import os
-        directory = Path(tempfile.mkdtemp())
+        directory = Path(self.mkdtemp())
         self.addCleanup(shutil.rmtree, directory, True)
         (directory / "scripts").mkdir()
         stray = directory / "scripts" / "profile_lint.py"
@@ -1204,7 +1206,7 @@ class TestParserIsClosed(LintCase):
         self.assertIn("domain is unknown", result.stderr)
 
 
-class TestManifestWritePath(unittest.TestCase):
+class TestManifestWritePath(TempDirMixin, unittest.TestCase):
     """The write surface had no tests at all — only reads were exercised.
 
     A mutation that misrouted the destination or bypassed containment was invisible. Every case below
@@ -1242,7 +1244,7 @@ class TestManifestWritePath(unittest.TestCase):
         self.assertFalse((self.ws / "both.json").exists(), "nothing may be written before the refusal")
 
     def test_a_destination_outside_the_root_is_refused(self):
-        outside = Path(tempfile.mkdtemp())
+        outside = Path(self.mkdtemp())
         self.addCleanup(shutil.rmtree, outside, True)
         result = self.write(outside / "escape.json", {"areas_confirmed": []})
         self.assertNotEqual(result.returncode, 0)
@@ -1265,7 +1267,7 @@ class TestManifestWritePath(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
 
 
-class TestRepoPathContainment(LintCase):
+class TestRepoPathContainment(TempDirMixin, LintCase):
     """`repo_path` names a checkout inside the workspace. Existence alone accepted `..` and `/tmp`."""
 
     def profile_with(self, repo_path):
@@ -1273,7 +1275,7 @@ class TestRepoPathContainment(LintCase):
         broken = base.replace("repo_path: ./tests/fixtures/issue2pr/fixture-repo",
                               "repo_path: %s" % repo_path)
         assert broken != base
-        directory = Path(tempfile.mkdtemp())
+        directory = Path(self.mkdtemp())
         self.addCleanup(shutil.rmtree, directory, True)
         path = directory / "candidate.md"
         path.write_text(broken, encoding="utf-8")
@@ -1294,7 +1296,7 @@ class TestRepoPathContainment(LintCase):
 
     def test_a_symlink_escape_is_refused(self):
         """The case a lexical check alone would miss."""
-        target = Path(tempfile.mkdtemp())
+        target = Path(self.mkdtemp())
         self.addCleanup(shutil.rmtree, target, True)
         (target / "README.md").write_text("outside\n", encoding="utf-8")
         link = REPO_ROOT / "tests" / "fixtures" / "issue2pr" / "escape-link"

@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from auditor_helpers_support import NOOP, REPO, SCRIPTS  # noqa: E402
+from tmpdirs import TempDirMixin  # noqa: E402
 
 
 def envelope(event, data, timestamp):
@@ -22,7 +23,7 @@ def envelope(event, data, timestamp):
             "run_id": "1", "run_number": 1, "data": data}
 
 
-class Test_rule_health(unittest.TestCase):
+class Test_rule_health(TempDirMixin, unittest.TestCase):
     """`rule-health.py` — the dataset that argues for changing the rulebook."""
 
     HELPER = SCRIPTS / "rule-health.py"
@@ -70,7 +71,7 @@ class Test_rule_health(unittest.TestCase):
                               "commit_sha: x\nscore: 95\nexemplifies: [R04]\n---\nbody\n"}
 
     def _data_dir(self, events=None, registry=None, exemplars=None):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "ledgers").mkdir()
         (d / "registry").mkdir()
         (d / "exemplars").mkdir()
@@ -86,7 +87,7 @@ class Test_rule_health(unittest.TestCase):
     def _run(self, d, script_text=None):
         helper = self.HELPER
         if script_text is not None:
-            helper = Path(tempfile.mkdtemp()) / "rule-health.py"
+            helper = Path(self.mkdtemp()) / "rule-health.py"
             helper.write_text(script_text, encoding="utf-8")
         return subprocess.run([sys.executable, str(helper), "--data-dir", str(d),
                                "--generated-at", "2026-08-08T00:00:00Z"],
@@ -290,7 +291,7 @@ class Test_rule_health(unittest.TestCase):
                          "mutation ineffective: a correct rule should now look half wrong")
 
 
-class Test_rule_health_section12(unittest.TestCase):
+class Test_rule_health_section12(TempDirMixin, unittest.TestCase):
     """vibe-167: the §12 metric set — every formula asserted against a fixture whose
     arithmetic is small enough to verify by hand.
 
@@ -381,7 +382,7 @@ class Test_rule_health_section12(unittest.TestCase):
     ]}
 
     def _data_dir(self):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         for sub in ("ledgers", "registry", "exemplars", "audits", "feedback"):
             (d / sub).mkdir()
         (d / "ledgers" / "events.jsonl").write_text(
@@ -469,7 +470,7 @@ class Test_rule_health_section12(unittest.TestCase):
             "9": {"number": 9, "updatedAt": "2026-04-01T00:00:00Z", "outcome": None,
                   "fingerprints": ["fp-n"], "rule_ids": ["R07"]},
         }}}}
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         for sub in ("ledgers", "registry", "exemplars"):
             (d / sub).mkdir()
         (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
@@ -506,7 +507,7 @@ class Test_rule_health_section12(unittest.TestCase):
                             "quote": "q", "commenter_role": "maintainer",
                             "classifier_model": "m", "classifier_confidence": "high"},
                            "2026-04-03T00:00:00Z") for fp in ("fp-1", "fp-2")]
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         for sub in ("ledgers", "registry", "exemplars"):
             (d / sub).mkdir()
         (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
@@ -534,7 +535,7 @@ class Test_rule_health_section12(unittest.TestCase):
                           "quote": "q", "commenter_role": "maintainer",
                           "classifier_model": "m", "classifier_confidence": "high"},
                          "2026-04-01T00:00:00Z")
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         for sub in ("ledgers", "registry", "exemplars"):
             (d / sub).mkdir()
         (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
@@ -553,7 +554,7 @@ class Test_rule_health_section12(unittest.TestCase):
     def test_a_disagreement_only_legacy_fingerprint_is_contributed(self):
         """F1: an adjudication event IS proof the finding reached a PR, even when
         the registry predates the metadata block and holds no record of it."""
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         for sub in ("ledgers", "registry", "exemplars"):
             (d / sub).mkdir()
         (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
@@ -574,7 +575,7 @@ class Test_rule_health_section12(unittest.TestCase):
         self.assertLessEqual(row["maintainer_rejection_rate"] or 0, 1)
 
     def test_empty_corpus_and_no_suppressions_yield_null_rate(self):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         for sub in ("ledgers", "registry", "exemplars"):
             (d / sub).mkdir()
         (d / "ledgers" / "events.jsonl").write_text("", encoding="utf-8")
@@ -647,7 +648,7 @@ class Test_state_policy_cross_alignment(unittest.TestCase):
                     self.assertEqual(state, "healthy")
 
 
-class Test_validate_feedback(unittest.TestCase):
+class Test_validate_feedback(TempDirMixin, unittest.TestCase):
     """`validate-feedback.sh` — the gate between a rebuild bug and a rulebook change."""
 
     HELPER = SCRIPTS / "validate-feedback.sh"
@@ -656,7 +657,7 @@ class Test_validate_feedback(unittest.TestCase):
         {"rule_id": "nl:R7", "hits": 4, "submitted": 2, "merged": 1, "rejected": 0}]}
 
     def _log(self, payload, write=True):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "feedback").mkdir()
         if write:
             text = payload if isinstance(payload, str) else json.dumps(payload)
@@ -666,7 +667,7 @@ class Test_validate_feedback(unittest.TestCase):
     def _run(self, d, extra=(), script_text=None):
         helper = self.HELPER
         if script_text is not None:
-            helper = Path(tempfile.mkdtemp()) / "validate-feedback.sh"
+            helper = Path(self.mkdtemp()) / "validate-feedback.sh"
             helper.write_text(script_text, encoding="utf-8")
         return subprocess.run(["bash", str(helper), "--data-dir", str(d), *extra],
                               capture_output=True, text=True)
@@ -833,7 +834,7 @@ class Test_validate_feedback(unittest.TestCase):
 
 
 
-class Test_prepare_refinement_input(unittest.TestCase):
+class Test_prepare_refinement_input(TempDirMixin, unittest.TestCase):
     """`prepare-refinement-input.py` — the filter IS the value."""
 
     HELPER = SCRIPTS / "prepare-refinement-input.py"
@@ -862,7 +863,7 @@ class Test_prepare_refinement_input(unittest.TestCase):
     ]
 
     def _data_dir(self, rules=None, findings=None):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "feedback").mkdir()
         (d / "audits").mkdir()
         (d / "feedback" / "log.json").write_text(
@@ -875,7 +876,7 @@ class Test_prepare_refinement_input(unittest.TestCase):
     def _run(self, d, script_text=None):
         helper = self.HELPER
         if script_text is not None:
-            helper = Path(tempfile.mkdtemp()) / "prepare-refinement-input.py"
+            helper = Path(self.mkdtemp()) / "prepare-refinement-input.py"
             helper.write_text(script_text, encoding="utf-8")
         r = subprocess.run([sys.executable, str(helper), "--data-dir", str(d)],
                            capture_output=True, text=True)
@@ -925,7 +926,7 @@ class Test_prepare_refinement_input(unittest.TestCase):
     def test_a_missing_feedback_log_is_refused(self):
         """Selecting from nothing reports 'no rules need review' — the most reassuring possible
         way to be wrong."""
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "feedback").mkdir()
         r, _ = self._run(d)
         self.assertNotEqual(r.returncode, 0)
@@ -946,7 +947,7 @@ class Test_prepare_refinement_input(unittest.TestCase):
                       "mutation ineffective: the mutant should admit the one-hit rule")
 
 
-class Test_generate_rule_review_body(unittest.TestCase):
+class Test_generate_rule_review_body(TempDirMixin, unittest.TestCase):
     """`generate-rule-review-body.py` — the quarterly review issue."""
 
     HELPER = SCRIPTS / "generate-rule-review-body.py"
@@ -989,7 +990,7 @@ class Test_generate_rule_review_body(unittest.TestCase):
     ]
 
     def _data_dir(self):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "ledgers").mkdir()
         (d / "exemplars").mkdir()
         for name, text in self.EXEMPLARS.items():
@@ -1001,7 +1002,7 @@ class Test_generate_rule_review_body(unittest.TestCase):
     def _run(self, d, script_text=None, quarter="2026-Q2"):
         helper = self.HELPER
         if script_text is not None:
-            helper = Path(tempfile.mkdtemp()) / "generate-rule-review-body.py"
+            helper = Path(self.mkdtemp()) / "generate-rule-review-body.py"
             helper.write_text(script_text, encoding="utf-8")
         return subprocess.run([sys.executable, str(helper), "--data-dir", str(d),
                                "--quarter", quarter, "--as-of", self.AS_OF],

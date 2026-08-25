@@ -5,10 +5,11 @@
 // because the runner cannot be imported (it runs `main()` on load) and a descriptor's lifetime is
 // not visible from outside the process that holds it.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { fstatSync, lstatSync, mkdtempSync, readFileSync, statSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { fstatSync, lstatSync, readFileSync, statSync, symlinkSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 
@@ -19,7 +20,7 @@ import {
 const ID = "job_aaaaaaaaaaaaaaaaaaaa";
 
 async function workspaceWithRecord() {
-  const ws = mkdtempSync(path.join(tmpdir(), "worker-sink-"));
+  const ws = tmpWorkspace("worker-sink-");
   await createRecord(ws, newRecord({
     jobId: ID, kind: "review", sandbox: "read-only", effort: "low",
     model: null, background: true, timeoutMs: 1000, claimDigest: null,

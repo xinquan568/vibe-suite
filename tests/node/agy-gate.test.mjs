@@ -5,9 +5,10 @@
 // lane cannot open by accident. A record whose top-level status disagrees with its checks is
 // corruption, not consent; an unreadable record is a closed gate, not an exception.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -23,7 +24,7 @@ const allPassed = () => ({
 });
 
 function recordFile(record) {
-  const dir = mkdtempSync(path.join(tmpdir(), "agy-gate-"));
+  const dir = tmpWorkspace("agy-gate-");
   const file = path.join(dir, "gate-status.json");
   writeFileSync(file, typeof record === "string" ? record : JSON.stringify(record));
   return file;

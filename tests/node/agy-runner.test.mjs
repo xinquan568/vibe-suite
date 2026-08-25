@@ -5,10 +5,11 @@
 // deliberately, and — once opened — the runner must mirror E1.1's contract while respecting what
 // agy's own behaviour forces (exit codes lie, OAuth blocks past stdin, no thread id exists).
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -22,7 +23,7 @@ const FIXTURES = path.join(REPO_ROOT, "tests", "fixtures", "fake-agy");
 
 /** A simulated GRADUATED gate, injected through the documented seam. Production stays not_passed. */
 function passedGateFile() {
-  const dir = mkdtempSync(path.join(tmpdir(), "agy-gate-open-"));
+  const dir = tmpWorkspace("agy-gate-open-");
   const file = path.join(dir, "gate-status.json");
   writeFileSync(file, JSON.stringify({
     schema: 1, status: "passed", agy_version: "1.1.2", recorded_at: "2026-07-28T00:00:00Z",
@@ -44,7 +45,7 @@ function run(args, { cwd, fixture = "responder.mjs", gate = null, probe = null, 
   });
 }
 
-const ws = () => mkdtempSync(path.join(tmpdir(), "agy-ws-"));
+const ws = () => tmpWorkspace("agy-ws-");
 const jobCount = (dir) => {
   try {
     return readdirSync(jobsDir(dir)).filter((n) => /^job_[0-9a-f]{20}\.json$/.test(n)).length;
@@ -63,7 +64,7 @@ test("pre-gate: the committed gate is shut, so nothing dispatches and no record 
 
 test("with the gate simulated open: a record, the five-key line, and threadId null", async () => {
   const dir = ws();
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "agy-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("agy-probe-"), "probe.json");
   const result = run(base(), { cwd: dir, gate: passedGateFile(), probe });
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   const line = JSON.parse(result.stdout.trim().split("\n").at(-1));
@@ -85,7 +86,7 @@ test("model resolution: explicit wins, agy's override applies, otherwise omitted
     return dir;
   };
   const argvOf = (dir, extra) => {
-    const probe = path.join(mkdtempSync(path.join(tmpdir(), "agy-probe-")), "probe.json");
+    const probe = path.join(tmpWorkspace("agy-probe-"), "probe.json");
     const r = run(base(...extra), { cwd: dir, gate, probe });
     assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
     return JSON.parse(readFileSync(probe, "utf8")).argv;
@@ -148,7 +149,7 @@ test("an OAuth-blocking agy is killed by the deadline: stdin at /dev/null does n
 
 test("an oversized prompt fails CLOSED — no truncation, no dispatch, no record", () => {
   const dir = ws();
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "agy-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("agy-probe-"), "probe.json");
   // Multibyte, so the cap is proven to be bytes rather than characters.
   const huge = "é".repeat(60_000);                    // 120 000 bytes
   const result = run(["--kind", "audit", "--timeout-ms", "20000", "--", huge],

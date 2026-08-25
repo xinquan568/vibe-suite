@@ -6,10 +6,11 @@
 // record, and assert what a caller can actually see: exit code, stdout, stderr, and how many job
 // records were created.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -24,7 +25,7 @@ const CODEX_FIXTURES = path.join(REPO_ROOT, "tests", "fixtures", "fake-codex");
 const MISSING = "/nonexistent/definitely-not-installed";
 
 function openGate() {
-  const file = path.join(mkdtempSync(path.join(tmpdir(), "audit-gate-")), "gate-status.json");
+  const file = path.join(tmpWorkspace("audit-gate-"), "gate-status.json");
   writeFileSync(file, JSON.stringify({
     schema: 1, status: "passed", agy_version: "1.1.2", recorded_at: "2026-07-28T00:00:00Z",
     checks: Object.fromEntries(MANDATORY_CHECKS.map((n) => [n, { state: "passed", note: "simulated" }])),
@@ -33,7 +34,7 @@ function openGate() {
 }
 
 function run({ agy = MISSING, codex = MISSING, gate = null } = {}) {
-  const cwd = mkdtempSync(path.join(tmpdir(), "audit-ws-"));
+  const cwd = tmpWorkspace("audit-ws-");
   const result = spawnSync(process.execPath, [CLI, "--", "audit this repository"], {
     cwd, encoding: "utf8", timeout: 90_000,
     env: {
@@ -100,7 +101,7 @@ test("both unreachable: the manual signal on stdout and exit 3", () => {
 });
 
 test("a malformed invocation is a usage error, distinct from the manual path", () => {
-  const cwd = mkdtempSync(path.join(tmpdir(), "audit-usage-"));
+  const cwd = tmpWorkspace("audit-usage-");
   // Both engines pinned even here: "no test invokes a real CLI" should hold by construction in every
   // subprocess, not just the ones that would have dispatched.
   const result = spawnSync(process.execPath, [CLI], {

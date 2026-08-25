@@ -8,11 +8,12 @@
 // and the verdict is read structurally (last assistant message, first non-empty line) so neither
 // the diff nor a non-assistant event can spoof it.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -27,7 +28,7 @@ const FIXTURES = path.join(REPO_ROOT, "tests", "fixtures", "fake-codex");
 const MARKER = "SEEDED-DEFECT-MARKER";
 
 function repo({ enabled = false, failPolicy = null, gateModel = null, projectModel = null, brokenProject = false } = {}) {
-  const dir = mkdtempSync(path.join(tmpdir(), "stop-gate-"));
+  const dir = tmpWorkspace("stop-gate-");
   const git = (...args) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
   git("init", "-q");
   writeFileSync(path.join(dir, "tracked.txt"), "baseline\n");
@@ -97,7 +98,7 @@ test("disabled by default on a fresh install: allows, and dispatches nothing at 
 test("enabled: a seeded defect in an UNTRACKED file blocks — and only because its content was sent", () => {
   const dir = repo({ enabled: true });
   seedDefect(dir);
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("gate-probe-"), "probe.json");
   const result = runHook(dir, { fixture: "gate-marker.mjs", probe });
 
   const decision = decisionOf(result);
@@ -119,7 +120,7 @@ test("the PUBLISHED prompt file is 0600 inside a 0700 scratch root", () => {
   // prompt, so the byte cap cannot truncate it away, and no other scratch root can contain it.
   const nonce = `nonce-${randomUUID()}`;
   seedDefect(dir, `defect-${nonce}.js`);
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("gate-probe-"), "probe.json");
   const result = runHook(dir, {
     fixture: "gate-prompt-mode.mjs", probe, env: { VIBE_TEST_PROMPT_NONCE: nonce },
   });
@@ -140,12 +141,12 @@ test("the PUBLISHED prompt file is 0600 inside a 0700 scratch root", () => {
 test("untracked collection: spaced names included, symlinks and outside targets excluded, caps disclosed", () => {
   const dir = repo({ enabled: true });
   writeFileSync(path.join(dir, "spaced name.txt"), "SPACED-CONTENT-PRESENT\n");
-  const outside = mkdtempSync(path.join(tmpdir(), "gate-outside-"));
+  const outside = tmpWorkspace("gate-outside-");
   writeFileSync(path.join(outside, "secret.txt"), "OUTSIDE-SECRET-MUST-NOT-LEAK\n");
   symlinkSync(path.join(outside, "secret.txt"), path.join(dir, "link-to-secret.txt"));
   writeFileSync(path.join(dir, "huge.txt"), "H".repeat(25_000));
 
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("gate-probe-"), "probe.json");
   const result = runHook(dir, { fixture: "gate-allower.mjs", probe });
   assert.equal(result.status, 0);
   const sent = promptSentTo(probe);
@@ -217,7 +218,7 @@ test("verdicts are read structurally: last assistant message, first non-empty li
 test("P9 both directions: unset gate.model sends no -m even with a project override; set sends exactly one", () => {
   const unset = repo({ enabled: true, projectModel: "project-configured-model" });
   seedDefect(unset);
-  const probeA = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const probeA = path.join(tmpWorkspace("gate-probe-"), "probe.json");
   runHook(unset, { fixture: "gate-allower.mjs", probe: probeA });
   const argvA = JSON.parse(readFileSync(probeA, "utf8")).argv;
   assert.ok(!argvA.includes("-m"),
@@ -225,7 +226,7 @@ test("P9 both directions: unset gate.model sends no -m even with a project overr
 
   const set = repo({ enabled: true, projectModel: "project-configured-model", gateModel: "gate-chosen-model" });
   seedDefect(set);
-  const probeB = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const probeB = path.join(tmpWorkspace("gate-probe-"), "probe.json");
   runHook(set, { fixture: "gate-allower.mjs", probe: probeB });
   const argvB = JSON.parse(readFileSync(probeB, "utf8")).argv;
   assert.equal(argvB.filter((a) => a === "-m").length, 1, argvB.join(" "));
@@ -233,7 +234,7 @@ test("P9 both directions: unset gate.model sends no -m even with a project overr
 });
 
 test("the runner refuses --model together with --no-model, without spawning or recording", () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "no-model-"));
+  const dir = tmpWorkspace("no-model-");
   const result = spawnSync(process.execPath, [
     path.join(REPO_ROOT, "scripts", "codex-runner.mjs"),
     "--kind", "stop-gate", "--sandbox", "read-only", "--no-model", "--model", "x",
@@ -263,7 +264,7 @@ test("a LARGE tracked diff is read, not dropped — and its cap is disclosed rat
   // an indeterminate result and an ALLOW), and that the prompt cap announces itself.
   writeFileSync(path.join(dir, "tracked.txt"),
     `// ${MARKER}\n` + "P".repeat(2 * 1024 * 1024) + "\n");
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("gate-probe-"), "probe.json");
   const result = runHook(dir, { fixture: "gate-marker.mjs", probe });
   const decision = decisionOf(result);
   assert.ok(decision, `a large tracked diff must still be reviewed, got: ${result.stderr}`);
@@ -276,7 +277,7 @@ test("a LARGE tracked diff is read, not dropped — and its cap is disclosed rat
 
 test("a collection failure is indeterminate, never a silent ALLOW", () => {
   // Not a git repository at all: `git status` fails, so the gate does not know the tree is clean.
-  const dir = mkdtempSync(path.join(tmpdir(), "stop-gate-nogit-"));
+  const dir = tmpWorkspace("stop-gate-nogit-");
   const enable = `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(STORE))}); ` +
     `import store; store.Store(${JSON.stringify(dir)}).set("gate.stop_review_gate", True)`;
   spawnSync("python3", ["-c", enable], { encoding: "utf8" });
@@ -284,7 +285,7 @@ test("a collection failure is indeterminate, never a silent ALLOW", () => {
   assert.equal(decisionOf(open), null);
   assert.ok(open.stderr.includes("could not be collected"), open.stderr);
 
-  const closedDir = mkdtempSync(path.join(tmpdir(), "stop-gate-nogit-closed-"));
+  const closedDir = tmpWorkspace("stop-gate-nogit-closed-");
   for (const [key, value] of [["gate.stop_review_gate", "True"], ["gate.fail_policy", '"closed"']]) {
     spawnSync("python3", ["-c",
       `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(STORE))}); ` +
@@ -298,14 +299,14 @@ test("a collection failure is indeterminate, never a silent ALLOW", () => {
 });
 
 test("an unborn repository is reviewable: every file is new, and its content is sent", () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "stop-gate-unborn-"));
+  const dir = tmpWorkspace("stop-gate-unborn-");
   spawnSync("git", ["-C", dir, "init", "-q"], { encoding: "utf8" });
   spawnSync("python3", ["-c",
     `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(STORE))}); ` +
     `import store; store.Store(${JSON.stringify(dir)}).set("gate.stop_review_gate", True)`,
   ], { encoding: "utf8" });
   seedDefect(dir);
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("gate-probe-"), "probe.json");
   const result = runHook(dir, { fixture: "gate-marker.mjs", probe });
   const decision = decisionOf(result);
   assert.ok(decision, `an unborn repo must still be reviewed, got: ${result.stderr}`);
@@ -314,7 +315,7 @@ test("an unborn repository is reviewable: every file is new, and its content is 
 
 test("a hostile textconv driver cannot execute or inject outside content", () => {
   const dir = repo({ enabled: true });
-  const outside = mkdtempSync(path.join(tmpdir(), "gate-textconv-"));
+  const outside = tmpWorkspace("gate-textconv-");
   writeFileSync(path.join(outside, "secret.txt"), "TEXTCONV-LEAKED-SECRET\n");
   // A repository configuring a converter that would dump an outside file into the diff.
   writeFileSync(path.join(dir, ".gitattributes"), "*.bin diff=evil\n");
@@ -326,7 +327,7 @@ test("a hostile textconv driver cannot execute or inject outside content", () =>
     "commit", "-q", "-m", "add payload"], { encoding: "utf8" });
   writeFileSync(path.join(dir, "payload.bin"), "binary-ish changed\n");
 
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("gate-probe-"), "probe.json");
   runHook(dir, { fixture: "gate-allower.mjs", probe });
   const sent = promptSentTo(probe);
   assert.ok(!sent.includes("TEXTCONV-LEAKED-SECRET"),
@@ -338,14 +339,14 @@ test("the total untracked cap is disclosed when many files exhaust it", () => {
   for (let i = 0; i < 12; i += 1) {
     writeFileSync(path.join(dir, `bulk-${i}.txt`), "B".repeat(15_000));
   }
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("gate-probe-"), "probe.json");
   runHook(dir, { fixture: "gate-allower.mjs", probe });
   const sent = promptSentTo(probe);
   assert.ok(sent.includes("total cap reached"), "exhausting the total cap must be disclosed");
 });
 
 test("unborn repository: STAGED content is reviewed too (ls-files --others cannot see it)", () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "stop-gate-staged-"));
+  const dir = tmpWorkspace("stop-gate-staged-");
   spawnSync("git", ["-C", dir, "init", "-q"], { encoding: "utf8" });
   spawnSync("python3", ["-c",
     `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(STORE))}); ` +
@@ -354,7 +355,7 @@ test("unborn repository: STAGED content is reviewed too (ls-files --others canno
   seedDefect(dir, "staged-defect.js");
   spawnSync("git", ["-C", dir, "add", "-A"], { encoding: "utf8" });   // now TRACKED, not "other"
 
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "gate-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("gate-probe-"), "probe.json");
   const result = runHook(dir, { fixture: "gate-marker.mjs", probe });
   const decision = decisionOf(result);
   assert.ok(decision, `staged content in an unborn repo must be reviewed, got: ${result.stderr}`);
@@ -363,7 +364,7 @@ test("unborn repository: STAGED content is reviewed too (ls-files --others canno
 });
 
 test("outside a git repository, rev-parse's 128 is a fault, not 'no commits yet'", () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "stop-gate-notrepo-"));
+  const dir = tmpWorkspace("stop-gate-notrepo-");
   spawnSync("python3", ["-c",
     `import sys; sys.path.insert(0, ${JSON.stringify(path.dirname(STORE))}); ` +
     `import store; store.Store(${JSON.stringify(dir)}).set("gate.stop_review_gate", True)`,
@@ -450,7 +451,7 @@ test("no python3 on PATH: the hook fails open with the spawn cause, not a stack 
   // A PATH with no python3 at all: `spawnSync("python3", …)` yields status null, error.code ENOENT and
   // UNDEFINED stdout/stderr — the branch a literal `result.stderr.trim()` would crash on. The hook
   // itself runs from process.execPath, and it returns before it needs `git`.
-  const empty = mkdtempSync(path.join(tmpdir(), "no-python-"));
+  const empty = tmpWorkspace("no-python-");
   const result = runHook(dir, { fixture: "gate-marker.mjs", env: { PATH: empty } });
   assert.equal(result.status, 0, `the hook never exits non-zero:\n${result.stderr}`);
   assert.equal(decisionOf(result), null, "with no store reader at all the stored policy is unrecoverable: fail open by default");

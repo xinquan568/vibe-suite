@@ -15,9 +15,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from auditor_helpers_support import NOOP, REPO, SCRIPTS  # noqa: E402
+from tmpdirs import TempDirMixin  # noqa: E402
 
 
-class Test_batch_process(unittest.TestCase):
+class Test_batch_process(TempDirMixin, unittest.TestCase):
     """`batch-process.py` — every call here touches a third party's repository."""
 
     HELPER = SCRIPTS / "batch-process.py"
@@ -28,7 +29,7 @@ class Test_batch_process(unittest.TestCase):
     REG_MUTANT = '    repos = {}'
 
     def _gh(self):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         script = d / "gh"
         script.write_text("#!/usr/bin/env bash\n"
                           'printf "%s\\n" "$*" >> "$(dirname "$0")/calls.log"\n'
@@ -41,7 +42,7 @@ class Test_batch_process(unittest.TestCase):
         return log.read_text().splitlines() if log.is_file() else []
 
     def _data_dir(self, repos=None, raw=None):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "registry").mkdir()
         if raw is not None:
             (d / "registry" / "repos.json").write_text(raw, encoding="utf-8")
@@ -56,7 +57,7 @@ class Test_batch_process(unittest.TestCase):
     def _run(self, d, ghdir, extra=(), script_text=None):
         helper = self.HELPER
         if script_text is not None:
-            helper = Path(tempfile.mkdtemp()) / "batch-process.py"
+            helper = Path(self.mkdtemp()) / "batch-process.py"
             helper.write_text(script_text, encoding="utf-8")
         env = dict(os.environ, PATH=f"{ghdir}:{os.environ['PATH']}")
         return subprocess.run([sys.executable, str(helper), "--data-dir", str(d),
@@ -173,7 +174,7 @@ class Test_batch_process(unittest.TestCase):
 
 
 
-class Test_propose_rule_citations(unittest.TestCase):
+class Test_propose_rule_citations(TempDirMixin, unittest.TestCase):
     """`propose-rule-citations.py` — S-4, and the links that end up in the rulebook."""
 
     HELPER = SCRIPTS / "propose-rule-citations.py"
@@ -187,7 +188,7 @@ class Test_propose_rule_citations(unittest.TestCase):
              "<!-- vibe-exemplar-citation:site R02 -->\n")
 
     def _fixture(self, exemplars=None, rules=None):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "exemplars").mkdir()
         for name, text in (exemplars if exemplars is not None else {
             "acme-widget.md": "---\nslug: acme-widget\nrepo: acme/widget\n"
@@ -205,7 +206,7 @@ class Test_propose_rule_citations(unittest.TestCase):
     def _run(self, d, rules_path, apply=True, prefix=None, script_text=None, env=None):
         helper = self.HELPER
         if script_text is not None:
-            helper = Path(tempfile.mkdtemp()) / "propose-rule-citations.py"
+            helper = Path(self.mkdtemp()) / "propose-rule-citations.py"
             helper.write_text(script_text, encoding="utf-8")
         argv = [sys.executable, str(helper), "--data-dir", str(d),
                 "--rules-path", str(rules_path)]

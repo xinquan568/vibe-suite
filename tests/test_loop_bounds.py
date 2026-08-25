@@ -33,6 +33,8 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tmpdirs import TempDirMixin  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOOPS = json.loads((REPO_ROOT / "tests" / "loop-bounds" / "loops.json").read_text(encoding="utf-8"))
@@ -188,12 +190,12 @@ def cites_contract(name):
     return "reviewer-contract.md#" in document(name)
 
 
-class StubCase(unittest.TestCase):
+class StubCase(TempDirMixin, unittest.TestCase):
     """The executable half: the stub is a program, so its outputs are observable."""
 
     def dispatch(self, mode, cwd=None):
         import tempfile
-        directory = cwd or tempfile.mkdtemp()
+        directory = cwd or self.mkdtemp()
         env = dict(os.environ)
         env["VIBE_SUITE_CODEX_BIN"] = str(STUB)
         env["VIBE_TEST_STUB_VERDICT"] = mode

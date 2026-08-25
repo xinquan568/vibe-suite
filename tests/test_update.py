@@ -31,6 +31,8 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import bridge          # noqa: E402
 import mcp_pin         # noqa: E402
 import retired_names   # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tmpdirs import TempDirMixin  # noqa: E402
 
 UNRELATED_TOML = textwrap.dedent("""\
     # a comment the user wrote
@@ -445,11 +447,11 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TestAdvisorReconcileStage(unittest.TestCase):
+class TestAdvisorReconcileStage(TempDirMixin, unittest.TestCase):
     """E6.1: update reconciles advisors in every pin state; removal needs no backend."""
 
     def test_orphan_removed_and_stage_reported(self):
-        ws = Path(tempfile.mkdtemp(prefix="vibe-update-advisors-"))
+        ws = Path(self.mkdtemp(prefix="vibe-update-advisors-"))
         self.addCleanup(__import__("shutil").rmtree, ws, ignore_errors=True)
         orphan = {"command": "npx", "args": ["-y", "claude-octopus@9.9.9"], "env": {},
                   "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}
@@ -469,7 +471,7 @@ class TestAdvisorReconcileStage(unittest.TestCase):
         # stage reports FAIL in /vibe-suite:update's report instead of dying silently. The seed
         # is a name collision — an unowned server squatting on a declared advisor's name —
         # which reconcile refuses in every pin state.
-        ws = Path(tempfile.mkdtemp(prefix="vibe-update-advisors-"))
+        ws = Path(self.mkdtemp(prefix="vibe-update-advisors-"))
         self.addCleanup(__import__("shutil").rmtree, ws, ignore_errors=True)
         (ws / ".vibe-suite" / "agents").mkdir(parents=True)
         (ws / ".vibe-suite" / "agents" / "floaty.md").write_text(
@@ -510,7 +512,7 @@ class TestAdvisorReconcileStage(unittest.TestCase):
 
     def test_a_declared_but_never_registered_advisor_is_held_by_update(self):
         # vibe-185: update converges only what the operator registered.
-        ws = Path(tempfile.mkdtemp(prefix="vibe-update-advisors-"))
+        ws = Path(self.mkdtemp(prefix="vibe-update-advisors-"))
         self.addCleanup(__import__("shutil").rmtree, ws, ignore_errors=True)
         (ws / ".vibe-suite" / "agents").mkdir(parents=True)
         (ws / ".vibe-suite" / "agents" / "quiet.md").write_text(

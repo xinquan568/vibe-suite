@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from auditor_helpers_support import NOOP, REPO, SCRIPTS, source_and_call  # noqa: E402
+from tmpdirs import TempDirMixin  # noqa: E402
 
 
 class Test_compute_fingerprint(unittest.TestCase):
@@ -145,14 +146,14 @@ class Test_compute_vocab_fingerprint(unittest.TestCase):
         self.assertNotEqual(a, b, "the mutant should be order-SENSITIVE; mutation ineffective")
 
 
-class Test_guard_protected_paths(unittest.TestCase):
+class Test_guard_protected_paths(TempDirMixin, unittest.TestCase):
     """`guard-protected-paths.sh` — refuse a pipeline run that touches core artifacts."""
 
     HELPER = SCRIPTS / "guard-protected-paths.sh"
 
     def _repo(self):
         """A throwaway git repo with a committed data file and no protected changes."""
-        td = tempfile.mkdtemp()
+        td = self.mkdtemp()
         root = Path(td)
         subprocess.run(["git", "init", "-q", "."], cwd=root, check=True)
         subprocess.run(["git", "config", "user.email", "t@e"], cwd=root, check=True)
@@ -309,7 +310,7 @@ class Test_parse_pr_metadata(unittest.TestCase):
         self.assertNotEqual(got, "second", "the oracle must reject first-block behaviour")
 
 
-class Test_parse_suppressions(unittest.TestCase):
+class Test_parse_suppressions(TempDirMixin, unittest.TestCase):
     """`parse-suppressions.py` — emit configured rule overrides as JSONL.
 
     The reference implementation imports PyYAML and, on ImportError, prints a note and exits 0,
@@ -334,7 +335,7 @@ class Test_parse_suppressions(unittest.TestCase):
     )
 
     def _run(self, config_text=None, script_text=None, path=None):
-        td = tempfile.mkdtemp()
+        td = self.mkdtemp()
         cfg = Path(td) / "cfg.md"
         if config_text is not None:
             cfg.write_text(config_text, encoding="utf-8")
@@ -492,7 +493,7 @@ class Test_vendor_default_filter(unittest.TestCase):
 
 
 
-class Test_docs_diff(unittest.TestCase):
+class Test_docs_diff(TempDirMixin, unittest.TestCase):
     """`docs-diff.py` — detect when a cited external doc has drifted."""
 
     HELPER = SCRIPTS / "docs-diff.py"
@@ -501,7 +502,7 @@ class Test_docs_diff(unittest.TestCase):
 
     def _module(self, script_text=None):
         import importlib.util
-        path = Path(tempfile.mkdtemp()) / "docs_diff.py"
+        path = Path(self.mkdtemp()) / "docs_diff.py"
         path.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
         spec = importlib.util.spec_from_file_location("docs_diff_under_test", path)
         mod = importlib.util.module_from_spec(spec)
@@ -534,7 +535,7 @@ class Test_docs_diff(unittest.TestCase):
     def _fixture(self, mod):
         import hashlib
         steady = hashlib.sha256(b"steady").hexdigest()
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "ledgers").mkdir()
         (d / "ledgers" / "docs-citations.json").write_text(json.dumps(
             {"_meta": "skipped", "http://new": {}, "http://drift": {},
@@ -604,7 +605,7 @@ class Test_docs_diff(unittest.TestCase):
 
 
 
-class Test_commit_via_pr(unittest.TestCase):
+class Test_commit_via_pr(TempDirMixin, unittest.TestCase):
     """`commit-via-pr.sh` — publish an already-committed data change as a PR.
 
     The workflow commits and this helper publishes; that split differs from the reference
@@ -618,7 +619,7 @@ class Test_commit_via_pr(unittest.TestCase):
     HELPER = SCRIPTS / "commit-via-pr.sh"
 
     def _repo(self, origin="https://github.com/acme/widget"):
-        d = Path(tempfile.mkdtemp()) / "work"
+        d = Path(self.mkdtemp()) / "work"
         d.mkdir()
         run = lambda *a: subprocess.run(["git", "-C", str(d), *a], check=True,
                                         capture_output=True)
@@ -650,7 +651,7 @@ class Test_commit_via_pr(unittest.TestCase):
         `origin` OPERAND of ls-remote, fetch and push only, so identity verification passes
         unchanged and the base comparison is actually reached.
         """
-        base = Path(tempfile.mkdtemp())
+        base = Path(self.mkdtemp())
         bare = base / "remote.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True,
                        capture_output=True)
@@ -712,7 +713,7 @@ class Test_commit_via_pr(unittest.TestCase):
         # bare flag behind, so `--checkout` swallowed the next flag as its value and the
         # helper ran on garbage — which then reached the network and hung.
         argv = [x for k, v in args.items() if v is not None for x in (k, v)]
-        path = Path(tempfile.mkdtemp()) / "helper.sh"
+        path = Path(self.mkdtemp()) / "helper.sh"
         path.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
         environ = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp"),
                    "PAT_TOKEN": "tok"}
@@ -784,7 +785,7 @@ class Test_commit_via_pr(unittest.TestCase):
         self.assertEqual(self._reason(r), "branch-equals-base")
 
     def test_a_non_worktree_checkout_is_refused(self):
-        r = self._run(Path(tempfile.mkdtemp()))
+        r = self._run(Path(self.mkdtemp()))
         self.assertEqual(self._reason(r), "not-a-git-worktree")
 
 
@@ -851,7 +852,7 @@ class Test_commit_via_pr(unittest.TestCase):
                       "the real helper must publish and report the PR")
 
 
-class Test_atomic_registry_write(unittest.TestCase):
+class Test_atomic_registry_write(TempDirMixin, unittest.TestCase):
     """`atomic-registry-write.sh` — validate a staged registry write, then land it atomically.
 
     The registry is the join key for every finding, PR outcome and disagreement the pipeline
@@ -865,7 +866,7 @@ class Test_atomic_registry_write(unittest.TestCase):
     VALIDATE_ANCHOR = 'if ! python3 -c \'import json,sys; json.load(open(sys.argv[1]))\' "$REG_TMP" >/dev/null 2>&1; then'
 
     def _tree(self):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "registry").mkdir()
         (d / "registry" / "repos.json").write_text(self.ORIGINAL, encoding="utf-8")
         return d
@@ -874,7 +875,7 @@ class Test_atomic_registry_write(unittest.TestCase):
         stage = d / "stage.json"
         if staged is not None:
             stage.write_text(staged, encoding="utf-8")
-        path = Path(tempfile.mkdtemp()) / "helper.sh"
+        path = Path(self.mkdtemp()) / "helper.sh"
         path.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
         env = dict(os.environ)
         env["REG_TMP"] = str(stage)
@@ -926,7 +927,7 @@ class Test_atomic_registry_write(unittest.TestCase):
         as a successful atomic write, which is the worst possible way to lose the file every
         other stage reads.
         """
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "registry").mkdir()
         registry = d / "registry" / "repos.json"
         registry.write_text('{"repos": {"a/b": {"status": "audited"}}}\n', encoding="utf-8")
@@ -939,7 +940,7 @@ class Test_atomic_registry_write(unittest.TestCase):
     def test_the_same_file_reached_by_a_relative_path_is_also_refused(self):
         """Compared by resolved path: a string comparison misses `--source repos.json` run from
         inside the registry directory, which is the same inode."""
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "registry").mkdir()
         registry = d / "registry" / "repos.json"
         registry.write_text('{"repos": {}}\n', encoding="utf-8")
@@ -978,7 +979,7 @@ class Test_atomic_registry_write(unittest.TestCase):
 
 
 
-class Test_three_way_merge_registry(unittest.TestCase):
+class Test_three_way_merge_registry(TempDirMixin, unittest.TestCase):
     """`three-way-merge-registry.py` — resolve a registry push race without losing updates.
 
     The bug this replaces is subtle and was observed in production: deep-merging OURS over
@@ -999,7 +1000,7 @@ class Test_three_way_merge_registry(unittest.TestCase):
                           "c/z": {"state": "new"}}}
 
     def _run(self, script_text=None, base=None, ours=None, theirs=None):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         # `is None`, NOT `or`: an empty registry `{}` is falsy, so `base or self.BASE`
         # silently substituted the default fixture and the empty-input case never ran.
         for name, doc in (("base", self.BASE if base is None else base),
@@ -1069,7 +1070,7 @@ class Test_three_way_merge_registry(unittest.TestCase):
 
 
 
-class Test_log_event(unittest.TestCase):
+class Test_log_event(TempDirMixin, unittest.TestCase):
     """`log-event.sh` — append one canonical event record to the ledger.
 
     E8.2a already wired all 18 emitters and ten ledger readers to this envelope, so its shape
@@ -1084,7 +1085,7 @@ class Test_log_event(unittest.TestCase):
 
     def _emit(self, payload, script_text=None, run_number="10", workflow="discover",
               event="search_complete"):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         helper = d / "helper.sh"
         helper.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
         env = dict(os.environ)
@@ -1155,7 +1156,7 @@ class Test_log_event(unittest.TestCase):
 
 
 
-class Test_repair_stale_statuses(unittest.TestCase):
+class Test_repair_stale_statuses(TempDirMixin, unittest.TestCase):
     @classmethod
     def score_re(cls):
         """The helper's OWN pattern, read from it rather than restated here.
@@ -1187,7 +1188,7 @@ class Test_repair_stale_statuses(unittest.TestCase):
     }}
 
     def _run(self, script_text=None, registry=None):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "registry").mkdir()
         (d / "audits").mkdir()
         (d / "registry" / "repos.json").write_text(
@@ -1229,7 +1230,7 @@ class Test_repair_stale_statuses(unittest.TestCase):
         self.assertEqual(after["f/complete"]["status"], "complete")
 
     def test_dry_run_writes_nothing(self):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "registry").mkdir()
         (d / "audits").mkdir()
         original = json.dumps(self.REGISTRY)
@@ -1239,7 +1240,7 @@ class Test_repair_stale_statuses(unittest.TestCase):
         self.assertEqual((d / "registry" / "repos.json").read_text(), original)
 
     def test_an_unreadable_registry_is_refused(self):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "registry").mkdir()
         (d / "registry" / "repos.json").write_text("{not json", encoding="utf-8")
         r = subprocess.run([sys.executable, str(self.HELPER), "--data-dir", str(d)],
@@ -1302,7 +1303,7 @@ class Test_repair_stale_statuses(unittest.TestCase):
 
 
 
-class Test_build_exemplar_gallery(unittest.TestCase):
+class Test_build_exemplar_gallery(TempDirMixin, unittest.TestCase):
     """`build-exemplar-gallery.py` — the exemplar index, regenerated and CI-checked."""
 
     HELPER = SCRIPTS / "build-exemplar-gallery.py"
@@ -1310,7 +1311,7 @@ class Test_build_exemplar_gallery(unittest.TestCase):
     SORT_MUTANT = 'for item in items:'
 
     def _corpus(self):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "exemplars").mkdir()
         # Deliberately created in NON-alphabetical order so a helper that preserves input
         # order produces different output from one that sorts.
@@ -1326,7 +1327,7 @@ class Test_build_exemplar_gallery(unittest.TestCase):
         return d
 
     def _run(self, d, script_text=None, check=False):
-        helper = Path(tempfile.mkdtemp()) / "helper.py"
+        helper = Path(self.mkdtemp()) / "helper.py"
         helper.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
         argv = [sys.executable, str(helper), "--data-dir", str(d)]
         if check:
@@ -1371,7 +1372,7 @@ class Test_build_exemplar_gallery(unittest.TestCase):
         self.assertEqual(self._run(d, check=True).returncode, 1, "stale gallery not detected")
 
     def test_check_on_a_missing_corpus_is_a_distinct_exit(self):
-        r = self._run(Path(tempfile.mkdtemp()), check=True)
+        r = self._run(Path(self.mkdtemp()), check=True)
         self.assertEqual(r.returncode, 2)
         self.assertIn("corpus-missing", r.stderr)
 
@@ -1400,7 +1401,7 @@ class Test_build_exemplar_gallery(unittest.TestCase):
 
 
 
-class Test_resolve_merge_conflicts(unittest.TestCase):
+class Test_resolve_merge_conflicts(TempDirMixin, unittest.TestCase):
     """`resolve-merge-conflicts.sh` — per-file conflict strategy, against a REAL git conflict.
 
     Each strategy exists because a naive default lost data: two-way merges reverted disjoint
@@ -1416,7 +1417,7 @@ class Test_resolve_merge_conflicts(unittest.TestCase):
 
     def _conflicted_repo(self):
         """A data checkout mid-conflict: ours changed a/x, theirs changed b/y, both appended."""
-        d = Path(tempfile.mkdtemp()) / "data"
+        d = Path(self.mkdtemp()) / "data"
         d.mkdir()
         g = lambda *a: subprocess.run(["git", "-C", str(d), *a], capture_output=True, check=False)
         g("init", "-q", ".")
@@ -1455,7 +1456,7 @@ class Test_resolve_merge_conflicts(unittest.TestCase):
         if script_text is None:
             path = helper
         else:
-            path = Path(tempfile.mkdtemp()) / "resolve.sh"
+            path = Path(self.mkdtemp()) / "resolve.sh"
             path.write_text(script_text, encoding="utf-8")
             # siblings resolve relative to the script, so link them next to the mutant
             for sib in ("three-way-merge-registry.py", "atomic-registry-write.sh",
@@ -1503,7 +1504,7 @@ class Test_resolve_merge_conflicts(unittest.TestCase):
         Every earlier test created a MERGE conflict (correct roles) or a rebase over DISJOINT
         changes (no field ever contested), so the inversion stayed invisible.
         """
-        t = Path(tempfile.mkdtemp())
+        t = Path(self.mkdtemp())
         run = lambda *a, **k: subprocess.run(a, capture_output=True, text=True, **k)
         run("git", "init", "-q", "--bare", str(t / "remote.git"))
         run("git", "-C", str(t / "remote.git"), "symbolic-ref", "HEAD", "refs/heads/main")
@@ -1547,7 +1548,7 @@ class Test_resolve_merge_conflicts(unittest.TestCase):
 
     def test_an_ordinary_file_conflict_during_a_REBASE_keeps_this_runs_content(self):
         """The generic fallback has the same inversion: `--ours` during a rebase is upstream."""
-        t = Path(tempfile.mkdtemp())
+        t = Path(self.mkdtemp())
         run = lambda *a, **k: subprocess.run(a, capture_output=True, text=True, **k)
         run("git", "init", "-q", str(t / "a"))
         for cfg in (("user.email", "t@e"), ("user.name", "t")):
@@ -1599,7 +1600,7 @@ class Test_resolve_merge_conflicts(unittest.TestCase):
 
 
 
-class Test_git_push_with_retry(unittest.TestCase):
+class Test_git_push_with_retry(TempDirMixin, unittest.TestCase):
     """`git-push-with-retry.sh` — the issue's named acceptance, against a REAL push race.
 
     Two clones of one bare remote. B commits and pushes first; A commits a DISJOINT change and
@@ -1613,7 +1614,7 @@ class Test_git_push_with_retry(unittest.TestCase):
 
     def _race(self):
         """A bare remote, a losing clone `a` mid-race, and B's change already pushed."""
-        t = Path(tempfile.mkdtemp())
+        t = Path(self.mkdtemp())
         run = lambda *a, **k: subprocess.run(a, capture_output=True, text=True, **k)
         run("git", "init", "-q", "--bare", str(t / "remote.git"))
         run("git", "-C", str(t / "remote.git"), "symbolic-ref", "HEAD", "refs/heads/main")
@@ -1657,7 +1658,7 @@ class Test_git_push_with_retry(unittest.TestCase):
         if script_text is None:
             path = self.HELPER
         else:
-            path = Path(tempfile.mkdtemp()) / "push.sh"
+            path = Path(self.mkdtemp()) / "push.sh"
             path.write_text(script_text, encoding="utf-8")
             for sib in ("resolve-merge-conflicts.sh", "three-way-merge-registry.py",
                         "atomic-registry-write.sh", "build-exemplar-gallery.py"):
@@ -1666,7 +1667,7 @@ class Test_git_push_with_retry(unittest.TestCase):
                                "--attempts", attempts], capture_output=True, text=True)
 
     def _remote_state(self, t):
-        verify = t / f"verify{tempfile.mkdtemp()[-6:]}"
+        verify = t / f"verify{self.mkdtemp()[-6:]}"
         subprocess.run(["git", "clone", "-q", str(t / "remote.git"), str(verify)],
                        capture_output=True)
         repos = json.loads((verify / "registry" / "repos.json").read_text())["repos"]
@@ -1699,7 +1700,7 @@ class Test_git_push_with_retry(unittest.TestCase):
         self.assertIn("REFUSE:git-push-with-retry:", r.stderr)
 
     def test_a_non_worktree_checkout_is_refused(self):
-        r = subprocess.run(["bash", str(self.HELPER), "--checkout", tempfile.mkdtemp()],
+        r = subprocess.run(["bash", str(self.HELPER), "--checkout", self.mkdtemp()],
                            capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("not-a-git-worktree", r.stderr)

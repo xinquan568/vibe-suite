@@ -17,15 +17,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from auditor_helpers_support import NOOP, REPO, SCRIPTS  # noqa: E402
+from tmpdirs import TempDirMixin  # noqa: E402
 
 
-class Test_generate_daily_report(unittest.TestCase):
+class Test_generate_daily_report(TempDirMixin, unittest.TestCase):
 
     def test_non_enum_outcomes_are_rendered_not_hidden(self):
         # vibe-167 F4 iteration 2: cla_blocked was in the old dynamic report
         import json as _json, subprocess as _sp, sys as _sys, tempfile as _tf
         from pathlib import Path as _P
-        d = _P(_tf.mkdtemp())
+        d = _P(self.mkdtemp())
         (d / "in").mkdir()
         (d / "in" / "pr-outcomes.json").write_text(_json.dumps(
             {"merged": 1, "cla_blocked": 2}))
@@ -40,7 +41,7 @@ class Test_generate_daily_report(unittest.TestCase):
         # vibe-167 (F4): policy_denied and friends are report facts
         import json as _json, subprocess as _sp, sys as _sys, tempfile as _tf
         from pathlib import Path as _P
-        d = _P(_tf.mkdtemp())
+        d = _P(self.mkdtemp())
         (d / "in").mkdir()
         (d / "in" / "registry-stats.json").write_text(_json.dumps(
             {"total": 3, "by_status": {"discovered": 1, "policy_denied": 2}}))
@@ -58,7 +59,7 @@ class Test_generate_daily_report(unittest.TestCase):
     DATE = "2026-08-07"
 
     def _run(self, script_text=None, outcomes=None, empty=False):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         if not empty:
             (d / "report-cache").mkdir()
             (d / "report-cache" / "registry-stats.json").write_text(
@@ -72,7 +73,7 @@ class Test_generate_daily_report(unittest.TestCase):
                 json.dumps({"R01": {"findings": 10, "accepted": 4}}), encoding="utf-8")
             (d / "report-cache" / "recent-activity.json").write_text(
                 json.dumps(["audited acme/widget"]), encoding="utf-8")
-        helper = Path(tempfile.mkdtemp()) / "helper.py"
+        helper = Path(self.mkdtemp()) / "helper.py"
         helper.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
         r = subprocess.run([sys.executable, str(helper), "--data-dir", str(d),
                             "--date", self.DATE], capture_output=True, text=True)
@@ -219,7 +220,7 @@ class Test_report_resources(unittest.TestCase):
                 self.fail(f"{name} references an external host: {ref}")
 
 
-class Test_render_dashboard(unittest.TestCase):
+class Test_render_dashboard(TempDirMixin, unittest.TestCase):
     """`render-dashboard.py` — the cross-repository aggregate page."""
 
     HELPER = SCRIPTS / "render-dashboard.py"
@@ -228,7 +229,7 @@ class Test_render_dashboard(unittest.TestCase):
     STAMP = "2026-08-07T00:00:00Z"
 
     def _data_dir(self, malformed=False):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "ledgers").mkdir()
         (d / "registry").mkdir()
         (d / "registry" / "repos.json").write_text(json.dumps({"repos": {
@@ -264,7 +265,7 @@ class Test_render_dashboard(unittest.TestCase):
             # dropped in a bare temp directory refuses for want of a template no matter what
             # was mutated — every mutant would "fail" identically and the comparison would
             # prove nothing. Mirror the real layout and link the resources it reads.
-            root = Path(tempfile.mkdtemp())
+            root = Path(self.mkdtemp())
             (root / "auditor" / "scripts").mkdir(parents=True)
             for name in ("templates", "skills"):
                 (root / name).symlink_to(REPO / name)
@@ -378,7 +379,7 @@ class Test_render_dashboard(unittest.TestCase):
 
     def test_an_empty_data_dir_still_renders(self):
         """A freshly provisioned auditor has no findings yet; that is a state, not a failure."""
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         r, data = self._run(d)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(data["summary"]["total_findings"], 0)
@@ -453,7 +454,7 @@ class Test_render_dashboard(unittest.TestCase):
 
 
 
-class Test_render_repo_report(unittest.TestCase):
+class Test_render_repo_report(TempDirMixin, unittest.TestCase):
     """`render-repo-report.py` — one repository's page, and the identifier it is keyed on."""
 
     HELPER = SCRIPTS / "render-repo-report.py"
@@ -462,7 +463,7 @@ class Test_render_repo_report(unittest.TestCase):
     STAMP = "2026-08-07T00:00:00Z"
 
     def _data_dir(self, repos=None):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "registry").mkdir()
         (d / "ledgers").mkdir(exist_ok=True)
         (d / "registry" / "repos.json").write_text(json.dumps({"repos": repos if repos is not None
@@ -488,7 +489,7 @@ class Test_render_repo_report(unittest.TestCase):
             # parents[1] of the helper locates templates/, and the sibling dashboard helper is
             # imported by name. A mutant in a bare temp directory would refuse for want of
             # those regardless of the mutation, making every mutant fail identically.
-            root = Path(tempfile.mkdtemp())
+            root = Path(self.mkdtemp())
             (root / "auditor" / "scripts").mkdir(parents=True)
             for name in ("templates", "skills"):
                 (root / name).symlink_to(REPO / name)
@@ -632,7 +633,7 @@ class Test_render_repo_report(unittest.TestCase):
 
 
 
-class Test_renderer_workflow_composition(unittest.TestCase):
+class Test_renderer_workflow_composition(TempDirMixin, unittest.TestCase):
     """I4.4 — the invocation in auditor-audit.yml, extracted and actually run.
 
     Every other test here calls the helper the way the TEST thinks the workflow calls it. That
@@ -665,7 +666,7 @@ class Test_renderer_workflow_composition(unittest.TestCase):
                           if not ln.lstrip().startswith("#"))
 
     def test_the_workflows_own_command_line_renders_a_report(self):
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "registry").mkdir()
         (d / "ledgers").mkdir(exist_ok=True)
         (d / "registry" / "repos.json").write_text(
@@ -696,7 +697,7 @@ class Test_renderer_workflow_composition(unittest.TestCase):
 
     def test_a_render_failure_fails_the_step(self):
         """The property the removed `|| echo` destroyed: a broken render stops the run."""
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp"),
                "CODE_DIR": str(REPO), "DATA_DIR": str(d), "TARGET_REPO": "acme/widget"}
         r = subprocess.run(["bash", "-c", self._render_block()],
@@ -727,7 +728,7 @@ class Test_renderer_workflow_composition(unittest.TestCase):
         # no registry, no file at all — and call no gh. Actions then never runs the
         # aggregation step of a failed job, so the ordering assertion above completes the
         # no-mutations guarantee.
-        d = Path(tempfile.mkdtemp())
+        d = Path(self.mkdtemp())
         (d / "audits").mkdir()
         (d / "ledgers").mkdir()
         (d / "registry").mkdir()

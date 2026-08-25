@@ -30,12 +30,14 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import advisors  # noqa: E402
 import bridge  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tmpdirs import TempDirMixin, scratch_dir  # noqa: E402
 
 PIN = "9.9.9"
 
 
 def make_ws(mcp=None, toml=None):
-    ws = Path(tempfile.mkdtemp(prefix="advisor-ws-"))
+    ws = Path(scratch_dir(prefix="advisor-ws-"))
     if mcp is not None:
         (ws / ".mcp.json").write_text(mcp, encoding="utf-8")
     if toml is not None:
@@ -832,7 +834,7 @@ class TestDangerGate(unittest.TestCase):
         self.assertEqual(self._ledger(ws2)[advisors.ACCEPTANCES_KEY], {"probe_advisor": good}, "apply recovery restores the PRIOR map")
 
 
-class TestRegistrationStamp(unittest.TestCase):
+class TestRegistrationStamp(TempDirMixin, unittest.TestCase):
     """vibe-185 / grill H1b: registration is an explicit operator act. A flag-less `reconcile` — what
     init / repair / update run — converges only definitions the operator registered (`add <name>` /
     `add --all` stamp the parsed content's sha in the ledger) and whose content is unchanged; a
@@ -1359,7 +1361,7 @@ class TestRegistrationStamp(unittest.TestCase):
                          "the file is left exactly as it was")
         self.assertFalse((agents / "alpha_one").exists(), "alpha's timeline — created by this call — is rolled back")
         # (2) a symlink at the leaf to a directory outside the workspace: Path.exists() is true; the descent refuses it; the target is untouched
-        outside = Path(tempfile.mkdtemp(prefix="vibe185-outside-"))
+        outside = Path(self.mkdtemp(prefix="vibe185-outside-"))
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (outside / "keep.txt").write_text("external\n", encoding="utf-8")
         (agents / "beta_two" / "timeline").unlink()
@@ -1377,7 +1379,7 @@ class TestRegistrationStamp(unittest.TestCase):
         # (3) the advisor DIRECTORY itself a symlink to an external directory that contains timeline/keep.txt: a different descent component
         (agents / "beta_two" / "timeline").unlink()
         (agents / "beta_two").rmdir()
-        outside2 = Path(tempfile.mkdtemp(prefix="vibe185-outside2-"))
+        outside2 = Path(self.mkdtemp(prefix="vibe185-outside2-"))
         self.addCleanup(shutil.rmtree, outside2, ignore_errors=True)
         (outside2 / "timeline").mkdir()
         (outside2 / "timeline" / "keep.txt").write_text("external\n", encoding="utf-8")
@@ -1559,12 +1561,12 @@ class TestTransactionJournal(unittest.TestCase):
         self.assertFalse((ws / ".gitignore").exists(), "no ignore-block residue")
 
 
-class TestSafeCreationAndPrivacy(unittest.TestCase):
+class TestSafeCreationAndPrivacy(TempDirMixin, unittest.TestCase):
     """W4/W5 (Step-8 F6, F7): descriptor-safe creation; ignore-block retention."""
 
     def test_symlinked_agents_dir_refused(self):
         ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
-        outside = Path(tempfile.mkdtemp(prefix="advisor-outside-"))
+        outside = Path(self.mkdtemp(prefix="advisor-outside-"))
         (ws / ".vibe-suite").mkdir()
         (ws / ".vibe-suite" / "agents").symlink_to(outside)
         with self.assertRaises((advisors.AdvisorError, bridge.BridgeError)):
@@ -1574,7 +1576,7 @@ class TestSafeCreationAndPrivacy(unittest.TestCase):
     def test_symlinked_advisor_dir_refused(self):
         ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
         add_definition(ws)
-        outside = Path(tempfile.mkdtemp(prefix="advisor-outside2-"))
+        outside = Path(self.mkdtemp(prefix="advisor-outside2-"))
         (ws / ".vibe-suite" / "agents" / "probe_advisor").symlink_to(outside)
         with self.assertRaises((advisors.AdvisorError, bridge.BridgeError)):
             advisors.add(ws, "probe_advisor", pin=PIN)
@@ -1849,10 +1851,10 @@ class TestRemoveSafety(unittest.TestCase):
                       json.loads((ws / ".mcp.json").read_text())["mcpServers"])
 
 
-class TestRootAndTargetSafety(unittest.TestCase):
+class TestRootAndTargetSafety(TempDirMixin, unittest.TestCase):
     def test_symlinked_workspace_root_refused(self):
-        real = Path(tempfile.mkdtemp(prefix="advisor-real-"))
-        link = Path(tempfile.mkdtemp(prefix="advisor-link-")) / "ws"
+        real = Path(self.mkdtemp(prefix="advisor-real-"))
+        link = Path(self.mkdtemp(prefix="advisor-link-")) / "ws"
         link.symlink_to(real)
         with self.assertRaises(bridge.BridgeError):
             advisors.reconcile(link)
@@ -1896,7 +1898,7 @@ class TestScalarFieldKinds(unittest.TestCase):
                 advisors.parse_definition(defn_text(extra=extra), "probe_advisor.md")
 
 
-class TestResidueHardening(unittest.TestCase):
+class TestResidueHardening(TempDirMixin, unittest.TestCase):
     """Round-3 Step-9 iteration 2: the re-verify's four residues."""
 
     def test_list_valued_name_rejected_cleanly(self):
@@ -1927,10 +1929,10 @@ class TestResidueHardening(unittest.TestCase):
             advisors.recover(ws)
 
     def test_recovery_through_symlink_root_refused(self):
-        real = Path(tempfile.mkdtemp(prefix="advisor-real2-"))
+        real = Path(self.mkdtemp(prefix="advisor-real2-"))
         (real / ".vibe-suite-state").mkdir()
         (real / ".vibe-suite-state" / "advisor-txn.json").write_text("{}")
-        link = Path(tempfile.mkdtemp(prefix="advisor-link2-")) / "ws"
+        link = Path(self.mkdtemp(prefix="advisor-link2-")) / "ws"
         link.symlink_to(real)
         with self.assertRaises(bridge.BridgeError):
             advisors.recover(link)

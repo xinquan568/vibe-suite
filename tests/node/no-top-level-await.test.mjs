@@ -7,15 +7,16 @@
 //
 // Both round-1 false negatives are pinned here permanently.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 
 import { inspect } from "./no-top-level-await.mjs";
 
-const DIR = mkdtempSync(path.join(tmpdir(), "tla-probe-"));
+const DIR = tmpWorkspace("tla-probe-");
 const probe = (name, source) => {
   const file = path.join(DIR, `${name}.mjs`);
   writeFileSync(file, source, "utf8");

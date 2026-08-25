@@ -30,6 +30,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tmpdirs import TempDirMixin  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNNER = REPO_ROOT / "scripts" / "codex-runner.mjs"
@@ -1044,7 +1046,7 @@ class Namespace(unittest.TestCase):
                              f"command names must be fully qualified (/vibe-suite{bare.strip()})")
 
 
-class ReaperContract(RunnerCase):
+class ReaperContract(TempDirMixin, RunnerCase):
     """Step-8 regressions for the vibe-129 reaper itself: authoritative-version
     resolution, and the pure-sleeper-only masking exemption. Each test fabricates a
     separate workspace and drives _reap_workspace_writers directly against a real
@@ -1065,7 +1067,7 @@ class ReaperContract(RunnerCase):
         proc.wait(timeout=10)
 
     def _fab_ws(self, records):
-        ws = Path(tempfile.mkdtemp(prefix="reaper-fab-"))
+        ws = Path(self.mkdtemp(prefix="reaper-fab-"))
         self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
         jobs = ws / STATE_DIRNAME / "jobs"
         jobs.mkdir(parents=True)

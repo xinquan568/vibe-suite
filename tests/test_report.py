@@ -22,6 +22,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tmpdirs import TempDirMixin, scratch_dir  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VENDOR = REPO_ROOT / "templates" / "report" / "vendor"
@@ -105,16 +107,16 @@ class TestRendererDiscipline(unittest.TestCase):
             self.assertNotIn(banned, text)
 
 
-class TestBlobValidation(unittest.TestCase):
+class TestBlobValidation(TempDirMixin, unittest.TestCase):
     def _refused(self, blob, why):
-        out = Path(tempfile.mkdtemp(prefix="report-refuse-"))
+        out = Path(self.mkdtemp(prefix="report-refuse-"))
         self.addCleanup(shutil.rmtree, out, ignore_errors=True)
         r = render(blob, out)
         self.assertEqual(r.returncode, 2, why)
         self.assertEqual(list(out.iterdir()), [], "a refusal writes nothing")
 
     def test_valid_blob_renders(self):
-        out = Path(tempfile.mkdtemp(prefix="report-ok-"))
+        out = Path(self.mkdtemp(prefix="report-ok-"))
         self.addCleanup(shutil.rmtree, out, ignore_errors=True)
         r = render(full_blob(), out)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -135,7 +137,7 @@ class TestBlobValidation(unittest.TestCase):
         self._refused(b, "judgment issue carrying source (cross-lane)")
 
     def test_honest_absences_render(self):
-        out = Path(tempfile.mkdtemp(prefix="report-absent-"))
+        out = Path(self.mkdtemp(prefix="report-absent-"))
         self.addCleanup(shutil.rmtree, out, ignore_errors=True)
         b = full_blob()
         b["check"]["judgment"] = {"available": False, "status": "skipped",
@@ -148,13 +150,13 @@ class TestBlobValidation(unittest.TestCase):
         self.assertIn("missing", html)
 
 
-class TestOfflineStructure(unittest.TestCase):
+class TestOfflineStructure(TempDirMixin, unittest.TestCase):
     def test_single_file_no_active_external_resource_attributes(self):
         """The structural gate: no ACTIVE external resource attributes (src/href to another
         origin). Inactive string constants inside the vendored minified bundle (icon-font URLs
         the report never dereferences) are outside this gate; the recorded browser evidence's
         zero-fetch observation covers the runtime half."""
-        out = Path(tempfile.mkdtemp(prefix="report-offline-"))
+        out = Path(self.mkdtemp(prefix="report-offline-"))
         self.addCleanup(shutil.rmtree, out, ignore_errors=True)
         render(full_blob(), out)
         html = (out / "index.html").read_text()
@@ -168,7 +170,7 @@ class TestOfflineStructure(unittest.TestCase):
             self.assertIn(view, html, view)
 
     def test_template_override(self):
-        out = Path(tempfile.mkdtemp(prefix="report-tpl-"))
+        out = Path(self.mkdtemp(prefix="report-tpl-"))
         self.addCleanup(shutil.rmtree, out, ignore_errors=True)
         alt = out / "alt.html"
         alt.write_text(TEMPLATE.read_text().replace("<title>", "<title>ALT "))
@@ -178,7 +180,7 @@ class TestOfflineStructure(unittest.TestCase):
 
 
 def _surrogate(root, results, idx):
-    scratch = tempfile.mkdtemp(prefix=f"report-scratch-{idx}-")
+    scratch = scratch_dir(prefix=f"report-scratch-{idx}-")
     fd, blob_path = tempfile.mkstemp(suffix=".json", dir=scratch)
     blob = full_blob()
     blob["score"]["files"][0]["score"] = 80 + idx
@@ -189,9 +191,9 @@ def _surrogate(root, results, idx):
     results[idx] = (r.returncode, blob_path)
 
 
-class TestConcurrency(unittest.TestCase):
+class TestConcurrency(TempDirMixin, unittest.TestCase):
     def test_parallel_runs_no_collision(self):
-        out = Path(tempfile.mkdtemp(prefix="report-conc-"))
+        out = Path(self.mkdtemp(prefix="report-conc-"))
         self.addCleanup(shutil.rmtree, out, ignore_errors=True)
         mgr = multiprocessing.Manager()
         results = mgr.dict()
@@ -214,11 +216,11 @@ class TestConcurrency(unittest.TestCase):
         self.assertEqual(residue, [], "no staging residue")
 
 
-class TestGraphLane(unittest.TestCase):
+class TestGraphLane(TempDirMixin, unittest.TestCase):
     """W2: --graph adds nodes/edges; flagless output byte-identical (goldens cover the repo)."""
 
     def test_synthetic_tree_all_kinds(self):
-        root = Path(tempfile.mkdtemp(prefix="graph-kinds-"))
+        root = Path(self.mkdtemp(prefix="graph-kinds-"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         (root / "commands" / "shared").mkdir(parents=True)
         (root / "agents").mkdir()
@@ -257,7 +259,7 @@ class TestGraphLane(unittest.TestCase):
         self.assertEqual(r.stdout, r3.stdout)
 
 
-class TestReadOnlyTrajectory(unittest.TestCase):
+class TestReadOnlyTrajectory(TempDirMixin, unittest.TestCase):
     """W3: trajectory_from_entries == the CLI trajectory minus the current point; no append."""
 
     def test_equivalence_minus_current(self):
@@ -293,7 +295,7 @@ class TestReadOnlyTrajectory(unittest.TestCase):
         cases = [("history-list.json", "present"), ("history-dict.json", "present"),
                  (None, "missing"), ("MALFORMED", "malformed")]
         for fixture, want_status in cases:
-            ws = Path(tempfile.mkdtemp(prefix="report-hist-"))
+            ws = Path(self.mkdtemp(prefix="report-hist-"))
             self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
             hist = ws / "vibe-history.json"
             src = None
@@ -337,13 +339,13 @@ class TestVocabGraphMapping(unittest.TestCase):
         self.assertEqual(data, run2, "deterministic")
 
 
-class TestValidatorRefusalMatrix(unittest.TestCase):
+class TestValidatorRefusalMatrix(TempDirMixin, unittest.TestCase):
     """F1 closure: the per-field refusal matrix beyond the earlier cases."""
 
     def _refused(self, mutate, why):
         b = full_blob()
         mutate(b)
-        out = Path(tempfile.mkdtemp(prefix="report-matrix-"))
+        out = Path(self.mkdtemp(prefix="report-matrix-"))
         self.addCleanup(shutil.rmtree, out, ignore_errors=True)
         r = render(b, out)
         self.assertEqual(r.returncode, 2, why)
@@ -421,7 +423,7 @@ process.stdout.write(JSON.stringify(out));
 """
 
 
-class TestRepoReportXSSHardening(unittest.TestCase):
+class TestRepoReportXSSHardening(TempDirMixin, unittest.TestCase):
     """vibe-195 (grill H3): the per-repository audit page renders hostile audited-repo
     strings as text, never as markup.
 
@@ -450,7 +452,7 @@ class TestRepoReportXSSHardening(unittest.TestCase):
     STAMP = "2026-08-24T00:00:00Z"
 
     def _render(self, repo):
-        d = Path(tempfile.mkdtemp(prefix="vibe195-"))
+        d = Path(self.mkdtemp(prefix="vibe195-"))
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         (d / "registry").mkdir()
         (d / "ledgers").mkdir()

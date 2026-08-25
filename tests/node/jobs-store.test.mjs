@@ -5,9 +5,10 @@
 // cleanly — notably an uncommitted version slot beside a canonical record, which is what a writer
 // that died between `link` and `rename` leaves behind.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 
@@ -17,7 +18,7 @@ import {
 } from "../../scripts/lib/jobs.mjs";
 
 function workspace() {
-  return mkdtempSync(path.join(tmpdir(), "jobs-store-"));
+  return tmpWorkspace("jobs-store-");
 }
 
 async function seed(ws, overrides = {}) {

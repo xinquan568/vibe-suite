@@ -10,10 +10,11 @@
 // this repo) and creates a real workspace change, so the verify block has an implementation
 // outcome to see.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -41,7 +42,7 @@ function extractBlock(text, tag) {
 // verify block may execute it only while the engine's run left it untouched. `withTests: false`
 // gives a baseline without one, for the engine-created-script case.
 function scratchRepo({ withTests = true } = {}) {
-  const dir = mkdtempSync(path.join(tmpdir(), "delegate-scratch-"));
+  const dir = tmpWorkspace("delegate-scratch-");
   const git = (...args) => {
     const r = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
@@ -64,10 +65,10 @@ test("the artifact's canonical dispatch runs the plan at workspace-write in the 
   }
 
   const scratch = scratchRepo();
-  const promptFile = path.join(mkdtempSync(path.join(tmpdir(), "delegate-prompt-")), "prompt.md");
+  const promptFile = path.join(tmpWorkspace("delegate-prompt-"), "prompt.md");
   writeFileSync(promptFile,
     "Provenance: unknown — supplied by the operator\n\n" + HOSTILE_PLAN + "\n");
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "delegate-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("delegate-probe-"), "probe.json");
 
   // The template is env-parameterized — resolved values travel as DATA in the environment, never
   // by textual substitution. Executing it verbatim with only env set is the whole instantiation.
@@ -196,7 +197,7 @@ test("the artifact's canonical dispatch runs the plan at workspace-write in the 
 
   // Faithful failure, git dimension: a broken inspection (not a git repo at all) must also fail
   // the block — no later success may mask an earlier failed command (set -euo pipefail).
-  const notARepo = mkdtempSync(path.join(tmpdir(), "delegate-notrepo-"));
+  const notARepo = tmpWorkspace("delegate-notrepo-");
   const brokenGit = spawnSync("bash", ["-c", verifyBlock], { cwd: notARepo, encoding: "utf8", timeout: 30_000 });
   assert.notEqual(brokenGit.status, 0, "failed git inspection must fail verification");
 });
@@ -205,9 +206,9 @@ test("override branch: env-carried effort/model values are data — even hostile
   const artifact = readFileSync(ARTIFACT, "utf8");
   const dispatchTemplate = extractBlock(artifact, "<!-- canonical-dispatch -->");
   const scratch = scratchRepo();
-  const promptFile = path.join(mkdtempSync(path.join(tmpdir(), "delegate-prompt-")), "prompt.md");
+  const promptFile = path.join(tmpWorkspace("delegate-prompt-"), "prompt.md");
   writeFileSync(promptFile, "Provenance: authored by Claude (this session)\n\ntrivial task\n");
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "delegate-probe-")), "probe.json");
+  const probe = path.join(tmpWorkspace("delegate-probe-"), "probe.json");
 
   const hostileModel = "x; touch pwned2 `touch pwned2`";
   const result = spawnSync("bash", ["-c", dispatchTemplate], {

@@ -15,6 +15,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tmpdirs import TempDirMixin, scratch_dir  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 WF_DIR = REPO / "auditor" / "workflows"
@@ -95,7 +98,7 @@ def extract(path, marker, name):
 
 class Sandbox:
     def __init__(self, registry="registry.json"):
-        self.root = Path(tempfile.mkdtemp(prefix="auditor-sm-"))
+        self.root = Path(scratch_dir(prefix="auditor-sm-"))
         self.code = self.root / "code"
         self.data = self.root / "data"
         (self.code).mkdir()
@@ -374,7 +377,7 @@ class TestDailyReport(StageBase):
             sb.cleanup()
 
 
-class TestNonStageDataWriters(unittest.TestCase):
+class TestNonStageDataWriters(TempDirMixin, unittest.TestCase):
     def test_every_data_writer_block_runs_confined_and_refuses_bare(self):
         for name in LOGIC_WORKFLOWS:
             path = WF_DIR / f"auditor-{name}.yml"
@@ -388,7 +391,7 @@ class TestNonStageDataWriters(unittest.TestCase):
                     # than none), so the bare fixture-run cans a successful empty search.
                     # The cans live OUTSIDE the sandbox root: the confinement assertion
                     # below owns everything under it.
-                    canned_dir = Path(tempfile.mkdtemp(prefix="supp-canned-"))
+                    canned_dir = Path(self.mkdtemp(prefix="supp-canned-"))
                     canned = canned_dir / "empty-search.json"
                     canned.write_text(json.dumps({"total_count": 0,
                                                   "incomplete_results": False,
@@ -770,7 +773,7 @@ class TestDocsDiffWiring(unittest.TestCase):
             sb.cleanup()
 
 
-class TestSuppressionsWiring(unittest.TestCase):
+class TestSuppressionsWiring(TempDirMixin, unittest.TestCase):
     """E8.6 (vibe-63): the scan is scan-suppressions.py's, and the corpus reaches the branch.
 
     The block used to reimplement search, fetch, and the override grammar inline — and never
@@ -933,7 +936,7 @@ class TestSuppressionsWiring(unittest.TestCase):
         sb = Sandbox()
         try:
             (sb.data / "feedback").mkdir(exist_ok=True)
-            canned_dir = Path(tempfile.mkdtemp(prefix="supp-canned-"))
+            canned_dir = Path(self.mkdtemp(prefix="supp-canned-"))
             self.addCleanup(shutil.rmtree, canned_dir, True)
             canned = canned_dir / "empty-search.json"
             canned.write_text(json.dumps({"total_count": 0, "incomplete_results": False,

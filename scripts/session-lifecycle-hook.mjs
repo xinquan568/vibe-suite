@@ -12,7 +12,10 @@
 // contract, not a hook), environment export (no bridge consumes it yet — F1.6/E2.x), and
 // stale-registration migration (E0.8's engine, invoked by init in E2.1).
 //
-// **Always exits 0.** A convenience hook that can break a session is not a convenience.
+// **Always exits 0 for runtime faults.** A convenience hook that can break a session is not a
+// convenience — a damaged store or a failed reap is reported and swallowed. The one exception is a
+// USAGE error: an unknown or missing `--event` exits 2, because that is misconfiguration, not a
+// session runtime condition.
 //
 // **Node floor: 18.** No top-level await.
 
@@ -21,7 +24,15 @@ import { isAbandoned, listRecords, reapOrphanTemps, TERMINAL_STATUSES } from "./
 function parseArgs(argv) {
   const index = argv.indexOf("--event");
   const event = index === -1 ? null : argv[index + 1];
-  return { event: event === "start" || event === "end" ? event : "start" };
+  // A misconfigured hook is a USAGE error, not something to paper over: an unknown (or missing)
+  // --event must fail loudly (exit 2) rather than silently masquerade as `start`. Runtime faults
+  // (a damaged store, a failed reap) still exit 0 below — only misuse exits non-zero.
+  if (event !== "start" && event !== "end") {
+    process.stderr.write(
+      `session-lifecycle-hook: expected --event start|end, got ${event === null ? "(none)" : JSON.stringify(event)}\n`);
+    process.exit(2);
+  }
+  return { event };
 }
 
 async function main() {

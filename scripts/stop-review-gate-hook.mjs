@@ -50,7 +50,11 @@ const STORE = path.join(SELF_DIR, "lib", "store.py");
 const HOOK_BUDGET_MS = Number(process.env.VIBE_TEST_GATE_BUDGET_MS) > 0
   ? Math.min(900_000, Number(process.env.VIBE_TEST_GATE_BUDGET_MS))
   : 900_000;
-const SHUTDOWN_RESERVE_MS = 20_000;      // always enough left to write our own decision
+// Capped at a third of the budget so a shrunk TEST budget (VIBE_TEST_GATE_BUDGET_MS) still leaves
+// room to dispatch and reap the reviewer: the fixed 20s/30s would otherwise make any budget small
+// enough to be a fast test short-circuit before dispatch. Production (900s) is unchanged (min picks
+// the fixed value); this is what the "testable in a second" comment above actually needs.
+const SHUTDOWN_RESERVE_MS = Math.min(20_000, Math.floor(HOOK_BUDGET_MS / 3)); // enough left to write our own decision
 const CONFIG_TIMEOUT_MS = 30_000;
 const GIT_TIMEOUT_MS = 60_000;
 const GIT_MAX_BUFFER = 32 * 1024 * 1024; // large enough that a real diff never silently truncates…
@@ -64,7 +68,7 @@ const TOTAL_UNTRACKED_CAP = 48_000;      // must fit inside PROMPT_CAP alongside
 const PROMPT_CAP = 96_000;
 const OUTPUT_MAX_BUFFER = 8 * 1024 * 1024;
 const REASON_CAP = 500;
-const DEADLINE_FLOOR_MS = 30_000;        // below this, stop collecting and report, do not guess
+const DEADLINE_FLOOR_MS = Math.min(30_000, Math.floor(HOOK_BUDGET_MS / 3)); // below this, stop collecting and report, do not guess
 
 const START = Date.now();
 const remainingMs = () => HOOK_BUDGET_MS - (Date.now() - START) - SHUTDOWN_RESERVE_MS;
@@ -90,6 +94,9 @@ function readStdin() {
   try {
     return JSON.parse(readFileSync(0, "utf8") || "{}");
   } catch {
+    // Unparseable stdin is not fatal — the gate proceeds with empty input (and allows a disabled
+    // gate) — but it is NOTED so a malformed harness invocation is visible rather than silent.
+    process.stderr.write("stop-review gate: stdin was not valid JSON; proceeding with empty input\n");
     return {};
   }
 }

@@ -459,3 +459,34 @@ test("no python3 on PATH: the hook fails open with the spawn cause, not a stack 
   assert.match(result.stderr, /failing open/);
   assert.ok(!/\n\s+at /.test(result.stderr), `no stack trace — the ENOENT path is handled, not crashed:\n${result.stderr}`);
 });
+
+// vibe-201 (M29): the readStdin() catch and the hung-reviewer deadline path, previously untested.
+
+test("garbage (non-JSON) stdin: the gate allows and notes it on stderr instead of crashing", () => {
+  const dir = repo();                                   // disabled by default -> allow without dispatch
+  const r = spawnSync(process.execPath, [HOOK], {
+    cwd: dir, encoding: "utf8", timeout: 60_000,
+    input: "this is not json {{{",                      // raw bytes readStdin() cannot parse
+    env: { ...process.env },
+  });
+  assert.equal(decisionOf(r), null, `garbage stdin must still allow, got: ${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /not valid JSON/i, `a stderr note must explain the empty-input fallback: ${r.stderr}`);
+});
+
+test("a hung reviewer INSIDE the budget: the hook still decides (fail-open) and does not orphan it", () => {
+  const dir = repo({ enabled: true });
+  seedDefect(dir);                                      // an untracked defect -> a real diff to review
+  const pidFile = path.join(dir, "reviewer.pid");
+  // sleeper.mjs ignores SIGTERM and never returns; VIBE_TEST_GATE_BUDGET_MS shrinks the 900 s budget so
+  // the deadline fires in seconds. The reviewer records its pid via the VIBE_TEST_PID_FILE seam.
+  const r = runHook(dir, {
+    fixture: "sleeper.mjs",
+    env: { VIBE_TEST_GATE_BUDGET_MS: "15000", VIBE_TEST_PID_FILE: pidFile },
+  });
+  assert.equal(decisionOf(r), null, `a timed-out reviewer must fail open (allow): ${r.stdout}${r.stderr}`);
+  assert.ok(existsSync(pidFile), `the reviewer must actually have been dispatched: ${r.stderr}`);
+  const pid = Number(readFileSync(pidFile, "utf8").trim());
+  assert.ok(Number.isInteger(pid) && pid > 0, `a reviewer pid must be recorded, got: ${pid}`);
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" },
+    "the hung reviewer process must be terminated by the deadline, not left orphaned");
+});

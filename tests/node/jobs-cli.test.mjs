@@ -7,10 +7,10 @@
 // script paths (round-1 plan review, finding 3): the CLI must work when invoked from outside the
 // repo, because an installed plugin is not the user's cwd.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -24,7 +24,7 @@ const RUNNER = path.join(REPO_ROOT, "scripts", "codex-runner.mjs");
 const FIXTURES = path.join(REPO_ROOT, "tests", "fixtures", "fake-codex");
 
 function workspace() {
-  return mkdtempSync(path.join(tmpdir(), "jobs-cli-"));
+  return tmpWorkspace("jobs-cli-");
 }
 
 function cli(ws, ...args) {

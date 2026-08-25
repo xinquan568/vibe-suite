@@ -7,9 +7,10 @@
 // classified, then discarded — never echoed (fallback.md's credential rule) — and every reported
 // field is an enum, a validated short token, or a capped control-free string.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 
@@ -19,7 +20,7 @@ import {
 } from "../../scripts/lib/preflight.mjs";
 
 function tempHome() {
-  return mkdtempSync(path.join(tmpdir(), "preflight-home-"));
+  return tmpWorkspace("preflight-home-");
 }
 
 function writeCache(home, payload) {

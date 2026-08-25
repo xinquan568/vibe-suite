@@ -7,9 +7,10 @@
 // every record through the slot-aware path, or `status` reports stale state (round-1 plan review,
 // finding 2).
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 
@@ -18,7 +19,7 @@ import {
 } from "../../scripts/lib/jobs.mjs";
 
 function workspace() {
-  return mkdtempSync(path.join(tmpdir(), "jobs-list-"));
+  return tmpWorkspace("jobs-list-");
 }
 
 function baseRecord(jobId, overrides = {}) {

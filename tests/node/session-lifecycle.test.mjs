@@ -3,10 +3,11 @@
 // must NOT do as much as what it does: it reports, it never rewrites a record it does not own, and
 // it exits 0 even when the store is damaged — a convenience hook that breaks a session is not one.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -33,7 +34,7 @@ test("BOTH events reap orphan temps and report abandoned jobs WITHOUT rewriting 
   // Run the identical assertions for start and end: the frozen plan promises both directions, and
   // a shared implementation is exactly the kind of thing that grows an event-specific branch later.
   for (const event of ["start", "end"]) {
-    const ws = mkdtempSync(path.join(tmpdir(), `lifecycle-${event}-`));
+    const ws = tmpWorkspace(`lifecycle-${event}-`);
     await createRecord(ws, abandonedRecord("job_aaaaaaaaaaaaaaaaaaaa"));
     const before = await readRecord(ws, "job_aaaaaaaaaaaaaaaaaaaa");
 
@@ -62,7 +63,7 @@ test("BOTH events reap orphan temps and report abandoned jobs WITHOUT rewriting 
 });
 
 test("end additionally reports still-running jobs; start does not", async () => {
-  const ws = mkdtempSync(path.join(tmpdir(), "lifecycle-live-"));
+  const ws = tmpWorkspace("lifecycle-live-");
   await createRecord(ws, {
     ...newRecord({ jobId: "job_cccccccccccccccccccc", kind: "delegate", sandbox: "read-only",
       effort: "low", model: null, background: true, timeoutMs: 1000, claimDigest: null }),
@@ -76,7 +77,7 @@ test("end additionally reports still-running jobs; start does not", async () => 
 });
 
 test("a damaged JOB RECORD is reported, and both events still exit 0", () => {
-  const ws = mkdtempSync(path.join(tmpdir(), "lifecycle-damaged-"));
+  const ws = tmpWorkspace("lifecycle-damaged-");
   mkdirSync(jobsDir(ws), { recursive: true });
   writeFileSync(path.join(jobsDir(ws), "job_dddddddddddddddddddd.json"), "not json at all");
   for (const event of ["start", "end"]) {
@@ -87,7 +88,7 @@ test("a damaged JOB RECORD is reported, and both events still exit 0", () => {
 });
 
 test("an empty workspace is silent and successful", () => {
-  const ws = mkdtempSync(path.join(tmpdir(), "lifecycle-empty-"));
+  const ws = tmpWorkspace("lifecycle-empty-");
   const result = runHook(ws, "start");
   assert.equal(result.status, 0);
   assert.equal(result.stderr.trim(), "");

@@ -20,10 +20,11 @@
 //
 // **Node floor: 18.** No top-level await.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -56,7 +57,7 @@ const REAL_PYTHON3 = (() => {
 })();
 
 function shimPath(shims) {
-  const dir = mkdtempSync(path.join(tmpdir(), "nl-audit-path-"));
+  const dir = tmpWorkspace("nl-audit-path-");
   const write = (name, line) => {
     const file = path.join(dir, name);
     writeFileSync(file, `#!/bin/sh\n${line}\n`);
@@ -72,7 +73,7 @@ function shimPath(shims) {
 }
 
 function openGate() {
-  const file = path.join(mkdtempSync(path.join(tmpdir(), "nl-audit-gate-")), "gate-status.json");
+  const file = path.join(tmpWorkspace("nl-audit-gate-"), "gate-status.json");
   writeFileSync(file, JSON.stringify({
     schema: 1, status: "passed", agy_version: "1.1.2", recorded_at: "2026-07-28T00:00:00Z",
     checks: Object.fromEntries(MANDATORY_CHECKS.map((n) => [n, { state: "passed", note: "simulated" }])),
@@ -85,7 +86,7 @@ function openGate() {
  * environment — if either survived, the test would be exercising the seam it exists to avoid.
  */
 function runOnPath(script, args, { shims = {}, gate = null } = {}) {
-  const cwd = mkdtempSync(path.join(tmpdir(), "nl-audit-ws-"));
+  const cwd = tmpWorkspace("nl-audit-ws-");
   const env = { ...process.env, PATH: shimPath(shims) };
   delete env.VIBE_SUITE_AGY_BIN;
   delete env.VIBE_SUITE_CODEX_BIN;

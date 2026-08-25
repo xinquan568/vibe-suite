@@ -6,10 +6,11 @@
 // controlled PATH without it — so a discovery defect that only the seam papers over fails here.
 // Seam-based variants (VIBE_SUITE_CODEX_BIN) cover auth and hostile-output behavior.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -19,7 +20,7 @@ const CLI = path.join(REPO_ROOT, "scripts", "preflight-cli.mjs");
 const FIXTURES = path.join(REPO_ROOT, "tests", "fixtures", "fake-codex");
 
 function tempDir(prefix) {
-  return mkdtempSync(path.join(tmpdir(), prefix));
+  return tmpWorkspace(prefix);
 }
 
 function freshHome() {
@@ -144,7 +145,7 @@ test("usage errors exit 2", () => {
 // the row says, and whether it may influence the exit code — which only a passed gate permits.
 
 function openGateFile() {
-  const dir = mkdtempSync(path.join(tmpdir(), "preflight-gate-"));
+  const dir = tmpWorkspace("preflight-gate-");
   const file = path.join(dir, "gate-status.json");
   const names = ["headless_invocation", "read_only_write_denied", "timeout_kill",
     "failure_signature", "quota_signature"];

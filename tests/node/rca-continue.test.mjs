@@ -5,10 +5,11 @@
 // blocks in commands/bug-analyze.md and commands/continue.md — extracted, instantiated via env
 // (values are data), and executed. RED while the artifacts (or their blocks) do not exist.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -36,7 +37,7 @@ function run(block, { cwd, env = {} }) {
 }
 
 function seededRepo() {
-  const dir = mkdtempSync(path.join(tmpdir(), "rca-seed-"));
+  const dir = tmpWorkspace("rca-seed-");
   mkdirSync(path.join(dir, "src"), { recursive: true });
   writeFileSync(path.join(dir, "src", "adder.js"),
     "export function addTwo(n) { return n + 2; } // bug: addTwo should add one\n");
@@ -77,8 +78,8 @@ test("recon: fixed-string sweep shortlists the defective file; hostile terms and
 
 test("wait mode: one read-only dispatch; the assembled report promotes only recon-supported findings", async () => {
   const repo = seededRepo();
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "rca-probe-")), "probe.json");
-  const promptFile = path.join(mkdtempSync(path.join(tmpdir(), "rca-prompt-")), "prompt.md");
+  const probe = path.join(tmpWorkspace("rca-probe-"), "probe.json");
+  const promptFile = path.join(tmpWorkspace("rca-prompt-"), "prompt.md");
   writeFileSync(promptFile, [
     "Bug: addTwo returns n+2 instead of n+1.",
     "FILE: src/adder.js", "evidence: return n + 2",
@@ -121,7 +122,7 @@ test("wait mode: one read-only dispatch; the assembled report promotes only reco
 
 test("background mode: running receipt, real jobs-result retrieval, findings identical to wait mode", async () => {
   const repo = seededRepo();
-  const side = mkdtempSync(path.join(tmpdir(), "rca-bg-"));            // outside the workspace,
+  const side = tmpWorkspace("rca-bg-");            // outside the workspace,
   const promptFile = path.join(side, "prompt.md");                     // as the artifact mandates
   const shortlistFile = path.join(side, "shortlist.txt");              // saved at dispatch time
   writeFileSync(promptFile, "Bug: addTwo.\nFILE: src/adder.js\nevidence: return n + 2\n");
@@ -172,7 +173,7 @@ test("background mode: running receipt, real jobs-result retrieval, findings ide
 
 test("report fence outgrows tilde runs in engine text and strips terminal controls", () => {
   const repo = seededRepo();
-  const side = mkdtempSync(path.join(tmpdir(), "rca-fence-"));
+  const side = tmpWorkspace("rca-fence-");
   const shortlistFile = path.join(side, "short.txt");
   const resultFile = path.join(side, "hostile.txt");
   writeFileSync(shortlistFile, "src/adder.js\n");
@@ -193,7 +194,7 @@ test("report fence outgrows tilde runs in engine text and strips terminal contro
 });
 
 test("continue: resumes the prior thread with full inheritance and no re-specified flags", async () => {
-  const ws = mkdtempSync(path.join(tmpdir(), "continue-ws-"));
+  const ws = tmpWorkspace("continue-ws-");
   // Prior job: a real runner dispatch against the emitter, whose record captures the thread id.
   const first = spawnSync("node", [path.join(REPO_ROOT, "scripts", "codex-runner.mjs"),
     "--kind", "review", "--effort", "low", "--sandbox", "read-only",
@@ -206,8 +207,8 @@ test("continue: resumes the prior thread with full inheritance and no re-specifi
   const prior = JSON.parse(first.stdout.trim().split("\n").at(-1));
   assert.equal(prior.threadId, "thread_fixture_0001");
 
-  const probe = path.join(mkdtempSync(path.join(tmpdir(), "continue-probe-")), "probe.json");
-  const promptFile = path.join(mkdtempSync(path.join(tmpdir(), "continue-prompt-")), "follow-up.md");
+  const probe = path.join(tmpWorkspace("continue-probe-"), "probe.json");
+  const promptFile = path.join(tmpWorkspace("continue-prompt-"), "follow-up.md");
   writeFileSync(promptFile, "follow-up question\n");
 
   const dispatch = extractBlock(CONTINUE, "<!-- canonical-dispatch -->");
@@ -243,8 +244,8 @@ test("continue: resumes the prior thread with full inheritance and no re-specifi
 });
 
 test("continue usage errors: invalid job id and thread-less records refuse without a new record", async () => {
-  const ws = mkdtempSync(path.join(tmpdir(), "continue-err-"));
-  const promptFile = path.join(mkdtempSync(path.join(tmpdir(), "continue-errp-")), "p.md");
+  const ws = tmpWorkspace("continue-err-");
+  const promptFile = path.join(tmpWorkspace("continue-errp-"), "p.md");
   writeFileSync(promptFile, "follow-up\n");
   const dispatch = extractBlock(CONTINUE, "<!-- canonical-dispatch -->");
 
@@ -270,14 +271,14 @@ test("continue usage errors: invalid job id and thread-less records refuse witho
 });
 
 test("continue danger prior: an inherited dangerous sandbox refuses without fresh confirmation", async () => {
-  const ws = mkdtempSync(path.join(tmpdir(), "continue-danger-"));
+  const ws = tmpWorkspace("continue-danger-");
   await createRecord(ws, {
     ...newRecord({ jobId: "job_cdcdcdcdcdcdcdcdcdcd", kind: "delegate",
       sandbox: "danger-full-access", effort: "low", model: null, background: false,
       timeoutMs: 1000, claimDigest: null }),
     status: "completed", threadId: "thread_danger_0001",
   });
-  const promptFile = path.join(mkdtempSync(path.join(tmpdir(), "continue-dp-")), "p.md");
+  const promptFile = path.join(tmpWorkspace("continue-dp-"), "p.md");
   writeFileSync(promptFile, "follow-up\n");
   const dispatch = extractBlock(CONTINUE, "<!-- canonical-dispatch -->");
 

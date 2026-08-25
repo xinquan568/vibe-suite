@@ -6,10 +6,11 @@
 // stdout is untouched. The runner-level case drives the real `codex-runner.mjs` against the
 // fake-codex fixture, exactly as `jobs-cli.test.mjs` does.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -23,7 +24,7 @@ const FIXTURES = path.join(REPO_ROOT, "tests", "fixtures", "fake-codex");
 const NOTICE = "notice: sandbox 'workspace-write' in .vibe-suite.md raises every codex dispatch from this workspace above read-only";
 
 function workspace(frontmatter) {
-  const dir = mkdtempSync(path.join(tmpdir(), "config-bridge-notice-"));
+  const dir = tmpWorkspace("config-bridge-notice-");
   if (frontmatter !== null) writeFileSync(path.join(dir, ".vibe-suite.md"), `---\n${frontmatter}---\n`);
   return dir;
 }

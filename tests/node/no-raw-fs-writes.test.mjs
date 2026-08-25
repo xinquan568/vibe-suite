@@ -14,16 +14,16 @@
 //   * CLEAN: the accepted dialect must actually admit ordinary modules, or the checker is
 //     unusable however sound it is.
 
+import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+
 import path from "node:path";
 import test from "node:test";
 
 import { inspect, MUTATORS, HANDLE_MUTATORS, KNOWN, PRIMITIVE } from "./no-raw-fs-writes.mjs";
 import { writeFileSync } from "node:fs";
 
-const DIR = mkdtempSync(path.join(tmpdir(), "rawfs-probe-"));
+const DIR = tmpWorkspace("rawfs-probe-");
 const probe = (name, source) => {
   const file = path.join(DIR, `${name}.mjs`);
   writeFileSync(file, source, "utf8");

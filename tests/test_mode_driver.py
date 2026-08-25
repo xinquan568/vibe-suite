@@ -20,6 +20,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tmpdirs import TempDirMixin, scratch_dir  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DRIVER = REPO_ROOT / "scripts" / "issue2pr_mode_driver.py"
@@ -52,7 +54,7 @@ def edit_reference(mutate):
             new = (f"<!-- {marker} -->\n```json\n"
                    + json.dumps(blocks[marker], indent=2, ensure_ascii=False) + "\n```")
             text = re.sub(pattern, lambda _m: new, text, flags=re.S)
-    out = Path(tempfile.mkdtemp(prefix="modes-ref-")) / "operational-modes.md"
+    out = Path(scratch_dir(prefix="modes-ref-")) / "operational-modes.md"
     out.write_text(text, encoding="utf-8")
     return out
 
@@ -67,18 +69,18 @@ def tree_hash(root):
     return h.hexdigest()
 
 
-class DriverCase(unittest.TestCase):
+class DriverCase(TempDirMixin, unittest.TestCase):
     def setUp(self):
-        self.work = Path(tempfile.mkdtemp(prefix="mode-driver-"))
+        self.work = Path(self.mkdtemp(prefix="mode-driver-"))
         self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
 
     def copy_fixture(self, name):
-        dst = Path(tempfile.mkdtemp(dir=self.work, prefix="fx-")) / name
+        dst = Path(self.mkdtemp(dir=self.work, prefix="fx-")) / name
         shutil.copytree(FIXTURES / name, dst)
         return dst
 
     def runs_root_with(self, *names):
-        root = Path(tempfile.mkdtemp(dir=self.work, prefix="runs-"))
+        root = Path(self.mkdtemp(dir=self.work, prefix="runs-"))
         for name in names:
             shutil.copytree(FIXTURES / name, root / name)
         return root
@@ -693,7 +695,7 @@ class TestConsumption(DriverCase):
             return self.drive("chain", "--chain-file", str(chain),
                               "--watcher-exit", "2", reference=ref)
         if marker == "manifest-operations":
-            root = Path(tempfile.mkdtemp(dir=self.work)) / "runs"
+            root = Path(self.mkdtemp(dir=self.work)) / "runs"
             root.mkdir()
             return self.drive("manifest", "--manifest",
                               str(FIXTURES / "manifest-mode.json"),
@@ -816,7 +818,7 @@ class TestConsumption(DriverCase):
             def mutate(blocks):
                 blocks["manifest-operations"]["creates"] = ["run_folder", "00-meta.json"]
             ref = edit_reference(mutate)
-            root = Path(tempfile.mkdtemp(dir=self.work)) / "runs"
+            root = Path(self.mkdtemp(dir=self.work)) / "runs"
             root.mkdir()
             r = self.drive("manifest", "--manifest",
                            str(FIXTURES / "manifest-mode.json"),

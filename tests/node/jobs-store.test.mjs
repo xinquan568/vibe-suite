@@ -872,6 +872,7 @@ test("createRecord is linearised against the marker: a creation that lands behin
   assert.ok(isTombstone(ws, id));
   assert.deepEqual(report.leftovers.sort(), [`${other}.json`, `${other}.pruning`].sort());
   assert.deepEqual(report.blocked, [other], "and the blocked job is counted, not left out of every total");
+  assert.equal(report.kept, 0, "…as blocked, not as a retention decision the store never made");
   assert.ok(lstatSync(recordPath(ws, other)).isFile(), "a record of another identity is never unlinked under a marker");
 });
 

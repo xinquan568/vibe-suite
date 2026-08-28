@@ -12,7 +12,7 @@ import test from "node:test";
 import { newRecord, resultLine } from "../../scripts/lib/jobs.mjs";
 import {
   ERROR_STDERR_EXCERPT, RAW_TRUNCATE, STDERR_TAIL_BYTES, noTerminalEvent, renderCancelOutcome, renderDetail,
-  renderJson, renderStatusTable, stderrTail,
+  renderJson, renderPruneOutcome, renderStatusTable, stderrTail,
 } from "../../scripts/lib/render.mjs";
 
 const ID_A = "job_aaaaaaaaaaaaaaaaaaaa";
@@ -216,4 +216,26 @@ test("noTerminalEvent names how the engine ended and quotes the first non-empty 
   assert.equal(noTerminalEvent({ exitCode: 2, signal: null, stderr: `FIRST-DIAGNOSTIC: bad flag\n${chatter}\n` }),
     "no terminal event (exit 2); stderr: FIRST-DIAGNOSTIC: bad flag", "the first line comes from the whole stderr, not the tail");
   assert.ok(!(stderrTail(`FIRST-DIAGNOSTIC: bad flag\n${chatter}\n`) ?? "").includes("FIRST-DIAGNOSTIC"), "…which the tail itself has dropped");
+});
+
+test("renderPruneOutcome: one line per pruned job, a summary that never reads as clean when it is not", () => {
+  const empty = renderPruneOutcome(
+    { pruned: [], resumed: [], kept: 3, invalid: [], leftovers: [], orphanSlots: 0, logsLeft: [], tombstonesExpired: 0, stagingSwept: 0 },
+    { olderThan: "7d" });
+  assert.equal(empty, "prune: 0 job(s) removed (0 file(s)); 0 orphan slot(s) swept; 3 kept (running, or ended within 7d)");
+
+  const full = renderPruneOutcome({
+    pruned: [{ jobId: ID_A, status: "completed", endedAt: "2026-08-10T10:00:00.000Z", files: 2 },
+      { jobId: ID_B, status: "failed", endedAt: "2026-08-11T10:00:00.000Z", files: 23 }],
+    kept: 1, invalid: [{ jobId: "job_eeeeeeeeeeeeeeeeeeee", reason: "invalid status: \"zombie\"" }],
+    leftovers: ["job_dddddddddddddddddddd.json"], orphanSlots: 4, logsLeft: [ID_A], tombstonesExpired: 2,
+    resumed: ["job_cccccccccccccccccccc"], stagingSwept: 1,
+  }, { olderThan: "0" });
+  const lines = full.split("\n");
+  assert.equal(lines[0], `pruned ${ID_A} (completed, ended 2026-08-10T10:00:00.000Z, 2 file(s))`);
+  assert.equal(lines[1], `pruned ${ID_B} (failed, ended 2026-08-11T10:00:00.000Z, 23 file(s))`);
+  assert.equal(lines[2], "prune: 2 job(s) removed (25 file(s)); 4 orphan slot(s) swept; 1 kept (running, or ended within 0); 1 interrupted prune(s) completed; 2 expired tombstone(s) removed; 1 stale staging dir(s) removed; 1 worker log(s) left in place");
+  assert.equal(lines[3], 'invalid record: job_eeeeeeeeeeeeeeeeeeee — invalid status: "zombie" (not pruned)');
+  assert.equal(lines[4], "left in place: job_dddddddddddddddddddd.json — no ownership stamp, or could not be removed");
+  assert.equal(lines.length, 5);
 });

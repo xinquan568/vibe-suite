@@ -1436,3 +1436,62 @@ class TestUriConformance(unittest.TestCase):
                     with self.subTest(production=node.targets[0].id, literal=literal):
                         self.assertFalse(literal.endswith("$"),
                                          "a production ends with a `$` anchor")
+
+
+class TestWatcherGhTimeout(unittest.TestCase):
+    """vibe-206 (M2): every `gh` call is bounded.
+
+    `_run_gh` is the watcher's only shell-out, and it ran `subprocess.run` with no `timeout=`, so a
+    network black hole or an interactive auth prompt blocked inside the call. `max_wait` is evaluated
+    between polls, so the deadline that exists to bound the watcher was unreachable from exactly the
+    state that needed it.
+
+    These drive `_run_gh` directly with an injected runner, because `Watcher(..., gh=...)` REPLACES
+    the shell-out: an injection at that seam never reaches the timeout inside `_run_gh` and a hanging
+    one would simply hang the test.
+    """
+
+    def test_every_gh_call_carries_the_timeout(self):
+        module = load_watcher()
+        seen = {}
+
+        def runner(argv, **kwargs):
+            seen.update(kwargs)
+            seen["argv"] = argv
+            return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+        self.assertEqual(module._run_gh(["pr", "view", "1"], runner=runner), "ok")
+        self.assertEqual(seen["timeout"], module.GH_TIMEOUT_SECONDS,
+                         "the bound is passed to the runner, not left to the default")
+        self.assertGreater(module.GH_TIMEOUT_SECONDS, 0)
+        self.assertEqual(seen["argv"][0], "gh")
+
+    def test_a_hung_gh_call_raises_gherror_rather_than_hanging(self):
+        module = load_watcher()
+
+        def runner(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        with self.assertRaises(module.GhError):
+            module._run_gh(["api", "--paginate", "x"], runner=runner)
+
+    def test_a_timeout_says_so_and_does_not_read_like_a_rejection(self):
+        """The issue maps a hung call to `GhError` so it joins the same accounting as a failing one.
+        An operator still has to be able to tell the two apart, and the message is where."""
+        module = load_watcher()
+
+        def hangs(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        def rejects(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="HTTP 403: Forbidden")
+
+        with self.assertRaises(module.GhError) as hung:
+            module._run_gh(["api", "x"], runner=hangs)
+        with self.assertRaises(module.GhError) as refused:
+            module._run_gh(["api", "x"], runner=rejects)
+
+        self.assertIn("timed out", str(hung.exception).lower())
+        self.assertIn(str(module.GH_TIMEOUT_SECONDS), str(hung.exception))
+        self.assertNotIn("timed out", str(refused.exception).lower())
+        self.assertIn("403", str(refused.exception))

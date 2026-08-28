@@ -1246,18 +1246,35 @@ export function validateRecord(record, jobId) {
  * job vanished from `status` with no trace would reasonably conclude the store lost it.
  */
 export async function listRecords(workspace) {
-  let names;
+  let entries;
   try {
-    names = await readdir(jobsDir(workspace));
+    entries = await readdir(jobsDir(workspace), { withFileTypes: true });
   } catch (error) {
     if (error.code === "ENOENT") return { records: [], invalid: [] };
     throw error;
   }
   const records = [];
   const invalid = [];
+  // vibe-204: a directory at a canonical path is a prune tombstone, and a `<jobId>.pruning` marker
+  // means a prune has begun — both are jobs that no longer exist, not records that failed to read.
+  const names = entries.filter((entry) => !entry.isDirectory()).map((entry) => entry.name);
+  const marked = new Set();
+  for (const id of names.map((name) => MARKER_NAME.exec(name)?.[1]).filter(Boolean)) {
+    if ((await inspectMarker(jobsDir(workspace), id)).state === "valid") marked.add(id);   // a foreign marker hides nothing
+  }
+  // A directory at a canonical path is skipped only when it is this store's tombstone; any other
+  // directory there is reported — a job whose record is buried under a foreign directory would
+  // otherwise vanish from `status` without a trace.
+  for (const entry of entries) {
+    const match = CANONICAL_NAME.exec(entry.name);
+    if (!match || !entry.isDirectory()) continue;
+    if (await inspectCanonicalPath(jobsDir(workspace), match[1]) !== "tombstone") {
+      invalid.push({ jobId: match[1], reason: "a directory that is not this store's tombstone occupies the canonical path" });
+    }
+  }
   for (const name of names.sort()) {
     const match = /^(job_[0-9a-f]{20})\.json$/.exec(name);
-    if (!match) continue;
+    if (!match || marked.has(match[1])) continue;
     const jobId = match[1];
     try {
       const record = await readRecord(workspace, jobId);

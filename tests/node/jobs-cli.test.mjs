@@ -16,7 +16,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createRecord, jobsDir, newRecord, readRecord } from "../../scripts/lib/jobs.mjs";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const CLI = path.join(REPO_ROOT, "scripts", "jobs-cli.mjs");
@@ -211,4 +211,80 @@ test("status --settle-abandoned finalises a dead-worker record to failed; plain 
   const settled = await readRecord(ws, "job_abababababababababab");
   assert.equal(settled.status, "failed");
   assert.ok(settled.error.includes("abandoned"));
+});
+
+// ---------------------------------------------------------------------------------------------
+// vibe-204 (grill H8): `prune`.
+
+test("prune: the default cutoff keeps a fresh finished job; --older-than 0 removes it whole and leaves the worker log", async () => {
+  const ws = workspace();
+  const jobId = launch(ws, "emitter.mjs");
+  await waitFor(ws, jobId, (r) => TERMINAL.has(r.status), "a terminal status");
+
+  const keep = cli(ws, "prune");
+  assert.equal(keep.status, 0, keep.stderr);
+  assert.ok(keep.stdout.includes("0 job(s) removed") && keep.stdout.includes("1 kept"), keep.stdout);
+  assert.ok(readdirSync(jobsDir(ws)).includes(`${jobId}.json`), "the default cutoff (7d) keeps a fresh job");
+
+  const take = cli(ws, "prune", "--older-than", "0");
+  assert.equal(take.status, 0, `stdout: ${take.stdout}\nstderr: ${take.stderr}`);
+  assert.ok(take.stdout.includes(`pruned ${jobId} (completed,`), take.stdout);
+  assert.ok(take.stdout.includes("1 job(s) removed") && take.stdout.includes("1 worker log(s) left in place"), take.stdout);
+  const names = readdirSync(jobsDir(ws));
+  assert.ok(!names.some((n) => n.startsWith(`${jobId}.v`)), names.join(", "));
+  assert.ok(lstatSync(path.join(jobsDir(ws), `${jobId}.json`)).isDirectory(), "a tombstone stands at the canonical path");
+  assert.ok(names.includes(`${jobId}.log`), "the worker log stays");
+
+  const all = cli(ws, "status", "--all");
+  assert.equal(all.status, 0, all.stderr);
+  assert.ok(!all.stdout.includes(jobId), "a pruned job is gone from status --all");
+  const gone = cli(ws, "result", jobId);
+  assert.equal(gone.status, 1, gone.stdout + gone.stderr);
+  assert.ok(gone.stderr.includes("not found"), gone.stderr);
+});
+
+test("prune never touches a running job", async () => {
+  const ws = workspace();
+  const jobId = launch(ws, "sleeper.mjs");
+  const claimed = await waitFor(ws, jobId, (r) => r.pgid !== null, "a claimed pgid");
+  try {
+    const out = cli(ws, "prune", "--older-than", "0");
+    assert.equal(out.status, 0, out.stdout + out.stderr);
+    assert.ok(out.stdout.includes("0 job(s) removed") && out.stdout.includes("1 kept"), out.stdout);
+    assert.equal((await readRecord(ws, jobId)).status, "running");
+  } finally {
+    try { process.kill(-claimed.pgid, "SIGKILL"); } catch { /* already gone */ }
+  }
+});
+
+test("prune usage errors exit 2: a bad or missing cutoff, the flag outside prune, status-only flags, a job id", () => {
+  const ws = workspace();
+  for (const args of [
+    ["prune", "--older-than", "1w"],
+    ["prune", "--older-than", "-1d"],
+    ["prune", "--older-than"],
+    ["prune", "--older-than=abc"],
+    ["status", "--older-than", "7d"],
+    ["cancel", "--older-than", "7d"],
+    ["prune", "--json"],
+    ["prune", "--all"],
+    ["prune", "job_aaaaaaaaaaaaaaaaaaaa"],
+  ]) {
+    const out = cli(ws, ...args);
+    assert.equal(out.status, 2, `${args.join(" ")}: ${out.stdout}${out.stderr}`);
+    assert.ok(out.stderr.startsWith("jobs-cli: "), out.stderr);
+  }
+  // …and the `=` form is accepted.
+  const ok = cli(ws, "prune", "--older-than=0");
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+});
+
+test("prune exits 1 when something in scope could not be vouched for or removed", async () => {
+  const ws = workspace();
+  mkdirSync(jobsDir(ws), { recursive: true });
+  writeFileSync(path.join(jobsDir(ws), "job_deadbeefdeadbeefdead.json"),
+    JSON.stringify({ jobId: "job_deadbeefdeadbeefdead", version: 1, status: "zombie" }));
+  const out = cli(ws, "prune", "--older-than", "0");
+  assert.equal(out.status, 1, out.stdout + out.stderr);
+  assert.ok(out.stdout.includes("invalid record: job_deadbeefdeadbeefdead"), out.stdout);
 });

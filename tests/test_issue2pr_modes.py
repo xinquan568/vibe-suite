@@ -20,6 +20,8 @@ divergence in *either* artifact fails it, which is what a doc and a program agre
 """
 
 import ast
+import contextlib
+import io
 import importlib.util
 import json
 import pathlib
@@ -566,9 +568,16 @@ class WatcherCase(unittest.TestCase):
     ROLLUP_EMPTY = {"statusCheckRollup": []}
 
     def watcher(self, *, state, rollup=None, activity=(), clock=(0,), merge_when_green=False,
-                cursor="2026-01-01T00:00:00Z", max_wait=21600, fail_probe=False):
+                cursor="2026-01-01T00:00:00Z", max_wait=21600, fail_probe=False,
+                rollup_fails=False, activity_fails=(), rollup_sequence=None, max_polls=5,
+                stderr=None):
+        """vibe-206 adds the degradation seams: `rollup_fails` / `activity_fails` make those probes
+        raise `GhError` (per-endpoint for activity, by argv fragment), `rollup_sequence` drives a
+        failure/success pattern across polls, `max_polls` lets a run reach the tenth consecutive
+        degradation, and `stderr` collects the watcher's own reports."""
         module = load_watcher()
         ticks = list(clock)
+        rollup_ticks = iter(rollup_sequence) if rollup_sequence is not None else None
 
         def now():
             return ticks.pop(0) if len(ticks) > 1 else ticks[0]
@@ -579,12 +588,21 @@ class WatcherCase(unittest.TestCase):
                     raise module.GhError("probe failed")
                 return json.dumps(state)
             if "--json" in argv and "statusCheckRollup" in argv:
+                fails = next(rollup_ticks) if rollup_ticks is not None else rollup_fails
+                if fails:
+                    raise module.GhError("rollup boom")
                 return json.dumps(rollup if rollup is not None else self.ROLLUP_EMPTY)
+            for fragment in activity_fails:
+                if any(fragment in part for part in argv):
+                    raise module.GhError(f"activity boom: {fragment}")
             return "\n".join(activity)
 
-        return module, module.Watcher("owner/repo", 1, cursor, poll=0, max_wait=max_wait,
-                                      merge_when_green=merge_when_green, gh=gh, clock=now,
-                                      max_polls=5)
+        w = module.Watcher("owner/repo", 1, cursor, poll=0, max_wait=max_wait,
+                           merge_when_green=merge_when_green, gh=gh, clock=now,
+                           max_polls=max_polls)
+        if stderr is not None:
+            w.emit_stderr = stderr.append
+        return module, w
 
 
 class TestWatcherExitCodes(WatcherCase):
@@ -1436,3 +1454,214 @@ class TestUriConformance(unittest.TestCase):
                     with self.subTest(production=node.targets[0].id, literal=literal):
                         self.assertFalse(literal.endswith("$"),
                                          "a production ends with a `$` anchor")
+
+
+class TestWatcherGhTimeout(unittest.TestCase):
+    """vibe-206 (M2): every `gh` call is bounded.
+
+    `_run_gh` is the watcher's only shell-out, and it ran `subprocess.run` with no `timeout=`, so a
+    network black hole or an interactive auth prompt blocked inside the call. `max_wait` is evaluated
+    between polls, so the deadline that exists to bound the watcher was unreachable from exactly the
+    state that needed it.
+
+    These drive `_run_gh` directly with an injected runner, because `Watcher(..., gh=...)` REPLACES
+    the shell-out: an injection at that seam never reaches the timeout inside `_run_gh` and a hanging
+    one would simply hang the test.
+    """
+
+    def test_every_gh_call_carries_the_timeout(self):
+        module = load_watcher()
+        seen = {}
+
+        def runner(argv, **kwargs):
+            seen.update(kwargs)
+            seen["argv"] = argv
+            return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+        self.assertEqual(module._run_gh(["pr", "view", "1"], runner=runner), "ok")
+        self.assertEqual(seen["timeout"], module.GH_TIMEOUT_SECONDS,
+                         "the bound is passed to the runner, not left to the default")
+        self.assertEqual(module.GH_TIMEOUT_SECONDS, 60,
+                         "the issue specifies 60s; a drift in the value is a change of policy")
+        self.assertEqual(seen["argv"][0], "gh")
+
+    def test_a_hung_gh_call_raises_gherror_rather_than_hanging(self):
+        module = load_watcher()
+
+        def runner(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        with self.assertRaises(module.GhError):
+            module._run_gh(["api", "--paginate", "x"], runner=runner)
+
+    def test_a_timeout_says_so_and_does_not_read_like_a_rejection(self):
+        """The issue maps a hung call to `GhError` so it joins the same accounting as a failing one.
+        An operator still has to be able to tell the two apart, and the message is where."""
+        module = load_watcher()
+
+        def hangs(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        def rejects(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="HTTP 403: Forbidden")
+
+        with self.assertRaises(module.GhError) as hung:
+            module._run_gh(["api", "x"], runner=hangs)
+        with self.assertRaises(module.GhError) as refused:
+            module._run_gh(["api", "x"], runner=rejects)
+
+        self.assertIn("timed out", str(hung.exception).lower())
+        self.assertIn(str(module.GH_TIMEOUT_SECONDS), str(hung.exception))
+        self.assertNotIn("timed out", str(refused.exception).lower())
+        self.assertIn("403", str(refused.exception))
+
+
+class TestWatcherDegradationCounters(WatcherCase):
+    """vibe-206 (M2): a blind watcher says so.
+
+    `_rollup` returned `[]` on a `GhError` and `_latest_activity` skipped a failing endpoint, both
+    silently, so a permanently failing `gh api` left the watcher unable to see a failing check or a
+    comment while looking exactly like a quiet PR — polling to `max_wait` and exiting 5, an
+    unobserved-state timeout the chain treats as a heartbeat.
+
+    Exit codes are deliberately NOT changed: the state probe already counts toward exit 6, and
+    routing rollup/activity degradation there too would be a separate contract change to the
+    docstring, `operational-modes.md` and its golden.
+    """
+
+    def lines(self, **kwargs):
+        out = []
+        module, w = self.watcher(state=self.OPEN, stderr=out, **kwargs)
+        w.run()
+        return module, out
+
+    # -- RED on the base: nothing reported degradation at all ------------------------------------
+
+    def test_ten_consecutive_rollup_degradations_report_once_on_stderr(self):
+        _, out = self.lines(rollup_fails=True, max_polls=10)
+        self.assertEqual(len(out), 1, f"one line at the tenth, got {out}")
+        self.assertIn("rollup", out[0])
+        self.assertIn("10", out[0])
+        self.assertIn("rollup boom", out[0], "the last error is named")
+
+    def test_ten_consecutive_activity_degradations_report_once_on_stderr(self):
+        _, out = self.lines(activity_fails=("comments", "reviews"), max_polls=10)
+        self.assertEqual(len(out), 1, f"one line at the tenth, got {out}")
+        self.assertIn("activity", out[0])
+        self.assertIn("10", out[0])
+
+    def test_reports_arrive_at_10_and_20_and_not_between(self):
+        for polls, expected in ((10, 1), (19, 1), (20, 2)):
+            with self.subTest(polls=polls):
+                _, out = self.lines(rollup_fails=True, max_polls=polls)
+                self.assertEqual(len(out), expected,
+                                 f"{polls} degradations should report {expected} time(s), got {out}")
+
+    def test_a_partial_activity_failure_counts_once_and_keeps_what_succeeded(self):
+        """One dead endpoint out of three is exactly the case that must not go uncounted: the other
+        two keep answering, so the probe still returns a result while blind to a source."""
+        _, out = self.lines(activity_fails=("issues/1/comments",),
+                            activity=("2020-01-01T00:00:00Z",), max_polls=10)
+        self.assertEqual(len(out), 1, f"one dead endpoint out of three is counted, got {out}")
+        self.assertIn("activity", out[0])
+
+    def test_a_surviving_endpoint_still_ends_the_run(self):
+        """The survivors' records are USED, not merely fetched: a newer stamp from an endpoint that
+        answered still produces EXIT_ACTIVITY and populates last_activity."""
+        stamp = "2027-01-01T00:00:00Z"
+        module, w = self.watcher(state=self.OPEN, activity_fails=("issues/1/comments",),
+                                 activity=(stamp,), max_polls=10)
+        self.assertEqual(w.run(), module.EXIT_ACTIVITY)
+        self.assertEqual(w.last_activity["at"], stamp)
+
+    def test_a_clean_activity_poll_resets_the_run(self):
+        """The discriminating shape: 9 failures, one wholly clean poll, 9 more failures.
+
+        WITH the reset the count restarts, so nine post-clean failures never reach ten and nothing is
+        reported. WITHOUT it the count would carry 9 across the clean poll and the very first
+        post-clean failure would be the tenth — so a report here is exactly the signature of a
+        missing reset. Asserting on the report's TEXT could not tell those apart; asserting on its
+        absence can.
+        """
+        module = load_watcher()
+        calls = {"n": 0}
+
+        def gh(argv):
+            if "--json" in argv and "state" in argv:
+                return json.dumps(self.OPEN)
+            if "--json" in argv and "statusCheckRollup" in argv:
+                return json.dumps(self.ROLLUP_EMPTY)
+            calls["n"] += 1
+            poll = (calls["n"] - 1) // 3 + 1     # three endpoints per poll
+            if poll == 10:
+                return ""                        # the clean poll: every endpoint answers
+            raise module.GhError("boom")
+
+        out = []
+        w = module.Watcher("owner/repo", 1, "2026-01-01T00:00:00Z", poll=0, max_wait=10**9,
+                           gh=gh, clock=lambda: 0, max_polls=19)
+        w.emit_stderr = out.append
+        w.run()
+        self.assertEqual(out, [],
+                         "nine, a clean poll, then nine more must never reach ten in a row")
+
+    def test_the_report_names_the_last_failing_endpoint(self):
+        """`_latest_activity` walks comments, reviews, then pull-comments, keeping the most recent
+        error. With two different endpoints failing differently, the report must carry the LATER
+        one — which a same-error fixture could not distinguish."""
+        module = load_watcher()
+
+        def gh(argv):
+            if "--json" in argv and "state" in argv:
+                return json.dumps(self.OPEN)
+            if "--json" in argv and "statusCheckRollup" in argv:
+                return json.dumps(self.ROLLUP_EMPTY)
+            if any("issues/1/comments" in part for part in argv):
+                raise module.GhError("first-endpoint-error")
+            if any("pulls/1/reviews" in part for part in argv):
+                raise module.GhError("second-endpoint-error")
+            return ""
+
+        out = []
+        w = module.Watcher("owner/repo", 1, "2026-01-01T00:00:00Z", poll=0, max_wait=10**9,
+                           gh=gh, clock=lambda: 0, max_polls=10)
+        w.emit_stderr = out.append
+        w.run()
+        self.assertEqual(len(out), 1, f"one line at the tenth, got {out}")
+        self.assertIn("second-endpoint-error", out[0],
+                      "the retained error is the last one the probe met, not the first")
+        self.assertNotIn("first-endpoint-error", out[0])
+
+    # -- characterization: these hold on the base too, and guard against a spurious report ---------
+
+    def test_nine_consecutive_degradations_say_nothing(self):
+        _, out = self.lines(rollup_fails=True, max_polls=9)
+        self.assertEqual(out, [])
+
+    def test_repeated_legitimate_empty_rollups_say_nothing(self):
+        """A PR whose checks have not registered yet returns an empty rollup successfully. Only the
+        GhError fallback is degradation — counting `[]` would report a failure that never happened."""
+        _, out = self.lines(rollup=None, max_polls=25)
+        self.assertEqual(out, [])
+
+    def test_a_legitimate_empty_rollup_resets_the_degradation_run(self):
+        _, out = self.lines(rollup_sequence=[True] * 9 + [False] * 9 + [True] * 9, max_polls=27)
+        self.assertEqual(out, [], "9 + 9 successes + 9 never reaches ten in a row")
+
+    def test_degradation_never_changes_an_exit_code(self):
+        """The frozen decision: counting and reporting only. Rollup/activity degradation does not
+        newly reach EXIT_GH_ERRORS, which stays ten consecutive STATE-probe failures."""
+        module, w = self.watcher(state=self.OPEN, rollup_fails=True,
+                                 activity_fails=("comments", "reviews", "pulls"),
+                                 max_polls=25, stderr=[])
+        self.assertEqual(w.run(), module.EXIT_TIMEOUT,
+                         "a blind watcher still ends at the unobserved-state timeout, not exit 6")
+
+    def test_the_report_actually_reaches_stderr(self):
+        """The other tests replace `emit_stderr` to capture it; this one leaves production alone and
+        proves the default emitter writes to stderr."""
+        module, w = self.watcher(state=self.OPEN, rollup_fails=True, max_polls=10)
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            w.run()
+        self.assertIn("rollup probe degraded 10 times", buffer.getvalue())

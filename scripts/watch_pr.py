@@ -109,6 +109,10 @@ def reduce_activity(body, field):
     return "\n".join(lines)
 
 
+def _emit_stderr(line):
+    sys.stderr.write(line + "\n")
+
+
 def _run_gh(argv, *, runner=subprocess.run, timeout=GH_TIMEOUT_SECONDS):
     """One `gh` invocation, bounded.
 
@@ -148,6 +152,12 @@ class Watcher:
         self.max_wait = max_wait
         self.merge_when_green = merge_when_green
         self.gh = gh or _run_gh
+        # vibe-206 (M2): a degraded probe returns without an answer and said nothing about it, so a
+        # permanently failing `gh api` left the watcher unable to see a failing check or a comment
+        # while looking exactly like a quiet PR. One counter per probe kind, reset on a clean poll.
+        self.rollup_degraded = 0
+        self.activity_degraded = 0
+        self.emit_stderr = _emit_stderr
         self.clock = clock or time.time
         self.max_polls = max_polls
         self.emit = emit or print           # where the exit-3 JSON line goes (stdout by default)
@@ -174,9 +184,24 @@ class Watcher:
     def _rollup(self):
         try:
             checks = self._pr_view("statusCheckRollup").get("statusCheckRollup") or []
-        except GhError:
-            return []                      # degrades: never counts toward EXIT_GH_ERRORS
+        except GhError as exc:
+            # Degrades: still never counts toward EXIT_GH_ERRORS — that stays ten consecutive STATE
+            # probe failures — but it is counted and reported, because a rollup this run could not
+            # read is a failing check this run cannot see.
+            self._degraded("rollup", exc)
+            return []
+        # A successful call with no checks is a PR whose checks have not registered yet, not a
+        # degradation: counting `[]` would report a failure that never happened.
+        self.rollup_degraded = 0
         return [(c.get("conclusion") or c.get("state") or "") for c in checks]
+
+    def _degraded(self, probe, exc):
+        """Count one degraded poll for a probe kind, and report at each tenth consecutive."""
+        attr = f"{probe}_degraded"
+        count = getattr(self, attr) + 1
+        setattr(self, attr, count)
+        if count % MAX_CONSECUTIVE_FAILURES == 0:
+            self.emit_stderr(f"{probe} probe degraded {count} times: {exc}")
 
     def _latest_activity(self):
         """The newest activity across the three endpoints, as `{at, author_association, author}`.
@@ -190,13 +215,18 @@ class Watcher:
                      (f"repos/{self.repo}/pulls/{self.pr}/reviews", "submitted_at"),
                      (f"repos/{self.repo}/pulls/{self.pr}/comments", "updated_at"))
         records = []
+        # vibe-206 (M2): the probe goes blind to a SOURCE the moment ONE endpoint fails — the other
+        # two keep answering, so it still returns a result. Counting only an all-three failure would
+        # leave a permanently dead endpoint uncounted forever, which is the case worth reporting.
+        failure = None
         for path, field in endpoints:
             jq = (f'.[] | select(.{field} != null and .{field} != "") | '
                   f'[.{field}, (.author_association // ""), (.user.login // "")] | @tsv')
             try:
                 raw = self.gh(["api", "--paginate", path, "--jq", jq])
-            except GhError:
-                continue                   # degrades, like the rollup
+            except GhError as exc:
+                failure = exc              # degrades, like the rollup; the survivors are still used
+                continue
             for line in raw.splitlines():
                 if not line.strip():
                     continue
@@ -207,6 +237,10 @@ class Watcher:
                 records.append({"at": stamp,
                                 "author_association": parts[1].strip() if len(parts) > 1 else "",
                                 "author": parts[2].strip() if len(parts) > 2 else ""})
+        if failure is None:
+            self.activity_degraded = 0
+        else:
+            self._degraded("activity", failure)
         if not records:
             return None
         return max(records, key=lambda r: r["at"])

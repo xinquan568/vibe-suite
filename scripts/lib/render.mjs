@@ -178,6 +178,31 @@ export function renderCancelOutcome(outcome) {
     `after SIGTERM/SIGKILL escalation — investigate manually`;
 }
 
+/**
+ * The `prune` report (vibe-204). Every interpolated field is store-validated data (ids by shape,
+ * statuses from the known set, timestamps by parse) or a directory entry of this store's own
+ * naming — nothing here is external free text.
+ */
+export function renderPruneOutcome(report, { olderThan }) {
+  const lines = report.pruned.map((job) =>
+    `pruned ${job.jobId} (${job.status}, ended ${job.endedAt}, ${job.files} file(s))`);
+  const files = report.pruned.reduce((sum, job) => sum + job.files, 0);
+  let summary = `prune: ${report.pruned.length} job(s) removed (${files} file(s)); ` +
+    `${report.orphanSlots} orphan slot(s) swept; ${report.kept} kept (running, or ended within ${olderThan})`;
+  if (report.resumed.length > 0) summary += `; ${report.resumed.length} interrupted prune(s) completed`;
+  if (report.tombstonesExpired > 0) summary += `; ${report.tombstonesExpired} expired tombstone(s) removed`;
+  if (report.stagingSwept > 0) summary += `; ${report.stagingSwept} stale staging dir(s) removed`;
+  if (report.logsLeft.length > 0) summary += `; ${report.logsLeft.length} worker log(s) left in place`;
+  lines.push(summary);
+  for (const entry of report.invalid) {
+    lines.push(`invalid record: ${entry.jobId} — ${entry.reason} (not pruned)`);
+  }
+  for (const name of report.leftovers) {
+    lines.push(`left in place: ${name} — no ownership stamp, or could not be removed`);
+  }
+  return lines.join("\n");
+}
+
 /** `--json`: the records verbatim, for tooling. Pretty-printed; still one JSON document. */
 export function renderJson(payload) {
   return JSON.stringify(payload, null, 2);

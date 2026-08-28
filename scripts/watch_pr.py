@@ -54,6 +54,12 @@ GREEN_FLOOR_SECONDS = 180
 #: Consecutive *state-probe* failures before giving up. Any success resets the count.
 MAX_CONSECUTIVE_FAILURES = 10
 
+# vibe-206 (M2): the bound on a single `gh` call. The issue specifies 60s. It is a policy, not a
+# measurement — a genuinely slow `gh api --paginate` over a very large PR will now degrade rather
+# than block, which is the accepted trade: a bounded wrong answer beats an unbounded wait, and the
+# degradation counters below make it visible instead of silent.
+GH_TIMEOUT_SECONDS = 60
+
 FAILING_CONCLUSIONS = frozenset({"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT"})
 PASSING_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
 
@@ -103,8 +109,22 @@ def reduce_activity(body, field):
     return "\n".join(lines)
 
 
-def _run_gh(argv):
-    result = subprocess.run(["gh"] + argv, capture_output=True, text=True)
+def _run_gh(argv, *, runner=subprocess.run, timeout=GH_TIMEOUT_SECONDS):
+    """One `gh` invocation, bounded.
+
+    vibe-206 (M2): this ran with no `timeout=`, so a network black hole or an interactive auth
+    prompt blocked here indefinitely — and `max_wait` is checked between polls, so the deadline that
+    bounds the watcher was unreachable from exactly the state that needed it. A hung call now raises
+    `GhError` like a failing one, so it joins the same accounting; the message says which it was, so
+    an operator can still tell a hang from a rejection.
+
+    `runner` exists because `Watcher(..., gh=...)` substitutes this whole function: a hanging
+    injection at that seam would hang rather than exercise the bound.
+    """
+    try:
+        result = runner(["gh"] + argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise GhError(f"gh timed out after {timeout}s: {' '.join(argv)}") from None
     if result.returncode != 0:
         raise GhError(result.stderr.strip() or f"gh exited {result.returncode}")
     return result.stdout

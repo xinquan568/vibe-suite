@@ -531,6 +531,11 @@ test("a canonical that is not ours is never marked, and a valid marker is never 
   writeFileSync(recordPath(ws, blocked), JSON.stringify({ ...newSeed(blocked), status: "running" }), "utf8");   // unstamped
   report = await pruneTerminalJobs(ws, { olderThanMs: 0, now });
   assert.deepEqual(report.resumed, [], "blocked, not resumed");
+  // …and NAMED as blocked. A job that leaves every total — pruned, resumed, kept, blocked, invalid —
+  // is the one an operator most needs to see and the one the report would never count.
+  assert.deepEqual(report.blocked.sort(), [blocked, foreign].sort(),
+    "both the unmarkable foreign canonical and the marked job that could not be finished are counted");
+  assert.equal(report.kept, 0, "and neither is a retention decision");
   assert.deepEqual(report.leftovers.sort(), [`${blocked}.json`, `${blocked}.pruning`, `${foreign}.json`].sort());
   assert.ok(existsSync(path.join(jobsDir(ws), `${blocked}.pruning`)), "the valid marker is preserved");
   assert.ok(lstatSync(recordPath(ws, blocked)).isFile(), "the foreign file is not ours to remove");
@@ -866,6 +871,7 @@ test("createRecord is linearised against the marker: a creation that lands behin
   assert.deepEqual(report.resumed, [id]);
   assert.ok(isTombstone(ws, id));
   assert.deepEqual(report.leftovers.sort(), [`${other}.json`, `${other}.pruning`].sort());
+  assert.deepEqual(report.blocked, [other], "and the blocked job is counted, not left out of every total");
   assert.ok(lstatSync(recordPath(ws, other)).isFile(), "a record of another identity is never unlinked under a marker");
 });
 

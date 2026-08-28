@@ -1076,7 +1076,10 @@ export async function pruneTerminalJobs(workspace, {
   for (const jobId of valid.sort()) {
     const done = await entomb(dir, jobId, names, { onStep });
     report.leftovers.push(...done.leftovers);
-    if (!done.ok) { blockedIds.add(jobId); continue; }
+    // A marked job the resume could not finish is BLOCKED, and is named as such. Adding it to the
+    // blocked set alone would keep it out of every subsequent loop and out of every total, so the
+    // one job in the store an operator most needs to see would be the one the report never counts.
+    if (!done.ok) { blockedIds.add(jobId); report.blocked.push(jobId); continue; }
     if (done.completedByOther) continue;
     if (names.includes(`${jobId}.log`)) report.logsLeft.push(jobId);
     report.resumed.push(jobId);

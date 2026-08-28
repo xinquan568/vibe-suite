@@ -29,6 +29,61 @@
 // `rename` removes its source, so a concurrent mover gets ENOENT. That is not a failure: re-read the
 // canonical record, and a version at or past the target proves the transition committed.
 //
+// ## What is deleted, and when (vibe-204)
+//
+// **A slot of a non-terminal job is never deleted**, and neither is any job's top slot: they are the
+// CAS protocol state above. Once a record is TERMINAL its history below the top slot is committed
+// and is compacted away at that commit (`compactSlots`), leaving canonical + one slot; a terminal
+// job old enough is deleted whole by `pruneTerminalJobs` — an explicit operator action, never a
+// hook. Two consequences are handled explicitly rather than assumed away:
+//
+//   * Freeing a version means a won `link` no longer proves first claim, so `commit` **confirms**
+//     every win before publishing — against the job's highest OTHER slot (the retained top is the
+//     authority; the canonical can be lowered by a paused publisher) and against the canonical.
+//   * `rename` onto the canonical path cannot be made conditional, so a publisher paused between
+//     confirming and renaming could recreate a canonical after prune deleted it. Prune therefore
+//     leaves a **tombstone: a 0700 directory at the canonical path**, holding this store's stamp
+//     for the job, staged elsewhere and renamed into place atomically so it never exists without
+//     that provenance. `rename(file, dir)` fails `EISDIR`, `publishNew` refuses a directory, every
+//     read reports the job gone — the late publication fails instead of resurrecting the job.
+//     Tombstones expire after `PRUNE_TOMBSTONE_TTL_MS`; a publisher paused longer than that is the
+//     declared boundary. A directory WITHOUT that provenance is foreign: never accepted as a
+//     tombstone, never expired, reported.
+//   * The tombstone cannot be created while the canonical file occupies its path, so entombing is
+//     two steps with a crash window between them. Prune therefore first publishes a durable
+//     **marker** (`<jobId>.pruning`, stamped) — *before* it unlinks anything — and removes it only
+//     after the tombstone stands and the slots are gone. Every later prune completes an interrupted
+//     one from its marker, readers and `commit` treat a validly marked job as gone, and
+//     `createRecord` refuses a marked or entombed id: the deletion is durable from the marker on,
+//     whatever crashes after it. Authority is never a name — a marker counts only with this store's
+//     stamp for that job id, read without following symlinks — and two prunes may race: a removal
+//     that finds nothing is a lost race, never a refusal, so a shared marker is never withdrawn by
+//     the loser. The marker names the record INCARNATION it commits to delete — the `incarnation`
+//     the record was minted with, because an id can be lived twice and two creations in one
+//     millisecond share a `createdAt` — and that identity is applied BY the unlink, on the document
+//     that call reads through its own handle, not by an earlier call whose answer a later mutation
+//     inherits. A record published in the gap is a different life and is refused, not deleted.
+//     `createRecord` re-checks the marker AFTER publishing and proves ITS OWN record still stands at
+//     the canonical path: the marker is the linearisation point, a creation that lost to it
+//     withdraws exactly what it published, and a creation whose record no longer stands is never
+//     reported as landed. The marker also opens a deletion ATTEMPT, and the tombstone carries the
+//     attempt it was installed under, so any prune adopting a marker can tell "the deletion I am
+//     completing reached its tombstone" from "this job was already deleted, and reported, under a
+//     different attempt, and this marker was published over the result" — the second, read as the
+//     first, would give an already-reported job a second line in a later run.
+//   * Removal of a directory of ours (an expired tombstone) VACATES the path first, in one atomic
+//     rename to a staging name, and is taken apart there. A concurrent prune therefore sees the
+//     tombstone whole or an absent path — never a directory of ours stripped of the provenance that
+//     would let it be proven, which is the one state a peer could neither finish nor honestly
+//     report. A crash inside the staging name leaves an EMPTY directory, and an empty directory
+//     wearing the staging shape, past the reap age, is removed by `rmdir` alone — the one removal
+//     that cannot destroy anything, since `rmdir` refuses a directory that holds so much as one
+//     entry.
+//
+// **The canonical is the job**: with no canonical (or a tombstone) there is no job, and a slot beside
+// that gap is a stale writer's orphan — removed by the writer itself when it learns the job is
+// gone, or by prune's sweep.
+//
 // ## Nullability differs deliberately from the toggle store
 //
 // `store.py` documents that an unset key is *absent* rather than null, because there absence means

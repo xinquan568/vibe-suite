@@ -398,6 +398,156 @@ async function removeInside(dir, keep) {
 }
 
 /**
+ * Read a stamped file of ours (vibe-204): parsed JSON, or `null`. Opened `O_NOFOLLOW` and checked
+ * to be a regular file THROUGH THE HANDLE, so a symlink at the path — even one whose target is a
+ * perfectly valid file of ours — is `null`, as is a directory, an unparseable file, or a file
+ * whose stamp is missing, of another schema, or of a kind not in `kinds`. This is the read-side
+ * twin of `unlinkOwned`: a name is not authority, and neither is what a name points at.
+ */
+export async function readOwned(root, rel, kinds) {
+  await assertRoot(root);
+  const target = path.resolve(root, rel);
+  await assertInside(root, target);
+  let handle;
+  try {
+    handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const info = await handle.stat();
+    if (!info.isFile()) return null;
+    const parsed = JSON.parse(await handle.readFile("utf8"));
+    const stamp = parsed?.[STAMP_KEY];
+    if (stamp?.schema !== STAMP_SCHEMA || !kinds.includes(stamp?.kind)) return null;
+    return parsed;
+  } catch {
+    return null;
+  } finally {
+    await handle?.close();
+  }
+}
+
+/**
+ * Publish a staged directory of ours at `dest` in one atomic step (vibe-204: the prune tombstone).
+ * The staged directory must be a real directory carrying our stamp file `stampName` (proven by
+ * `readOwned`), and `dest` must be absent — a file or a directory there, ours or not, is refused
+ * (`false`), never replaced. `rename(2)` of a directory is atomic, so the tombstone becomes visible
+ * WITH its provenance already inside; there is no state in which an unprovenanced directory of ours
+ * exists at the destination.
+ */
+export async function publishDirAt(root, stagedRel, destRel, { stampName, kinds }) {
+  await assertRoot(root);
+  const staged = path.resolve(root, stagedRel);
+  const dest = path.resolve(root, destRel);
+  await assertInside(root, staged);
+  await assertInside(root, dest);
+  if (await classify(staged) !== "dir") return false;
+  if (await readOwned(staged, stampName, kinds) === null) return false;
+  if (await classify(dest) !== "absent") return false;
+  try {
+    await fs.rename(staged, dest);
+  } catch (error) {
+    if (["EEXIST", "ENOTEMPTY", "ENOTDIR", "EISDIR"].includes(error.code)) return false;
+    throw error;
+  }
+  return true;
+}
+
+/**
+ * Remove a directory of ours (vibe-204: an expired tombstone, a stale staging directory):
+ * `removed`, `absent`, or `refused`. Provenance is the stamp file inside it, read without
+ * following; the directory must hold that file and NOTHING else (nothing here descends), the stamp
+ * is unlinked through `unlinkOwned`, and `rmdir` does the rest. A directory without our stamp — or
+ * with anything else in it — is not ours to remove and is refused.
+ */
+/** Does `dir` hold exactly `name` and nothing else? `false` if it cannot be read at all. */
+async function holdsOnly(dir, name) {
+  try {
+    const entries = await fs.readdir(dir);
+    return entries.length === 1 && entries[0] === name;
+  } catch {
+    return false;
+  }
+}
+
+export async function removeOwnedDirAt(root, rel, {
+  stampName, kinds, vacateAs = null, onVacated = null, onValidated = null, onStampJudged = null,
+}) {
+  await assertRoot(root);
+  let target = path.resolve(root, rel);
+  await assertInside(root, target);
+  const kind = await classify(target);
+  if (kind === "absent") return "absent";
+  if (kind !== "dir") return "refused";
+  if (await readOwned(target, stampName, kinds) === null) return "refused";
+  if (!(await holdsOnly(target, stampName))) return "refused";     // decided before anything moves
+  // A documented test seam at the one window this call cannot close by construction: the directory
+  // has been validated and nothing has been touched yet. Two callers sweeping the same directory
+  // both stand here, and what happens next is what the outcomes below have to describe honestly.
+  if (onValidated) await onValidated();
+  // vibe-204 round 6: `vacateAs` takes the directory OUT of the caller's namespace, in one atomic
+  // `rename`, before anything inside it is touched. Removing in place published two intermediate
+  // states to concurrent peers — "our stamp is gone but the directory is still here" — and a peer
+  // that met one of them could only report a directory it was unable to prove. With the path
+  // vacated first, the states a peer can observe at `rel` are the two it can act on: the directory
+  // whole, or nothing. The remains carry their provenance to a name the caller sweeps. Only a
+  // directory that holds exactly our stamp is ever moved: a directory carrying anything else is
+  // refused where it stands.
+  if (vacateAs !== null) {
+    const staged = path.resolve(root, vacateAs);
+    await assertInside(root, staged);
+    if (await classify(staged) !== "absent") return "refused";
+    try {
+      await fs.rename(target, staged);
+    } catch (error) {
+      if (error.code === "ENOENT") return "absent";              // a peer took it first: a lost race
+      return "refused";
+    }
+    target = staged;
+    if (onVacated) await onVacated();
+  }
+  if (!(await holdsOnly(target, stampName))) {
+    return (await classify(target)) === "absent" ? "absent" : "refused";
+  }
+  // The second seam sits INSIDE the unlink, between the stamp being read through its handle and the
+  // `unlink` on the next line — the one window `holdsOnly` above cannot cover, because two callers
+  // can both pass that check and both open the stamp before either removes it.
+  if (!(await unlinkOwned(target, stampName, kinds,
+        { predicate: onStampJudged === null ? null : async () => { await onStampJudged(); return true; } }))) {
+    return (await classify(target)) === "absent" ? "absent" : "refused";
+  }
+  try {
+    await fs.rmdir(target);
+  } catch (error) {
+    return error.code === "ENOENT" ? "absent" : "refused";
+  }
+  return "removed";
+}
+
+/**
+ * Remove an EMPTY directory (vibe-204 round 6): `removed`, `absent`, or `refused`.
+ *
+ * The narrow twin of `removeOwnedDirAt`, for the two states a crash can strand where provenance
+ * either does not exist yet or no longer does: a staging directory created before its stamp was
+ * published, and the tail of a removal whose stamp is already gone. `rmdir(2)` is the whole
+ * operation — it refuses a directory that holds anything at all, so it cannot destroy data, and
+ * nothing here descends, reads, or follows. The caller decides which paths are eligible; this
+ * primitive proves only "empty".
+ */
+export async function removeEmptyDirAt(root, rel) {
+  await assertRoot(root);
+  const target = path.resolve(root, rel);
+  await assertInside(root, target);
+  const kind = await classify(target);
+  if (kind === "absent") return "absent";
+  if (kind !== "dir") return "refused";
+  try {
+    await fs.rmdir(target);
+  } catch (error) {
+    if (error.code === "ENOENT") return "absent";
+    return "refused";
+  }
+  return "removed";
+}
+
+/**
  * Delete `rel` under `root` only when this suite wrote it.
  *
  * The stamp is read **through the open handle**, so what is deleted is what was inspected as far as
@@ -405,7 +555,7 @@ async function removeInside(dir, keep) {
  * failing to collect our own temp is a leak, and deleting someone else's file is a defect, and the
  * two are not the same size.
  */
-export async function unlinkOwned(root, rel, kinds) {
+export async function unlinkOwned(root, rel, kinds, { predicate = null } = {}) {
   await assertRoot(root);
   const target = path.resolve(root, rel);
   await assertInside(root, target);
@@ -414,13 +564,31 @@ export async function unlinkOwned(root, rel, kinds) {
   let handle;
   try {
     handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const stamp = JSON.parse(await handle.readFile("utf8"))?.[STAMP_KEY];
+    const parsed = JSON.parse(await handle.readFile("utf8"));
+    const stamp = parsed?.[STAMP_KEY];
     if (stamp?.schema !== STAMP_SCHEMA || !kinds.includes(stamp?.kind)) return false;
+    // vibe-204 round 6: the caller's identity predicate is applied HERE, on the document read
+    // through this handle, and the unlink is the next thing that happens. A caller that checked
+    // identity in an earlier call and then asked for an unqualified delete was deciding on one
+    // observation and mutating a different one — which is how a record published in the gap could
+    // be deleted on its stamp kind alone. What a path-based API can promise is that the object
+    // deleted is the object judged as far as it was observed; that promise has to live in the
+    // deleting call, not beside it.
+    if (predicate !== null && !(await predicate(parsed))) return false;
   } catch {
     return false;
   } finally {
     await handle?.close();
   }
-  await fs.unlink(target);
+  try {
+    await fs.unlink(target);
+  } catch (error) {
+    // A peer that removed the same file between this call's read and its unlink has done what this
+    // call was about to do. `false` already means "absent or not ours"; a lost race belongs on that
+    // side of the line, not thrown at a caller that is sweeping. Everything else still raises — a
+    // permission failure is not a race.
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
   return true;
 }

@@ -19,7 +19,8 @@ import {
   createRecord, finaliseRecord, newRecord, readRecord, transact, updateRecord, STATE_DIRNAME,
 } from "../../scripts/lib/jobs.mjs";
 import {
-  cancelJob, resolveCancelableJob, resolveResultJob, resolveStatusJobs, ResolveError,
+  cancelJob, parseOlderThan, resolveCancelableJob, resolveResultJob, resolveStatusJobs,
+  OLDER_THAN_DEFAULT, ResolveError,
 } from "../../scripts/lib/resolve.mjs";
 
 function workspace() {
@@ -244,4 +245,18 @@ test("no live process: abandoned-style records are finalised without signalling"
   assert.equal(outcome.signalled, false);
   assert.equal(outcome.groupDead, true);
   assert.deepEqual(calls, [[424242, 0]], "one liveness probe, no signals");
+});
+
+test("parseOlderThan accepts <n>d|h|m|s and the bare 0, and refuses everything else as usage", () => {
+  assert.equal(OLDER_THAN_DEFAULT, "7d");
+  for (const [text, ms] of [
+    ["7d", 7 * 86_400_000], ["12h", 12 * 3_600_000], ["30m", 30 * 60_000], ["45s", 45_000],
+    ["0", 0], ["0d", 0], ["1s", 1000],
+  ]) {
+    assert.equal(parseOlderThan(text), ms, text);
+  }
+  for (const bad of ["", "7", "-1d", "1w", "1.5d", "d", "abc", " 7d", "7d ", null, undefined, 7]) {
+    assert.throws(() => parseOlderThan(bad), (error) => error instanceof ResolveError && error.code === "usage",
+      `accepted: ${String(bad)}`);
+  }
 });

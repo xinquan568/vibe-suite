@@ -8,6 +8,7 @@
 //   node scripts/jobs-cli.mjs [status [<job-id>]] [--all] [--json] [--settle-abandoned]
 //   node scripts/jobs-cli.mjs result <job-id>
 //   node scripts/jobs-cli.mjs cancel [<job-id>]
+//   node scripts/jobs-cli.mjs prune [--older-than <n>d|h|m|s]      (vibe-204: terminal jobs, whole)
 //
 // Default subcommand is `status`; a bare job id means `status <job-id>`. The workspace is
 // `process.cwd()` — identical to codex-runner.mjs, so both sides of the store agree on where it is:
@@ -21,24 +22,36 @@
 // (cc-suite W7 class). All command logic lives here and in scripts/lib/, never in markdown
 // snippets, so the no-top-level-await sweep covers every line that can execute.
 
-import { isAbandoned, resultLine, TERMINAL_STATUSES } from "./lib/jobs.mjs";
+import { isAbandoned, pruneTerminalJobs, resultLine, TERMINAL_STATUSES } from "./lib/jobs.mjs";
 import {
-  abandonedIds, cancelJob, resolveResultJob, resolveStatusJobs, settleAbandoned, ResolveError,
+  abandonedIds, cancelJob, parseOlderThan, resolveResultJob, resolveStatusJobs, settleAbandoned,
+  OLDER_THAN_DEFAULT, ResolveError,
 } from "./lib/resolve.mjs";
-import { renderCancelOutcome, renderDetail, renderJson, renderStatusTable } from "./lib/render.mjs";
+import {
+  renderCancelOutcome, renderDetail, renderJson, renderPruneOutcome, renderStatusTable,
+} from "./lib/render.mjs";
 
-const SUBCOMMANDS = new Set(["status", "result", "cancel"]);
-const FLAGS = new Set(["--all", "--json", "--settle-abandoned"]);
+const SUBCOMMANDS = new Set(["status", "result", "cancel", "prune"]);
+const FLAGS = new Set(["--all", "--json", "--settle-abandoned", "--older-than"]);
 
 class UsageError extends Error {}
 
 function parseArgs(argv) {
-  const options = { subcommand: null, jobId: null, all: false, json: false, settle: false };
+  const options = {
+    subcommand: null, jobId: null, all: false, json: false, settle: false, olderThan: null, olderThanMs: null,
+  };
   const positional = [];
-  for (const arg of argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
     if (arg === "--all") options.all = true;
     else if (arg === "--json") options.json = true;
     else if (arg === "--settle-abandoned") options.settle = true;
+    else if (arg === "--older-than" || arg.startsWith("--older-than=")) {
+      // The one value-taking flag: `--older-than 7d` or `--older-than=7d`.
+      const value = arg.includes("=") ? arg.slice("--older-than=".length) : argv[i += 1];
+      if (value === undefined) throw new UsageError("--older-than requires a value (e.g. 7d, 12h, 30m, or 0)");
+      options.olderThan = value;
+    }
     else if (arg.startsWith("--")) throw new UsageError(`unknown flag: ${arg} (known: ${[...FLAGS].join(", ")})`);
     else positional.push(arg);
   }
@@ -64,6 +77,21 @@ function parseArgs(argv) {
       ["--settle-abandoned", options.settle]]) {
       if (set) throw new UsageError(`${flag} applies to status only`);
     }
+  }
+  if (options.subcommand === "prune") {
+    // vibe-204: prune is a sweep, never a per-job command — a job id here is a misunderstanding of
+    // what it does, so it is refused rather than narrowed to that job.
+    if (options.jobId !== null) {
+      throw new UsageError("prune takes no job id — it removes every terminal job older than the cutoff");
+    }
+    try {
+      options.olderThanMs = parseOlderThan(options.olderThan ?? OLDER_THAN_DEFAULT);
+    } catch (error) {
+      if (!(error instanceof ResolveError)) throw error;
+      throw new UsageError(error.message);
+    }
+  } else if (options.olderThan !== null) {
+    throw new UsageError("--older-than applies to prune only");
   }
   return options;
 }
@@ -114,6 +142,19 @@ async function runCancel(workspace, options) {
   return 0;
 }
 
+/**
+ * `prune` (vibe-204): delete terminal jobs older than the cutoff, whole. The store decides what is
+ * eligible and proves ownership of every file it removes; this side only parses and renders. Exit 1
+ * when something in scope could not be vouched for or removed — a sweep that reports clean while
+ * leaving files behind would be the same defect as a silent reaper.
+ */
+async function runPrune(workspace, options) {
+  const report = await pruneTerminalJobs(workspace, { olderThanMs: options.olderThanMs });
+  process.stdout.write(
+    renderPruneOutcome(report, { olderThan: options.olderThan ?? OLDER_THAN_DEFAULT }) + "\n");
+  return report.invalid.length > 0 || report.leftovers.length > 0 || report.blocked.length > 0 ? 1 : 0;
+}
+
 async function main() {
   const workspace = process.cwd();
   let options;
@@ -128,6 +169,7 @@ async function main() {
   try {
     if (options.subcommand === "result") return await runResult(workspace, options);
     if (options.subcommand === "cancel") return await runCancel(workspace, options);
+    if (options.subcommand === "prune") return await runPrune(workspace, options);
     return await runStatus(workspace, options);
   } catch (error) {
     if (error instanceof ResolveError) {

@@ -10,6 +10,7 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { createRecord as createRecordForTombstone } from "../../scripts/lib/jobs.mjs";
 
 import path from "node:path";
 import test from "node:test";
@@ -60,10 +61,20 @@ test("listRecords enumerates canonical records only and skips slots, temps and f
   writeFileSync(path.join(dir, `${ID_A}.v2.json`), JSON.stringify(baseRecord(ID_A, { version: 2 })));
   writeFileSync(path.join(dir, `${ID_C}.tmp.deadbeef.json`), "{}");
   writeFileSync(path.join(dir, "notes.txt"), "not a record");
+  // vibe-204: a prune tombstone (a directory at a canonical path) and a VALID prune marker are
+  // neither records nor invalid records — while a foreign file wearing the marker name hides nothing.
+  mkdirSync(path.join(dir, "job_dddddddddddddddddddd.json"), { mode: 0o700 });
+  writeFileSync(path.join(dir, "job_dddddddddddddddddddd.json", ".vibe-suite-tombstone"),
+    JSON.stringify({ "_vibe-suite_owned": { kind: "job-tombstone", schema: 1 }, jobId: "job_dddddddddddddddddddd" }));
+  writeFileSync(path.join(dir, `${ID_B}.pruning`), "{}");                                   // foreign: ID_B stays listed
+  writeFileSync(path.join(dir, "job_eeeeeeeeeeeeeeeeeeee.json"), JSON.stringify(baseRecord("job_eeeeeeeeeeeeeeeeeeee")));
+  writeFileSync(path.join(dir, "job_eeeeeeeeeeeeeeeeeeee.pruning"),
+    JSON.stringify({ "_vibe-suite_owned": { kind: "job-prune-marker", schema: 1 }, jobId: "job_eeeeeeeeeeeeeeeeeeee", createdAt: "2026-01-01T00:00:00.000Z" }));
 
   const { records, invalid } = await listRecords(ws);
   assert.deepEqual(records.map((r) => r.jobId).sort(), [ID_A, ID_B]);
   assert.deepEqual(invalid, []);
+  void createRecordForTombstone;
 });
 
 test("listRecords loads through the slot-aware path: a newer committed slot wins over a stale canonical", async () => {

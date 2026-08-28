@@ -47,7 +47,8 @@ function run({ agy = MISSING, codex = MISSING, gate = null } = {}) {
   });
   const records = (() => {
     try {
-      return readdirSync(jobsDir(cwd)).filter((n) => /^job_[0-9a-f]{20}\.json$/.test(n)).length;
+      return readdirSync(jobsDir(cwd), { withFileTypes: true })
+        .filter((e) => e.isFile() && /^job_[0-9a-f]{20}\.json$/.test(e.name)).length;
     } catch { return 0; }
   })();
   return { ...result, cwd, records };

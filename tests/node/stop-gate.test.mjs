@@ -88,7 +88,8 @@ const assertFailOpen = (result, why = "") => {
 const promptSentTo = (probe) => JSON.parse(readFileSync(probe, "utf8")).argv.at(-1);
 const jobCount = (dir) => {
   try {
-    return readdirSync(jobsDir(dir)).filter((n) => /^job_[0-9a-f]{20}\.json$/.test(n)).length;
+    return readdirSync(jobsDir(dir), { withFileTypes: true })
+      .filter((e) => e.isFile() && /^job_[0-9a-f]{20}\.json$/.test(e.name)).length;
   } catch {
     return 0;
   }

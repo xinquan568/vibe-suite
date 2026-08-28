@@ -26,6 +26,26 @@ import {
   REJECT, TERMINAL_STATUSES,
 } from "./jobs.mjs";
 
+/** `jobs prune` cutoff default, as the operator writes it. */
+export const OLDER_THAN_DEFAULT = "7d";
+const OLDER_THAN_UNIT_MS = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1000 };
+
+/**
+ * `--older-than <n>d|h|m|s` → milliseconds; the bare `0` means "every terminal job". Anything else —
+ * a bare number, a negative, a fraction, `1w` — is a usage error (vibe-204). Lives here, import-safe,
+ * so the table of forms is pinned in-process rather than through a subprocess per case.
+ */
+export function parseOlderThan(text) {
+  const value = String(text ?? "");
+  if (value === "0") return 0;
+  const match = /^(\d+)([dhms])$/.exec(value);
+  if (!match) {
+    throw new ResolveError(
+      `--older-than expects <n>d|h|m|s (e.g. 7d, 12h, 30m, 45s) or 0, got '${value}'`, "usage");
+  }
+  return Number(match[1]) * OLDER_THAN_UNIT_MS[match[2]];
+}
+
 export const CANCEL_GRACE_MS = 2000;
 export const CANCEL_REAP_DEADLINE_MS = 15_000;
 export const CANCEL_POLL_MS = 50;

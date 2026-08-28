@@ -447,3 +447,198 @@ test("openSinkAt creates an exclusive 0600 append sink a child can inherit, and 
   await assert.rejects(openSinkAt(root, path.join(tmpdir(), "vibe-182-outside.log")), /outside/,
     "containment holds for sinks as for every other write");
 });
+
+test("readOwned reads a stamped regular file of ours and nothing else — not through a symlink, not a directory, not another kind", async () => {
+  const { readOwned, STAMP_KEY } = await import("../../scripts/lib/write.mjs");
+  const { mkdirSync, symlinkSync, writeFileSync } = await import("node:fs");
+  const path = (await import("node:path")).default;
+  const { tmpWorkspace } = await import("./_tmp.mjs");
+  const root = tmpWorkspace("write-readowned-");
+  const good = JSON.stringify({ [STAMP_KEY]: { kind: "probe", schema: 1 }, jobId: "x" });
+  writeFileSync(path.join(root, "good.json"), good);
+  writeFileSync(path.join(root, "unstamped.json"), "{}");
+  writeFileSync(path.join(root, "garbage.json"), "not json");
+  writeFileSync(path.join(root, "wrongkind.json"), JSON.stringify({ [STAMP_KEY]: { kind: "other", schema: 1 } }));
+  writeFileSync(path.join(root, "wrongschema.json"), JSON.stringify({ [STAMP_KEY]: { kind: "probe", schema: 2 } }));
+  mkdirSync(path.join(root, "dir.json"));
+  const outside = tmpWorkspace("write-readowned-outside-");
+  writeFileSync(path.join(outside, "target.json"), good);
+  symlinkSync(path.join(outside, "target.json"), path.join(root, "link.json"));   // a symlink to a VALID file of ours
+
+  assert.deepEqual(await readOwned(root, "good.json", ["probe"]), JSON.parse(good));
+  for (const name of ["unstamped.json", "garbage.json", "wrongkind.json", "wrongschema.json", "dir.json", "link.json", "absent.json"]) {
+    assert.equal(await readOwned(root, name, ["probe"]), null, name);
+  }
+  await assert.rejects(() => readOwned(root, "../escape.json", ["probe"]), /'\.\.' is not a usable path component|resolves outside/);
+});
+
+test("publishDirAt renames a staged directory of ours into an ABSENT destination, and refuses everything else", async () => {
+  const { publishDirAt, STAMP_KEY } = await import("../../scripts/lib/write.mjs");
+  const { mkdirSync, symlinkSync, writeFileSync, existsSync, lstatSync, readdirSync } = await import("node:fs");
+  const path = (await import("node:path")).default;
+  const { tmpWorkspace } = await import("./_tmp.mjs");
+  const root = tmpWorkspace("write-publishdir-");
+  const opts = { stampName: ".stamp", kinds: ["probe"] };
+  const stamp = JSON.stringify({ [STAMP_KEY]: { kind: "probe", schema: 1 } });
+  const stage = (name, { stamped = true } = {}) => {
+    mkdirSync(path.join(root, name), { mode: 0o700 });
+    if (stamped) writeFileSync(path.join(root, name, ".stamp"), stamp);
+  };
+  stage("s1");
+  assert.equal(await publishDirAt(root, "s1", "dest", opts), true);
+  assert.ok(lstatSync(path.join(root, "dest")).isDirectory() && !existsSync(path.join(root, "s1")));
+  assert.deepEqual(readdirSync(path.join(root, "dest")), [".stamp"], "the provenance arrived with the directory");
+  stage("s2");
+  assert.equal(await publishDirAt(root, "s2", "dest", opts), false, "an existing directory is never replaced");
+  assert.ok(existsSync(path.join(root, "s2")), "the staged directory is left for the caller to withdraw");
+  writeFileSync(path.join(root, "file"), "x");
+  assert.equal(await publishDirAt(root, "s2", "file", opts), false, "an existing file is never replaced");
+  stage("unstamped", { stamped: false });
+  assert.equal(await publishDirAt(root, "unstamped", "dest2", opts), false, "no provenance, no publication");
+  assert.ok(!existsSync(path.join(root, "dest2")));
+  const outside = tmpWorkspace("write-publishdir-outside-");
+  writeFileSync(path.join(outside, ".stamp"), stamp);
+  symlinkSync(outside, path.join(root, "linked"));
+  assert.equal(await publishDirAt(root, "linked", "dest3", opts), false, "a symlinked staging directory is refused");
+  assert.ok(!existsSync(path.join(root, "dest3")) && existsSync(path.join(outside, ".stamp")));
+});
+
+test("removeOwnedDirAt removes only a directory holding exactly our stamp — foreign, non-empty, symlinked and absent answer differently", async () => {
+  const { removeOwnedDirAt, STAMP_KEY } = await import("../../scripts/lib/write.mjs");
+  const { mkdirSync, symlinkSync, writeFileSync, existsSync } = await import("node:fs");
+  const path = (await import("node:path")).default;
+  const { tmpWorkspace } = await import("./_tmp.mjs");
+  const root = tmpWorkspace("write-rmowned-");
+  const opts = { stampName: ".stamp", kinds: ["probe"] };
+  const stamp = JSON.stringify({ [STAMP_KEY]: { kind: "probe", schema: 1 } });
+  mkdirSync(path.join(root, "ours"), { mode: 0o700 }); writeFileSync(path.join(root, "ours", ".stamp"), stamp);
+  mkdirSync(path.join(root, "empty"), { mode: 0o700 });
+  mkdirSync(path.join(root, "extra"), { mode: 0o700 }); writeFileSync(path.join(root, "extra", ".stamp"), stamp); writeFileSync(path.join(root, "extra", "more"), "x");
+  mkdirSync(path.join(root, "wrong"), { mode: 0o700 }); writeFileSync(path.join(root, "wrong", ".stamp"), JSON.stringify({ [STAMP_KEY]: { kind: "other", schema: 1 } }));
+  writeFileSync(path.join(root, "file"), "x");
+  const outside = tmpWorkspace("write-rmowned-outside-"); writeFileSync(path.join(outside, ".stamp"), stamp);
+  symlinkSync(outside, path.join(root, "link"));
+
+  assert.equal(await removeOwnedDirAt(root, "ours", opts), "removed");
+  assert.ok(!existsSync(path.join(root, "ours")));
+  assert.equal(await removeOwnedDirAt(root, "ours", opts), "absent");
+  assert.equal(await removeOwnedDirAt(root, "empty", opts), "refused", "no provenance");
+  assert.equal(await removeOwnedDirAt(root, "extra", opts), "refused", "anything besides the stamp");
+  assert.ok(existsSync(path.join(root, "extra", ".stamp")) && existsSync(path.join(root, "extra", "more")), "nothing inside was touched");
+  assert.equal(await removeOwnedDirAt(root, "wrong", opts), "refused");
+  assert.equal(await removeOwnedDirAt(root, "file", opts), "refused");
+  assert.equal(await removeOwnedDirAt(root, "link", opts), "refused", "a symlink is refused, not followed");
+  assert.ok(existsSync(path.join(outside, ".stamp")), "the target survives");
+  await assert.rejects(() => removeOwnedDirAt(root, "../escape", opts), /'\.\.' is not a usable path component|resolves outside/);
+});
+
+test("unlinkOwned applies the caller's identity predicate at the mutation, not beside it", async () => {
+  const { unlinkOwned, STAMP_KEY } = await import("../../scripts/lib/write.mjs");
+  const { writeFileSync, existsSync } = await import("node:fs");
+  const path = (await import("node:path")).default;
+  const { tmpWorkspace } = await import("./_tmp.mjs");
+  const root = tmpWorkspace("write-predicate-");
+  const doc = (id) => JSON.stringify({ [STAMP_KEY]: { kind: "probe", schema: 1 }, id }) + "\n";
+  writeFileSync(path.join(root, "a.json"), doc("A"));
+  writeFileSync(path.join(root, "b.json"), doc("B"));
+
+  const isA = (parsed) => parsed.id === "A";
+  assert.equal(await unlinkOwned(root, "b.json", ["probe"], { predicate: isA }), false,
+    "the stamp matches, the identity does not: refused");
+  assert.ok(existsSync(path.join(root, "b.json")), "and the file is still there");
+  assert.equal(await unlinkOwned(root, "a.json", ["probe"], { predicate: isA }), true);
+  assert.ok(!existsSync(path.join(root, "a.json")));
+  assert.equal(await unlinkOwned(root, "b.json", ["probe"]), true, "no predicate: the kind decides, as before");
+});
+
+test("removeOwnedDirAt with vacateAs takes the path first, and refuses before moving anything it cannot remove", async () => {
+  const { removeOwnedDirAt, classify, STAMP_KEY } = await import("../../scripts/lib/write.mjs");
+  const { mkdirSync, writeFileSync, existsSync } = await import("node:fs");
+  const path = (await import("node:path")).default;
+  const { tmpWorkspace } = await import("./_tmp.mjs");
+  const root = tmpWorkspace("write-vacate-");
+  const opts = { stampName: ".stamp", kinds: ["probe"] };
+  const stamp = JSON.stringify({ [STAMP_KEY]: { kind: "probe", schema: 1 } });
+  mkdirSync(path.join(root, "ours"), { mode: 0o700 }); writeFileSync(path.join(root, "ours", ".stamp"), stamp);
+  mkdirSync(path.join(root, "extra"), { mode: 0o700 });
+  writeFileSync(path.join(root, "extra", ".stamp"), stamp); writeFileSync(path.join(root, "extra", "more"), "x");
+
+  const seen = [];
+  assert.equal(await removeOwnedDirAt(root, "ours", {
+    ...opts, vacateAs: ".staged", onVacated: async () => seen.push(await classify(path.join(root, "ours"))),
+  }), "removed");
+  assert.deepEqual(seen, ["absent"], "a peer arriving mid-removal sees an absent path, never a stripped directory");
+  assert.ok(!existsSync(path.join(root, ".staged")), "and the remains are gone too");
+
+  assert.equal(await removeOwnedDirAt(root, "extra", { ...opts, vacateAs: ".staged2" }), "refused");
+  assert.ok(existsSync(path.join(root, "extra", "more")), "a directory holding more than the stamp is refused WHERE IT STANDS");
+  assert.ok(!existsSync(path.join(root, ".staged2")));
+
+  mkdirSync(path.join(root, "taken"), { mode: 0o700 });
+  mkdirSync(path.join(root, "ours2"), { mode: 0o700 }); writeFileSync(path.join(root, "ours2", ".stamp"), stamp);
+  assert.equal(await removeOwnedDirAt(root, "ours2", { ...opts, vacateAs: "taken" }), "refused",
+    "an occupied staging name is refused, never replaced");
+  assert.ok(existsSync(path.join(root, "ours2", ".stamp")));
+});
+
+test("removeEmptyDirAt removes an empty directory and nothing else", async () => {
+  const { removeEmptyDirAt } = await import("../../scripts/lib/write.mjs");
+  const { mkdirSync, writeFileSync, existsSync, symlinkSync } = await import("node:fs");
+  const path = (await import("node:path")).default;
+  const { tmpWorkspace } = await import("./_tmp.mjs");
+  const root = tmpWorkspace("write-rmempty-");
+  mkdirSync(path.join(root, "empty"), { mode: 0o700 });
+  mkdirSync(path.join(root, "full"), { mode: 0o700 }); writeFileSync(path.join(root, "full", "x"), "x");
+  writeFileSync(path.join(root, "file"), "x");
+  const outside = tmpWorkspace("write-rmempty-outside-");
+  symlinkSync(outside, path.join(root, "link"));
+
+  assert.equal(await removeEmptyDirAt(root, "empty"), "removed");
+  assert.equal(await removeEmptyDirAt(root, "empty"), "absent");
+  assert.equal(await removeEmptyDirAt(root, "full"), "refused", "rmdir cannot destroy data");
+  assert.ok(existsSync(path.join(root, "full", "x")));
+  assert.equal(await removeEmptyDirAt(root, "file"), "refused");
+  assert.equal(await removeEmptyDirAt(root, "link"), "refused", "a symlink is not a directory here");
+  assert.ok(existsSync(outside), "the target survives");
+  await assert.rejects(() => removeEmptyDirAt(root, "../escape"), /'\.\.' is not a usable path component|resolves outside/);
+});
+
+test("unlinkOwned answers false when the file it judged is gone by the time it unlinks", async () => {
+  // Review finding 2: the final `fs.unlink` sat outside the primitive's catch, so a peer that
+  // removed the same file in the window made the call THROW. `removeOwnedDirAt` calls this
+  // primitive without a catch of its own, so a second prune sweeping the same aged staging
+  // directory aborted the whole sweep instead of treating a lost race as a lost race.
+  const root = tmpWorkspace("write-race-");
+  const target = path.join(root, "x.json");
+  const doc = JSON.stringify({ [STAMP_KEY]: { kind: "probe", schema: 1 }, id: "A" }) + "\n";
+  writeFileSync(target, doc, "utf8");
+  // The predicate runs on the document read through the handle, immediately before the unlink —
+  // which is exactly the window a peer occupies.
+  const { existsSync, unlinkSync } = await import("node:fs");
+  const peerRemovesItFirst = () => { unlinkSync(target); return true; };
+  assert.equal(await unlinkOwned(root, "x.json", ["probe"], { predicate: peerRemovesItFirst }), false,
+    "a lost race is false, never a throw");
+  assert.ok(!existsSync(target));
+});
+
+test("removeOwnedDirAt reports a peer that finished in the validation window as absent, not as a failure",
+  async () => {
+    const { removeOwnedDirAt } = await import("../../scripts/lib/write.mjs");
+    const root = scratchDir();
+    const opts = { stampName: ".stamp", kinds: ["probe"] };
+    const stamp = JSON.stringify({ [STAMP_KEY]: { kind: "probe", schema: 1 } });
+    const { rmSync } = await import("node:fs");
+    mkdirSync(path.join(root, "ours"), { mode: 0o700 });
+    writeFileSync(path.join(root, "ours", ".stamp"), stamp);
+    assert.equal(await removeOwnedDirAt(root, "ours", {
+      ...opts, onValidated: () => rmSync(path.join(root, "ours"), { recursive: true }),
+    }), "absent", "a peer that removed the whole directory is a lost race, not a refusal");
+
+    mkdirSync(path.join(root, "ours2"), { mode: 0o700 });
+    writeFileSync(path.join(root, "ours2", ".stamp"), stamp);
+    const { unlinkSync, existsSync } = await import("node:fs");
+    assert.equal(await removeOwnedDirAt(root, "ours2", {
+      ...opts, onValidated: () => unlinkSync(path.join(root, "ours2", ".stamp")),
+    }), "refused", "a peer that removed only the stamp leaves an empty directory for the caller's fallback");
+    assert.ok(existsSync(path.join(root, "ours2")));
+  });

@@ -48,7 +48,8 @@ function run(args, { cwd, fixture = "responder.mjs", gate = null, probe = null, 
 const ws = () => tmpWorkspace("agy-ws-");
 const jobCount = (dir) => {
   try {
-    return readdirSync(jobsDir(dir)).filter((n) => /^job_[0-9a-f]{20}\.json$/.test(n)).length;
+    return readdirSync(jobsDir(dir), { withFileTypes: true })
+      .filter((e) => e.isFile() && /^job_[0-9a-f]{20}\.json$/.test(e.name)).length;
   } catch { return 0; }
 };
 const base = (...extra) => ["--kind", "audit", "--timeout-ms", "20000", ...extra, "--", "analyse this"];

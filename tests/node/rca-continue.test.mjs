@@ -10,6 +10,10 @@ import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 
+/** Canonical records only — regular files, so a prune tombstone (a directory, vibe-204) never counts. */
+const canonicalCount = (ws) => readdirSync(jobsDir(ws), { withFileTypes: true })
+  .filter((e) => e.isFile() && /^job_[0-9a-f]{20}\.json$/.test(e.name)).length;
+
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -266,8 +270,7 @@ test("continue usage errors: invalid job id and thread-less records refuse witho
   });
   assert.notEqual(noThread.status, 0);
   assert.ok((noThread.stdout + noThread.stderr).includes("no thread id"), noThread.stderr);
-  assert.equal(readdirSync(jobsDir(ws)).filter((n) => /^job_[0-9a-f]{20}\.json$/.test(n)).length, 1,
-    "a refused resume must not create a new record");
+  assert.equal(canonicalCount(ws), 1, "a refused resume must not create a new record");
 });
 
 test("continue danger prior: an inherited dangerous sandbox refuses without fresh confirmation", async () => {
@@ -288,5 +291,5 @@ test("continue danger prior: an inherited dangerous sandbox refuses without fres
   });
   assert.notEqual(refused.status, 0,
     "inheriting a confirmed sandbox is not inheriting the confirmation");
-  assert.equal(readdirSync(jobsDir(ws)).filter((n) => /^job_[0-9a-f]{20}\.json$/.test(n)).length, 1);
+  assert.equal(canonicalCount(ws), 1);
 });

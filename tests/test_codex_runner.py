@@ -112,6 +112,8 @@ class RunnerCase(unittest.TestCase):
         slot_re = re.compile(r"(job_[A-Za-z0-9_-]+?)(?:\.v(\d+))?\.json")
         by_job = {}
         for rec in (jobs_dir.glob("job_*.json") if jobs_dir.is_dir() else []):
+            if not rec.is_file():
+                continue                      # a prune tombstone is a directory (vibe-204)
             m = slot_re.fullmatch(rec.name)
             if not m:
                 continue
@@ -1205,7 +1207,7 @@ class LifecycleRaces(RunnerCase):
         """
         proc = self.run_latched(*self.base_args("--background"))
         self.wait_signal("pre-claim")
-        jobs = list((self.ws / STATE_DIRNAME / "jobs").glob("job_*.json"))
+        jobs = [p for p in (self.ws / STATE_DIRNAME / "jobs").glob("job_*.json") if p.is_file()]
         self.assertEqual(len(jobs), 1)
         job_id = jobs[0].stem
         jobs[0].write_text("not json at all\n")
@@ -1228,7 +1230,7 @@ class LifecycleRaces(RunnerCase):
         """
         proc = self.run_latched(*self.base_args("--background"), hold_pre_spawn=True)
         self.wait_signal("pre-spawn")
-        jobs = list((self.ws / STATE_DIRNAME / "jobs").glob("job_*.json"))
+        jobs = [p for p in (self.ws / STATE_DIRNAME / "jobs").glob("job_*.json") if p.is_file()]
         self.assertEqual(len(jobs), 1, "the record exists before the sink is opened")
         job_id = jobs[0].stem
         log = self.ws / STATE_DIRNAME / "jobs" / f"{job_id}.log"
@@ -1274,7 +1276,7 @@ class LifecycleRaces(RunnerCase):
         proc = self.run_latched(*self.base_args("--background"))
         self.wait_signal("pre-claim")
         # The worker is parked before claiming; the record must still be unclaimed.
-        jobs = list((self.ws / STATE_DIRNAME / "jobs").glob("job_*.json"))
+        jobs = [p for p in (self.ws / STATE_DIRNAME / "jobs").glob("job_*.json") if p.is_file()]
         self.assertEqual(len(jobs), 1)
         self.assertIsNone(json.loads(jobs[0].read_text())["workerPid"],
                           "the worker must not claim before the latch is released")
@@ -1331,7 +1333,8 @@ class LifecycleRaces(RunnerCase):
         self.release("pre-ack")
         proc.communicate(timeout=60)
 
-        job = json.loads(next((self.ws / STATE_DIRNAME / "jobs").glob("job_*.json")).read_text())
+        job = json.loads(next(p for p in (self.ws / STATE_DIRNAME / "jobs").glob("job_*.json")
+                                if p.is_file()).read_text())
         self.assertIsNotNone(job["workerPid"], "the worker must have claimed before the kill")
 
         # Asserting only the worker would pass an implementation that kills the worker and leaves the

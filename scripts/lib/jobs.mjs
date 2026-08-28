@@ -1043,8 +1043,8 @@ export async function pruneTerminalJobs(workspace, {
 } = {}) {
   const dir = jobsDir(workspace);
   const report = {
-    pruned: [], resumed: [], kept: 0, invalid: [], leftovers: [], orphanSlots: 0, logsLeft: [],
-    tombstonesExpired: 0, stagingSwept: 0,
+    pruned: [], resumed: [], kept: 0, blocked: [], invalid: [], leftovers: [], orphanSlots: 0,
+    logsLeft: [], tombstonesExpired: 0, stagingSwept: 0,
   };
   let entries;
   try {
@@ -1071,7 +1071,7 @@ export async function pruneTerminalJobs(workspace, {
     const id = MARKER_NAME.exec(entry.name)?.[1];
     if (!id) continue;
     if ((await inspectMarker(dir, id)).state === "valid") valid.push(id);
-    else { report.leftovers.push(entry.name); blockedIds.add(id); }
+    else { report.leftovers.push(entry.name); blockedIds.add(id); report.blocked.push(id); }
   }
   for (const jobId of valid.sort()) {
     const done = await entomb(dir, jobId, names, { onStep });
@@ -1105,7 +1105,12 @@ export async function pruneTerminalJobs(workspace, {
     const done = await entomb(dir, jobId, names, { onStep, identity: record });
     report.leftovers.push(...done.leftovers);
     if (!done.ok) {
-      report.kept += 1;                             // not ours, changed under us, or blocked: the job stays
+      // Eligible, but not deletable: the canonical is not ours, it changed under us, or something
+      // at one of the job's paths blocks the deletion. This is NOT `kept` — `kept` means "a job
+      // this run deliberately left alone because it is running or too recent", and rendering a
+      // blocked job as kept tells an operator the store made a retention decision when in fact it
+      // met something it could not act on. It is its own category, and it is reported.
+      report.blocked.push(jobId);
       blockedIds.add(jobId);
       continue;
     }
@@ -1125,7 +1130,16 @@ export async function pruneTerminalJobs(workspace, {
   // blocked or mid-deletion — left alone.
   for (const entry of after) {
     const match = ANY_SLOT_NAME.exec(entry.name);
-    if (!match || present.has(match[1]) || marked.has(match[1]) || blockedIds.has(match[1])) continue;
+    if (!match) continue;
+    if (present.has(match[1]) || marked.has(match[1]) || blockedIds.has(match[1])) {
+      // The job is live, marked, or blocked, so its slots are not this sweep's to remove — but a
+      // slot-shaped entry that is not ours is still reported, because that is what the retention
+      // documentation promises and because an operator whose job is quietly reading an object this
+      // store never wrote has no other way to learn of it. Ownership is proven, never assumed: a
+      // non-following stamped read, exactly as every other decision here makes it.
+      if (await readOwned(dir, entry.name, [SCRATCH_KIND]) === null) report.leftovers.push(entry.name);
+      continue;
+    }
     const at = await inspectCanonicalPath(dir, match[1]);
     if (at !== "absent" && at !== "tombstone") { report.leftovers.push(entry.name); continue; }
     const outcome = await removeOwned(dir, entry.name, [SCRATCH_KIND]);

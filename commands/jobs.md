@@ -71,7 +71,8 @@ with the job — and `prune` removes finished jobs whole:
   timestamp cannot tell two lives apart) before it touches the record, then replaces the record with
   a **tombstone** — a `0700` directory at the same `<job-id>.json` path carrying this suite's stamp
   inside, staged and renamed into place in one step, kept for 30 days — then removes the slots,
-  then the marker. A prune interrupted at any step is completed by the next one. So a pruned job
+  then the marker. A prune interrupted at any step is completed by the next one — unless it meets
+  something it cannot act on, in which case it reports and stops rather than guessing. So a pruned job
   cannot come back: a reader finds no job, and a writer that was mid-flight (even one paused inside
   its final rename) fails to publish. A record created in the gap is a different incarnation: it is
   refused by the deletion, and the creation withdraws itself rather than reporting a job that a
@@ -91,7 +92,8 @@ store names the states an interrupted one leaves rather than pretending they can
 
 | Left behind | When | What it means for the job | Converged by |
 | --- | --- | --- | --- |
-| `<job-id>.pruning` (stamped), with or without the record | a crash after the marker | the job is already gone to readers and writers | the next `prune`, reported as an interrupted prune completed |
+| `<job-id>.pruning` (stamped), with the record it names or with none | a crash after the marker | the job is already gone to readers and writers | the next `prune`, reported as an interrupted prune completed |
+| `<job-id>.pruning` (stamped) beside a record of a **different** incarnation | a creation landed in the gap after the marker and crashed before withdrawing itself | the job stays gone to readers; neither entry is deleted, because the record is not the one the marker judged | nobody — both are reported every run, and yours to clear |
 | `.tomb.<hex>.vibe-tmp/` holding the tombstone stamp | a crash between staging a tombstone and renaming it into place | nothing — it never stood at a record's path | the next `prune` past the 6-hour temp age |
 | `.tomb.<hex>.vibe-tmp/`, **empty** | a crash before the stamp was written, or after it was removed while a tombstone was being taken apart | nothing | the next `prune` past the 6-hour temp age (`rmdir`, which refuses any directory holding anything) |
 | A tombstone holding the stamp **and something else** | not written by this suite | the job stays gone; the directory is never removed | nobody — reported every run, and yours to clear |

@@ -152,7 +152,7 @@ async function runPrune(workspace, options) {
   const report = await pruneTerminalJobs(workspace, { olderThanMs: options.olderThanMs });
   process.stdout.write(
     renderPruneOutcome(report, { olderThan: options.olderThan ?? OLDER_THAN_DEFAULT }) + "\n");
-  return report.invalid.length > 0 || report.leftovers.length > 0 ? 1 : 0;
+  return report.invalid.length > 0 || report.leftovers.length > 0 || report.blocked.length > 0 ? 1 : 0;
 }
 
 async function main() {

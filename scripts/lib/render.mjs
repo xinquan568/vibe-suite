@@ -189,6 +189,7 @@ export function renderPruneOutcome(report, { olderThan }) {
   const files = report.pruned.reduce((sum, job) => sum + job.files, 0);
   let summary = `prune: ${report.pruned.length} job(s) removed (${files} file(s)); ` +
     `${report.orphanSlots} orphan slot(s) swept; ${report.kept} kept (running, or ended within ${olderThan})`;
+  if (report.blocked?.length > 0) summary += `; ${report.blocked.length} blocked (reported below)`;
   if (report.resumed.length > 0) summary += `; ${report.resumed.length} interrupted prune(s) completed`;
   if (report.tombstonesExpired > 0) summary += `; ${report.tombstonesExpired} expired tombstone(s) removed`;
   if (report.stagingSwept > 0) summary += `; ${report.stagingSwept} stale staging dir(s) removed`;

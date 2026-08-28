@@ -239,3 +239,23 @@ test("renderPruneOutcome: one line per pruned job, a summary that never reads as
   assert.equal(lines[4], "left in place: job_dddddddddddddddddddd.json — no ownership stamp, or could not be removed");
   assert.equal(lines.length, 5);
 });
+
+test("renderPruneOutcome names blocked jobs separately from kept ones", () => {
+  // Step-8 finding: a job the prune could not act on was counted as `kept`, which the summary
+  // defines as "running, or ended within <cutoff>" — a retention decision the store never made.
+  const blocked = renderPruneOutcome({
+    pruned: [], resumed: [], kept: 1, blocked: [ID_A, ID_B], invalid: [], orphanSlots: 0,
+    logsLeft: [], tombstonesExpired: 0, stagingSwept: 0,
+    leftovers: [`${ID_A}.pruning`, `${ID_B}.json`],
+  }, { olderThan: "7d" });
+  assert.ok(blocked.includes("1 kept (running, or ended within 7d)"), "kept keeps its meaning");
+  assert.ok(blocked.includes("2 blocked (reported below)"), "and blocked jobs are counted as their own thing");
+  assert.ok(blocked.includes(`left in place: ${ID_A}.pruning`));
+  assert.ok(blocked.includes(`left in place: ${ID_B}.json`));
+
+  const none = renderPruneOutcome({
+    pruned: [], resumed: [], kept: 0, blocked: [], invalid: [], leftovers: [], orphanSlots: 0,
+    logsLeft: [], tombstonesExpired: 0, stagingSwept: 0,
+  }, { olderThan: "7d" });
+  assert.ok(!none.includes("blocked"), "nothing blocked, nothing said");
+});

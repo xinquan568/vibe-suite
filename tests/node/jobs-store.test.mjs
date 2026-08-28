@@ -733,7 +733,9 @@ test("prune leaves alone what it cannot vouch for: invalid records and unstamped
   const report = await pruneTerminalJobs(ws, { olderThanMs: 0, now });
   assert.deepEqual(report.pruned, []);
   assert.deepEqual(report.leftovers, [`${foreign}.json`], "a canonical without our stamp is not ours to delete");
-  assert.equal(report.kept, 1, "…and that job is counted as kept, whole");
+  assert.deepEqual(report.blocked, [foreign],
+    "…and that job is counted as BLOCKED, not kept: the store made no retention decision about it");
+  assert.equal(report.kept, 0, "nothing here was left alone for being running or recent");
   assert.equal(report.invalid.length, 1);
   assert.equal(report.invalid[0].jobId, bad);
   assert.ok(existsSync(path.join(jobsDir(ws), `${foreign}.json`)));
@@ -776,8 +778,8 @@ test("prune on a workspace without a state directory is a no-op report", async (
   const ws = workspace();
   const report = await pruneTerminalJobs(ws, { olderThanMs: 0 });
   assert.deepEqual(report, {
-    pruned: [], resumed: [], kept: 0, invalid: [], leftovers: [], orphanSlots: 0, logsLeft: [], tombstonesExpired: 0,
-    stagingSwept: 0,
+    pruned: [], resumed: [], kept: 0, blocked: [], invalid: [], leftovers: [], orphanSlots: 0,
+    logsLeft: [], tombstonesExpired: 0, stagingSwept: 0,
   });
 });
 
@@ -1345,3 +1347,63 @@ test("a job pruned after the contested staging directory is still pruned — the
     assert.equal(mine.kept, 1, "and it still accounts for the running job it kept");
     assert.ok(!existsSync(staged));
   });
+
+test("a foreign slot beside a job that is NOT being pruned is reported every run", async () => {
+  // Step-8 finding: the orphan sweep skipped every slot whose canonical was present, so a
+  // slot-shaped entry that is not ours went unreported beside a live job — while the retention
+  // documentation promised it is reported every run. Ownership is proven by a non-following stamped
+  // read; nothing here is removed, because these slots belong to a job this sweep is not deleting.
+  const ws = workspace();
+  const id = "job_eeeeeeeeeeeeeeeeee01";
+  await seed(ws, {}, id);
+  await updateRecord(ws, id, { kind: "beat" });                        // our own slots: v1, v2
+  const foreign = path.join(jobsDir(ws), `${id}.v9.json`);
+  writeFileSync(foreign, "{}\n", "utf8");                              // unstamped: not ours
+  mkdirSync(path.join(jobsDir(ws), `${id}.v8.json`), { mode: 0o700 });  // a slot-shaped directory
+  const elsewhere = path.join(jobsDir(ws), ".target.json");
+  writeFileSync(elsewhere, "{}\n", "utf8");
+  symlinkSync(elsewhere, path.join(jobsDir(ws), `${id}.v7.json`));      // a slot-shaped symlink
+
+  for (const run of [1, 2]) {
+    const report = await pruneTerminalJobs(ws, { olderThanMs: 0 });
+    assert.ok(report.leftovers.includes(`${id}.v9.json`), `run ${run}: the unstamped file is reported`);
+    assert.ok(report.leftovers.includes(`${id}.v8.json`), `run ${run}: the directory is reported`);
+    assert.ok(report.leftovers.includes(`${id}.v7.json`), `run ${run}: the symlink is reported`);
+    assert.equal(report.orphanSlots, 0, `run ${run}: nothing belonging to this job is swept`);
+    assert.deepEqual(report.pruned, [], `run ${run}: and nothing is pruned`);
+    // The job itself is reported rather than silently dropped. It reads as INVALID here because the
+    // highest slot is chosen by NAME — the pre-existing read path this issue declares out of scope
+    // (#261) — so the foreign v9 is what a read resolves. That is the declared boundary, visible:
+    // the store reports what it met and deletes none of it.
+    assert.deepEqual(report.invalid.map((entry) => entry.jobId), [id],
+      `run ${run}: the job is accounted for, not dropped`);
+    for (const own of [`${id}.v1.json`, `${id}.v2.json`]) {
+      assert.ok(!report.leftovers.includes(own), `run ${run}: ${own} is ours and is not a leftover`);
+    }
+  }
+  assert.ok(existsSync(foreign) && existsSync(elsewhere), "nothing foreign is deleted");
+  assert.ok(existsSync(recordPath(ws, id)), "and the record itself is untouched");
+});
+
+test("a job blocked by a foreign marker is reported as blocked, never as kept", async () => {
+  // Step-8 finding: an id wearing a foreign marker was added to the blocked set before the canonical
+  // loop, so a running job could vanish from the totals entirely; and an eligible terminal record
+  // that could not be deleted was counted as `kept`, which reads as a retention decision the store
+  // never made.
+  const ws = workspace();
+  const running = "job_eeeeeeeeeeeeeeeeee02";
+  const terminal = "job_eeeeeeeeeeeeeeeeee03";
+  await seed(ws, {}, running);
+  await seed(ws, {}, terminal);
+  await finaliseRecord(ws, terminal, { status: "completed" });
+  writeFileSync(path.join(jobsDir(ws), `${running}.pruning`), "not ours\n", "utf8");
+  writeFileSync(path.join(jobsDir(ws), `${terminal}.pruning`), "not ours\n", "utf8");
+
+  const report = await pruneTerminalJobs(ws, { olderThanMs: 0 });
+  assert.deepEqual(report.blocked.sort(), [running, terminal].sort(),
+    "both jobs are accounted for, neither silently dropped");
+  assert.equal(report.kept, 0, "and neither is reported as a retention decision");
+  assert.deepEqual(report.pruned, []);
+  assert.ok(report.leftovers.includes(`${running}.pruning`));
+  assert.ok(report.leftovers.includes(`${terminal}.pruning`));
+});

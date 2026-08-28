@@ -642,3 +642,57 @@ test("removeOwnedDirAt reports a peer that finished in the validation window as 
     }), "refused", "a peer that removed only the stamp leaves an empty directory for the caller's fallback");
     assert.ok(existsSync(path.join(root, "ours2")));
   });
+
+test("publishDirAt answers false when the destination appears after it was checked", async () => {
+  // The catch arm at the rename: `dest` was absent when this call looked, and something landed
+  // there before the rename. It is a lost race, not a failure, and nothing at the destination is
+  // replaced.
+  const { publishDirAt, STAMP_KEY } = await import("../../scripts/lib/write.mjs");
+  const { mkdirSync, writeFileSync, readFileSync, existsSync } = await import("node:fs");
+  const root = scratchDir();
+  const opts = { stampName: ".stamp", kinds: ["probe"] };
+  const stamp = JSON.stringify({ [STAMP_KEY]: { kind: "probe", schema: 1 } });
+  mkdirSync(path.join(root, "staged"), { mode: 0o700 });
+  writeFileSync(path.join(root, "staged", ".stamp"), stamp);
+
+  assert.equal(await publishDirAt(root, "staged", "dest", {
+    ...opts, onChecked: () => writeFileSync(path.join(root, "dest"), "someone else's\n"),
+  }), false, "a destination that appeared in the window is a lost race");
+  assert.equal(readFileSync(path.join(root, "dest"), "utf8"), "someone else's\n",
+    "and what landed there is untouched");
+  assert.ok(existsSync(path.join(root, "staged", ".stamp")), "the staged directory is left for its caller");
+});
+
+test("removeEmptyDirAt answers absent when the directory is gone by the time it calls rmdir", async () => {
+  const { removeEmptyDirAt } = await import("../../scripts/lib/write.mjs");
+  const { mkdirSync, rmdirSync, writeFileSync, existsSync } = await import("node:fs");
+  const root = scratchDir();
+  mkdirSync(path.join(root, "empty"), { mode: 0o700 });
+  assert.equal(await removeEmptyDirAt(root, "empty", {
+    onChecked: () => rmdirSync(path.join(root, "empty")),
+  }), "absent", "a peer that removed it first is a lost race, not a refusal");
+
+  mkdirSync(path.join(root, "fills"), { mode: 0o700 });
+  assert.equal(await removeEmptyDirAt(root, "fills", {
+    onChecked: () => writeFileSync(path.join(root, "fills", "x"), "x"),
+  }), "refused", "a directory that gained an entry in the window is refused, and keeps it");
+  assert.ok(existsSync(path.join(root, "fills", "x")));
+});
+
+test("removeOwnedDirAt answers absent when the directory vanishes before it is vacated", async () => {
+  // The catch arm on the vacating rename: the source is gone. `absent` — not `refused`, which would
+  // report a leftover for an object a peer has already dealt with.
+  const { removeOwnedDirAt, STAMP_KEY } = await import("../../scripts/lib/write.mjs");
+  const { mkdirSync, writeFileSync, rmSync, existsSync } = await import("node:fs");
+  const root = scratchDir();
+  const opts = { stampName: ".stamp", kinds: ["probe"] };
+  const stamp = JSON.stringify({ [STAMP_KEY]: { kind: "probe", schema: 1 } });
+  mkdirSync(path.join(root, "ours"), { mode: 0o700 });
+  writeFileSync(path.join(root, "ours", ".stamp"), stamp);
+
+  assert.equal(await removeOwnedDirAt(root, "ours", {
+    ...opts, vacateAs: ".staged",
+    onValidated: () => rmSync(path.join(root, "ours"), { recursive: true }),
+  }), "absent");
+  assert.equal(existsSync(path.join(root, ".staged")), false, "nothing was staged");
+});

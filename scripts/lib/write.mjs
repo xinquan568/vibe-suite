@@ -432,7 +432,7 @@ export async function readOwned(root, rel, kinds) {
  * WITH its provenance already inside; there is no state in which an unprovenanced directory of ours
  * exists at the destination.
  */
-export async function publishDirAt(root, stagedRel, destRel, { stampName, kinds }) {
+export async function publishDirAt(root, stagedRel, destRel, { stampName, kinds, onChecked = null }) {
   await assertRoot(root);
   const staged = path.resolve(root, stagedRel);
   const dest = path.resolve(root, destRel);
@@ -441,6 +441,9 @@ export async function publishDirAt(root, stagedRel, destRel, { stampName, kinds 
   if (await classify(staged) !== "dir") return false;
   if (await readOwned(staged, stampName, kinds) === null) return false;
   if (await classify(dest) !== "absent") return false;
+  // A documented test seam at the window this call cannot close: the destination was absent when it
+  // was checked, and the rename below is what finds out whether it still is.
+  if (onChecked) await onChecked();
   try {
     await fs.rename(staged, dest);
   } catch (error) {
@@ -531,13 +534,16 @@ export async function removeOwnedDirAt(root, rel, {
  * nothing here descends, reads, or follows. The caller decides which paths are eligible; this
  * primitive proves only "empty".
  */
-export async function removeEmptyDirAt(root, rel) {
+export async function removeEmptyDirAt(root, rel, { onChecked = null } = {}) {
   await assertRoot(root);
   const target = path.resolve(root, rel);
   await assertInside(root, target);
   const kind = await classify(target);
   if (kind === "absent") return "absent";
   if (kind !== "dir") return "refused";
+  // The same window, and the same reason for naming it: `rmdir` below is what learns whether the
+  // directory classified a moment ago is still there.
+  if (onChecked) await onChecked();
   try {
     await fs.rmdir(target);
   } catch (error) {

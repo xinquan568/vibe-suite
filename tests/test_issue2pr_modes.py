@@ -1574,35 +1574,63 @@ class TestWatcherDegradationCounters(WatcherCase):
         self.assertEqual(w.run(), module.EXIT_ACTIVITY)
         self.assertEqual(w.last_activity["at"], stamp)
 
-    def test_a_clean_activity_poll_resets_the_run_and_the_next_ten_report_the_last_error(self):
-        """RED on the base twice over: nothing reported, and nothing reset. After nine failures and a
-        wholly clean poll, the count restarts — so the report arrives on the tenth AFTER the reset,
-        and names the error seen then."""
+    def test_a_clean_activity_poll_resets_the_run(self):
+        """The discriminating shape: 9 failures, one wholly clean poll, 9 more failures.
+
+        WITH the reset the count restarts, so nine post-clean failures never reach ten and nothing is
+        reported. WITHOUT it the count would carry 9 across the clean poll and the very first
+        post-clean failure would be the tenth — so a report here is exactly the signature of a
+        missing reset. Asserting on the report's TEXT could not tell those apart; asserting on its
+        absence can.
+        """
         module = load_watcher()
-        polls = {"n": 0}
+        calls = {"n": 0}
 
         def gh(argv):
             if "--json" in argv and "state" in argv:
                 return json.dumps(self.OPEN)
             if "--json" in argv and "statusCheckRollup" in argv:
                 return json.dumps(self.ROLLUP_EMPTY)
-            polls["n"] += 1
-            #  polls 1-9 fail, poll 10 is wholly clean, 11-20 fail with a DIFFERENT error
-            index = (polls["n"] - 1) // 3 + 1
-            if index <= 9:
-                raise module.GhError("early boom")
-            if index == 10:
-                return ""
-            raise module.GhError("late boom")
+            calls["n"] += 1
+            poll = (calls["n"] - 1) // 3 + 1     # three endpoints per poll
+            if poll == 10:
+                return ""                        # the clean poll: every endpoint answers
+            raise module.GhError("boom")
 
         out = []
         w = module.Watcher("owner/repo", 1, "2026-01-01T00:00:00Z", poll=0, max_wait=10**9,
-                           gh=gh, clock=lambda: 0, max_polls=20)
+                           gh=gh, clock=lambda: 0, max_polls=19)
         w.emit_stderr = out.append
         w.run()
-        self.assertEqual(len(out), 1, f"the clean poll reset the run, so only one report: {out}")
-        self.assertIn("late boom", out[0], "and it names the error from the run that reached ten")
-        self.assertIn("10", out[0])
+        self.assertEqual(out, [],
+                         "nine, a clean poll, then nine more must never reach ten in a row")
+
+    def test_the_report_names_the_last_failing_endpoint(self):
+        """`_latest_activity` walks comments, reviews, then pull-comments, keeping the most recent
+        error. With two different endpoints failing differently, the report must carry the LATER
+        one — which a same-error fixture could not distinguish."""
+        module = load_watcher()
+
+        def gh(argv):
+            if "--json" in argv and "state" in argv:
+                return json.dumps(self.OPEN)
+            if "--json" in argv and "statusCheckRollup" in argv:
+                return json.dumps(self.ROLLUP_EMPTY)
+            if any("issues/1/comments" in part for part in argv):
+                raise module.GhError("first-endpoint-error")
+            if any("pulls/1/reviews" in part for part in argv):
+                raise module.GhError("second-endpoint-error")
+            return ""
+
+        out = []
+        w = module.Watcher("owner/repo", 1, "2026-01-01T00:00:00Z", poll=0, max_wait=10**9,
+                           gh=gh, clock=lambda: 0, max_polls=10)
+        w.emit_stderr = out.append
+        w.run()
+        self.assertEqual(len(out), 1, f"one line at the tenth, got {out}")
+        self.assertIn("second-endpoint-error", out[0],
+                      "the retained error is the last one the probe met, not the first")
+        self.assertNotIn("first-endpoint-error", out[0])
 
     # -- characterization: these hold on the base too, and guard against a spurious report ---------
 

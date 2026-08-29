@@ -462,7 +462,16 @@ test("phase A: a BACKGROUND dispatch emits start and finalise, not just a foregr
   const jobId = launch(ws, "emitter.mjs");
   await waitFor(ws, jobId, (r) => TERMINAL.has(r.status), "the background job to finish");
 
-  const mine = eventsOf(ws).filter((e) => e.jobId === jobId);
+  // The record turns TERMINAL inside finaliseRecord, and dispatch.finalise is emitted just after —
+  // so `waitFor` on the record returns strictly BEFORE the event lands, and under load the gap is
+  // wide enough to see. Wait for the event itself; the record's status is not the synchronisation
+  // point for a claim about the log.
+  let mine = [];
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    mine = eventsOf(ws).filter((e) => e.jobId === jobId);
+    if (mine.some((e) => e.event === "dispatch.finalise")) break;
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+  }
   assert.ok(mine.some((e) => e.event === "dispatch.start"),
     "the Step-8 review found dispatch events only in runForeground — a background job is still a dispatch");
   const finalise = mine.find((e) => e.event === "dispatch.finalise");

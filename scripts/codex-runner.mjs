@@ -313,6 +313,14 @@ function verdictFrom(events) {
 }
 
 async function execute(workspace, record, prompt) {
+  // vibe-207: dispatch.start lives HERE, not in runForeground, because `execute` is the one
+  // function BOTH paths reach — the foreground caller and the detached background worker. The
+  // Step-8 review found the events only on the foreground path, which meant a background job, the
+  // shape an operator is most likely to be asking about later, recorded nothing.
+  await emit(workspace, { component: "runner", event: "dispatch.start", jobId: record.jobId,
+    detail: { kind: record.kind, sandbox: record.sandbox, effort: record.effort,
+              background: record.background } });
+
   const heartbeatMs = heartbeatInterval();
   const outcome = await runWithDeadline({
     command: codexBinary(),
@@ -327,7 +335,14 @@ async function execute(workspace, record, prompt) {
     onHeartbeat: record.background
       ? () => {
           updateRecord(workspace, record.jobId, { heartbeatAt: new Date().toISOString() })
-            .catch(() => { /* a missed beat must never kill the job */ });
+            .catch((error) => {
+              // A missed beat must never kill the job — but it must no longer be invisible either.
+              // A job that looks abandoned because its heartbeats were failing is exactly the
+              // question this log exists to answer, and the swallow used to erase it.
+              void emit(workspace, { component: "runner", event: "heartbeat.error",
+                jobId: record.jobId,
+                detail: { errorClass: "failure", message: String(error?.message ?? error) } });
+            });
         }
       : null,
   });
@@ -367,7 +382,11 @@ async function execute(workspace, record, prompt) {
         ?? (outcome.timedOut ? `deadline of ${record.timeoutMs}ms exceeded` : noTerminalEvent(outcome)),
     tokens: billableTokens(events.usage),
   });
-  return finished ?? readRecord(workspace, record.jobId);
+  const settled = finished ?? await readRecord(workspace, record.jobId);
+  // vibe-207: dispatch.finalise beside dispatch.start, for the same reason — this is the one place
+  // both the foreground caller and the detached background worker pass through.
+  await emitFinalise(workspace, settled);
+  return settled;
 }
 
 /** Resolve the record to run, asserting the effective sandbox before anything can be spawned. */
@@ -428,11 +447,6 @@ async function runForeground(workspace, options, timeoutMs) {
     claimed = await updateRecord(workspace, record.jobId, {
       workerPid: process.pid, pgid: null, startedAt: new Date().toISOString(),
     });
-    // vibe-207: fire-and-forget. `emit` cannot throw, and nothing below branches on it — a dispatch
-    // must run identically whether or not its diagnostics were recorded.
-    await emit(workspace, { component: "runner", event: "dispatch.start", jobId: record.jobId,
-      detail: { kind: record.kind, sandbox: record.sandbox, effort: record.effort,
-                background: record.background } });
   } catch (error) {
     if (error instanceof UsageError) throw error;
     if (!record) return preRecordFailure(error);
@@ -449,7 +463,6 @@ async function runForeground(workspace, options, timeoutMs) {
   }
   try {
     const finished = await execute(workspace, claimed ?? record, options.prompt);
-    await emitFinalise(workspace, finished);
     process.stdout.write(resultLine(finished) + "\n");
     return finished.status === "completed" ? 0 : 1;
   } catch (error) {
@@ -462,6 +475,8 @@ async function runForeground(workspace, options, timeoutMs) {
       detail: { errorClass: "failure", message: String(error?.message ?? error) } });
     await emitFinalise(workspace, failed ?? { ...record, status: "failed" });
     process.stdout.write(resultLine(failed ?? { ...record, status: "failed" }) + "\n");
+    // (dispatch.finalise for the ordinary path is emitted inside execute(), which both the
+    // foreground and the background WORKER go through — see the note there.)
     return 1;
   }
 }

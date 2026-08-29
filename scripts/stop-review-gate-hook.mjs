@@ -42,6 +42,7 @@ import { makeOwnedTempDir, removeOwnedTree, writeAtomic, PRIVATE_FILE_MODE } fro
 /** vibe-207: what the gate decided, and where to record it. Set by the three decision helpers. */
 let lastDecision = null;
 let gateWorkspace = process.cwd();
+let gateJobId = null;
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -381,6 +382,10 @@ async function main() {
     return applyFailPolicy(gate, `the review job did not complete (${result?.status ?? "no result"})`);
   }
 
+  // vibe-207: the review's own job id, so a gate decision can be traced back to the dispatch that
+  // produced it. The Step-8 review found it discarded — the runner's result contract carries it as
+  // one of exactly five keys, and dropping it left the two halves of one story uncorrelated.
+  gateJobId = result.jobId ?? null;
   const parsed = verdictFrom(result.rawOutput);
   if (parsed === null) return applyFailPolicy(gate, "no parseable ALLOW/BLOCK verdict");
   if (parsed.verdict === "BLOCK") return blockDecision(parsed.reason || "the review blocked this stop");
@@ -392,7 +397,8 @@ main().then(async (code) => {
   // decision helpers would put an await in three sync functions whose only job is to answer; doing
   // it here keeps the gate's control flow exactly as it was.
   if (lastDecision !== null) {
-    await emit(gateWorkspace, { component: "gate", event: "gate.decision", detail: lastDecision });
+    await emit(gateWorkspace, { component: "gate", event: "gate.decision", jobId: gateJobId,
+      detail: lastDecision });
   }
   process.exitCode = code;
 }).catch((error) => {

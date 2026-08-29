@@ -223,7 +223,13 @@ export function renderPruneOutcome(report, { olderThan }) {
 export function renderEventLog(records, { truncated = false, oversized = null, requested = 0 } = {}) {
   const lines = [];
   if (records.length === 0) {
-    lines.push("no events recorded yet");
+    // `truncated` is the operator's question — "am I seeing everything?" — so answering "no events
+    // recorded yet" to a log whose history sits behind a ceiling-filling suffix answers a DIFFERENT
+    // question, wrongly. An empty RESULT is not an empty LOG.
+    lines.push(truncated
+      ? "no complete event found in the part of the log that was read — the view is TRUNCATED, and " +
+        "older events are behind it"
+      : "no events recorded yet");
   } else {
     const shown = `${records.length} event(s) in file order${truncated ? `, the most recent of more` : ""}`;
     lines.push(`${shown} — file order, not a sequence: records from different processes interleave`);

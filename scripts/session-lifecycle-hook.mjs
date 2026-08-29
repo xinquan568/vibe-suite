@@ -50,9 +50,12 @@ async function main() {
   // reached disk. Awaiting the flush does not weaken property 1 — `emit` still cannot throw, and the
   // hook's own stdout is byte-identical either way; the process simply lives a few milliseconds
   // longer. "Never affect the caller" is about the caller's OUTCOME, not its wall clock.
+  // vibe-207: `jobId` travels with the report when there is one. The Step-8 review found per-job
+  // reports emitting without it, which is the difference between "something is wrong with a job" and
+  // "something is wrong with THIS job".
   const reported = [];
-  const report = (msg) => {
-    reported.push(msg.trimEnd());
+  const report = (msg, jobId = null) => {
+    reported.push({ text: msg.trimEnd(), jobId });
     return (event === "start" ? process.stdout : process.stderr).write(msg);
   };
 
@@ -61,24 +64,27 @@ async function main() {
 
   const { records, invalid } = await listRecords(workspace).catch(() => ({ records: [], invalid: [] }));
   for (const entry of invalid) {
-    report(`vibe-suite ${event}: job ${entry.jobId} is unreadable (${entry.reason})\n`);
+    report(`vibe-suite ${event}: job ${entry.jobId} is unreadable (${entry.reason})\n`, entry.jobId);
   }
 
   const live = records.filter((r) => !TERMINAL_STATUSES.has(r.status) && r.background);
   for (const record of live.filter((r) => isAbandoned(r))) {
     report(
       `vibe-suite ${event}: job ${record.jobId} looks abandoned (stale heartbeat, worker gone) — ` +
-      `settle it with /vibe-suite:jobs status --settle-abandoned\n`);
+      `settle it with /vibe-suite:jobs status --settle-abandoned\n`, record.jobId);
   }
   if (event === "end") {
     for (const record of live.filter((r) => !isAbandoned(r))) {
-      process.stderr.write(
-        `vibe-suite end: job ${record.jobId} is still running — /vibe-suite:jobs status\n`);
+      // Through `report`, not straight to stderr: the Step-8 review found this one bypassing the
+      // emitter, so a session that ended with jobs still running recorded nothing about them.
+      report(`vibe-suite end: job ${record.jobId} is still running — /vibe-suite:jobs status\n`,
+        record.jobId);
     }
   }
 
-  for (const text of reported) {
-    await emit(workspace, { component: "hook", event: "hook.report", detail: { event, text } });
+  for (const entry of reported) {
+    await emit(workspace, { component: "hook", event: "hook.report", jobId: entry.jobId,
+      detail: { event, text: entry.text } });
   }
 }
 

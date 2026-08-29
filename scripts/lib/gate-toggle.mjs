@@ -49,9 +49,6 @@ export const SHADOWABLE_DOMAINS = {
   "gate.fail_policy": "open|closed",
 };
 
-/** `store.py:FRESH` for the one key this module answers: absent means disabled. */
-export const FRESH_STOP_REVIEW_GATE = false;
-
 const isPlainObject = (value) =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -81,14 +78,23 @@ export function storedGateToggle(workspace) {
 
   let document;
   try {
-    document = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    // `ignoreBOM: true` is a misleading name: it means "do not TREAT the BOM specially",
+    // i.e. keep it in the output. The default STRIPS a leading U+FEFF, and
+    // `Path.read_text(encoding="utf-8")` does not — so a BOM-prefixed document parses cleanly
+    // in Node while `json.loads` rejects it, and this reader would answer "disabled" for a
+    // store the resolver refuses to read. That is the silent allow this module exists to
+    // prevent, so the BOM is preserved and `JSON.parse` rejects it exactly as python does.
+    document = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes));
   } catch {
     return "defer";                              // undecodable or unparseable: store.py exits non-zero
   }
   if (!isPlainObject(document)) return "defer";  // store.py: "expected a JSON object at the top level"
 
   const config = document.config;
-  if (config === undefined) return "disabled";   // no config member at all: FRESH applies
+  // `store.py:FRESH` makes `gate.stop_review_gate` false when it is not stored, so a document
+  // with no `config` member is a positive answer, not an absence of one.
+  if (config === undefined) return "disabled";
   if (!isPlainObject(config)) return "defer";    // store.py `_read`: "'config' must be an object"
 
   // `overrides()` walks EVERY section, so an unknown sibling section makes the resolver fail even

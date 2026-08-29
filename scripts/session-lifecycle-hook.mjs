@@ -19,6 +19,7 @@
 //
 // **Node floor: 18.** No top-level await.
 
+import { emit } from "./lib/eventlog.mjs";
 import { isAbandoned, listRecords, reapOrphanTemps, TERMINAL_STATUSES } from "./lib/jobs.mjs";
 
 function parseArgs(argv) {
@@ -42,7 +43,18 @@ async function main() {
   // vibe-203 (observability): a SessionStart hook's stdout is added to the session context, so the
   // operator actually sees these reports; SessionEnd stdout is not shown, so its reports stay on
   // stderr (transcript). Routing by event is the whole point of the fix.
-  const report = (msg) => (event === "start" ? process.stdout : process.stderr).write(msg);
+  // vibe-207: reports are ACCUMULATED and flushed once, awaited, before main returns.
+  //
+  // The first cut emitted fire-and-forget from inside `report` and the test caught it recording
+  // nothing: a lifecycle hook is a short-lived process, and it exited before the unawaited append
+  // reached disk. Awaiting the flush does not weaken property 1 — `emit` still cannot throw, and the
+  // hook's own stdout is byte-identical either way; the process simply lives a few milliseconds
+  // longer. "Never affect the caller" is about the caller's OUTCOME, not its wall clock.
+  const reported = [];
+  const report = (msg) => {
+    reported.push(msg.trimEnd());
+    return (event === "start" ? process.stdout : process.stderr).write(msg);
+  };
 
   const reaped = await reapOrphanTemps(workspace).catch(() => 0);
   if (reaped > 0) report(`vibe-suite ${event}: reaped ${reaped} orphan temp file(s)\n`);
@@ -63,6 +75,10 @@ async function main() {
       process.stderr.write(
         `vibe-suite end: job ${record.jobId} is still running — /vibe-suite:jobs status\n`);
     }
+  }
+
+  for (const text of reported) {
+    await emit(workspace, { component: "hook", event: "hook.report", detail: { event, text } });
   }
 }
 

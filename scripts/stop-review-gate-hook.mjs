@@ -36,7 +36,12 @@
 import { spawnSync } from "node:child_process";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 
+import { emit } from "./lib/eventlog.mjs";
 import { makeOwnedTempDir, removeOwnedTree, writeAtomic, PRIVATE_FILE_MODE } from "./lib/write.mjs";
+
+/** vibe-207: what the gate decided, and where to record it. Set by the three decision helpers. */
+let lastDecision = null;
+let gateWorkspace = process.cwd();
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,11 +81,17 @@ const remainingMs = () => HOOK_BUDGET_MS - (Date.now() - START) - SHUTDOWN_RESER
 /** A failure that leaves the gate WITHOUT a verdict — routed to the fail policy, never assumed. */
 class Indeterminate extends Error {}
 
-const allow = () => 0;
+const allow = () => {
+  // vibe-207: recorded, but never over a decision already made — allowWithNotice and
+  // blockDecision carry a reason, and a bare allow after one of them would erase it.
+  lastDecision = lastDecision ?? { decision: "allow", reason: null };
+  return 0;
+};
 // vibe-203 (observability): an ALLOW that the operator should actually SEE. Emitting a stdout JSON
 // with a `systemMessage` (and NO `decision:"block"`) is still an allow to the harness, but the
 // message is surfaced — unlike a bare stderr line at exit 0, which stays transcript-only.
 function allowWithNotice(message) {
+  lastDecision = { decision: "allow", reason: message };
   process.stdout.write(JSON.stringify({ systemMessage: message }) + "\n");
   return 0;
 }
@@ -88,6 +99,7 @@ const byteLength = (text) => Buffer.byteLength(text, "utf8");
 const clampBytes = (text, cap) => Buffer.from(text, "utf8").subarray(0, cap).toString("utf8");
 
 function blockDecision(reason) {
+  lastDecision = { decision: "block", reason: String(reason) };
   const clean = String(reason)
     .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
     .replace(/[\x00-\x1f\x7f-]/g, " ")
@@ -286,6 +298,7 @@ async function main() {
   if (input.stop_hook_active === true) return allow();
 
   const cwd = input.cwd || process.cwd();
+  gateWorkspace = cwd;                       // vibe-207: the log lives in the reviewed workspace
   const resolved = effectiveGate(cwd);
   if (resolved.gate === null) return applyFailPolicy(null, resolved.why);
   const gate = resolved.gate;
@@ -374,7 +387,13 @@ async function main() {
   return allow();
 }
 
-main().then((code) => {
+main().then(async (code) => {
+  // vibe-207: one record per run, after the decision is made and written. Emitting from inside the
+  // decision helpers would put an await in three sync functions whose only job is to answer; doing
+  // it here keeps the gate's control flow exactly as it was.
+  if (lastDecision !== null) {
+    await emit(gateWorkspace, { component: "gate", event: "gate.decision", detail: lastDecision });
+  }
   process.exitCode = code;
 }).catch((error) => {
   // A crashed gate is an infra failure, not a verdict — and never a non-zero hook exit.

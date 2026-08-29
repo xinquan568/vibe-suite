@@ -12,7 +12,7 @@ import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 
 import path from "node:path";
 import test from "node:test";
@@ -508,14 +508,16 @@ test("a hung reviewer INSIDE the budget: the hook still decides (fail-open) and 
 
 function gateEventsOf(dir) {
   const p = path.join(dir, ".vibe-suite-state", "events.log");
-  if (!existsSync(p)) return [];
+  // `existsSync` is true for a DIRECTORY, and a directory at this path is exactly the phase-B
+  // fixture — so asking "does it exist?" reads it and throws EISDIR. Ask whether it is a file.
+  if (!existsSync(p) || !statSync(p).isFile()) return [];
   return readFileSync(p, "utf8").split("\n").filter(Boolean).flatMap((line) => {
     try { return [JSON.parse(line)]; } catch { return []; }
   });
 }
 
 test("phase A: the gate records its decision and the reason (vibe-207)", () => {
-  const dir = repoWithGate({ stop_review_gate: false });
+  const dir = repo({ enabled: false });
   const result = runHook(dir);
   assert.equal(result.status, 0);
   const decisions = gateEventsOf(dir).filter((e) => e.event === "gate.decision");
@@ -525,10 +527,10 @@ test("phase A: the gate records its decision and the reason (vibe-207)", () => {
 });
 
 test("phase B: the gate's decision is unchanged when the event log cannot be written (vibe-207)", () => {
-  const clean = repoWithGate({ stop_review_gate: false });
+  const clean = repo({ enabled: false });
   const expected = runHook(clean);
 
-  const blocked = repoWithGate({ stop_review_gate: false });
+  const blocked = repo({ enabled: false });
   mkdirSync(path.join(blocked, ".vibe-suite-state"), { recursive: true });
   mkdirSync(path.join(blocked, ".vibe-suite-state", "events.log"), { recursive: true });
   const actual = runHook(blocked);

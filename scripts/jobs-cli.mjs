@@ -23,7 +23,7 @@
 // (cc-suite W7 class). All command logic lives here and in scripts/lib/, never in markdown
 // snippets, so the no-top-level-await sweep covers every line that can execute.
 
-import { eventLogPath, tailRecords, EVENT_LOG_MAX_BYTES } from "./lib/eventlog.mjs";
+import { emit, eventLogPath, tailRecords, EVENT_LOG_MAX_BYTES } from "./lib/eventlog.mjs";
 import { isAbandoned, pruneTerminalJobs, resultLine, TERMINAL_STATUSES } from "./lib/jobs.mjs";
 import {
   abandonedIds, cancelJob, parseOlderThan, resolveResultJob, resolveStatusJobs, settleAbandoned,
@@ -175,6 +175,11 @@ async function runCancel(workspace, options) {
  */
 async function runPrune(workspace, options) {
   const report = await pruneTerminalJobs(workspace, { olderThanMs: options.olderThanMs });
+  // vibe-207: the CLI emits, not the store. jobs.mjs carries the crash-safety protocol vibe-204
+  // spent seven rounds on; threading observability through it would put a new failure mode inside
+  // the one module whose invariants are load-bearing.
+  await emit(workspace, { component: "jobs", event: "prune.action",
+    detail: { removed: report.pruned.length, kept: report.kept, blocked: report.blocked.length } });
   process.stdout.write(
     renderPruneOutcome(report, { olderThan: options.olderThan ?? OLDER_THAN_DEFAULT }) + "\n");
   return report.invalid.length > 0 || report.leftovers.length > 0 || report.blocked.length > 0 ? 1 : 0;

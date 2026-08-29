@@ -59,6 +59,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { emit } from "./lib/eventlog.mjs";
 import { billableTokens, readEventStream } from "./lib/events.mjs";
 import { noTerminalEvent, stderrTail } from "./lib/render.mjs";
 import { loadConfig, resolveDefaults } from "./lib/config-bridge.mjs";
@@ -427,9 +428,16 @@ async function runForeground(workspace, options, timeoutMs) {
     claimed = await updateRecord(workspace, record.jobId, {
       workerPid: process.pid, pgid: null, startedAt: new Date().toISOString(),
     });
+    // vibe-207: fire-and-forget. `emit` cannot throw, and nothing below branches on it — a dispatch
+    // must run identically whether or not its diagnostics were recorded.
+    await emit(workspace, { component: "runner", event: "dispatch.start", jobId: record.jobId,
+      detail: { kind: record.kind, sandbox: record.sandbox, effort: record.effort,
+                background: record.background } });
   } catch (error) {
     if (error instanceof UsageError) throw error;
     if (!record) return preRecordFailure(error);
+    await emit(workspace, { component: "runner", event: "claim.error", jobId: record.jobId,
+      detail: { errorClass: "failure", message: String(error?.message ?? error) } });
     // The record exists (the claim step failed): finalise it as failed so the store and the line
     // agree, then emit the line — the same shape the execution guard below uses.
     const failed = await finaliseRecord(workspace, record.jobId, {
@@ -441,6 +449,7 @@ async function runForeground(workspace, options, timeoutMs) {
   }
   try {
     const finished = await execute(workspace, claimed ?? record, options.prompt);
+    await emitFinalise(workspace, finished);
     process.stdout.write(resultLine(finished) + "\n");
     return finished.status === "completed" ? 0 : 1;
   } catch (error) {
@@ -449,9 +458,35 @@ async function runForeground(workspace, options, timeoutMs) {
     const failed = await finaliseRecord(workspace, record.jobId, {
       status: "failed", errorClass: "failure", error: String(error?.message ?? error),
     }).catch(() => null);
+    await emit(workspace, { component: "runner", event: "finalise.error", jobId: record.jobId,
+      detail: { errorClass: "failure", message: String(error?.message ?? error) } });
+    await emitFinalise(workspace, failed ?? { ...record, status: "failed" });
     process.stdout.write(resultLine(failed ?? { ...record, status: "failed" }) + "\n");
     return 1;
   }
+}
+
+/**
+ * `dispatch.finalise` for a terminal record (vibe-207).
+ *
+ * `durationMs` is `endedAt - startedAt`, and **null when `startedAt` is null** — a job finalised
+ * before it was ever claimed has no run to measure, and falling back to `createdAt` would report
+ * queue time under a name that means run time. The record's terminal timestamp is `endedAt`; there
+ * is no `finalisedAt` field anywhere in the store.
+ */
+async function emitFinalise(workspace, record) {
+  const startedAt = record?.startedAt ?? null;
+  const endedAt = record?.endedAt ?? null;
+  const durationMs = startedAt === null || endedAt === null
+    ? null
+    : Date.parse(endedAt) - Date.parse(startedAt);
+  await emit(workspace, {
+    component: "runner", event: "dispatch.finalise", jobId: record?.jobId ?? null,
+    detail: {
+      status: record?.status ?? null, errorClass: record?.errorClass ?? null,
+      exitCode: record?.exitCode ?? null, signal: record?.signal ?? null, durationMs,
+    },
+  });
 }
 
 /**

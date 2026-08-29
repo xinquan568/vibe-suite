@@ -16,7 +16,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createRecord, jobsDir, newRecord, readRecord } from "../../scripts/lib/jobs.mjs";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const CLI = path.join(REPO_ROOT, "scripts", "jobs-cli.mjs");
@@ -417,7 +417,9 @@ test("the four existing subcommands keep their exit contract (characterization)"
 
 function eventsOf(ws) {
   const p = path.join(ws, ".vibe-suite-state", "events.log");
-  if (!existsSync(p)) return [];
+  // `existsSync` is true for a DIRECTORY, and a directory at this path is exactly the phase-B
+  // fixture — so asking "does it exist?" reads it and throws EISDIR. Ask whether it is a file.
+  if (!existsSync(p) || !statSync(p).isFile()) return [];
   return readFileSync(p, "utf8").split("\n").filter(Boolean).flatMap((line) => {
     try { return [JSON.parse(line)]; } catch { return []; }
   });

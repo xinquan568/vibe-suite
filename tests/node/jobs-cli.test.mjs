@@ -452,5 +452,33 @@ test("phase B: prune is unchanged when the event log cannot be written (vibe-207
 
   assert.equal(actual.status, expected.status, "same exit code");
   assert.equal(actual.stdout, expected.stdout, "byte-identical stdout — observability changed nothing");
+  assert.equal(actual.stderr, expected.stderr,
+    "and byte-identical STDERR — a warning that only appears when the log is blocked is still a\n     difference the caller can see");
   assert.equal(eventsOf(blocked).length, 0, "and nothing was recorded, which is the point of the fixture");
+});
+
+test("phase A: a BACKGROUND dispatch emits start and finalise, not just a foreground one (vibe-207)", async () => {
+  const ws = workspace();
+  const jobId = launch(ws, "emitter.mjs");
+  await waitFor(ws, jobId, (r) => TERMINAL.has(r.status), "the background job to finish");
+
+  const mine = eventsOf(ws).filter((e) => e.jobId === jobId);
+  assert.ok(mine.some((e) => e.event === "dispatch.start"),
+    "the Step-8 review found dispatch events only in runForeground — a background job is still a dispatch");
+  const finalise = mine.find((e) => e.event === "dispatch.finalise");
+  assert.ok(finalise, "and its outcome is the half an operator actually asks about");
+  assert.equal(finalise.component, "runner");
+  assert.ok(finalise.detail.durationMs === null || finalise.detail.durationMs >= 0);
+});
+
+test("phase B: a background dispatch is unchanged when the event log cannot be written (vibe-207)", async () => {
+  const blocked = workspace();
+  blockTheLog(blocked);
+  const jobId = launch(blocked, "emitter.mjs");
+  const record = await waitFor(blocked, jobId, (r) => TERMINAL.has(r.status),
+    "the background job to finish with its log blocked");
+  assert.equal(record.status, "completed",
+    "the job completes identically — a dispatch that failed because its diagnostics could not be " +
+    "written would be the exact inversion of what this feature is for");
+  assert.equal(eventsOf(blocked).length, 0);
 });

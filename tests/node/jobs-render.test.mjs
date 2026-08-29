@@ -11,6 +11,7 @@ import test from "node:test";
 
 import { newRecord, resultLine } from "../../scripts/lib/jobs.mjs";
 import {
+  renderEventLog,
   ERROR_STDERR_EXCERPT, RAW_TRUNCATE, STDERR_TAIL_BYTES, noTerminalEvent, renderCancelOutcome, renderDetail,
   renderJson, renderPruneOutcome, renderStatusTable, stderrTail,
 } from "../../scripts/lib/render.mjs";
@@ -258,4 +259,24 @@ test("renderPruneOutcome names blocked jobs separately from kept ones", () => {
     logsLeft: [], tombstonesExpired: 0, stagingSwept: 0,
   }, { olderThan: "7d" });
   assert.ok(!none.includes("blocked"), "nothing blocked, nothing said");
+});
+
+// --- vibe-207 step 9 -------------------------------------------------------------------------------
+
+test("renderEventLog says the view is partial even when NO record was found (vibe-207)", () => {
+  // The Step-8 review's finding: `truncated` is deliberately the operator's question — "am I seeing
+  // everything?" — and answering "no events recorded yet" to a log whose history is buried behind a
+  // ceiling-filling suffix answers a DIFFERENT question, wrongly.
+  const out = renderEventLog([], { truncated: true, requested: 25 });
+  assert.ok(!/^no events recorded yet$/m.test(out),
+    "an empty RESULT is not an empty LOG when the scan was cut short");
+  assert.match(out, /truncat|not the whole|older/i,
+    "the output must say the view is partial");
+});
+
+test("renderEventLog still says 'no events' for a genuinely empty log (vibe-207)", () => {
+  const out = renderEventLog([], { truncated: false, requested: 25 });
+  assert.match(out, /no events recorded yet/,
+    "and the honest empty case must keep its plain answer — otherwise the fix trades one wrong " +
+    "message for another");
 });

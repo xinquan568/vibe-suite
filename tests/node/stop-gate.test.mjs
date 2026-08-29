@@ -538,5 +538,6 @@ test("phase B: the gate's decision is unchanged when the event log cannot be wri
   assert.equal(actual.status, expected.status, "the gate still exits 0");
   assert.equal(actual.stdout, expected.stdout,
     "byte-identical — a gate whose verdict depended on its diagnostics would be the worst version of this feature");
+  assert.equal(actual.stderr, expected.stderr, "and stderr, where the fail-open notice lives");
   assert.equal(gateEventsOf(blocked).length, 0);
 });

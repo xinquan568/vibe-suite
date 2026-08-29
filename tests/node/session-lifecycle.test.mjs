@@ -159,4 +159,5 @@ test("phase B: the lifecycle hook is unchanged when the event log cannot be writ
   assert.equal(actual.status, expected.status);
   assert.equal(actual.stdout, expected.stdout,
     "byte-identical — a hook that reported differently because its log was blocked would have failed property 1");
+  assert.equal(actual.stderr, expected.stderr, "and stderr, which is where SessionEnd reports go");
 });

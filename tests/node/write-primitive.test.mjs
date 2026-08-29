@@ -7,7 +7,7 @@
 
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -795,4 +795,61 @@ test("appendLineAt never re-chmods a log it did not create (vibe-207)", async ()
   await assert.rejects(appendLineAt(root, "events.log", "{}"), /EACCES|permission/i,
     "an unwritable private log is refused rather than chmodded back open");
   assert.equal(mode(dest), 0o400, "the mode we found is the mode we leave");
+});
+
+// --- vibe-207 step 9: the branches the Step-8 review found undeclared ------------------------------
+
+test("appendLineAt refuses a FIFO WITHOUT blocking — the whole point of O_NONBLOCK (vibe-207)", async () => {
+  const root = scratchDir();
+  const fifo = path.join(root, "events.log");
+  const made = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+  if (made.status !== 0) return;                       // no mkfifo on this platform: skip, do not fake
+
+  // The assertion that matters is that this RETURNS. An O_WRONLY open of a FIFO with no reader blocks
+  // forever without O_NONBLOCK, and an emitter that hangs has broken the promise that observability
+  // never affects what it observes — worse than one that loses a record.
+  const started = Date.now();
+  await assert.rejects(appendLineAt(root, "events.log", "{}"), /FIFO|regular file|ENXIO/,
+    "a FIFO with no reader is refused");
+  assert.ok(Date.now() - started < 5_000,
+    `the open took ${Date.now() - started}ms — without O_NONBLOCK it would never return at all`);
+});
+
+test("appendLineAt refuses a non-regular file it CAN open — the isFile() branch (vibe-207)", async () => {
+  const root = scratchDir();
+  const fifo = path.join(root, "events.log");
+  const made = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+  if (made.status !== 0) return;
+
+  // A reader on the other end makes the O_NONBLOCK open SUCCEED, so the refusal has to come from the
+  // descriptor check rather than from the open. Without a reader the earlier test covers ENXIO;
+  // this one reaches `isFile()`, which the directory fixture never does (it fails at the open).
+  const reader = spawn("cat", [fifo], { stdio: ["ignore", "ignore", "ignore"] });
+  try {
+    await new Promise((resolve) => { setTimeout(resolve, 200); });
+    await assert.rejects(appendLineAt(root, "events.log", "{}"), /regular file|FIFO/,
+      "an OPENED non-regular descriptor is refused by fstat, not by the open");
+  } finally {
+    reader.kill("SIGKILL");
+  }
+});
+
+test("appendLineAt chmods what it creates, restoring bits a RESTRICTIVE umask removed (vibe-207)", async () => {
+  // A permissive umask proves nothing: open(path, flags, mode) creates with mode & ~umask, so a
+  // umask of 0 still yields 0600 and the chmod is invisible. A umask can only REMOVE bits — so the
+  // discriminating fixture is a restrictive one, where the create yields 0400 and only the chmod
+  // brings the owner-write bit back.
+  //
+  // My first version of this test used umask 0 and passed with the chmod deleted. Mutation caught
+  // it, which is the reason the mutation was run.
+  const root = scratchDir();
+  const previous = process.umask(0o277);               // strips group/other AND owner-write
+  try {
+    await appendLineAt(root, "events.log", "{}");
+    assert.equal(mode(path.join(root, "events.log")), 0o600,
+      "without the chmod on the created descriptor this is 0400 — created read-only, and the next " +
+      "append would fail EACCES on a log this process just made");
+  } finally {
+    process.umask(previous);
+  }
 });

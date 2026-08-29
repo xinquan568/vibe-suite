@@ -28,6 +28,7 @@
 // lands the log grows without bound; that is an accepted, declared liability, and a notice is not a
 // cap.
 
+import { open } from "node:fs/promises";
 import path from "node:path";
 
 import { appendLineAt, ensureDirAt, secureDirAt, EVENT_LINE_MAX } from "./write.mjs";
@@ -125,5 +126,98 @@ export async function emit(workspace, { component, event, jobId = null, detail =
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * The furthest back `tailRecords` will scan, in bytes.
+ *
+ * **This is the bound, and "read backwards until N complete lines" is not one.** That termination
+ * condition is finding N newlines, and nothing guarantees the file contains them within any distance
+ * of the end: a torn write leaves a fragment, and a foreign writer can leave an arbitrarily long run
+ * with no newline in it at all. With retention split to #266 the file itself is unbounded, so an
+ * unbounded scan is reachable — the ceiling is what makes the read finite regardless of content.
+ */
+export const EVENT_LOG_TAIL_MAX_BYTES = 256 * 1024;
+
+/** Read granularity. Large enough that an ordinary tail is one or two reads. */
+const READ_CHUNK = 64 * 1024;
+
+/**
+ * The last `n` parseable records, read backwards from the end and bounded by `ceiling` bytes.
+ *
+ * Returns `{ records, truncated, bytesRead, size }`. **`truncated` is true whenever older records
+ * exist that this result does not carry** — either because the scan stopped before the start of the
+ * file (the ceiling, or enough records found) or because more records were parsed than `n`. It is
+ * deliberately the operator's question, "am I seeing everything?", rather than the implementation's
+ * "did the scan reach byte zero?": on a small file the scan reaches the start and the answer is
+ * still no. A tail presented as the whole log is a lie a reader cannot detect.
+ *
+ * Three details that are easy to get wrong and are the reason this is a function rather than three
+ * lines at the call site:
+ *
+ *   * **Decoding happens after the chunks are assembled**, never per chunk. A backwards read splits
+ *     a multi-byte character across a boundary roughly one time in three for CJK text, and decoding
+ *     early replaces it with U+FFFD.
+ *   * **The first line is dropped whenever the scan started mid-file**, because it is a fragment of
+ *     a record whose beginning was never read. Handing it to `JSON.parse` would be a parse error the
+ *     reader then has to explain.
+ *   * **An unparseable line is skipped, not fatal.** Property 2 of the contract says a record is
+ *     written whole or not at all and a torn one is the reader's to drop; a concurrent appender's
+ *     partial write is expected, not exceptional.
+ *
+ * Every failure — an absent log, a directory, an unreadable file — yields the empty result rather
+ * than raising, for the same reason `emit` cannot throw.
+ */
+export async function tailRecords(logPath, n, { ceiling = EVENT_LOG_TAIL_MAX_BYTES, chunk = READ_CHUNK } = {}) {
+  const empty = { records: [], truncated: false, bytesRead: 0, size: 0 };
+  let handle;
+  try {
+    handle = await open(logPath, "r");
+  } catch {
+    return empty;
+  }
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) return empty;
+
+    const size = info.size;
+    const parts = [];
+    let pos = size;
+    let bytesRead = 0;
+    let newlines = 0;
+    // `newlines <= n` rather than `< n`: with a fragment at the front, n complete records need
+    // n+1 newlines. Stopping a chunk early would return n-1 records and call it n.
+    while (pos > 0 && bytesRead < ceiling && newlines <= n) {
+      const want = Math.min(chunk, pos, ceiling - bytesRead);
+      const buffer = Buffer.alloc(want);
+      pos -= want;
+      const read = await handle.read(buffer, 0, want, pos);
+      if (read.bytesRead <= 0) break;
+      const piece = buffer.subarray(0, read.bytesRead);
+      parts.unshift(piece);
+      bytesRead += read.bytesRead;
+      for (const byte of piece) if (byte === 0x0a) newlines += 1;
+    }
+
+    const lines = Buffer.concat(parts).toString("utf8").split("\n");
+    if (pos > 0) lines.shift();
+    const records = [];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        records.push(JSON.parse(line));
+      } catch {
+        // A torn record, or something a foreign writer left. Expected; dropped.
+      }
+    }
+    // `truncated` answers the operator's question — "am I seeing everything?" — not the
+    // implementation's. The scan reaching the start of a small file does NOT mean the view is
+    // complete: asking for the last 2 of 5 records omits 3. Both causes are truncation.
+    return { records: records.slice(-n), truncated: pos > 0 || records.length > n, bytesRead, size };
+  } catch {
+    return empty;
+  } finally {
+    await handle.close().catch(() => {});
   }
 }

@@ -12,7 +12,7 @@ import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 
 import path from "node:path";
 import test from "node:test";
@@ -502,4 +502,42 @@ test("a hung reviewer INSIDE the budget: the hook still decides (fail-open) and 
   assert.ok(Number.isInteger(pid) && pid > 0, `a reviewer pid must be recorded, got: ${pid}`);
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" },
     "the hung reviewer process must be terminated by the deadline, not left orphaned");
+});
+
+// --- vibe-207: the two-phase emitter tests --------------------------------------------------------
+
+function gateEventsOf(dir) {
+  const p = path.join(dir, ".vibe-suite-state", "events.log");
+  // `existsSync` is true for a DIRECTORY, and a directory at this path is exactly the phase-B
+  // fixture — so asking "does it exist?" reads it and throws EISDIR. Ask whether it is a file.
+  if (!existsSync(p) || !statSync(p).isFile()) return [];
+  return readFileSync(p, "utf8").split("\n").filter(Boolean).flatMap((line) => {
+    try { return [JSON.parse(line)]; } catch { return []; }
+  });
+}
+
+test("phase A: the gate records its decision and the reason (vibe-207)", () => {
+  const dir = repo({ enabled: false });
+  const result = runHook(dir);
+  assert.equal(result.status, 0);
+  const decisions = gateEventsOf(dir).filter((e) => e.event === "gate.decision");
+  assert.equal(decisions.length, 1, "one record per run — the gate decides once");
+  assert.equal(decisions[0].component, "gate");
+  assert.ok(["allow", "block"].includes(decisions[0].detail.decision));
+});
+
+test("phase B: the gate's decision is unchanged when the event log cannot be written (vibe-207)", () => {
+  const clean = repo({ enabled: false });
+  const expected = runHook(clean);
+
+  const blocked = repo({ enabled: false });
+  mkdirSync(path.join(blocked, ".vibe-suite-state"), { recursive: true });
+  mkdirSync(path.join(blocked, ".vibe-suite-state", "events.log"), { recursive: true });
+  const actual = runHook(blocked);
+
+  assert.equal(actual.status, expected.status, "the gate still exits 0");
+  assert.equal(actual.stdout, expected.stdout,
+    "byte-identical — a gate whose verdict depended on its diagnostics would be the worst version of this feature");
+  assert.equal(actual.stderr, expected.stderr, "and stderr, where the fail-open notice lives");
+  assert.equal(gateEventsOf(blocked).length, 0);
 });

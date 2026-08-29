@@ -9,6 +9,7 @@
 //   node scripts/jobs-cli.mjs result <job-id>
 //   node scripts/jobs-cli.mjs cancel [<job-id>]
 //   node scripts/jobs-cli.mjs prune [--older-than <n>d|h|m|s]      (vibe-204: terminal jobs, whole)
+//   node scripts/jobs-cli.mjs log [--tail <n>]                     (vibe-207: the event log, fenced)
 //
 // Default subcommand is `status`; a bare job id means `status <job-id>`. The workspace is
 // `process.cwd()` — identical to codex-runner.mjs, so both sides of the store agree on where it is:
@@ -22,23 +23,29 @@
 // (cc-suite W7 class). All command logic lives here and in scripts/lib/, never in markdown
 // snippets, so the no-top-level-await sweep covers every line that can execute.
 
+import { emit, eventLogPath, tailRecords, EVENT_LOG_MAX_BYTES } from "./lib/eventlog.mjs";
 import { isAbandoned, pruneTerminalJobs, resultLine, TERMINAL_STATUSES } from "./lib/jobs.mjs";
 import {
   abandonedIds, cancelJob, parseOlderThan, resolveResultJob, resolveStatusJobs, settleAbandoned,
   OLDER_THAN_DEFAULT, ResolveError,
 } from "./lib/resolve.mjs";
 import {
-  renderCancelOutcome, renderDetail, renderJson, renderPruneOutcome, renderStatusTable,
+  renderCancelOutcome, renderDetail, renderEventLog, renderJson, renderPruneOutcome,
+  renderStatusTable,
 } from "./lib/render.mjs";
 
-const SUBCOMMANDS = new Set(["status", "result", "cancel", "prune"]);
-const FLAGS = new Set(["--all", "--json", "--settle-abandoned", "--older-than"]);
+const SUBCOMMANDS = new Set(["status", "result", "cancel", "prune", "log"]);
+
+/** `jobs log` with no `--tail`: enough to see the last few dispatches without scrolling. */
+const DEFAULT_TAIL = 25;
+const FLAGS = new Set(["--all", "--json", "--settle-abandoned", "--older-than", "--tail"]);
 
 class UsageError extends Error {}
 
 function parseArgs(argv) {
   const options = {
-    subcommand: null, jobId: null, all: false, json: false, settle: false, olderThan: null, olderThanMs: null,
+    subcommand: null, jobId: null, all: false, json: false, settle: false, olderThan: null,
+    olderThanMs: null, tail: null,
   };
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -51,6 +58,14 @@ function parseArgs(argv) {
       const value = arg.includes("=") ? arg.slice("--older-than=".length) : argv[i += 1];
       if (value === undefined) throw new UsageError("--older-than requires a value (e.g. 7d, 12h, 30m, or 0)");
       options.olderThan = value;
+    }
+    else if (arg === "--tail" || arg.startsWith("--tail=")) {
+      const value = arg.includes("=") ? arg.slice("--tail=".length) : argv[i += 1];
+      if (value === undefined) throw new UsageError("--tail requires a count (e.g. --tail 50)");
+      // Rejected, never coerced: `--tail abc` silently becoming the default would answer a question
+      // the operator did not ask, which is the same rule --older-than follows.
+      if (!/^[1-9][0-9]*$/.test(value)) throw new UsageError(`--tail expects a positive integer, got '${value}'`);
+      options.tail = Number(value);
     }
     else if (arg.startsWith("--")) throw new UsageError(`unknown flag: ${arg} (known: ${[...FLAGS].join(", ")})`);
     else positional.push(arg);
@@ -77,6 +92,16 @@ function parseArgs(argv) {
       ["--settle-abandoned", options.settle]]) {
       if (set) throw new UsageError(`${flag} applies to status only`);
     }
+  }
+  if (options.subcommand === "log") {
+    // vibe-207: the log spans every job, and the gate and the hooks besides. A job id here is the
+    // same misunderstanding `prune` refuses one clause below — narrowing to one job would answer a
+    // question the log is not organised to answer.
+    if (options.jobId !== null) {
+      throw new UsageError("log takes no job id — the log spans every job, and the gate and hooks besides");
+    }
+  } else if (options.tail !== null) {
+    throw new UsageError("--tail applies to log only");
   }
   if (options.subcommand === "prune") {
     // vibe-204: prune is a sweep, never a per-job command — a job id here is a misunderstanding of
@@ -150,9 +175,31 @@ async function runCancel(workspace, options) {
  */
 async function runPrune(workspace, options) {
   const report = await pruneTerminalJobs(workspace, { olderThanMs: options.olderThanMs });
+  // vibe-207: the CLI emits, not the store. jobs.mjs carries the crash-safety protocol vibe-204
+  // spent seven rounds on; threading observability through it would put a new failure mode inside
+  // the one module whose invariants are load-bearing.
+  await emit(workspace, { component: "jobs", event: "prune.action",
+    detail: { removed: report.pruned.length, kept: report.kept, blocked: report.blocked.length } });
   process.stdout.write(
     renderPruneOutcome(report, { olderThan: options.olderThan ?? OLDER_THAN_DEFAULT }) + "\n");
   return report.invalid.length > 0 || report.leftovers.length > 0 || report.blocked.length > 0 ? 1 : 0;
+}
+
+/**
+ * `jobs log [--tail N]` — the tail of the event log (vibe-207).
+ *
+ * Exit 0 whether or not there are events: an empty log is a true answer, not a failure. The read is
+ * bounded by `tailRecords`' ceiling rather than by finding N lines, because a torn write or a
+ * foreign writer can leave an arbitrarily long run with no newline in it — and with retention
+ * tracked in #266 the file itself is unbounded.
+ */
+async function runLog(workspace, options) {
+  const requested = options.tail ?? DEFAULT_TAIL;
+  const logPath = eventLogPath(workspace);
+  const { records, truncated, size } = await tailRecords(logPath, requested);
+  const oversized = size > EVENT_LOG_MAX_BYTES ? { size, cap: EVENT_LOG_MAX_BYTES } : null;
+  process.stdout.write(`${renderEventLog(records, { truncated, oversized, requested })}\n`);
+  return 0;
 }
 
 async function main() {
@@ -170,6 +217,7 @@ async function main() {
     if (options.subcommand === "result") return await runResult(workspace, options);
     if (options.subcommand === "cancel") return await runCancel(workspace, options);
     if (options.subcommand === "prune") return await runPrune(workspace, options);
+    if (options.subcommand === "log") return await runLog(workspace, options);
     return await runStatus(workspace, options);
   } catch (error) {
     if (error instanceof ResolveError) {

@@ -7,16 +7,17 @@
 
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
-import { spawnSync } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  classify, ensureDirAt, isOwnedTempRoot, makeOwnedTempDir, publishNew, removeOwnedTree, scratch,
-  openSinkAt, secureDirAt, unlinkOwned, writeAtomic, PRIVATE_FILE_MODE, STAMP_KEY,
+  appendLineAt, classify, ensureDirAt, isOwnedTempRoot, makeOwnedTempDir, publishNew,
+  removeOwnedTree, scratch, openSinkAt, secureDirAt, unlinkOwned, writeAtomic,
+  EVENT_LINE_MAX, PRIVATE_FILE_MODE, STAMP_KEY,
 } from "../../scripts/lib/write.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -695,4 +696,166 @@ test("removeOwnedDirAt answers absent when the directory vanishes before it is v
     onValidated: () => rmSync(path.join(root, "ours"), { recursive: true }),
   }), "absent");
   assert.equal(existsSync(path.join(root, ".staged")), false, "nothing was staged");
+});
+
+
+// ------------------------------------------------------- appendLineAt: the shared-log append (vibe-207)
+//
+// `openSinkAt` is `O_EXCL` — "a sink is created once, never reopened" — which is right for one
+// child's stderr and wrong for a log every process must reopen. `appendLineAt` keeps the exclusive
+// CREATE (so the chmod is provably the creator's) and makes only the REOPEN permissive, validating
+// the DESCRIPTOR rather than the path.
+//
+// Two clauses are implemented and deliberately NOT tested here, because an unprivileged test cannot
+// reach them honestly:
+//   * `st.uid !== process.getuid()` — creating a file owned by another uid needs privilege.
+//   * a short `write()` — the kernel decides; forcing one on a regular file is not reachable from
+//     the test process. The check exists because a short write on an append log tears a record.
+// Writing tests that appear to cover these would be worse than the declared gap: they would pass
+// with the clause removed.
+
+test("appendLineAt creates the log 0600 and appends a terminated line (vibe-207)", async () => {
+  const root = scratchDir();
+  await appendLineAt(root, "events.log", '{"event":"first"}');
+  const dest = path.join(root, "events.log");
+  assert.equal(mode(dest), 0o600, "a created log is private from the first byte");
+  assert.equal(readFileSync(dest, "utf8"), '{"event":"first"}\n', "the line is terminated");
+
+  await appendLineAt(root, "events.log", '{"event":"second"}');
+  assert.equal(readFileSync(dest, "utf8"), '{"event":"first"}\n{"event":"second"}\n',
+    "the second call REOPENS and appends — this is what openSinkAt cannot do");
+});
+
+test("appendLineAt refuses a record with an embedded newline (vibe-207)", async () => {
+  const root = scratchDir();
+  await assert.rejects(appendLineAt(root, "events.log", 'a\nb'), /newline/,
+    "a record is one line by construction; splitting it silently would interleave under concurrency");
+  assert.equal(existsSync(path.join(root, "events.log")), false, "nothing is created for a refused record");
+});
+
+test("appendLineAt refuses a record over EVENT_LINE_MAX, whole (vibe-207)", async () => {
+  const root = scratchDir();
+  assert.equal(typeof EVENT_LINE_MAX, "number", "the bound is exported so callers can fit their records");
+  await assert.rejects(appendLineAt(root, "events.log", "x".repeat(EVENT_LINE_MAX)), /EVENT_LINE_MAX/,
+    "refused rather than split — a split record is two malformed lines, not one long one");
+});
+
+test("appendLineAt refuses a symlink on BOTH the create and the reopen path (vibe-207)", async () => {
+  const root = scratchDir();
+  symlinkSync(path.join(tmpdir(), "vibe-207-nowhere.log"), path.join(root, "events.log"));
+  await assert.rejects(appendLineAt(root, "events.log", "{}"), /symlink|ELOOP/,
+    "a dangling symlink fails O_EXCL with EEXIST and then O_NOFOLLOW on the reopen");
+
+  const real = scratchDir();
+  writeFileSync(path.join(real, "target.log"), "", { mode: 0o600 });
+  const root2 = scratchDir();
+  symlinkSync(path.join(real, "target.log"), path.join(root2, "events.log"));
+  await assert.rejects(appendLineAt(root2, "events.log", "{}"), /symlink|ELOOP/,
+    "a symlink to a real private file is still refused — the link is what would be written through");
+});
+
+test("appendLineAt refuses a directory at the log path (vibe-207)", async () => {
+  const root = scratchDir();
+  mkdirSync(path.join(root, "events.log"));
+  await assert.rejects(appendLineAt(root, "events.log", "{}"), /directory|EISDIR|not a regular file/,
+    "a directory is what an emitter's degrade test plants; it must refuse, not throw something unhandled");
+});
+
+test("appendLineAt refuses a hard-linked log — the substitution O_NOFOLLOW cannot see (vibe-207)", async () => {
+  const root = scratchDir();
+  const dest = path.join(root, "events.log");
+  writeFileSync(dest, "", { mode: 0o600 });
+  linkSync(dest, path.join(root, "events.log.alias"));
+  assert.equal(lstatSync(dest).nlink, 2, "the fixture really is hard-linked");
+  await assert.rejects(appendLineAt(root, "events.log", "{}"), /link|nlink/,
+    "a second name for the inode means someone else can read every record we write");
+});
+
+test("appendLineAt refuses a group- or world-readable log, and does not repair it (vibe-207)", async () => {
+  const root = scratchDir();
+  const dest = path.join(root, "events.log");
+  writeFileSync(dest, "keep\n", { mode: 0o640 });
+  await assert.rejects(appendLineAt(root, "events.log", "{}"), /mode|0600|private/,
+    "0600 is enforced on the reopen path, which is where the issue's requirement would otherwise be lost");
+  assert.equal(mode(dest), 0o640, "REFUSE, NEVER REPAIR — chmodding a file we did not create is a mutation we cannot justify");
+  assert.equal(readFileSync(dest, "utf8"), "keep\n", "and nothing was appended to it");
+});
+
+test("appendLineAt refuses a path outside the root (vibe-207)", async () => {
+  const root = scratchDir();
+  await assert.rejects(appendLineAt(root, path.join("..", "escape.log"), "{}"), /outside/,
+    "containment is checked before anything is opened");
+});
+
+test("appendLineAt never re-chmods a log it did not create (vibe-207)", async () => {
+  const root = scratchDir();
+  const dest = path.join(root, "events.log");
+  await appendLineAt(root, "events.log", "{}");
+  chmodSync(dest, 0o400);                     // still private, but not writable by us
+  await assert.rejects(appendLineAt(root, "events.log", "{}"), /EACCES|permission/i,
+    "an unwritable private log is refused rather than chmodded back open");
+  assert.equal(mode(dest), 0o400, "the mode we found is the mode we leave");
+});
+
+// --- vibe-207 step 9: the branches the Step-8 review found undeclared ------------------------------
+
+test("appendLineAt refuses a FIFO WITHOUT blocking — the whole point of O_NONBLOCK (vibe-207)", async () => {
+  const root = scratchDir();
+  const fifo = path.join(root, "events.log");
+  const made = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+  if (made.status !== 0) return;                       // no mkfifo on this platform: skip, do not fake
+
+  // The assertion that matters is that this RETURNS. An O_WRONLY open of a FIFO with no reader blocks
+  // forever without O_NONBLOCK, and an emitter that hangs has broken the promise that observability
+  // never affects what it observes — worse than one that loses a record.
+  const started = Date.now();
+  await assert.rejects(appendLineAt(root, "events.log", "{}"), /FIFO|regular file|ENXIO/,
+    "a FIFO with no reader is refused");
+  assert.ok(Date.now() - started < 5_000,
+    `the open took ${Date.now() - started}ms — without O_NONBLOCK it would never return at all`);
+});
+
+test("appendLineAt refuses a non-regular file it CAN open — the isFile() branch (vibe-207)", async () => {
+  const root = scratchDir();
+  const fifo = path.join(root, "events.log");
+  const made = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+  if (made.status !== 0) return;                       // no mkfifo here: skip, do not fake
+
+  // A reader on the other end makes the O_NONBLOCK open SUCCEED, so the refusal must come from the
+  // descriptor `fstat` rather than from the open. That is the `isFile()` branch, which the directory
+  // fixture never reaches — it fails at the open.
+  //
+  // THIS PROCESS is the reader, opened O_RDONLY|O_NONBLOCK so the open returns at once and the fd is
+  // held for the whole assertion. Two earlier attempts were not coordination at all: a timed sleep,
+  // and then a probe that opened the FIFO for writing — which sent EOF when it exited, so `cat`
+  // finished and there was no reader left by the time the assertion ran.
+  const reader = openSync(fifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    await assert.rejects(appendLineAt(root, "events.log", "{}"),
+      /not a regular file/,
+      "the refusal must be the fstat one — matching the ENXIO text too would let this pass on the " +
+      "no-reader path the previous test already covers");
+  } finally {
+    closeSync(reader);
+  }
+});
+
+test("appendLineAt chmods what it creates, restoring bits a RESTRICTIVE umask removed (vibe-207)", async () => {
+  // A permissive umask proves nothing: open(path, flags, mode) creates with mode & ~umask, so a
+  // umask of 0 still yields 0600 and the chmod is invisible. A umask can only REMOVE bits — so the
+  // discriminating fixture is a restrictive one, where the create yields 0400 and only the chmod
+  // brings the owner-write bit back.
+  //
+  // My first version of this test used umask 0 and passed with the chmod deleted. Mutation caught
+  // it, which is the reason the mutation was run.
+  const root = scratchDir();
+  const previous = process.umask(0o277);               // strips group/other AND owner-write
+  try {
+    await appendLineAt(root, "events.log", "{}");
+    assert.equal(mode(path.join(root, "events.log")), 0o600,
+      "without the chmod on the created descriptor this is 0400 — created read-only, and the next " +
+      "append would fail EACCES on a log this process just made");
+  } finally {
+    process.umask(previous);
+  }
 });

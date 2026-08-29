@@ -6,7 +6,7 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 
 import path from "node:path";
 import test from "node:test";
@@ -111,4 +111,53 @@ test("an unknown --event is a usage error (exit 2), not a silent 'start'", () =>
 test("a MISSING --event is likewise a usage error (exit 2)", () => {
   const r = spawnSync(process.execPath, [HOOK], { encoding: "utf8" });
   assert.equal(r.status, 2, `a missing --event must exit 2, got ${r.status}: ${r.stderr}`);
+});
+
+// --- vibe-207: the two-phase emitter tests --------------------------------------------------------
+
+function eventsOf207(ws) {
+  const p = path.join(ws, ".vibe-suite-state", "events.log");
+  // `existsSync` is true for a DIRECTORY, and a directory at this path is exactly the phase-B
+  // fixture — so asking "does it exist?" reads it and throws EISDIR. Ask whether it is a file.
+  if (!existsSync(p) || !statSync(p).isFile()) return [];
+  return readFileSync(p, "utf8").split("\n").filter(Boolean).flatMap((line) => {
+    try { return [JSON.parse(line)]; } catch { return []; }
+  });
+}
+
+function seedReportable(ws) {
+  mkdirSync(jobsDir(ws), { recursive: true });
+  // The suite's own reliable report fixture: a STAMPED orphan temp, aged past the reap floor.
+  // An unstamped one is left alone by design, so only the stamp produces the "reaped 1" line.
+  const orphan = path.join(jobsDir(ws), "job_cccccccccccccccccccc.tmp.207.feedface");
+  writeFileSync(orphan, JSON.stringify({ "_vibe-suite_owned": { kind: "job-scratch", schema: 1 } }));
+  const aged = (Date.now() - TEMP_REAP_MIN_AGE_MS - 60_000) / 1000;
+  utimesSync(orphan, aged, aged);
+  return ws;
+}
+
+test("phase A: a lifecycle report is also recorded durably (vibe-207)", () => {
+  const ws = seedReportable(tmpWorkspace("lifecycle-207-"));
+
+  const result = runHook(ws, "start");
+  assert.match(result.stdout, /reaped 1 orphan temp/,
+    "the fixture must actually produce a report — an emitter test whose fixture triggers nothing proves nothing");
+  assert.equal(result.status, 0, "a lifecycle hook never fails the session");
+  const reports = eventsOf207(ws).filter((e) => e.event === "hook.report");
+  assert.ok(reports.length >= 1, "the text the operator sees is kept where it can be read tomorrow");
+  assert.equal(reports[0].component, "hook");
+  assert.equal(reports[0].detail.event, "start");
+});
+
+test("phase B: the lifecycle hook is unchanged when the event log cannot be written (vibe-207)", () => {
+  const expected = runHook(seedReportable(tmpWorkspace("lifecycle-207-clean-")), "start");
+
+  const blocked = seedReportable(tmpWorkspace("lifecycle-207-blocked-"));
+  mkdirSync(path.join(blocked, ".vibe-suite-state", "events.log"), { recursive: true });
+  const actual = runHook(blocked, "start");
+
+  assert.equal(actual.status, expected.status);
+  assert.equal(actual.stdout, expected.stdout,
+    "byte-identical — a hook that reported differently because its log was blocked would have failed property 1");
+  assert.equal(actual.stderr, expected.stderr, "and stderr, which is where SessionEnd reports go");
 });

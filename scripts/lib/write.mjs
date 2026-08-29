@@ -61,6 +61,16 @@ const DEFAULT_FILE_MODE = 0o644;
 
 const SCRATCH_ATTEMPTS = 64;
 const OPEN_WRITE = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
+/**
+ * vibe-207: the largest record `appendLineAt` will write, in UTF-8 bytes.
+ *
+ * A POLICY bound, not an atomicity threshold — `PIPE_BUF` governs pipes, and a regular-file
+ * `write()` may return short regardless of size. It is sized from the suite's own field caps
+ * (`REASON_CAP` 500, `STDERR_TAIL_BYTES` 8192 truncated well below it by callers) against JSON
+ * escaping's 6x worst case, so a record that fits its fields fits this.
+ */
+export const EVENT_LINE_MAX = 4096;
+
 // vibe-182: a long-lived sink (a child's stderr) appends; everything else about its creation is the
 // same — exclusive, never through a symlink, private from the first byte.
 const OPEN_SINK = OPEN_WRITE | constants.O_APPEND;
@@ -285,6 +295,102 @@ export async function openSinkAt(root, dest, { mode = PRIVATE_FILE_MODE } = {}) 
   } catch (error) {
     await handle.close().catch(() => {});
     await fs.unlink(dest).catch(() => {});
+    throw error;
+  }
+  return handle;
+}
+
+/**
+ * Append ONE line to a shared, reopenable log inside `root` (vibe-207).
+ *
+ * `openSinkAt` is `O_EXCL` — "a sink is created once, never reopened" — which is exactly right for
+ * one child's stderr and exactly wrong for a log that every process in the workspace must reopen.
+ * This is the reopenable counterpart, and it gives up that exclusivity ONLY on the reopen:
+ *
+ *   * The CREATE stays `O_EXCL`, so a successful create is self-identifying and the `chmod` that
+ *     follows it is provably ours. A pre-open `classify()` could not tell us that: between the
+ *     classify and the open the path can change, and then "did this call create it?" is a guess.
+ *   * The REOPEN validates the **descriptor**, never the path — `fstat` on the handle we are about
+ *     to write through, so the object judged and the object mutated are the same object. That is
+ *     the property four earlier designs of the surrounding feature failed to hold, each by deciding
+ *     about an inode and then mutating a pathname.
+ *   * `O_NONBLOCK` is on the reopen because a FIFO at the path would otherwise block an `O_WRONLY`
+ *     open forever, and an emitter that hangs has broken the one promise observability owes: never
+ *     to affect the operation it observes. On a regular file the flag is a no-op.
+ *
+ * **Refuse, never repair.** A file that fails any clause is not chmodded, not truncated and not
+ * appended to. Tightening the mode of a file we did not create is a mutation we cannot justify, and
+ * appending to a group-readable log would publish whatever the caller is recording.
+ *
+ * One `write()` of one buffer, with `bytesWritten` checked: `O_APPEND` makes the seek-and-write
+ * atomic per call, so a record that needs two calls can interleave with another appender's. A short
+ * write is therefore NOT retried — a retry would splice this record around someone else's — it
+ * raises, and the reader drops the torn line.
+ *
+ * `line` must not contain a newline: a record is one line by construction, and splitting it here
+ * would silently produce two malformed ones.
+ */
+export async function appendLineAt(root, rel, line, { mode = PRIVATE_FILE_MODE } = {}) {
+  await assertRoot(root);
+  const dest = path.resolve(root, rel);
+  await assertInside(root, dest);
+  if (typeof line !== "string" || line.includes("\n")) {
+    throw new WriteError(`${dest}: a record is one line — an embedded newline is refused`);
+  }
+  const buf = Buffer.from(`${line}\n`, "utf8");
+  if (buf.length > EVENT_LINE_MAX) {
+    throw new WriteError(
+      `${dest}: record is ${buf.length} bytes, over EVENT_LINE_MAX (${EVENT_LINE_MAX}) — refused whole`);
+  }
+
+  let handle = null;
+  try {
+    handle = await fs.open(dest, OPEN_SINK, mode);   // O_CREAT|O_EXCL|O_NOFOLLOW|O_WRONLY|O_APPEND
+    await handle.chmod(mode);                        // we created it, so the umask cannot loosen it
+  } catch (error) {
+    if (error.code !== "EEXIST") {
+      await handle?.close().catch(() => {});
+      throw error;
+    }
+    handle = await reopenForAppend(dest, mode);
+  }
+
+  try {
+    const { bytesWritten } = await handle.write(buf);
+    if (bytesWritten !== buf.length) {
+      throw new WriteError(
+        `${dest}: short write (${bytesWritten}/${buf.length}) — the record is torn and is not retried`);
+    }
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+/** The reopen half of `appendLineAt`: open without following, then judge the descriptor. */
+async function reopenForAppend(dest, mode) {
+  const flags = constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  let handle;
+  try {
+    handle = await fs.open(dest, flags);
+  } catch (error) {
+    // ELOOP: a symlink at the final component. EISDIR / ENXIO: a directory or an unread FIFO.
+    if (error.code === "ELOOP") throw new WriteError(`${dest}: is a symlink — refusing to append through it`);
+    if (error.code === "EISDIR") throw new WriteError(`${dest}: is a directory, not a regular file`);
+    if (error.code === "ENXIO") throw new WriteError(`${dest}: is a FIFO with no reader — refusing to append`);
+    throw error;
+  }
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw new WriteError(`${dest}: not a regular file — refusing to append`);
+    if (info.nlink !== 1) throw new WriteError(
+      `${dest}: has ${info.nlink} links — another name for this inode can read every record`);
+    if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+      throw new WriteError(`${dest}: owned by uid ${info.uid} — refusing to append`);
+    }
+    if ((info.mode & 0o077) !== 0) throw new WriteError(
+      `${dest}: mode ${(info.mode & 0o777).toString(8)} is not private (${mode.toString(8)} required) — refused, not repaired`);
+  } catch (error) {
+    await handle.close().catch(() => {});
     throw error;
   }
   return handle;

@@ -378,14 +378,14 @@ async function main() {
   } catch {
     result = null;
   }
+  // vibe-207: captured BEFORE the completion guard. A review that failed still names the job that
+  // failed, and that is the case an operator is most likely to be tracing — the verify caught this
+  // assignment sitting after the guard, where only a successful review kept its id.
+  gateJobId = result?.jobId ?? null;
   if (!result || result.status !== "completed") {
     return applyFailPolicy(gate, `the review job did not complete (${result?.status ?? "no result"})`);
   }
 
-  // vibe-207: the review's own job id, so a gate decision can be traced back to the dispatch that
-  // produced it. The Step-8 review found it discarded — the runner's result contract carries it as
-  // one of exactly five keys, and dropping it left the two halves of one story uncorrelated.
-  gateJobId = result.jobId ?? null;
   const parsed = verdictFrom(result.rawOutput);
   if (parsed === null) return applyFailPolicy(gate, "no parseable ALLOW/BLOCK verdict");
   if (parsed.verdict === "BLOCK") return blockDecision(parsed.reason || "the review blocked this stop");

@@ -339,7 +339,7 @@ async function execute(workspace, record, prompt) {
               // A missed beat must never kill the job — but it must no longer be invisible either.
               // A job that looks abandoned because its heartbeats were failing is exactly the
               // question this log exists to answer, and the swallow used to erase it.
-              void emit(workspace, { component: "runner", event: "heartbeat.error",
+              void emit(workspace, { component: "store", event: "heartbeat.error",
                 jobId: record.jobId,
                 detail: { errorClass: "failure", message: String(error?.message ?? error) } });
             });
@@ -450,7 +450,7 @@ async function runForeground(workspace, options, timeoutMs) {
   } catch (error) {
     if (error instanceof UsageError) throw error;
     if (!record) return preRecordFailure(error);
-    await emit(workspace, { component: "runner", event: "claim.error", jobId: record.jobId,
+    await emit(workspace, { component: "store", event: "claim.error", jobId: record.jobId,
       detail: { errorClass: "failure", message: String(error?.message ?? error) } });
     // The record exists (the claim step failed): finalise it as failed so the store and the line
     // agree, then emit the line — the same shape the execution guard below uses.
@@ -471,7 +471,7 @@ async function runForeground(workspace, options, timeoutMs) {
     const failed = await finaliseRecord(workspace, record.jobId, {
       status: "failed", errorClass: "failure", error: String(error?.message ?? error),
     }).catch(() => null);
-    await emit(workspace, { component: "runner", event: "finalise.error", jobId: record.jobId,
+    await emit(workspace, { component: "store", event: "finalise.error", jobId: record.jobId,
       detail: { errorClass: "failure", message: String(error?.message ?? error) } });
     await emitFinalise(workspace, failed ?? { ...record, status: "failed" });
     process.stdout.write(resultLine(failed ?? { ...record, status: "failed" }) + "\n");
@@ -480,6 +480,14 @@ async function runForeground(workspace, options, timeoutMs) {
     return 1;
   }
 }
+
+/**
+ * The three store-error events (vibe-207).
+ *
+ * `component: "store"` rather than `"runner"`, per the frozen detail contract: the runner is where
+ * these are CAUGHT, but what they are ABOUT is a store operation that failed. An operator asking
+ * "why did this job look abandoned" is asking about the store.
+ */
 
 /**
  * `dispatch.finalise` for a terminal record (vibe-207).
@@ -664,10 +672,22 @@ async function runWorker(workspace, jobId, handoffFd) {
 `);
     return 1;
   }
-  const claimed = await claimWith(workspace, jobId, handoff.token);
+  let claimed;
+  try {
+    claimed = await claimWith(workspace, jobId, handoff.token);
+  } catch (error) {
+    // vibe-207: a THROWN claim, as opposed to a refused one. Previously it propagated with no record
+    // at all, so a background job that died claiming left nothing behind but a stack in its worker
+    // log — which is the case this feature exists for.
+    await emit(workspace, { component: "store", event: "claim.error", jobId,
+      detail: { errorClass: "failure", message: String(error?.message ?? error) } });
+    throw error;
+  }
   if (claimed === null) {
     // No valid one-time token, or already claimed, or already terminal. Spawn nothing.
     process.stderr.write(`codex-runner: worker claim refused for ${jobId}\n`);
+    await emit(workspace, { component: "store", event: "claim.error", jobId,
+      detail: { errorClass: "failure", message: "claim refused (no valid token, or already claimed)" } });
     return 1;
   }
   await signalLatch("post-claim");
@@ -676,9 +696,16 @@ async function runWorker(workspace, jobId, handoffFd) {
     await execute(workspace, claimed, handoff.prompt);
     return 0;
   } catch (error) {
-    await finaliseRecord(workspace, jobId, {
+    const failed = await finaliseRecord(workspace, jobId, {
       status: "failed", errorClass: "failure", error: String(error?.message ?? error),
-    }).catch(() => {});
+    }).catch(() => null);
+    // vibe-207: this path finalised in silence. A background job that threw out of `execute` — the
+    // spawn failed, the store faulted — recorded neither the error nor an outcome, so the log said
+    // the dispatch started and then nothing. Both halves are emitted now.
+    await emit(workspace, { component: "store", event: "finalise.error", jobId,
+      detail: { errorClass: "failure", message: String(error?.message ?? error) } });
+    await emitFinalise(workspace, failed ?? { jobId, status: "failed", errorClass: "failure",
+      startedAt: null, endedAt: null, exitCode: null, signal: null });
     return 1;
   }
 }

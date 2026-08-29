@@ -169,55 +169,63 @@ const READ_CHUNK = 64 * 1024;
  * Every failure — an absent log, a directory, an unreadable file — yields the empty result rather
  * than raising, for the same reason `emit` cannot throw.
  */
-export async function tailRecords(logPath, n, { ceiling = EVENT_LOG_TAIL_MAX_BYTES, chunk = READ_CHUNK } = {}) {
+export async function tailRecords(logPath, n, options = {}) {
+  const { ceiling = EVENT_LOG_TAIL_MAX_BYTES, chunk = READ_CHUNK } = options;
   const empty = { records: [], truncated: false, bytesRead: 0, size: 0 };
-  let handle;
   try {
-    handle = await open(logPath, "r");
-  } catch {
-    return empty;
-  }
-  try {
-    const info = await handle.stat();
-    if (!info.isFile()) return empty;
+    // `const handle = await open(p, "r")` is the ONE consumption form the write-discipline checker
+    // accepts for an open: a read-only string literal flag, bound to a fresh local. The handle may
+    // then only be called through — never hoisted to an outer `let`, never passed to a helper — so
+    // the whole scan lives here rather than in a function taking the handle as an argument.
+    const handle = await open(logPath, "r");
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) return empty;
 
-    const size = info.size;
-    const parts = [];
-    let pos = size;
-    let bytesRead = 0;
-    let newlines = 0;
-    // `newlines <= n` rather than `< n`: with a fragment at the front, n complete records need
-    // n+1 newlines. Stopping a chunk early would return n-1 records and call it n.
-    while (pos > 0 && bytesRead < ceiling && newlines <= n) {
-      const want = Math.min(chunk, pos, ceiling - bytesRead);
-      const buffer = Buffer.alloc(want);
-      pos -= want;
-      const read = await handle.read(buffer, 0, want, pos);
-      if (read.bytesRead <= 0) break;
-      const piece = buffer.subarray(0, read.bytesRead);
-      parts.unshift(piece);
-      bytesRead += read.bytesRead;
-      for (const byte of piece) if (byte === 0x0a) newlines += 1;
-    }
+      const size = info.size;
+      const parts = [];
+      let pos = size;
+      let bytesRead = 0;
+      let newlines = 0;
+      // `newlines <= n` rather than `< n`: with a fragment at the front, n complete records need
+      // n+1 newlines. Stopping a chunk early would return n-1 records and call it n.
+      while (pos > 0 && bytesRead < ceiling && newlines <= n) {
+        const want = Math.min(chunk, pos, ceiling - bytesRead);
+        const buffer = Buffer.alloc(want);
+        pos -= want;
+        const read = await handle.read(buffer, 0, want, pos);
+        if (read.bytesRead <= 0) break;
+        const piece = buffer.subarray(0, read.bytesRead);
+        parts.unshift(piece);
+        bytesRead += read.bytesRead;
+        for (const byte of piece) if (byte === 0x0a) newlines += 1;
+      }
 
-    const lines = Buffer.concat(parts).toString("utf8").split("\n");
-    if (pos > 0) lines.shift();
-    const records = [];
-    for (const line of lines) {
-      if (!line.trim()) continue;
+      // Decode ONCE, after assembly: a backwards read splits a multi-byte character across a chunk
+      // boundary, and decoding per chunk turns it into U+FFFD.
+      const lines = Buffer.concat(parts).toString("utf8").split("\n");
+      if (pos > 0) lines.shift();                 // a fragment whose beginning was never read
+      const records = [];
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          records.push(JSON.parse(line));
+        } catch {
+          // A torn record, or something a foreign writer left. Expected; dropped.
+        }
+      }
+      // `truncated` answers the operator's question — "am I seeing everything?" — not the loop's.
+      // The scan reaching the start of a small file does NOT make the view complete: asking for the
+      // last 2 of 5 records omits 3. Both causes are truncation.
+      return { records: records.slice(-n), truncated: pos > 0 || records.length > n, bytesRead, size };
+    } finally {
       try {
-        records.push(JSON.parse(line));
+        await handle.close();
       } catch {
-        // A torn record, or something a foreign writer left. Expected; dropped.
+        // A close that fails has nothing left to protect.
       }
     }
-    // `truncated` answers the operator's question — "am I seeing everything?" — not the
-    // implementation's. The scan reaching the start of a small file does NOT mean the view is
-    // complete: asking for the last 2 of 5 records omits 3. Both causes are truncation.
-    return { records: records.slice(-n), truncated: pos > 0 || records.length > n, bytesRead, size };
   } catch {
     return empty;
-  } finally {
-    await handle.close().catch(() => {});
   }
 }

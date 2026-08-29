@@ -457,6 +457,22 @@ test("phase B: prune is unchanged when the event log cannot be written (vibe-207
   assert.equal(eventsOf(blocked).length, 0, "and nothing was recorded, which is the point of the fixture");
 });
 
+test("the store's three error events are emitted as component 'store' (vibe-207)", () => {
+  // The plan's detail contract assigns claim.error, finalise.error and heartbeat.error to component
+  // `store`; the first implementation emitted them as `runner`. Asserting through `emit` would prove
+  // nothing — it records whatever it is handed — so this reads the CALL SITES, the same way the
+  // suite pins other cross-file invariants it cannot reach at runtime.
+  const source = readFileSync(path.join(REPO_ROOT, "scripts", "codex-runner.mjs"), "utf8");
+  for (const event of ["claim.error", "finalise.error", "heartbeat.error"]) {
+    const sites = [...source.matchAll(new RegExp(`component:\\s*"([a-z]+)"[^}]*?event:\\s*"${event.replace(".", "\\.")}"`, "gs"))];
+    assert.ok(sites.length >= 1, `${event} is emitted nowhere in the runner`);
+    for (const [, component] of sites) {
+      assert.equal(component, "store",
+        `${event} must be a store event — the runner is where it is CAUGHT, not what it is ABOUT`);
+    }
+  }
+});
+
 test("phase A: a BACKGROUND dispatch emits start and finalise, not just a foreground one (vibe-207)", async () => {
   const ws = workspace();
   const jobId = launch(ws, "emitter.mjs");
@@ -481,13 +497,24 @@ test("phase A: a BACKGROUND dispatch emits start and finalise, not just a foregr
 });
 
 test("phase B: a background dispatch is unchanged when the event log cannot be written (vibe-207)", async () => {
+  // "It still completes" is not the assertion phase B owes. The verify's point: phase B must COMPARE
+  // a clean run with a blocked one, on everything the caller can see. A dispatch that merely finishes
+  // while printing something different has still affected the operation it was supposed to observe.
+  const clean = workspace();
+  const cleanJob = launch(clean, "emitter.mjs");
+  const cleanRecord = await waitFor(clean, cleanJob, (r) => TERMINAL.has(r.status), "the clean job");
+
   const blocked = workspace();
   blockTheLog(blocked);
-  const jobId = launch(blocked, "emitter.mjs");
-  const record = await waitFor(blocked, jobId, (r) => TERMINAL.has(r.status),
-    "the background job to finish with its log blocked");
-  assert.equal(record.status, "completed",
-    "the job completes identically — a dispatch that failed because its diagnostics could not be " +
-    "written would be the exact inversion of what this feature is for");
-  assert.equal(eventsOf(blocked).length, 0);
+  const blockedJob = launch(blocked, "emitter.mjs");
+  const blockedRecord = await waitFor(blocked, blockedJob, (r) => TERMINAL.has(r.status),
+    "the job whose log is blocked");
+
+  assert.equal(blockedRecord.status, cleanRecord.status, "same terminal status");
+  assert.equal(blockedRecord.errorClass, cleanRecord.errorClass, "same error class");
+  assert.equal(blockedRecord.exitCode, cleanRecord.exitCode, "same exit code");
+  assert.equal(blockedRecord.verdictState, cleanRecord.verdictState, "same verdict state");
+  assert.equal(blockedRecord.rawOutput, cleanRecord.rawOutput,
+    "and byte-identical captured output — the record is what a caller reads back");
+  assert.equal(eventsOf(blocked).length, 0, "nothing was recorded, which is the point of the fixture");
 });

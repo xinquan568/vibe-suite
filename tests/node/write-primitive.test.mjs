@@ -8,7 +8,7 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -819,18 +819,24 @@ test("appendLineAt refuses a non-regular file it CAN open — the isFile() branc
   const root = scratchDir();
   const fifo = path.join(root, "events.log");
   const made = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
-  if (made.status !== 0) return;
+  if (made.status !== 0) return;                       // no mkfifo here: skip, do not fake
 
-  // A reader on the other end makes the O_NONBLOCK open SUCCEED, so the refusal has to come from the
-  // descriptor check rather than from the open. Without a reader the earlier test covers ENXIO;
-  // this one reaches `isFile()`, which the directory fixture never does (it fails at the open).
-  const reader = spawn("cat", [fifo], { stdio: ["ignore", "ignore", "ignore"] });
+  // A reader on the other end makes the O_NONBLOCK open SUCCEED, so the refusal must come from the
+  // descriptor `fstat` rather than from the open. That is the `isFile()` branch, which the directory
+  // fixture never reaches — it fails at the open.
+  //
+  // THIS PROCESS is the reader, opened O_RDONLY|O_NONBLOCK so the open returns at once and the fd is
+  // held for the whole assertion. Two earlier attempts were not coordination at all: a timed sleep,
+  // and then a probe that opened the FIFO for writing — which sent EOF when it exited, so `cat`
+  // finished and there was no reader left by the time the assertion ran.
+  const reader = openSync(fifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
   try {
-    await new Promise((resolve) => { setTimeout(resolve, 200); });
-    await assert.rejects(appendLineAt(root, "events.log", "{}"), /regular file|FIFO/,
-      "an OPENED non-regular descriptor is refused by fstat, not by the open");
+    await assert.rejects(appendLineAt(root, "events.log", "{}"),
+      /not a regular file/,
+      "the refusal must be the fstat one — matching the ENXIO text too would let this pass on the " +
+      "no-reader path the previous test already covers");
   } finally {
-    reader.kill("SIGKILL");
+    closeSync(reader);
   }
 });
 

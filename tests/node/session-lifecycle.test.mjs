@@ -6,7 +6,7 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 
 import path from "node:path";
 import test from "node:test";
@@ -111,4 +111,44 @@ test("an unknown --event is a usage error (exit 2), not a silent 'start'", () =>
 test("a MISSING --event is likewise a usage error (exit 2)", () => {
   const r = spawnSync(process.execPath, [HOOK], { encoding: "utf8" });
   assert.equal(r.status, 2, `a missing --event must exit 2, got ${r.status}: ${r.stderr}`);
+});
+
+// --- vibe-207: the two-phase emitter tests --------------------------------------------------------
+
+function eventsOf207(ws) {
+  const p = path.join(ws, ".vibe-suite-state", "events.log");
+  if (!existsSync(p)) return [];
+  return readFileSync(p, "utf8").split("\n").filter(Boolean).flatMap((line) => {
+    try { return [JSON.parse(line)]; } catch { return []; }
+  });
+}
+
+test("phase A: a lifecycle report is also recorded durably (vibe-207)", () => {
+  const ws = tmpWorkspace("lifecycle-207-");
+  mkdirSync(path.join(ws, ".vibe-suite-state", "jobs"), { recursive: true });
+  writeFileSync(path.join(ws, ".vibe-suite-state", "jobs", "job_x.json"), "not json at all");
+
+  const result = runHook(ws, "start");
+  assert.equal(result.status, 0, "a lifecycle hook never fails the session");
+  const reports = eventsOf207(ws).filter((e) => e.event === "hook.report");
+  assert.ok(reports.length >= 1, "the text the operator sees is kept where it can be read tomorrow");
+  assert.equal(reports[0].component, "hook");
+  assert.equal(reports[0].detail.event, "start");
+});
+
+test("phase B: the lifecycle hook is unchanged when the event log cannot be written (vibe-207)", () => {
+  const clean = tmpWorkspace("lifecycle-207-clean-");
+  mkdirSync(path.join(clean, ".vibe-suite-state", "jobs"), { recursive: true });
+  writeFileSync(path.join(clean, ".vibe-suite-state", "jobs", "job_x.json"), "not json at all");
+  const expected = runHook(clean, "start");
+
+  const blocked = tmpWorkspace("lifecycle-207-blocked-");
+  mkdirSync(path.join(blocked, ".vibe-suite-state", "jobs"), { recursive: true });
+  writeFileSync(path.join(blocked, ".vibe-suite-state", "jobs", "job_x.json"), "not json at all");
+  mkdirSync(path.join(blocked, ".vibe-suite-state", "events.log"), { recursive: true });
+  const actual = runHook(blocked, "start");
+
+  assert.equal(actual.status, expected.status);
+  assert.equal(actual.stdout, expected.stdout,
+    "byte-identical — a hook that reported differently because its log was blocked would have failed property 1");
 });

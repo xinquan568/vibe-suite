@@ -16,7 +16,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createRecord, jobsDir, newRecord, readRecord } from "../../scripts/lib/jobs.mjs";
-import { lstatSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const CLI = path.join(REPO_ROOT, "scripts", "jobs-cli.mjs");
@@ -408,4 +408,47 @@ test("the four existing subcommands keep their exit contract (characterization)"
   assert.equal(cli(ws, "result").status, 2, "result without an id is a usage error");
   assert.equal(cli(ws, "prune", "job_abc").status, 2, "prune takes no job id");
   assert.equal(cli(ws, "nonsense").status, 2, "an unknown subcommand is a usage error");
+});
+
+// --- vibe-207: the two-phase emitter tests --------------------------------------------------------
+// Phase A proves the site EMITS when the log is writable; phase B proves the site's own outcome is
+// unchanged when the log path is a real directory. Phase B alone passes on the unmodified base — the
+// caller works and nothing tried to emit — so phase A is what makes it mean anything.
+
+function eventsOf(ws) {
+  const p = path.join(ws, ".vibe-suite-state", "events.log");
+  if (!existsSync(p)) return [];
+  return readFileSync(p, "utf8").split("\n").filter(Boolean).flatMap((line) => {
+    try { return [JSON.parse(line)]; } catch { return []; }
+  });
+}
+
+function blockTheLog(ws) {
+  mkdirSync(path.join(ws, ".vibe-suite-state"), { recursive: true });
+  mkdirSync(path.join(ws, ".vibe-suite-state", "events.log"), { recursive: true });
+}
+
+test("phase A: prune emits prune.action with its counts (vibe-207)", () => {
+  const ws = workspace();
+  const result = cli(ws, "prune");
+  assert.equal(result.status, 0);
+  const pruneEvents = eventsOf(ws).filter((e) => e.event === "prune.action");
+  assert.equal(pruneEvents.length, 1, "one record per sweep");
+  assert.equal(pruneEvents[0].component, "jobs");
+  assert.equal(typeof pruneEvents[0].detail.removed, "number");
+  assert.equal(typeof pruneEvents[0].detail.kept, "number");
+  assert.equal(typeof pruneEvents[0].detail.blocked, "number");
+});
+
+test("phase B: prune is unchanged when the event log cannot be written (vibe-207)", () => {
+  const clean = workspace();
+  const expected = cli(clean, "prune");
+
+  const blocked = workspace();
+  blockTheLog(blocked);
+  const actual = cli(blocked, "prune");
+
+  assert.equal(actual.status, expected.status, "same exit code");
+  assert.equal(actual.stdout, expected.stdout, "byte-identical stdout — observability changed nothing");
+  assert.equal(eventsOf(blocked).length, 0, "and nothing was recorded, which is the point of the fixture");
 });

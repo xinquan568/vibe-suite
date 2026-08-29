@@ -503,3 +503,38 @@ test("a hung reviewer INSIDE the budget: the hook still decides (fail-open) and 
   assert.throws(() => process.kill(pid, 0), { code: "ESRCH" },
     "the hung reviewer process must be terminated by the deadline, not left orphaned");
 });
+
+// --- vibe-207: the two-phase emitter tests --------------------------------------------------------
+
+function gateEventsOf(dir) {
+  const p = path.join(dir, ".vibe-suite-state", "events.log");
+  if (!existsSync(p)) return [];
+  return readFileSync(p, "utf8").split("\n").filter(Boolean).flatMap((line) => {
+    try { return [JSON.parse(line)]; } catch { return []; }
+  });
+}
+
+test("phase A: the gate records its decision and the reason (vibe-207)", () => {
+  const dir = repoWithGate({ stop_review_gate: false });
+  const result = runHook(dir);
+  assert.equal(result.status, 0);
+  const decisions = gateEventsOf(dir).filter((e) => e.event === "gate.decision");
+  assert.equal(decisions.length, 1, "one record per run — the gate decides once");
+  assert.equal(decisions[0].component, "gate");
+  assert.ok(["allow", "block"].includes(decisions[0].detail.decision));
+});
+
+test("phase B: the gate's decision is unchanged when the event log cannot be written (vibe-207)", () => {
+  const clean = repoWithGate({ stop_review_gate: false });
+  const expected = runHook(clean);
+
+  const blocked = repoWithGate({ stop_review_gate: false });
+  mkdirSync(path.join(blocked, ".vibe-suite-state"), { recursive: true });
+  mkdirSync(path.join(blocked, ".vibe-suite-state", "events.log"), { recursive: true });
+  const actual = runHook(blocked);
+
+  assert.equal(actual.status, expected.status, "the gate still exits 0");
+  assert.equal(actual.stdout, expected.stdout,
+    "byte-identical — a gate whose verdict depended on its diagnostics would be the worst version of this feature");
+  assert.equal(gateEventsOf(blocked).length, 0);
+});

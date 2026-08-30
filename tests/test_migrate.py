@@ -735,3 +735,46 @@ class ConfigMigrationUsesThePrimitive(unittest.TestCase):
         self.run_migrate()
         leftovers = [p.name for p in self.ws.iterdir() if p.name.endswith(".tmp")]
         self.assertEqual(leftovers, [], f"scratch files survived: {leftovers}")
+
+
+class ConflictsStampHasOneDefinition(unittest.TestCase):
+    """vibe-265: the stamp the migration writes is the same string `unbridge` recognises.
+
+    Two independently-maintained copies of that literal is exactly what the bug was — the writer
+    stamped its report so a re-run would know its own output, and the teardown read the prose as
+    JSON and never saw the stamp. One definition in `bridge` removes the possibility of drift
+    rather than merely detecting it.
+    """
+
+    SCRIPT = REPO_ROOT / "scripts" / "migrate" / "migrate-state.sh"
+    LITERAL = "# vibe-suite-owned: migration-conflicts"
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-stamp-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        import sys
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+
+    # T9 — kills P1: the shared constant exists and is what the writer actually emits.
+    def test_the_written_report_starts_with_the_shared_constant(self):
+        import bridge
+        (self.ws / ".vibe-suite-state").mkdir(parents=True)
+        for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+            d = self.ws / name
+            d.mkdir()
+            (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+        r = subprocess.run(["bash", str(self.SCRIPT), "--workspace", str(self.ws)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.txt"
+        self.assertTrue(report.read_text(encoding="utf-8")
+                        .startswith(bridge.MIGRATION_CONFLICTS_STAMP))
+
+    # T12 — kills P2: the writer SOURCES the stamp rather than holding its own copy. A value test
+    # cannot see this: with an identical private literal the output is byte-identical and T9 passes.
+    def test_the_migration_sources_the_stamp_and_keeps_no_literal_of_its_own(self):
+        text = self.SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("stamp = bridge.MIGRATION_CONFLICTS_STAMP", text,
+                      "the writer must take the stamp from the shared definition")
+        self.assertNotIn(self.LITERAL, text,
+                         "a second copy of the stamp is what vibe-265 was; there must be exactly one")

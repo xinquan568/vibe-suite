@@ -1138,3 +1138,164 @@ class TestAdvisorTeardown(UnbridgeCase):
         self.assertNotIn("probe_advisor", (after.get("mcpServers") or {}))
         if toml.is_file():
             self.assertNotIn("probe_advisor", toml.read_text())
+
+
+class ListedNonJsonStateFile(UnbridgeCase):
+    """vibe-265: `migration-conflicts.txt` is listed in SUITE_STATE and is prose, not JSON.
+
+    Before the fix `_is_suite_state` sent it to `load_json`, which raised; the walk aborted after
+    it had already unlinked every deeper child, and `print` — then sitting after the loop — was
+    never reached. The file carries an ownership stamp *specifically* so a re-run recognises it.
+    """
+
+    STAMP = bridge.MIGRATION_CONFLICTS_STAMP
+
+    def ours(self, name, path):
+        return unbridge._is_suite_state(Path(name), path)
+
+    def state(self):
+        d = self.ws / ".vibe-suite-state"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def written_by_the_migration(self):
+        """A real stamped report, produced by RUNNING the writer — never a hand-typed literal.
+
+        A hand-typed stamp would keep passing if the reader and `migrate-state.sh` ever diverged,
+        which is this very defect one level up.
+        """
+        for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+            d = self.ws / name
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+        self.state()
+        r = subprocess.run(["bash", str(REPO_ROOT / "scripts/migrate/migrate-state.sh"),
+                            "--workspace", str(self.ws)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.txt"
+        self.assertTrue(report.is_file(), "precondition: the migration wrote its conflicts report")
+        self.assertTrue(report.read_text(encoding="utf-8").startswith(self.STAMP),
+                        "precondition: the writer stamped its own output")
+        return report
+
+    # T1
+    def test_a_stamped_report_written_by_the_migration_is_ours(self):
+        report = self.written_by_the_migration()
+        self.assertTrue(self.ours("migration-conflicts.txt", report))
+
+    # T2
+    def test_a_users_unstamped_file_at_that_path_is_left_alone(self):
+        path = self.state() / "migration-conflicts.txt"
+        path.write_text("my own notes about a migration\n", encoding="utf-8")
+        self.assertFalse(self.ours("migration-conflicts.txt", path))
+
+    # T3
+    def test_a_member_that_is_not_utf8_is_left_alone_and_does_not_raise(self):
+        path = self.state() / "migration-conflicts.txt"
+        path.write_bytes(b"\xff\xfe not text at all\n")
+        self.assertFalse(self.ours("migration-conflicts.txt", path),
+                         "undecodable bytes must be unowned, not an uncaught UnicodeDecodeError")
+
+    # T4 — regression: this already passed before vibe-265.
+    def test_a_directory_at_that_path_is_left_alone(self):
+        path = self.state() / "migration-conflicts.txt"
+        path.mkdir()
+        self.assertFalse(self.ours("migration-conflicts.txt", path))
+
+    # T5
+    def test_a_near_miss_stamp_is_not_the_writers_shape(self):
+        report = self.written_by_the_migration()
+        real = report.read_text(encoding="utf-8")
+        body = real[len(self.STAMP):]
+        self.assertTrue(self.ours("migration-conflicts.txt", report), "control: the real report is ours")
+
+        def near_misses():
+            yield "wrong-marker-text", "# vibe-suite-owned: migration-conflict\n" + body
+            yield "marker-cased", self.STAMP.upper() + body
+            yield "stamp-not-on-the-first-line", "row 5: a note\n" + self.STAMP + body
+            yield "leading-whitespace", " " + self.STAMP + body
+            yield "leading-blank-line", "\n" + self.STAMP + body
+            yield "stamp-without-its-newline", self.STAMP.rstrip("\n") + " extra\n" + body
+            yield "empty", ""
+
+        for label, text in near_misses():
+            with self.subTest(shape=label):
+                report.write_text(text, encoding="utf-8")
+                self.assertFalse(self.ours("migration-conflicts.txt", report),
+                                 f"{label}: a near-miss stamp is not the writer's exact shape")
+
+        # The stamp is ASCII, so `errors="replace"` would preserve it and call this ours. The read
+        # is strict precisely so a file we cannot decode end to end is never deleted.
+        report.write_bytes(self.STAMP.encode("utf-8") + b"\xff\xfe binary tail\n")
+        self.assertFalse(self.ours("migration-conflicts.txt", report),
+                         "an exact stamp above undecodable bytes must still be left alone")
+
+        report.write_text(real, encoding="utf-8")
+        self.assertTrue(self.ours("migration-conflicts.txt", report), "control: still ours afterwards")
+
+    # T6 — bullet 5: JSON members are unchanged. Guards against widening the catch too far.
+    def test_an_unparseable_json_member_still_raises(self):
+        path = self.state() / "state.json"
+        path.write_text("{not json", encoding="utf-8")
+        with self.assertRaises(bridge.BridgeError):
+            self.ours("state.json", path)
+
+    # T10 — regression: placement of the new branch must not disturb these.
+    def test_symlinks_and_deeper_paths_are_still_judged_first(self):
+        state = self.state()
+        outside = self.ws / "keep.txt"
+        outside.write_text(self.STAMP, encoding="utf-8")
+        link = state / "migration-conflicts.txt"
+        link.symlink_to(outside)
+        self.assertFalse(self.ours("migration-conflicts.txt", link),
+                         "a symlink is judged before any name shortcut")
+        nested = state / "jobs"
+        nested.mkdir()
+        deep = nested / "migration-conflicts.txt"
+        deep.write_text(self.STAMP, encoding="utf-8")
+        self.assertFalse(unbridge._is_suite_state(Path("jobs/migration-conflicts.txt"), deep),
+                         "a path deeper than one component is still rejected")
+
+
+class TeardownReportSurvives(UnbridgeCase):
+    """vibe-265: `print` used to sit after the walk, so any raise inside it lost the whole report."""
+
+    # T8 — end to end, the issue's first acceptance criterion.
+    def test_a_workspace_with_a_stamped_conflicts_report_tears_down_completely(self):
+        self.install()
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.txt"
+        report.write_text(bridge.MIGRATION_CONFLICTS_STAMP + "row 5: legacy dirs disagree\n",
+                          encoding="utf-8")
+        r = self.unbridge("--confirm")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(report.exists(), "the stamped report is ours and must be removed")
+        self.assertFalse((self.ws / ".vibe-suite-state").exists(),
+                         "with everything in it ours, the state directory goes too")
+        self.assertTrue(r.stdout.strip(), "the run must print its report")
+
+    # T7 — the report survives a raise inside the walk.
+    def test_a_raise_inside_the_walk_still_prints_the_report(self):
+        self.install()
+        state = self.ws / ".vibe-suite-state"
+        # A listed JSON member that cannot be parsed. `load_json` raises by design (bullet 5).
+        (state / "history.json").write_text("{not json", encoding="utf-8")
+        r = self.unbridge("--confirm")
+        self.assertNotEqual(r.returncode, 0, "an unreadable JSON member still fails the run")
+        self.assertTrue(r.stdout.strip(),
+                        "the report must reach stdout even though the walk raised")
+        self.assertIn("error:", r.stderr)
+
+    # T11 — an unlink failure is reported, not thrown as a traceback.
+    @unittest.skipIf(os.geteuid() == 0, "permission bits do not bind root")
+    def test_an_unlink_failure_is_a_message_not_a_traceback(self):
+        self.install()
+        state = self.ws / ".vibe-suite-state"
+        self.assertTrue((state / "install-provenance.json").is_file(), "precondition: a member to unlink")
+        os.chmod(state, 0o500)                      # r-x: entries cannot be removed from it
+        self.addCleanup(os.chmod, state, 0o700)
+        r = self.unbridge("--confirm")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertTrue(r.stdout.strip(), "the report must reach stdout")
+        self.assertIn("error:", r.stderr)
+        self.assertIn("teardown could not complete", r.stderr)
+        self.assertNotIn("Traceback", r.stderr, "a permission failure must not surface as a traceback")

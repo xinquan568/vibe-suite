@@ -85,7 +85,7 @@ if len(distinct) > 1:
     # A fixed path is a path the user may own. `lstat`, not `exists` — a dangling symlink reports
     # False and would be followed. The report carries an ownership line so a re-run recognises its
     # own output instead of truncating whatever is there.
-    stamp = "# vibe-suite-owned: migration-conflicts\n"
+    stamp = bridge.MIGRATION_CONFLICTS_STAMP   # vibe-265: one definition, shared with unbridge
     existing = Path(report)
     if existing.is_symlink():
         sys.stderr.write(f"error: row 5: {report} is a symlink; refusing to write through it\n")

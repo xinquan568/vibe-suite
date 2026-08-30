@@ -267,6 +267,10 @@ SUITE_STATE = ("install-provenance.json", "state.json", "config.json", "jobs.jso
 #: user's same-named JSON would have to reproduce restorable pre-images, sha-bound acceptance
 #: and registration maps, or a journal with both stores' images. A lookalike is left alone.
 ADVISOR_STATE = ("advisor-preimages.json", "advisor-txn.json")
+#: vibe-265: the listed members that are NOT JSON, each mapped to the exact first line its
+#: writer emits. `SUITE_STATE` stays a flat tuple of names; the shape lives here, the way
+#: `ADVISOR_STATE` keeps the advisor records' shape out of the name list.
+SUITE_STATE_STAMPS = {"migration-conflicts.txt": bridge.MIGRATION_CONFLICTS_STAMP}
 
 
 def _advisor_record_is_ours(name, path):
@@ -277,9 +281,32 @@ def _advisor_record_is_ours(name, path):
     return advisors.ledger_is_well_formed(bridge.load_json(path), ws)
 #: `migrate-state.sh:32` writes `.txt`; the earlier entry said `.md` and matched nothing.
 #:
-#: These migration artefacts carry no `vibe_suite_owned` stamp, so they are *left behind* rather than
-#: removed — recorded residue, and the safe direction: an artefact of ours surviving teardown costs
-#: the user nothing, while deleting a file we cannot prove is ours costs them everything.
+#: The report carries `bridge.MIGRATION_CONFLICTS_STAMP` as its first line — the writer puts it
+#: there so a re-run recognises its own output (`migrate-state.sh:93-96`), and that same line is
+#: what proves the file ours at teardown. Before vibe-265 this comment claimed the opposite —
+#: "no stamp, so left behind" — which was false from the day it was written: the stamp landed in
+#: #97, six commits before this file existed. The safe direction it appealed to still holds, and
+#: is now carried by `_text_state_is_ours`: anything whose stamp we cannot read is left behind,
+#: because deleting a file we cannot prove is ours costs the user everything.
+
+
+def _text_state_is_ours(name, path):
+    """Whether a listed non-JSON member carries its writer's exact stamp line.
+
+    **Strict decoding, deliberately.** `migrate-state.sh:93-94` reads its own report back with
+    `errors="replace"`, which is safe there because it is deciding whether to overwrite *its own
+    output*. Teardown is deciding whether to DELETE, and under `errors="replace"` a file whose first
+    line is the exact stamp and whose remainder is invalid UTF-8 still matches — so a user's file
+    that quotes our stamp above binary content would be removed. A file we cannot read end to end is
+    a file we cannot prove is ours.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        # OSError: a directory, an unreadable mode, a file that vanished mid-walk. ValueError:
+        # UnicodeDecodeError. Every one lands on "not ours" — the module's safe direction.
+        return False
+    return text.startswith(SUITE_STATE_STAMPS[name])
 
 
 def _is_suite_state(relative, path=None):
@@ -309,6 +336,10 @@ def _is_suite_state(relative, path=None):
     # would be deleted, so the link is what must be judged.
     if parts[0] in ADVISOR_STATE:
         return _advisor_record_is_ours(parts[0], path)   # vibe-185: full schema, see above
+    if parts[0] in SUITE_STATE_STAMPS:
+        # vibe-265: listed, but not JSON. Below the symlink test and the advisor branch, above
+        # `load_json` — which raised on this file's prose and aborted the walk mid-teardown.
+        return _text_state_is_ours(parts[0], path)
     doc = bridge.load_json(path)
     # An explicit ownership stamp, not a generic `schema` key a user's own JSON may also carry.
     return isinstance(doc, dict) and doc.get("vibe_suite_owned") is True
@@ -472,30 +503,40 @@ def main(argv):
               "registrations. Re-run with --confirm.", file=sys.stderr)
         return 3
 
-    json_targets(ws, report, dry=False)
-    for entry in record["targets"]:
-        restore(ws, entry, report)
-    prune(ws, record, report)
-    state = ws / ".vibe-suite-state"
-    if state.is_symlink():
-        report.append(".vibe-suite-state/: a symlink, not a directory — left alone")
-    elif state.is_dir():
-        # Only what the suite puts there. `rglob("*")` deleted every child, so anything a user had
-        # placed in this directory before install — it is a plain directory, nothing stops them —
-        # was destroyed by a command that is supposed to remove only what it owns.
-        for child in sorted(state.rglob("*"), key=lambda c: len(str(c)), reverse=True):
-            rel = str(child.relative_to(ws))
-            if _is_suite_state(child.relative_to(state), child):
-                bridge.unlink_at(ws, rel)
+    try:
+        json_targets(ws, report, dry=False)
+        for entry in record["targets"]:
+            restore(ws, entry, report)
+        prune(ws, record, report)
+        state = ws / ".vibe-suite-state"
+        if state.is_symlink():
+            report.append(".vibe-suite-state/: a symlink, not a directory — left alone")
+        elif state.is_dir():
+            # Only what the suite puts there. `rglob("*")` deleted every child, so anything a user had
+            # placed in this directory before install — it is a plain directory, nothing stops them —
+            # was destroyed by a command that is supposed to remove only what it owns.
+            for child in sorted(state.rglob("*"), key=lambda c: len(str(c)), reverse=True):
+                rel = str(child.relative_to(ws))
+                if _is_suite_state(child.relative_to(state), child):
+                    bridge.unlink_at(ws, rel)
+                else:
+                    report.append(f"{rel}: not a suite state file — left alone")
+            # Depth-first above, so the directory is empty here exactly when everything in it was ours.
+            if not any(state.iterdir()):
+                bridge.unlink_at(ws, ".vibe-suite-state")
+                report.append(".vibe-suite-state/: removed")
             else:
-                report.append(f"{rel}: not a suite state file — left alone")
-        # Depth-first above, so the directory is empty here exactly when everything in it was ours.
-        if not any(state.iterdir()):
-            bridge.unlink_at(ws, ".vibe-suite-state")
-            report.append(".vibe-suite-state/: removed")
-        else:
-            report.append(".vibe-suite-state/: kept — it still holds files that are not ours")
-    print("\n".join(report))
+                report.append(".vibe-suite-state/: kept — it still holds files that are not ours")
+    except OSError as exc:
+        # `unlink_at` propagates raw OSError from os.lstat/os.unlink/os.rmdir (bridge.py:243-245),
+        # and `__main__` catches only BridgeError — so without this a permission failure mid-teardown
+        # exits by traceback rather than by the one-line `error:` this command promises everywhere else.
+        raise bridge.BridgeError(
+            f".vibe-suite-state/: teardown could not complete ({exc})") from exc
+    finally:
+        # In the `finally`, not after the loop: a raise inside it used to lose the whole report, so the
+        # run destroyed most of the state directory and then told the user nothing about any of it.
+        print("\n".join(report))
     return 0
 
 

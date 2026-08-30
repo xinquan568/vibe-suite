@@ -34,6 +34,15 @@ O_NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
 SENTINEL_LITERALS = ("vibe-mcp", "vibe-claude-mcp")
 SENTINEL_PREFIX = "vibe-agent:"
 
+#: The first line `migrate-state.sh` writes into `.vibe-suite-state/migration-conflicts.txt`, and
+#: the exact prefix `unbridge` requires before it will remove that file. ONE definition, imported by
+#: both sides — a second copy is precisely what vibe-265 was: the writer stamped the file so a re-run
+#: would recognise its own output, and the teardown never looked, reading the prose as JSON instead.
+#: A literal, deliberately NOT `f"# {MARKER}-owned: migration-conflicts\n"`: this is a PERSISTED
+#: on-disk format. Deriving it from a renameable runtime constant would silently stop recognising
+#: reports already written to a user's workspace.
+MIGRATION_CONFLICTS_STAMP = "# vibe-suite-owned: migration-conflicts\n"
+
 #: Advisor ownership is structural, not nominal (E6.1 / vibe-47): an advisor registers under its
 #: bare name — the skill's `mcp__<name>__<tool_name>` callable identity requires the server key to
 #: BE the name — so the claim of ownership travels inside the entry, exactly as owned hook entries

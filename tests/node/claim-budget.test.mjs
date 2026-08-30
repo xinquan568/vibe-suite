@@ -8,7 +8,7 @@
 //
 // **Why the seam lives in `scripts/lib/claim-budget.mjs` rather than in the runner.**
 // `scripts/codex-runner.mjs` calls `main()` at module scope and exports nothing, so importing it
-// would dispatch a job. The ten-case input table below cannot be written against a self-executing
+// would dispatch a job. The eleven-case input table below cannot be written against a self-executing
 // script — the same constraint that moved vibe-208's gate reader into a lib module.
 //
 // **Upward, not shrink-only.** The Stop hook's `VIBE_TEST_GATE_BUDGET_MS` is one-way by design
@@ -84,8 +84,14 @@ test("R11: the message names the EXACT budget and the ACTUAL pid, both variants 
 });
 
 test("R11b: a pid that is not known is said so, never fabricated (vibe-209)", () => {
-  const message = claimFailureMessage({ budgetMs: 5000, pid: null, reaped: true });
-  assert.match(message, /within 5000ms/);
-  assert.ok(!/\(pid \d+\)/.test(message),
-    `an unknown pid must not be invented: ${message}`);
+  for (const pid of [null, undefined, 0, -1, NaN, "1234"]) {
+    const message = claimFailureMessage({ budgetMs: 5000, pid, reaped: true });
+    assert.match(message, /within 5000ms/, `budget still reported for pid ${String(pid)}`);
+    // `(pid` AT ALL, not `(pid \d+)`. The mutation that made this test earn its place emitted
+    // `(pid null)` — which the digit-shaped assertion happily accepted, and which is worse than
+    // silence because it reads like a fact. A string pid is refused for the same reason: the field
+    // means "the process we waited for", and only a real pid is that.
+    assert.ok(!message.includes("(pid"),
+      `an unknown pid must be omitted, not rendered: ${message}`);
+  }
 });

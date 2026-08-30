@@ -1218,6 +1218,16 @@ class ListedNonJsonStateFile(UnbridgeCase):
             yield "stamp-without-its-newline", self.STAMP.rstrip("\n") + " extra\n" + body
             yield "empty", ""
 
+        # Byte-level near-misses. `read_text` translates CRLF and bare CR to LF, so these two were
+        # normalised into the writer's stamp and DELETED — a user's Windows-authored file at a path
+        # the suite happens to know. The shape test is on bytes precisely so they cannot match.
+        for label, head in (("crlf-after-the-marker", self.STAMP.rstrip("\n").encode() + b"\r\n"),
+                            ("bare-cr-after-the-marker", self.STAMP.rstrip("\n").encode() + b"\r")):
+            with self.subTest(shape=label):
+                report.write_bytes(head + body.encode("utf-8"))
+                self.assertFalse(self.ours("migration-conflicts.txt", report),
+                                 f"{label}: only the writer's exact byte sequence is ours")
+
         for label, text in near_misses():
             with self.subTest(shape=label):
                 report.write_text(text, encoding="utf-8")
@@ -1299,3 +1309,30 @@ class TeardownReportSurvives(UnbridgeCase):
         self.assertIn("error:", r.stderr)
         self.assertIn("teardown could not complete", r.stderr)
         self.assertNotIn("Traceback", r.stderr, "a permission failure must not surface as a traceback")
+
+    # T13 — the newline case end to end: a user's CRLF file must SURVIVE a completed teardown.
+    def test_a_users_crlf_file_at_that_path_survives_teardown(self):
+        self.install()
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.txt"
+        raw = bridge.MIGRATION_CONFLICTS_STAMP.rstrip("\n").encode() + b"\r\nmy own notes\r\n"
+        report.write_bytes(raw)
+        r = self.unbridge("--confirm")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(report.is_file(), "a user's CRLF file was deleted by teardown")
+        self.assertEqual(report.read_bytes(), raw, "the user's bytes were altered")
+        self.assertIn("not a suite state file", r.stdout)
+
+    # T14 — an OSError raised BEFORE the state-directory walk must not be blamed on that directory.
+    @unittest.skipIf(os.geteuid() == 0, "permission bits do not bind root")
+    def test_a_failure_before_the_walk_is_not_attributed_to_the_state_directory(self):
+        self.install()
+        target = self.ws / ".claude"
+        self.assertTrue(target.is_dir(), "precondition: a restore/prune target outside the state dir")
+        os.chmod(target, 0o500)
+        self.addCleanup(os.chmod, target, 0o700)
+        r = self.unbridge("--confirm")
+        if r.returncode == 0:
+            self.skipTest("this workspace shape did not force an error before the walk")
+        self.assertNotIn(".vibe-suite-state/: teardown could not complete", r.stderr,
+                         "a failure elsewhere was misattributed to the state directory")
+        self.assertNotIn("Traceback", r.stderr)

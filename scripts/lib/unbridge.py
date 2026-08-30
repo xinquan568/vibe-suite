@@ -301,12 +301,20 @@ def _text_state_is_ours(name, path):
     a file we cannot prove is ours.
     """
     try:
-        text = Path(path).read_text(encoding="utf-8")
-    except (OSError, ValueError):
-        # OSError: a directory, an unreadable mode, a file that vanished mid-walk. ValueError:
-        # UnicodeDecodeError. Every one lands on "not ours" — the module's safe direction.
+        raw = Path(path).read_bytes()
+    except OSError:
+        # A directory, an unreadable mode, a file that vanished mid-walk — all "not ours".
         return False
-    return text.startswith(SUITE_STATE_STAMPS[name])
+    try:
+        raw.decode("utf-8")
+    except ValueError:
+        # A file we cannot read end to end is a file we cannot prove is ours. Note this is a
+        # readability test only; the shape test below is on BYTES, deliberately.
+        return False
+    # `read_text` would translate CRLF and bare CR to LF, so a user's file whose first line is the
+    # marker with Windows endings normalised to the writer's LF stamp and was DELETED. The writer
+    # emits one byte sequence; anything else is somebody else's file.
+    return raw.startswith(SUITE_STATE_STAMPS[name].encode("utf-8"))
 
 
 def _is_suite_state(relative, path=None):
@@ -531,8 +539,7 @@ def main(argv):
         # `unlink_at` propagates raw OSError from os.lstat/os.unlink/os.rmdir (bridge.py:243-245),
         # and `__main__` catches only BridgeError — so without this a permission failure mid-teardown
         # exits by traceback rather than by the one-line `error:` this command promises everywhere else.
-        raise bridge.BridgeError(
-            f".vibe-suite-state/: teardown could not complete ({exc})") from exc
+        raise bridge.BridgeError(f"teardown could not complete ({exc})") from exc
     finally:
         # In the `finally`, not after the loop: a raise inside it used to lose the whole report, so the
         # run destroyed most of the state directory and then told the user nothing about any of it.

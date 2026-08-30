@@ -398,15 +398,12 @@ async function defaultRuntimeRun(name, timeoutMs, env) {
  * ones that do not exist for a runtime (`smoke`, `models`).
  */
 export async function probeRuntime(name, deps = {}) {
-  // `timeoutMs` defaults to the production deadline and exists so a test can shorten it without
-  // replacing the effect: the group-kill behaviour under test IS `defaultRuntimeRun`, so a fake
-  // `run` would prove nothing about it.
-  const { env = process.env, timeoutMs = VERSION_TIMEOUT_MS } = deps;
-  const run = deps.run ?? ((ms) => defaultRuntimeRun(name, ms, env));
+  const { env = process.env } = deps;
+  const run = deps.run ?? ((timeoutMs) => defaultRuntimeRun(name, timeoutMs, env));
   const floor = RUNTIME_FLOORS[name] ?? null;
   const wanted = floorText(floor);
 
-  const outcome = await run(timeoutMs);
+  const outcome = await run(VERSION_TIMEOUT_MS);
   if (outcome.spawnFailed) {
     return {
       runtime: name, available: false, version: null, auth: null,

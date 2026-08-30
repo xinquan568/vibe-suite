@@ -496,6 +496,25 @@ test("R-DESCENDANT: only a GROUP-wide deadline reaps a probe's descendant (vibe-
     + "nothing.");
 });
 
+test("R-BOUNDS: an implausible version component is REJECTED, not truncated (vibe-209)", () => {
+  // The mutation that earned this test survived a 38-row ledger: the doctor side had a bounds test
+  // and preflight did not, so `\d{1,4}` without the lookahead would have shipped here.
+  //
+  // Truncation is worse than a parse failure. `Python 3.12345` matched as 3.1234 — a version that
+  // was never printed, handed to the floor comparison as if it had been read. A four-digit ceiling
+  // is a plausibility check, not a formatter.
+  const result = cli({
+    pathVar: rawRuntimePath("python3", "#!/bin/sh\nprintf 'Python 3.12345\\n'\n"),
+    seam: path.join(FIXTURES, "preflight-ok.mjs"), args: ["--json"],
+  });
+  const row = runtimeRow(result, "python3");
+  assert.equal(row.available, false,
+    "an implausible component means the output is not the banner it resembles");
+  assert.ok(!/3\.1234\b/.test(JSON.stringify(row)),
+    `a truncated component must never be reported as the version: ${JSON.stringify(row)}`);
+  assert.equal(result.status, 1);
+});
+
 test("R-EXIT: a runtime that FAILS is unavailable, whatever it printed on the way (vibe-209)", () => {
   // Reporting a runtime available because a failing invocation happened to mention a version is the
   // same class of defect as reading a verdict out of a raw stream instead of an assistant message.

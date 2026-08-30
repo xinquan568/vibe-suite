@@ -42,8 +42,21 @@ function freshHome() {
  *                on PATH because the seam names the binary directly.
  *  - absent:     [an empty temp dir] — nothing named codex is reachable, and no fixture needs node.
  */
-function controlledPath({ codexFixture = null, includeNode = codexFixture !== null } = {}) {
+function controlledPath({ codexFixture = null, includeNode = codexFixture !== null,
+                          healthyRuntimes = true } = {}) {
   const entries = [];
+  // vibe-209: preflight now probes python3/node/git and those rows COUNT toward the exit code, so a
+  // PATH with none of them present is a machine missing its runtimes — and every engine-focused test
+  // below would fail for a reason it is not about. Seeding healthy fakes keeps each test testing
+  // what it means to: the engine cases get a working machine, and the runtime cases
+  // (`runtimePath`) build their own PATH to say otherwise.
+  if (healthyRuntimes) {
+    const rt = tempDir("preflight-healthy-rt-");
+    fakeRuntime(rt, "python3", "Python 3.14.6");
+    fakeRuntime(rt, "node", "v24.12.0");
+    fakeRuntime(rt, "git", "git version 2.43.0");
+    entries.push(rt);
+  }
   if (codexFixture) {
     const bin = tempDir("preflight-bin-");
     const wrapper = path.join(bin, "codex");
@@ -219,14 +232,21 @@ test("agy matrix under an OPEN gate: the row reports truthfully and contributes 
 // `row.engine !== "agy" && row.auth === "unknown"`, a hard-coded exception BY NAME, and a runtime row
 // reporting `"unknown"` would fail preflight on a healthy machine. R-AUTH below pins that reasoning.
 
+const fakeRuntime = (dir, name, output) => {
+  const p = path.join(dir, name);
+  const real = name === "node" ? process.execPath : `/usr/bin/${name}`;
+  writeFileSync(p, `#!/bin/sh\n`
+    + `if [ "$1" = "--version" ]; then printf '%s\\n' ${JSON.stringify(output)}; exit 0; fi\n`
+    + `exec ${JSON.stringify(real)} "$@"\n`);
+  chmodSync(p, 0o755);
+};
+
 /** A PATH holding fake runtime binaries. `undefined` version ⇒ the binary is absent. */
 function runtimePath({ python3, node: nodeVer, git, includeNodeDir = false } = {}) {
   const bin = tempDir("preflight-rt-");
   const put = (name, out) => {
     if (out === undefined) return;
-    const p = path.join(bin, name);
-    writeFileSync(p, `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(out)}\n`);
-    chmodSync(p, 0o755);
+    fakeRuntime(bin, name, out);
   };
   put("python3", python3);
   put("node", nodeVer);
@@ -303,7 +323,12 @@ test("R-AUTH: a runtime row reporting auth 'unknown' WOULD fail the exit code (v
   // `row.engine !== "agy" && row.auth === "unknown"`, an exception hard-coded to ONE engine name. A
   // runtime row is not named there, so `"unknown"` would fail preflight on a perfectly healthy
   // machine. If someone later "tidies" `null` into `"unknown"`, this goes red and says why.
-  const { exitCodeFor } = await import("../../scripts/preflight-cli.mjs");
+  // From the LIBRARY, not the CLI. `preflight-cli.mjs` calls main() at module scope, so
+  // importing it runs a REAL preflight against this machine — printing a matrix, probing the
+  // real codex and agy, and setting process.exitCode. That is what made this suite take 110s
+  // and fail at file level while every subtest passed. The exit rule lives in the library so a
+  // test can read it without dispatching anything.
+  const { exitCodeFor } = await import("../../scripts/lib/preflight.mjs");
   const healthy = { runtime: "git", available: true, version: "git version 2.43.0", auth: null };
   assert.equal(exitCodeFor([healthy]), 0, "auth null passes");
   assert.equal(exitCodeFor([{ ...healthy, auth: "unknown" }]), 1,

@@ -298,6 +298,153 @@ export function agyRow() {
   };
 }
 
+
+/**
+ * The runtime rows (vibe-209 / grill P4).
+ *
+ * The matrix probed AI engines only, so a missing `python3`, `node` or `git` first announced itself
+ * as a stack trace mid-run, or as a silent fail-open. Every Node dispatch shells to `python3`, the
+ * Python `update` stage shells to `node`, and the Stop gate shells to `git`.
+ *
+ * **These rows are not engines, and the difference is load-bearing.** They carry `runtime` instead
+ * of `engine`, and `auth: null` instead of `auth: "unknown"`. `exitCodeFor` ends with
+ * `row.engine !== "agy" && row.auth === "unknown"` — an exception hard-coded to ONE engine name,
+ * because agy exposes no auth mode and `"unknown"` is its truthful terminal answer rather than a
+ * failed probe. `git` is in exactly that position and is not named there, so reporting the honest
+ * `"unknown"` would fail preflight on a healthy machine. The schema already has the right word:
+ * `null` means *there is nothing here to learn*, which is why `exitCodeFor` needs no change at all.
+ */
+
+/** Floors from the project's own prerequisites. `null` means "any version, just be present". */
+export const RUNTIME_FLOORS = {
+  python3: [3, 11],
+  node: [18],
+  git: null,
+};
+
+/** Fixed order, so the matrix reads the same way every time. */
+export const RUNTIME_NAMES = ["python3", "node", "git"];
+
+/**
+ * The first dotted number in a `--version` line, as integer components.
+ *
+ * Returns `null` when there is nothing version-shaped to read, which the caller turns into the
+ * `"unknown"` that `exitCodeFor` already fails.
+ */
+function parseVersion(text) {
+  const match = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(String(text ?? ""));
+  if (!match) return null;
+  return [match[1], match[2], match[3] ?? "0"].map(Number);
+}
+
+/**
+ * Is `found` at least `floor`, comparing component by component?
+ *
+ * **Not a decimal comparison.** `parseFloat("3.9") > parseFloat("3.11")` is `true`, so a float
+ * compare accepts Python 3.9 as meeting a 3.11 floor — the single likeliest defect here, and the
+ * reason this is written out rather than inlined. `>=` at every position, so the floor itself passes.
+ */
+function meetsFloor(found, floor) {
+  if (floor === null) return true;
+  for (let i = 0; i < floor.length; i += 1) {
+    const have = found[i] ?? 0;
+    if (have > floor[i]) return true;
+    if (have < floor[i]) return false;
+  }
+  return true;                                   // equal through the floor's components: it meets it
+}
+
+const floorText = (floor) => (floor === null ? null : floor.join("."));
+
+/** The default effect: run `<name> --version` on PATH, bounded by the same deadline as the engines. */
+async function defaultRuntimeRun(name, timeoutMs, env) {
+  try {
+    return await runWithDeadline({ command: name, args: ["--version"], env, timeoutMs });
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "EACCES") {
+      return { exitCode: null, stdout: "", stderr: "", timedOut: false, spawnFailed: true };
+    }
+    throw error;
+  }
+}
+
+/**
+ * One runtime row. Shape mirrors an engine row where the fields mean the same thing, and omits the
+ * ones that do not exist for a runtime (`smoke`, `models`).
+ */
+export async function probeRuntime(name, deps = {}) {
+  const { env = process.env } = deps;
+  const run = deps.run ?? ((timeoutMs) => defaultRuntimeRun(name, timeoutMs, env));
+  const floor = RUNTIME_FLOORS[name] ?? null;
+  const wanted = floorText(floor);
+
+  const outcome = await run(VERSION_TIMEOUT_MS);
+  if (outcome.spawnFailed) {
+    return {
+      runtime: name, available: false, version: null, auth: null,
+      detail: wanted ? `not found on PATH (needs ${name} ${wanted} or newer)`
+                     : `not found on PATH (needs ${name})`,
+    };
+  }
+  if (outcome.timedOut) {
+    return { runtime: name, available: false, version: "unknown", auth: null,
+      detail: `${name} --version did not return within the probe deadline` };
+  }
+
+  // Both streams: `python3 --version` printed to stderr on 3.3 and earlier, and a wrapper may still.
+  const text = `${outcome.stdout ?? ""}\n${outcome.stderr ?? ""}`.trim();
+  const parsed = parseVersion(text);
+  const version = boundToken(text.split("\n")[0] ?? "") || "unknown";
+  if (parsed === null) {
+    return { runtime: name, available: false, version: "unknown", auth: null,
+      detail: `could not read a version from ${name} --version` };
+  }
+
+  const ok = meetsFloor(parsed, floor);
+  return {
+    runtime: name,
+    available: ok,
+    version,
+    // `null`, never `"unknown"` — see the note above `RUNTIME_FLOORS`.
+    auth: null,
+    detail: ok
+      ? (wanted ? `meets the ${wanted} floor` : "present")
+      : `below the ${wanted} floor — found ${parsed.join(".")}`,
+  };
+}
+
+/** Every runtime row, in fixed order. */
+export async function probeRuntimes(deps = {}) {
+  const rows = [];
+  for (const name of RUNTIME_NAMES) rows.push(await probeRuntime(name, deps));
+  return rows;
+}
+
+/**
+ * The exit rule, unchanged by vibe-209 and deliberately so.
+ *
+ * Runtime rows are counted by the two rules that apply to them — `available !== true` and
+ * `version === "unknown"` — and slip past the third because they carry `auth: null` rather than
+ * `auth: "unknown"`. That is not a workaround: `null` means "there is nothing here to learn", which
+ * is the truth for a tool with no auth mode, while `"unknown"` means "a probe failed to learn
+ * something knowable" and rightly fails a preflight.
+ *
+ * Exported so a test can pin that reasoning directly — see R-AUTH in preflight-cli.test.mjs.
+ */
+export function exitCodeFor(rows) {
+  for (const row of rows) {
+    if (row.available === null) continue;              // pending never counts against
+    if (row.available !== true) return 1;
+    // A degraded probe is one that FAILED TO LEARN something knowable. `auth: "unknown"` means that
+    // for codex, which exposes its auth mode — but agy exposes none, so `unknown` there is the
+    // truthful terminal answer, not a failure to look. Treating them alike would fail a preflight
+    // over a fact that cannot be discovered.
+    if (row.version === "unknown") return 1;
+    if (row.engine !== "agy" && row.auth === "unknown") return 1;
+  }
+  return 0;
+}
+
 /** The matrix: rows in fixed engine order, each already normalized. */
 export function buildMatrix(rows) {
   return rows;

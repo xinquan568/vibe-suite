@@ -12,7 +12,7 @@
 //
 // **Node floor: 18.** No top-level await — `main()` is invoked, not awaited at module scope.
 
-import { buildMatrix, probeAgy, probeCodex } from "./lib/preflight.mjs";
+import { buildMatrix, exitCodeFor, probeAgy, probeCodex, probeRuntimes } from "./lib/preflight.mjs";
 import { agyGate } from "./lib/agy-gate.mjs";
 
 class UsageError extends Error {}
@@ -28,6 +28,20 @@ function parseArgs(argv) {
 
 function cell(value) {
   return value === null ? "-" : String(value);
+}
+
+function renderRuntimes(rows) {
+  if (rows.length === 0) return "";
+  const table = rows.map((row) => [
+    row.runtime,
+    row.available ? "available" : "unavailable",
+    row.version ?? "-",
+    row.detail ?? "",
+  ]);
+  const widths = [0, 1, 2].map((i) => Math.max(...table.map((r) => r[i].length)));
+  return ["", "runtimes:", ...table.map((r) =>
+    `  ${r[0].padEnd(widths[0])}  ${r[1].padEnd(widths[1])}  ${r[2].padEnd(widths[2])}  ${r[3]}`)]
+    .join("\n");
 }
 
 function renderText(rows) {
@@ -56,19 +70,6 @@ function renderText(rows) {
   return lines.join("\n");
 }
 
-function exitCodeFor(rows) {
-  for (const row of rows) {
-    if (row.available === null) continue;              // pending never counts against
-    if (row.available !== true) return 1;
-    // A degraded probe is one that FAILED TO LEARN something knowable. `auth: "unknown"` means that
-    // for codex, which exposes its auth mode — but agy exposes none, so `unknown` there is the
-    // truthful terminal answer, not a failure to look. Treating them alike would fail a preflight
-    // over a fact that cannot be discovered.
-    if (row.version === "unknown") return 1;
-    if (row.engine !== "agy" && row.auth === "unknown") return 1;
-  }
-  return 0;
-}
 
 async function main() {
   let options;
@@ -84,12 +85,17 @@ async function main() {
   // passed in so the agy row can distinguish "unverified" (pending) from "unavailable" (broken).
   const gate = agyGate();
   const rows = buildMatrix([await probeCodex(), await probeAgy({ gate })]);
+  // vibe-209: a SIBLING key, never appended to `engines`. That array is asserted exactly and read
+  // positionally by tests that are contracts rather than defects, and a runtime is not an engine —
+  // it has no auth mode, no smoke test and no model list. Consumers switching on `engines` keep
+  // working; the new information is purely additive.
+  const runtimes = await probeRuntimes();
   if (options.json) {
-    process.stdout.write(JSON.stringify({ engines: rows }, null, 2) + "\n");
+    process.stdout.write(JSON.stringify({ engines: rows, runtimes }, null, 2) + "\n");
   } else {
-    process.stdout.write(renderText(rows) + "\n");
+    process.stdout.write(renderText(rows) + renderRuntimes(runtimes) + "\n");
   }
-  return exitCodeFor(rows);
+  return exitCodeFor([...rows, ...runtimes]);
 }
 
 main()

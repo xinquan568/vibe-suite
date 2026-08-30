@@ -22,6 +22,10 @@ import json
 import os
 import re
 import subprocess
+
+#: vibe-209 / grill P4 — the mirror-regeneration spawn is bounded. Unbounded, a wedged
+#: generator hangs `bridge --mirrors` with no way back.
+MIRROR_REGEN_TIMEOUT_S = 60
 import sys
 from pathlib import Path
 
@@ -383,9 +387,17 @@ def main(argv=None):
             if not gen.is_file():
                 print(f"error: mirrors: generator not found at {gen}", file=sys.stderr)
                 return 1
-            proc = subprocess.run(
-                [sys.executable, str(gen), "generate", "--root", str(plugin_root)],
-                capture_output=True, text=True)
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(gen), "generate", "--root", str(plugin_root)],
+                    capture_output=True, text=True,
+                    timeout=MIRROR_REGEN_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                # vibe-209: a bound with no handler turns a hang into a traceback, which is not
+                # an improvement. Reported the same way every other regeneration failure is.
+                print(f"error: mirrors: regeneration timed out after "
+                      f"{MIRROR_REGEN_TIMEOUT_S}s", file=sys.stderr)
+                return 1
             if proc.returncode != 0:
                 print(f"error: mirrors: regeneration failed — {proc.stderr.strip()}",
                       file=sys.stderr)

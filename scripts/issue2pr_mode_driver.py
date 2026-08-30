@@ -23,6 +23,9 @@ import datetime
 import json
 import re
 import subprocess
+
+#: vibe-209 / grill P4 — the manifest validator is bounded.
+MANIFEST_VALIDATE_TIMEOUT_S = 60
 import sys
 from pathlib import Path
 
@@ -540,9 +543,15 @@ def mode_manifest(decl, args):
         if key not in ops:
             raise DeclarationGap("manifest-operations", key)
     entry = REPO_ROOT / ops["validate_via"]
-    result = subprocess.run([sys.executable, str(entry), args.manifest,
-                             "--profile", args.profile],
-                            capture_output=True, text=True, cwd=REPO_ROOT)
+    try:
+        result = subprocess.run([sys.executable, str(entry), args.manifest,
+                                 "--profile", args.profile],
+                                capture_output=True, text=True, cwd=REPO_ROOT,
+                                timeout=MANIFEST_VALIDATE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        # vibe-209: a validator that never returns used to hang the driver silently.
+        raise Refusal(f"{ops['validate_via']} did not finish within "
+                      f"{MANIFEST_VALIDATE_TIMEOUT_S}s")
     print(f"manifest_entry: exit {result.returncode}")
     if result.returncode != 0:
         raise Refusal(f"{ops['validate_via']} rejected the manifest:\n{result.stderr}")

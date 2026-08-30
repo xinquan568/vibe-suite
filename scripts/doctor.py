@@ -386,6 +386,85 @@ def _staler_path(skill_md, refreshed):
     return "—"
 
 
+#: vibe-209 / grill P4 — the runtime floors this project declares in README.md.
+RUNTIME_FLOORS = {"python3": (3, 11), "node": (18,), "git": None}
+
+
+#: Each runtime's own `--version` grammar, anchored to the start of a line. NOT "the first dotted
+#: number anywhere": that read `wrapper 9.0 warning; Python 3.9.18` as 9.0, clearing a 3.11 floor
+#: while the real interpreter was below it. Components are bounded — an absurd one means the output
+#: is not what it claims to be.
+#: `(?!\d)` after every component: without it `\d{1,4}` TRUNCATES rather than rejects, so
+#: `Python 3.12345` read as (3, 1234) — a fabricated version handed to the floor comparison.
+RUNTIME_VERSION_PATTERNS = {
+    "python3": re.compile(r"^Python (\d{1,4})(?!\d)\.(\d{1,4})(?!\d)", re.M),
+    "node": re.compile(r"^v(\d{1,4})(?!\d)\.(\d{1,4})(?!\d)", re.M),
+    "git": re.compile(r"^git version (\d{1,4})(?!\d)\.(\d{1,4})(?!\d)", re.M),
+}
+
+
+def probe_runtimes():
+    """The installed version of each runtime, as integer components, or None when unreadable.
+
+    `None` covers every way the answer is not a version: the binary is absent, the invocation
+    FAILED, it timed out, or it printed nothing matching the runtime's own banner. A non-zero exit
+    is a failed probe whatever it printed on the way — reporting a runtime present because a failing
+    command mentioned a number would be a false green in the one check meant to prevent them.
+    """
+    found = {}
+    for name, pattern in RUNTIME_VERSION_PATTERNS.items():
+        try:
+            proc = subprocess.run([name, "--version"], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            found[name] = None
+            continue
+        if proc.returncode != 0:
+            found[name] = None
+            continue
+        match = pattern.search(f"{proc.stdout}\n{proc.stderr}")
+        found[name] = (int(match.group(1)), int(match.group(2))) if match else None
+    return found
+
+
+def runtime_capability(capabilities, probe=None):
+    """One capability row for the runtimes this installation needs (vibe-209 / grill P4).
+
+    **A capability, not a finding.** A missing `node` is a fact about the machine, not a defect in
+    the project — and `vibe-core` makes `[GOOD]` exclusive, so filing it as a finding would mean no
+    project with an incomplete toolchain could ever report clean.
+
+    **One row, and a mixed state is `unavailable`.** A capability that is partly missing is not
+    available; splitting it per runtime would put a green row beside a red one for what is really a
+    single question, "can this installation run its own tooling".
+
+    **The bootstrap limit is in `blocked_on`, where both renderers show it.** `commands/doctor.md`
+    launches this script as `python3 .../doctor.py`, so an ABSENT python3 produces no doctor output
+    at all — including this row. Preflight, which is Node-hosted, is the diagnostic for that case,
+    exactly as doctor is the diagnostic for an absent node. Neither tool can report the absence of
+    its own host, and the pair is complete only when each says so. `see-preflight` is the existing
+    vocabulary for deferring like this (the connectivity row below).
+    """
+    found = probe_runtimes() if probe is None else probe
+    problems = []
+    for name, floor in RUNTIME_FLOORS.items():
+        version = found.get(name)
+        if version is None:
+            problems.append(f"{name} not found (or unreadable)")
+            continue
+        if floor is not None and tuple(version[:len(floor)]) < tuple(floor):
+            wanted = ".".join(str(part) for part in floor)
+            have = ".".join(str(part) for part in version)
+            problems.append(f"{name} {have} is below the {wanted} floor")
+
+    limit = ("an ABSENT python3 yields no doctor output at all, since this check runs under it — "
+             "/vibe-suite:preflight is the diagnostic for that case")
+    if problems:
+        capabilities.append({"check": "runtimes", "status": "unavailable",
+                             "blocked_on": "; ".join(problems) + " · " + limit})
+    else:
+        capabilities.append({"check": "runtimes", "status": "ok", "blocked_on": limit})
+
+
 def knowledge_capability(out):
     """F8.4's date is plugin-level, beside the skill it describes — a project-local copy would let
     two projects disagree about one shared skill. /vibe-suite:refresh-knowledge (E6.5/#51)
@@ -443,6 +522,7 @@ def diagnose(ws):
         capabilities.append(knowledge)
     elif knowledge:
         findings.append(knowledge)
+    runtime_capability(capabilities)
     capabilities.append({"check": "connectivity", "status": "see-preflight",
                          "blocked_on": "/vibe-suite:preflight owns the normalised lane result; "
                                        "agy's 'available' verdict stays pending behind its gate"})

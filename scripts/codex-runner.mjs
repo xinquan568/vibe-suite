@@ -59,6 +59,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { claimFailureMessage, resolveClaimBudget } from "./lib/claim-budget.mjs";
 import { emit } from "./lib/eventlog.mjs";
 import { billableTokens, readEventStream } from "./lib/events.mjs";
 import { noTerminalEvent, stderrTail } from "./lib/render.mjs";
@@ -556,7 +557,10 @@ async function runBackground(workspace, options, timeoutMs) {
   handoff.end(`${token}\n${options.prompt}`, () => handoff.destroy());
   child.unref();
 
-  const claimed = await awaitWorkerClaim(workspace, record.jobId);
+  // vibe-209 / grill A14: the budget is an operator seam now, because a cold Node start on a
+  // loaded box can exceed the old fixed 5 s and there was no way to wait longer.
+  const claimBudgetMs = resolveClaimBudget();
+  const claimed = await awaitWorkerClaim(workspace, record.jobId, { timeoutMs: claimBudgetMs });
   if (claimed === null) {
     await signalLatch("final-poll");
     await awaitLatch("pre-kill");
@@ -589,9 +593,10 @@ async function runBackground(workspace, options, timeoutMs) {
       await finaliseRecord(workspace, record.jobId, {
         status: "failed",
         errorClass: "failure",
-        error: reaped
-          ? "worker did not start, or was terminated before claiming"
-          : "worker did not start and could not be confirmed reaped",
+        // vibe-209: the budget and the pid both travel here. The budget is a parameter of
+        // awaitWorkerClaim rather than of this caller, so a message built without passing it would
+        // report a number that is merely the default — true by luck, wrong the moment a seam is set.
+        error: claimFailureMessage({ budgetMs: claimBudgetMs, pid: child.pid, reaped }),
       }).catch((error) => { finaliseError = error; });
 
       after = await readRecord(workspace, record.jobId).catch(() => null);

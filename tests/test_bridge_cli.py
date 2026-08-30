@@ -700,3 +700,112 @@ class TestMirrorWiring(BridgeCase):
         result = self.run_bridge("mirrors")
         self.assertEqual(result.returncode, 1)
         self.assertIn("mirror", (result.stdout + result.stderr).lower())
+
+
+# --- vibe-209 -------------------------------------------------------------------------------------
+import ast as _v209_ast                                                              # noqa: E402
+import pathlib as _v209_pathlib                                                      # noqa: E402
+import sys as _v209_sys                                                              # noqa: E402
+from unittest import mock as _v209_mock                                              # noqa: E402
+import io as _v209_io                                                               # noqa: E402
+import contextlib as _v209_contextlib                                               # noqa: E402
+import tempfile as _v209_tempfile                                                   # noqa: E402
+
+_V209_ROOT = _v209_pathlib.Path(__file__).resolve().parent.parent
+_V209_SCRIPTS = _V209_ROOT / "scripts"
+if str(_V209_SCRIPTS) not in _v209_sys.path:
+    _v209_sys.path.insert(0, str(_V209_SCRIPTS))
+
+
+def _v209_unbounded_runs(source_path):
+    """Every `subprocess.run(...)` call in a file that does NOT pass `timeout=`.
+
+    Structural, by AST, which is this repo's own idiom for "the call site must look like this"
+    (`tests/test_write_discipline.py`). Forcing a real spawn would need a whole command invocation
+    and a 60-second wait; reading the call is exact, instant, and cannot pass by luck.
+    """
+    tree = _v209_ast.parse(_v209_pathlib.Path(source_path).read_text(encoding="utf-8"))
+    calls = [n for n in _v209_ast.walk(tree)
+             if isinstance(n, _v209_ast.Call) and isinstance(n.func, _v209_ast.Attribute)
+             and n.func.attr == "run" and isinstance(n.func.value, _v209_ast.Name)
+             and n.func.value.id == "subprocess"]
+    return calls, [c for c in calls if "timeout" not in [kw.arg for kw in c.keywords]]
+
+
+class MirrorRegenTimeoutTest(unittest.TestCase):
+    """R16 — the mirror-regeneration spawn is bounded at exactly 60 s (vibe-209 / grill P4).
+
+    Two assertions for two different defects. The VALUE is what the issue specifies, and a test that
+    only proved "some bound exists" would accept 1 s or 10 minutes equally. The CALL is that the
+    bound reaches `subprocess.run` rather than sitting in an unused constant.
+    """
+
+    def test_the_constant_is_the_value_the_issue_names(self):
+        import bridge_cli
+        self.assertEqual(bridge_cli.MIRROR_REGEN_TIMEOUT_S, 60)
+
+    def test_every_subprocess_run_in_bridge_cli_is_bounded(self):
+        calls, unbounded = _v209_unbounded_runs(_V209_SCRIPTS / "bridge_cli.py")
+        self.assertTrue(calls, "the mirror regeneration spawn must still be a subprocess.run call")
+        self.assertEqual([c.lineno for c in unbounded], [],
+                         "an unbounded subprocess.run can hang the command forever")
+
+
+class MirrorRegenTimeoutValueTest(unittest.TestCase):
+    """The value and the handler, not merely "a timeout keyword exists" (Step-8 finding 2).
+
+    `timeout=1`, `timeout=None` or `timeout=some_other_constant` all satisfy an AST presence check.
+    These read the call's OWN keyword back and force the exception the handler exists for.
+    """
+
+    def _timeout_arg(self, source_path, call_index=0):
+        tree = _v209_ast.parse(_v209_pathlib.Path(source_path).read_text(encoding="utf-8"))
+        calls = [n for n in _v209_ast.walk(tree)
+                 if isinstance(n, _v209_ast.Call) and isinstance(n.func, _v209_ast.Attribute)
+                 and n.func.attr == "run" and isinstance(n.func.value, _v209_ast.Name)
+                 and n.func.value.id == "subprocess"]
+        self.assertTrue(calls, "the spawn must still be a subprocess.run call")
+        for call in calls:
+            for kw in call.keywords:
+                if kw.arg == "timeout":
+                    return kw.value
+        self.fail("no timeout= keyword on any subprocess.run call")
+
+    def test_the_timeout_is_the_owning_constant_not_an_arbitrary_number(self):
+        node = self._timeout_arg(_V209_SCRIPTS / "bridge_cli.py")
+        self.assertIsInstance(node, _v209_ast.Name,
+                              "the bound must be the named constant, so the value has one home")
+        self.assertEqual(node.id, "MIRROR_REGEN_TIMEOUT_S")
+
+    def test_a_timeout_is_reported_as_a_diagnostic_not_a_traceback(self):
+        """FORCE the exception; a source search proves only that the words are in the file.
+
+        A bound with no handler turns a hang into a crash, which is not an improvement — and the
+        earlier version of this test would have passed with the `except` deleted, because it read
+        for the string rather than running the path.
+        """
+        import bridge_cli
+        ws = _v209_pathlib.Path(_v209_tempfile.mkdtemp())
+        plugin_root = _v209_pathlib.Path(_v209_tempfile.mkdtemp())
+        gen = plugin_root / "scripts" / "mirror-sync.py"
+        gen.parent.mkdir(parents=True, exist_ok=True)
+        gen.write_text("# stand-in for the generator; never actually run\n")
+
+        def explode(argv, **kwargs):
+            raise bridge_cli.subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+        err = _v209_io.StringIO()
+        with _v209_mock.patch.object(bridge_cli.subprocess, "run", explode), \
+                _v209_contextlib.redirect_stderr(err):
+            rc = bridge_cli.main(["mirrors", "--workspace", str(ws),
+                                  "--plugin-root", str(plugin_root)])
+        self.assertEqual(rc, 1, "a timed-out regeneration is a reported failure, not a crash")
+        # The command's OWN sentence, not Python's. `TimeoutExpired.__str__` is
+        # "Command '[...]' timed out after 60 seconds", so asserting "timed out after" or "60"
+        # passes whether this handler ran or a generic outer one printed the raw exception —
+        # which is exactly how the first version of this test certified nothing.
+        self.assertIn("error: mirrors: regeneration timed out after 60s", err.getvalue(),
+                      "the handler's own diagnostic must be what reaches the operator: %r"
+                      % err.getvalue())
+        self.assertNotIn("Command '[", err.getvalue(),
+                         "and the raw exception must not be what they see")

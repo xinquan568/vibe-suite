@@ -9,7 +9,7 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync } from "node:fs";
 
 import path from "node:path";
 import test from "node:test";
@@ -77,4 +77,57 @@ test("a dispatch through codex-runner prints the notice when the project file ra
     if (Date.now() > deadline) throw new Error("fixture job never reached a terminal status");
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+});
+
+// --- vibe-209 ------------------------------------------------------------------------------------
+
+test("C1 CHARACTERISATION (green before this change): a misspelled known key warns once on dispatch", async () => {
+  // **This test is not RED and proves nothing about vibe-209.** The issue's second acceptance
+  // criterion — "a misspelled known key in .vibe-suite.md produces one stderr warning on dispatch" —
+  // was ALREADY met before this change. The grill report described `config.load()` discarding
+  // warnings on the dispatch path, which was true at its baseline `090b511`; vibe-186 then made
+  // `config.py:main()` print every warning to stderr and `config-bridge.mjs` forward them.
+  //
+  // It is added as a REGRESSION GUARD, and labelled so nobody later mistakes a green test for
+  // evidence that this issue did the work. The sibling cases above cover the sandbox-raised and
+  // store-only notices; an unknown key is the shape the criterion actually names, and had none.
+  const { loadConfig } = await import(BRIDGE);
+  const root = tmpWorkspace("config-c1-");
+  writeFileSync(path.join(root, ".vibe-suite.md"), "---\nsandbax: read-only\n---\n");
+
+  const seen = [];
+  const real = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, ...rest) => { seen.push(String(chunk)); return real(chunk, ...rest); };
+  let resolved;
+  try {
+    resolved = loadConfig(root);
+  } finally {
+    process.stderr.write = real;
+  }
+
+  const warnings = seen.join("").split("\n").filter((line) => line.includes("config:"));
+  assert.equal(warnings.length, 1, `exactly one warning, got ${JSON.stringify(warnings)}`);
+  assert.match(warnings[0], /unknown key 'sandbax'/, "it names the key the operator misspelled");
+  assert.ok(resolved && typeof resolved === "object", "and the load still succeeds — warn, never crash");
+});
+
+test("R15: the python3 spawn is bounded at exactly 30_000 ms, and the bound is real (vibe-209)", async () => {
+  // Two assertions, because they fail for different reasons. The VALUE is what the issue specifies —
+  // a test that only forces a timeout cannot tell 30 s from 10 min, so any bound at all would pass
+  // it. The BEHAVIOUR is that the bound is actually wired into the spawn rather than merely declared.
+  const { CONFIG_TIMEOUT_MS, loadConfig: load } = await import(BRIDGE);
+  assert.equal(CONFIG_TIMEOUT_MS, 30_000, "the issue names this value; a different one is a defect");
+
+  // A `python3` that never returns. The bridge must give up rather than hang the dispatch forever.
+  const root = tmpWorkspace("config-slow-");
+  const bin = tmpWorkspace("config-slowbin-");
+  const fake = path.join(bin, "python3");
+  writeFileSync(fake, "#!/bin/sh\nsleep 30\n");
+  chmodSync(fake, 0o755);
+
+  const started = Date.now();
+  assert.throws(() => load(root, { python: fake, timeoutMs: 300 }),
+    /cannot run|exited/, "a timed-out interpreter is an error, never a silent empty config");
+  assert.ok(Date.now() - started < 10_000,
+    `the spawn must be bounded — took ${Date.now() - started}ms with no bound in sight`);
 });

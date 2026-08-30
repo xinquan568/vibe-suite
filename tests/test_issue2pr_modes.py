@@ -1665,3 +1665,80 @@ class TestWatcherDegradationCounters(WatcherCase):
         with contextlib.redirect_stderr(buffer):
             w.run()
         self.assertIn("rollup probe degraded 10 times", buffer.getvalue())
+
+
+# --- vibe-209 -------------------------------------------------------------------------------------
+import ast as _v209_ast                                                              # noqa: E402
+import pathlib as _v209_pathlib                                                      # noqa: E402
+import sys as _v209_sys                                                              # noqa: E402
+from unittest import mock as _v209_mock                                              # noqa: E402
+import types as _v209_types                                                         # noqa: E402
+
+_V209_ROOT = _v209_pathlib.Path(__file__).resolve().parent.parent
+_V209_SCRIPTS = _V209_ROOT / "scripts"
+if str(_V209_SCRIPTS) not in _v209_sys.path:
+    _v209_sys.path.insert(0, str(_V209_SCRIPTS))
+
+
+def _v209_unbounded_runs(source_path):
+    """Every `subprocess.run(...)` call in a file that does NOT pass `timeout=`.
+
+    Structural, by AST, which is this repo's own idiom for "the call site must look like this"
+    (`tests/test_write_discipline.py`). Forcing a real spawn would need a whole command invocation
+    and a 60-second wait; reading the call is exact, instant, and cannot pass by luck.
+    """
+    tree = _v209_ast.parse(_v209_pathlib.Path(source_path).read_text(encoding="utf-8"))
+    calls = [n for n in _v209_ast.walk(tree)
+             if isinstance(n, _v209_ast.Call) and isinstance(n.func, _v209_ast.Attribute)
+             and n.func.attr == "run" and isinstance(n.func.value, _v209_ast.Name)
+             and n.func.value.id == "subprocess"]
+    return calls, [c for c in calls if "timeout" not in [kw.arg for kw in c.keywords]]
+
+
+class ManifestValidatorTimeoutTest(unittest.TestCase):
+    """R17 — the manifest-validator spawn is bounded at exactly 60 s (vibe-209 / grill P4)."""
+
+    def test_the_constant_is_the_value_the_issue_names(self):
+        import issue2pr_mode_driver
+        self.assertEqual(issue2pr_mode_driver.MANIFEST_VALIDATE_TIMEOUT_S, 60)
+
+    def test_every_subprocess_run_in_the_driver_is_bounded(self):
+        calls, unbounded = _v209_unbounded_runs(_V209_SCRIPTS / "issue2pr_mode_driver.py")
+        self.assertTrue(calls, "the validator spawn must still be a subprocess.run call")
+        self.assertEqual([c.lineno for c in unbounded], [], "unbounded subprocess.run")
+
+
+class ManifestValidatorTimeoutValueTest(unittest.TestCase):
+    """The value and the handler at the validator site (Step-8 finding 2)."""
+
+    def test_the_timeout_is_the_owning_constant(self):
+        tree = _v209_ast.parse(
+            (_V209_SCRIPTS / "issue2pr_mode_driver.py").read_text(encoding="utf-8"))
+        found = None
+        for n in _v209_ast.walk(tree):
+            if (isinstance(n, _v209_ast.Call) and isinstance(n.func, _v209_ast.Attribute)
+                    and n.func.attr == "run" and isinstance(n.func.value, _v209_ast.Name)
+                    and n.func.value.id == "subprocess"):
+                for kw in n.keywords:
+                    if kw.arg == "timeout":
+                        found = kw.value
+        self.assertIsInstance(found, _v209_ast.Name, "the bound must be the named constant")
+        self.assertEqual(found.id, "MANIFEST_VALIDATE_TIMEOUT_S")
+
+    def test_a_timeout_becomes_a_refusal_not_a_traceback(self):
+        """FORCE the exception rather than reading the source for the handler's words."""
+        import issue2pr_mode_driver as driver
+
+        def explode(argv, **kwargs):
+            raise driver.subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+        decl = _v209_types.SimpleNamespace(block=lambda name: {
+            "validate_via": "scripts/manifest_entry.py", "creates": "x",
+            "containment": "y", "initial_status": "pending"})
+        args = _v209_types.SimpleNamespace(manifest="m.json", profile="vibe-suite")
+
+        with _v209_mock.patch.object(driver.subprocess, "run", explode):
+            with self.assertRaises(driver.Refusal) as caught:
+                driver.mode_manifest(decl, args)
+        self.assertIn("did not finish within", str(caught.exception))
+        self.assertIn("60", str(caught.exception), "the refusal names the bound it hit")

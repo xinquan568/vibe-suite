@@ -20,6 +20,16 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PY = path.join(HERE, "config.py");
 
+/**
+ * The bound on the interpreter this bridge shells to (vibe-209 / grill P4).
+ *
+ * Every Node dispatch that reads configuration comes through here, so an unbounded spawn is a
+ * dispatch that can hang forever on a machine where `python3` wedges. The value is the one the
+ * issue names; `spawnSync` surfaces a timeout through `result.error`, which the existing branch
+ * below already routes to a ConfigBridgeError, so the bound needs no new failure path.
+ */
+export const CONFIG_TIMEOUT_MS = 30_000;
+
 export class ConfigBridgeError extends Error {}
 
 /**
@@ -29,8 +39,9 @@ export class ConfigBridgeError extends Error {}
  * .startswith("-") else "."` — so the path must be the final argument, and the shape it returns is
  * validated here rather than trusted.
  */
-export function loadConfig(root = process.cwd(), { python = "python3" } = {}) {
-  const result = spawnSync(python, [CONFIG_PY, root], { encoding: "utf8" });
+export function loadConfig(root = process.cwd(),
+                          { python = "python3", timeoutMs = CONFIG_TIMEOUT_MS } = {}) {
+  const result = spawnSync(python, [CONFIG_PY, root], { encoding: "utf8", timeout: timeoutMs });
 
   if (result.error) {
     throw new ConfigBridgeError(`cannot run ${python}: ${result.error.message}`);

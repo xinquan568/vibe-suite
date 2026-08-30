@@ -298,6 +298,197 @@ export function agyRow() {
   };
 }
 
+
+/**
+ * The runtime rows (vibe-209 / grill P4).
+ *
+ * The matrix probed AI engines only, so a missing `python3`, `node` or `git` first announced itself
+ * as a stack trace mid-run, or as a silent fail-open. Every Node dispatch shells to `python3`, the
+ * Python `update` stage shells to `node`, and the Stop gate shells to `git`.
+ *
+ * **These rows are not engines, and the difference is load-bearing.** They carry `runtime` instead
+ * of `engine`, and `auth: null` instead of `auth: "unknown"`. `exitCodeFor` ends with
+ * `row.engine !== "agy" && row.auth === "unknown"` — an exception hard-coded to ONE engine name,
+ * because agy exposes no auth mode and `"unknown"` is its truthful terminal answer rather than a
+ * failed probe. `git` is in exactly that position and is not named there, so reporting the honest
+ * `"unknown"` would fail preflight on a healthy machine. The schema already has the right word:
+ * `null` means *there is nothing here to learn*, which is why `exitCodeFor` needs no change at all.
+ */
+
+/** Floors from the project's own prerequisites. `null` means "any version, just be present". */
+export const RUNTIME_FLOORS = {
+  python3: [3, 11],
+  node: [18],
+  git: null,
+};
+
+/** Fixed order, so the matrix reads the same way every time. */
+export const RUNTIME_NAMES = ["python3", "node", "git"];
+
+/**
+ * Each runtime's own `--version` grammar, anchored to the start of a line.
+ *
+ * **Not "the first dotted number anywhere".** That accepted `wrapper 9.0 warning; Python 3.9.18` as
+ * version 9.0 — clearing a 3.11 floor while the actual interpreter was 3.9.18, so preflight called
+ * a machine healthy that was not. Anything a wrapper prints ahead of the real banner is noise, and
+ * only the runtime's documented form counts.
+ */
+// `(?!\d)` after every component, and it is load-bearing. Without it `\d{1,4}` TRUNCATES rather
+// than rejects: `Python 3.12345` matched as 3.1234 — not a display artefact but a *fabricated*
+// version, handed to the floor comparison as if it were read. An implausible component means the
+// output is not the banner it looks like, and the honest answer is to fail closed.
+const RUNTIME_VERSION_PATTERNS = {
+  python3: /^Python (\d{1,4})(?!\d)\.(\d{1,4})(?!\d)(?:\.(\d{1,4})(?!\d))?/m,
+  node: /^v(\d{1,4})(?!\d)\.(\d{1,4})(?!\d)(?:\.(\d{1,4})(?!\d))?/m,
+  git: /^git version (\d{1,4})(?!\d)\.(\d{1,4})(?!\d)(?:\.(\d{1,4})(?!\d))?/m,
+};
+
+/**
+ * The runtime's version as integer components, or `null` when its banner is not there.
+ *
+ * Components are bounded to four digits by the patterns above: an absurd component is a sign the
+ * output is not what it claims to be, and `Number` on an arbitrarily long digit run is a value no
+ * floor comparison should be asked to interpret.
+ */
+function parseVersion(name, text) {
+  const pattern = RUNTIME_VERSION_PATTERNS[name];
+  if (!pattern) return null;
+  const match = pattern.exec(String(text ?? ""));
+  if (!match) return null;
+  return [match[1], match[2], match[3] ?? "0"].map(Number);
+}
+
+/**
+ * Is `found` at least `floor`, comparing component by component?
+ *
+ * **Not a decimal comparison.** `parseFloat("3.9") > parseFloat("3.11")` is `true`, so a float
+ * compare accepts Python 3.9 as meeting a 3.11 floor — the single likeliest defect here, and the
+ * reason this is written out rather than inlined. `>=` at every position, so the floor itself passes.
+ */
+function meetsFloor(found, floor) {
+  if (floor === null) return true;
+  for (let i = 0; i < floor.length; i += 1) {
+    const have = found[i] ?? 0;
+    if (have > floor[i]) return true;
+    if (have < floor[i]) return false;
+  }
+  return true;                                   // equal through the floor's components: it meets it
+}
+
+const floorText = (floor) => (floor === null ? null : floor.join("."));
+
+/** The default effect: run `<name> --version` on PATH, bounded by the same deadline as the engines. */
+async function defaultRuntimeRun(name, timeoutMs, env) {
+  try {
+    // `detached: true`, like the engine probes. A runtime on PATH may be a wrapper script that
+    // spawns descendants, and only a group-wide deadline reaps those; a non-detached kill leaves
+    // them holding the inherited pipes. The engine lanes already learned this (E1.3 / vibe-13).
+    return await runWithDeadline({ command: name, args: ["--version"], env, timeoutMs,
+      detached: true });
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "EACCES") {
+      return { exitCode: null, stdout: "", stderr: "", timedOut: false, spawnFailed: true };
+    }
+    throw error;
+  }
+}
+
+/**
+ * One runtime row. Shape mirrors an engine row where the fields mean the same thing, and omits the
+ * ones that do not exist for a runtime (`smoke`, `models`).
+ */
+export async function probeRuntime(name, deps = {}) {
+  const { env = process.env } = deps;
+  const run = deps.run ?? ((timeoutMs) => defaultRuntimeRun(name, timeoutMs, env));
+  const floor = RUNTIME_FLOORS[name] ?? null;
+  const wanted = floorText(floor);
+
+  const outcome = await run(VERSION_TIMEOUT_MS);
+  if (outcome.spawnFailed) {
+    return {
+      runtime: name, available: false, version: null, auth: null,
+      detail: wanted ? `not found on PATH (needs ${name} ${wanted} or newer)`
+                     : `not found on PATH (needs ${name})`,
+    };
+  }
+  if (outcome.timedOut) {
+    return { runtime: name, available: false, version: "unknown", auth: null,
+      detail: `${name} --version did not return within the probe deadline` };
+  }
+
+  // Confirmation, not a timer: an unreaped group means descendants may still be running, and a
+  // probe that could not be bounded is not a probe that succeeded.
+  if (outcome.groupReaped !== true) {
+    return { runtime: name, available: false, version: "unknown", auth: null,
+      detail: `${name} --version could not be confirmed reaped — investigate before trusting it` };
+  }
+  // A non-zero exit means the command FAILED, whatever it printed on the way. Reporting a runtime
+  // as available because a failing invocation happened to mention a version is the same class of
+  // defect as reading a verdict out of a stream instead of an assistant message.
+  if (outcome.exitCode !== 0) {
+    return { runtime: name, available: false, version: "unknown", auth: null,
+      detail: `${name} --version exited ${outcome.exitCode}` };
+  }
+
+  // Both streams: `python3 --version` printed to stderr on 3.3 and earlier, and a wrapper may still.
+  const text = `${outcome.stdout ?? ""}\n${outcome.stderr ?? ""}`.trim();
+  const parsed = parseVersion(name, text);
+  if (parsed === null) {
+    return { runtime: name, available: false, version: "unknown", auth: null,
+      detail: `could not read a ${name} version banner from --version` };
+  }
+  // The reported token is the matched BANNER, not the first line: a wrapper's own chatter has no
+  // business in the matrix. No `boundToken` here, deliberately — the anchored pattern IS the bound.
+  // It matches a fixed literal plus components of at most four digits, so the result cannot exceed
+  // ~30 characters and cannot contain a control character. Passing it through `boundToken` would be
+  // a line no input can change, which the mutation ledger correctly refused to certify.
+  const version = RUNTIME_VERSION_PATTERNS[name].exec(text)[0];
+
+  const ok = meetsFloor(parsed, floor);
+  return {
+    runtime: name,
+    available: ok,
+    version,
+    // `null`, never `"unknown"` — see the note above `RUNTIME_FLOORS`.
+    auth: null,
+    detail: ok
+      ? (wanted ? `meets the ${wanted} floor` : "present")
+      : `below the ${wanted} floor — found ${parsed.join(".")}`,
+  };
+}
+
+/** Every runtime row, in fixed order. */
+export async function probeRuntimes(deps = {}) {
+  const rows = [];
+  for (const name of RUNTIME_NAMES) rows.push(await probeRuntime(name, deps));
+  return rows;
+}
+
+/**
+ * The exit rule, unchanged by vibe-209 and deliberately so.
+ *
+ * Runtime rows are counted by the two rules that apply to them — `available !== true` and
+ * `version === "unknown"` — and slip past the third because they carry `auth: null` rather than
+ * `auth: "unknown"`. That is not a workaround: `null` means "there is nothing here to learn", which
+ * is the truth for a tool with no auth mode, while `"unknown"` means "a probe failed to learn
+ * something knowable" and rightly fails a preflight.
+ *
+ * Exported so a test can pin that reasoning directly — see R-AUTH in preflight-cli.test.mjs.
+ */
+export function exitCodeFor(rows) {
+  for (const row of rows) {
+    if (row.available === null) continue;              // pending never counts against
+    if (row.available !== true) return 1;
+    // A degraded probe is one that FAILED TO LEARN something knowable. `auth: "unknown"` means that
+    // for codex, which exposes its auth mode — but agy exposes none, so `unknown` there is the
+    // truthful terminal answer, not a failure to look. Treating them alike would fail a preflight
+    // over a fact that cannot be discovered.
+    if (row.version === "unknown") return 1;
+    if (row.engine !== "agy" && row.auth === "unknown") return 1;
+  }
+  return 0;
+}
+
 /** The matrix: rows in fixed engine order, each already normalized. */
 export function buildMatrix(rows) {
   return rows;

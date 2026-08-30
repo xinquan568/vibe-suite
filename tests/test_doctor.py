@@ -638,3 +638,173 @@ class TestKnowledgeFreshnessStates(DoctorCase):
                         if f["check"] == "knowledge-freshness"]
                 self.assertEqual(len(lows), 1)
                 self.assertEqual(lows[0]["severity"], "[LOW]")
+
+
+# --- vibe-209 -------------------------------------------------------------------------------------
+import ast as _v209_ast                                                              # noqa: E402
+import pathlib as _v209_pathlib                                                      # noqa: E402
+import sys as _v209_sys                                                              # noqa: E402
+import os as _v209_os                                                                # noqa: E402
+import tempfile as _v209_tempfile                                                    # noqa: E402
+from unittest import mock as _v209_mock                                              # noqa: E402
+
+_V209_ROOT = _v209_pathlib.Path(__file__).resolve().parent.parent
+_V209_SCRIPTS = _V209_ROOT / "scripts"
+if str(_V209_SCRIPTS) not in _v209_sys.path:
+    _v209_sys.path.insert(0, str(_V209_SCRIPTS))
+
+
+def _v209_unbounded_runs(source_path):
+    """Every `subprocess.run(...)` call in a file that does NOT pass `timeout=`.
+
+    Structural, by AST, which is this repo's own idiom for "the call site must look like this"
+    (`tests/test_write_discipline.py`). Forcing a real spawn would need a whole command invocation
+    and a 60-second wait; reading the call is exact, instant, and cannot pass by luck.
+    """
+    tree = _v209_ast.parse(_v209_pathlib.Path(source_path).read_text(encoding="utf-8"))
+    calls = [n for n in _v209_ast.walk(tree)
+             if isinstance(n, _v209_ast.Call) and isinstance(n.func, _v209_ast.Attribute)
+             and n.func.attr == "run" and isinstance(n.func.value, _v209_ast.Name)
+             and n.func.value.id == "subprocess"]
+    return calls, [c for c in calls if "timeout" not in [kw.arg for kw in c.keywords]]
+
+
+class RuntimeCapabilityRowTest(unittest.TestCase):
+    """R18/R19 — doctor's runtime capability row (vibe-209 / grill P4).
+
+    The row uses the shape doctor's other capability rows use — `check` / `status` / `blocked_on` —
+    and NOT a `detail` field, which does not exist. `doctor.py` already ships the precedent for a
+    capability that defers to preflight: `{"check": "connectivity", "status": "see-preflight"}`.
+    """
+
+    def _row(self, probe):
+        import doctor
+        capabilities = []
+        doctor.runtime_capability(capabilities, probe=probe)
+        self.assertEqual(len(capabilities), 1, "one row, aggregated — not one per runtime")
+        return capabilities[0]
+
+    def test_all_runtimes_healthy_reports_ok(self):
+        row = self._row({"python3": (3, 14), "node": (24, 0), "git": (2, 43)})
+        self.assertEqual(row["check"], "runtimes")
+        self.assertEqual(row["status"], "ok")
+
+    def test_node_below_18_is_unavailable(self):
+        # The plan's only floor case was python3; deleting the node floor would have survived it.
+        row = self._row({"python3": (3, 14), "node": (16, 20), "git": (2, 43)})
+        self.assertEqual(row["status"], "unavailable")
+        self.assertIn("node", row["blocked_on"])
+
+    def test_python_below_3_11_is_unavailable(self):
+        row = self._row({"python3": (3, 9), "node": (24, 0), "git": (2, 43)})
+        self.assertEqual(row["status"], "unavailable")
+        self.assertIn("python3", row["blocked_on"])
+
+    def test_the_floors_themselves_pass(self):
+        # A `>` where `>=` belongs rejects exactly the version the docs tell people to install.
+        row = self._row({"python3": (3, 11), "node": (18, 0), "git": (2, 43)})
+        self.assertEqual(row["status"], "ok")
+
+    def test_missing_node_and_missing_git_are_each_reported(self):
+        for absent in ("node", "git"):
+            probe = {"python3": (3, 14), "node": (24, 0), "git": (2, 43)}
+            probe[absent] = None
+            row = self._row(probe)
+            self.assertEqual(row["status"], "unavailable", absent)
+            self.assertIn(absent, row["blocked_on"], absent)
+
+    def test_a_mixed_state_is_unavailable_not_ok(self):
+        row = self._row({"python3": (3, 14), "node": None, "git": (2, 43)})
+        self.assertEqual(row["status"], "unavailable",
+                         "vibe-core makes [GOOD] exclusive: partly missing is not available")
+
+    def test_the_row_discloses_that_an_absent_python3_yields_no_doctor_output(self):
+        # The bootstrap limit, in `blocked_on` so it reaches BOTH the JSON and the text renderer.
+        # commands/doctor.md launches `python3 .../doctor.py`, so an ABSENT python3 produces no rows
+        # at all — including this one. Preflight, which is Node-hosted, is the diagnostic for that.
+        row = self._row({"python3": None, "node": (24, 0), "git": (2, 43)})
+        self.assertIn("preflight", row["blocked_on"].lower(),
+                      "the row must point at the tool that CAN see an absent python3")
+
+
+class RuntimeProbeAndWiringTest(unittest.TestCase):
+    """The parts `runtime_capability(probe=...)` never reaches (vibe-209, Step-8 finding 3).
+
+    Calling the pure function with a pre-parsed dict proves the AGGREGATION and leaves everything
+    around it untested: the probe that produces the dict, and the call that puts the row in the
+    report at all. Both are deletable without any of those tests noticing.
+    """
+
+    def _probe_with(self, script_by_name):
+        """Run probe_runtimes against a PATH of fake binaries built from raw shell scripts."""
+        import doctor
+        binder = _v209_pathlib.Path(_v209_tempfile.mkdtemp())
+        for name, script in script_by_name.items():
+            p = binder / name
+            p.write_text(script)
+            p.chmod(0o755)
+        env = dict(_v209_os.environ, PATH=str(binder))
+        with _v209_mock.patch.dict(_v209_os.environ, env, clear=True):
+            return doctor.probe_runtimes()
+
+    def test_a_failing_version_call_is_not_a_version(self):
+        found = self._probe_with({
+            "python3": "#!/bin/sh\nprintf 'Python 3.11.9\\n'\nexit 1\n",
+            "node": "#!/bin/sh\nprintf 'v24.0.0\\n'\n",
+            "git": "#!/bin/sh\nprintf 'git version 2.43.0\\n'\n",
+        })
+        self.assertIsNone(found["python3"],
+                          "a non-zero --version is a failed probe, whatever it printed")
+
+    def test_a_wrapper_version_is_not_mistaken_for_the_runtime(self):
+        # Measured before the fix: this parsed as 9.0 and cleared the 3.11 floor.
+        found = self._probe_with({
+            "python3": "#!/bin/sh\nprintf 'wrapper 9.0 warning; Python 3.9.18\\n'\n",
+            "node": "#!/bin/sh\nprintf 'v24.0.0\\n'\n",
+            "git": "#!/bin/sh\nprintf 'git version 2.43.0\\n'\n",
+        })
+        self.assertIsNone(found["python3"], "only the runtime's own anchored banner counts")
+
+    def test_a_banner_below_wrapper_chatter_is_still_read(self):
+        found = self._probe_with({
+            "python3": "#!/bin/sh\nprintf 'wrapper: pyenv shim\\nPython 3.14.6\\n'\n",
+            "node": "#!/bin/sh\nprintf 'v24.0.0\\n'\n",
+            "git": "#!/bin/sh\nprintf 'git version 2.43.0\\n'\n",
+        })
+        self.assertEqual(found["python3"], (3, 14),
+                         "the anchor is per LINE — a false red would be no better than a false green")
+
+    def test_a_missing_binary_is_none_not_a_crash(self):
+        found = self._probe_with({"node": "#!/bin/sh\nprintf 'v24.0.0\\n'\n"})
+        self.assertIsNone(found["python3"])
+        self.assertIsNone(found["git"])
+
+    def test_the_REPORT_from_diagnose_contains_the_runtimes_row(self):
+        """Through `diagnose`, not a source search.
+
+        Deleting `runtime_capability(capabilities)` leaves a source search passing if the words
+        appear anywhere, and leaves every unit test on the pure function green. The row has to be
+        in what the command actually emits.
+        """
+        import doctor
+        ws = _v209_pathlib.Path(_v209_tempfile.mkdtemp())
+        report = doctor.diagnose(ws)
+        rows = [row for row in report["capabilities"] if row["check"] == "runtimes"]
+        self.assertEqual(len(rows), 1,
+                         "exactly one runtimes row in the emitted report: %r"
+                         % [r["check"] for r in report["capabilities"]])
+        self.assertIn(rows[0]["status"], ("ok", "unavailable"))
+        self.assertIn("preflight", rows[0]["blocked_on"].lower(),
+                      "and it still carries the bootstrap disclosure")
+
+
+class RuntimeVersionBoundsTest(unittest.TestCase):
+    """An implausible component is not a version (vibe-209, Step-9 finding 4)."""
+
+    def test_an_oversized_component_is_rejected_not_truncated(self):
+        import doctor
+        # `\d{1,4}` without a lookahead TRUNCATES: `Python 3.12345` matched as (3, 1234), a version
+        # that was never printed, handed to the floor comparison as if it had been read.
+        self.assertIsNone(doctor.RUNTIME_VERSION_PATTERNS["python3"].search("Python 3.12345"),
+                          "an implausible component means the output is not the banner it resembles")
+        self.assertIsNotNone(doctor.RUNTIME_VERSION_PATTERNS["python3"].search("Python 3.11.9"))

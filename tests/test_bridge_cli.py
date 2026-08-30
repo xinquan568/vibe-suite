@@ -700,3 +700,48 @@ class TestMirrorWiring(BridgeCase):
         result = self.run_bridge("mirrors")
         self.assertEqual(result.returncode, 1)
         self.assertIn("mirror", (result.stdout + result.stderr).lower())
+
+
+# --- vibe-209 -------------------------------------------------------------------------------------
+import ast as _v209_ast                                                              # noqa: E402
+import pathlib as _v209_pathlib                                                      # noqa: E402
+import sys as _v209_sys                                                              # noqa: E402
+
+_V209_ROOT = _v209_pathlib.Path(__file__).resolve().parent.parent
+_V209_SCRIPTS = _V209_ROOT / "scripts"
+if str(_V209_SCRIPTS) not in _v209_sys.path:
+    _v209_sys.path.insert(0, str(_V209_SCRIPTS))
+
+
+def _v209_unbounded_runs(source_path):
+    """Every `subprocess.run(...)` call in a file that does NOT pass `timeout=`.
+
+    Structural, by AST, which is this repo's own idiom for "the call site must look like this"
+    (`tests/test_write_discipline.py`). Forcing a real spawn would need a whole command invocation
+    and a 60-second wait; reading the call is exact, instant, and cannot pass by luck.
+    """
+    tree = _v209_ast.parse(_v209_pathlib.Path(source_path).read_text(encoding="utf-8"))
+    calls = [n for n in _v209_ast.walk(tree)
+             if isinstance(n, _v209_ast.Call) and isinstance(n.func, _v209_ast.Attribute)
+             and n.func.attr == "run" and isinstance(n.func.value, _v209_ast.Name)
+             and n.func.value.id == "subprocess"]
+    return calls, [c for c in calls if "timeout" not in [kw.arg for kw in c.keywords]]
+
+
+class MirrorRegenTimeoutTest(unittest.TestCase):
+    """R16 — the mirror-regeneration spawn is bounded at exactly 60 s (vibe-209 / grill P4).
+
+    Two assertions for two different defects. The VALUE is what the issue specifies, and a test that
+    only proved "some bound exists" would accept 1 s or 10 minutes equally. The CALL is that the
+    bound reaches `subprocess.run` rather than sitting in an unused constant.
+    """
+
+    def test_the_constant_is_the_value_the_issue_names(self):
+        import bridge_cli
+        self.assertEqual(bridge_cli.MIRROR_REGEN_TIMEOUT_S, 60)
+
+    def test_every_subprocess_run_in_bridge_cli_is_bounded(self):
+        calls, unbounded = _v209_unbounded_runs(_V209_SCRIPTS / "bridge_cli.py")
+        self.assertTrue(calls, "the mirror regeneration spawn must still be a subprocess.run call")
+        self.assertEqual([c.lineno for c in unbounded], [],
+                         "an unbounded subprocess.run can hang the command forever")

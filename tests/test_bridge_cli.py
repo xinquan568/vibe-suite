@@ -745,3 +745,38 @@ class MirrorRegenTimeoutTest(unittest.TestCase):
         self.assertTrue(calls, "the mirror regeneration spawn must still be a subprocess.run call")
         self.assertEqual([c.lineno for c in unbounded], [],
                          "an unbounded subprocess.run can hang the command forever")
+
+
+class MirrorRegenTimeoutValueTest(unittest.TestCase):
+    """The value and the handler, not merely "a timeout keyword exists" (Step-8 finding 2).
+
+    `timeout=1`, `timeout=None` or `timeout=some_other_constant` all satisfy an AST presence check.
+    These read the call's OWN keyword back and force the exception the handler exists for.
+    """
+
+    def _timeout_arg(self, source_path, call_index=0):
+        tree = _v209_ast.parse(_v209_pathlib.Path(source_path).read_text(encoding="utf-8"))
+        calls = [n for n in _v209_ast.walk(tree)
+                 if isinstance(n, _v209_ast.Call) and isinstance(n.func, _v209_ast.Attribute)
+                 and n.func.attr == "run" and isinstance(n.func.value, _v209_ast.Name)
+                 and n.func.value.id == "subprocess"]
+        self.assertTrue(calls, "the spawn must still be a subprocess.run call")
+        for call in calls:
+            for kw in call.keywords:
+                if kw.arg == "timeout":
+                    return kw.value
+        self.fail("no timeout= keyword on any subprocess.run call")
+
+    def test_the_timeout_is_the_owning_constant_not_an_arbitrary_number(self):
+        node = self._timeout_arg(_V209_SCRIPTS / "bridge_cli.py")
+        self.assertIsInstance(node, _v209_ast.Name,
+                              "the bound must be the named constant, so the value has one home")
+        self.assertEqual(node.id, "MIRROR_REGEN_TIMEOUT_S")
+
+    def test_a_timeout_is_reported_as_a_diagnostic_not_a_traceback(self):
+        # A bound with no handler turns a hang into a crash, which is not an improvement.
+        source = (_V209_SCRIPTS / "bridge_cli.py").read_text(encoding="utf-8")
+        self.assertIn("except subprocess.TimeoutExpired:", source,
+                      "the bound needs the handler it exists for")
+        self.assertIn("regeneration timed out after", source,
+                      "and the handler must say what happened, in the command's own voice")

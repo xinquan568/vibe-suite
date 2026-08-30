@@ -644,6 +644,9 @@ class TestKnowledgeFreshnessStates(DoctorCase):
 import ast as _v209_ast                                                              # noqa: E402
 import pathlib as _v209_pathlib                                                      # noqa: E402
 import sys as _v209_sys                                                              # noqa: E402
+import os as _v209_os                                                                # noqa: E402
+import tempfile as _v209_tempfile                                                    # noqa: E402
+from unittest import mock as _v209_mock                                              # noqa: E402
 
 _V209_ROOT = _v209_pathlib.Path(__file__).resolve().parent.parent
 _V209_SCRIPTS = _V209_ROOT / "scripts"
@@ -722,3 +725,67 @@ class RuntimeCapabilityRowTest(unittest.TestCase):
         row = self._row({"python3": None, "node": (24, 0), "git": (2, 43)})
         self.assertIn("preflight", row["blocked_on"].lower(),
                       "the row must point at the tool that CAN see an absent python3")
+
+
+class RuntimeProbeAndWiringTest(unittest.TestCase):
+    """The parts `runtime_capability(probe=...)` never reaches (vibe-209, Step-8 finding 3).
+
+    Calling the pure function with a pre-parsed dict proves the AGGREGATION and leaves everything
+    around it untested: the probe that produces the dict, and the call that puts the row in the
+    report at all. Both are deletable without any of those tests noticing.
+    """
+
+    def _probe_with(self, script_by_name):
+        """Run probe_runtimes against a PATH of fake binaries built from raw shell scripts."""
+        import doctor
+        binder = _v209_pathlib.Path(_v209_tempfile.mkdtemp())
+        for name, script in script_by_name.items():
+            p = binder / name
+            p.write_text(script)
+            p.chmod(0o755)
+        env = dict(_v209_os.environ, PATH=str(binder))
+        with _v209_mock.patch.dict(_v209_os.environ, env, clear=True):
+            return doctor.probe_runtimes()
+
+    def test_a_failing_version_call_is_not_a_version(self):
+        found = self._probe_with({
+            "python3": "#!/bin/sh\nprintf 'Python 3.11.9\\n'\nexit 1\n",
+            "node": "#!/bin/sh\nprintf 'v24.0.0\\n'\n",
+            "git": "#!/bin/sh\nprintf 'git version 2.43.0\\n'\n",
+        })
+        self.assertIsNone(found["python3"],
+                          "a non-zero --version is a failed probe, whatever it printed")
+
+    def test_a_wrapper_version_is_not_mistaken_for_the_runtime(self):
+        # Measured before the fix: this parsed as 9.0 and cleared the 3.11 floor.
+        found = self._probe_with({
+            "python3": "#!/bin/sh\nprintf 'wrapper 9.0 warning; Python 3.9.18\\n'\n",
+            "node": "#!/bin/sh\nprintf 'v24.0.0\\n'\n",
+            "git": "#!/bin/sh\nprintf 'git version 2.43.0\\n'\n",
+        })
+        self.assertIsNone(found["python3"], "only the runtime's own anchored banner counts")
+
+    def test_a_banner_below_wrapper_chatter_is_still_read(self):
+        found = self._probe_with({
+            "python3": "#!/bin/sh\nprintf 'wrapper: pyenv shim\\nPython 3.14.6\\n'\n",
+            "node": "#!/bin/sh\nprintf 'v24.0.0\\n'\n",
+            "git": "#!/bin/sh\nprintf 'git version 2.43.0\\n'\n",
+        })
+        self.assertEqual(found["python3"], (3, 14),
+                         "the anchor is per LINE — a false red would be no better than a false green")
+
+    def test_a_missing_binary_is_none_not_a_crash(self):
+        found = self._probe_with({"node": "#!/bin/sh\nprintf 'v24.0.0\\n'\n"})
+        self.assertIsNone(found["python3"])
+        self.assertIsNone(found["git"])
+
+    def test_the_report_actually_CONTAINS_the_runtimes_row(self):
+        """Deleting `runtime_capability(capabilities)` from diagnose leaves every other test green."""
+        import doctor
+        capabilities = []
+        doctor.runtime_capability(capabilities)
+        self.assertEqual([row["check"] for row in capabilities], ["runtimes"])
+        # and the wiring: the call site must be present in diagnose's body.
+        source = (_V209_SCRIPTS / "doctor.py").read_text(encoding="utf-8")
+        self.assertIn("runtime_capability(capabilities)", source,
+                      "the row must be assembled into the report, not merely definable")

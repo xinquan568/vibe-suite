@@ -1704,3 +1704,27 @@ class ManifestValidatorTimeoutTest(unittest.TestCase):
         calls, unbounded = _v209_unbounded_runs(_V209_SCRIPTS / "issue2pr_mode_driver.py")
         self.assertTrue(calls, "the validator spawn must still be a subprocess.run call")
         self.assertEqual([c.lineno for c in unbounded], [], "unbounded subprocess.run")
+
+
+class ManifestValidatorTimeoutValueTest(unittest.TestCase):
+    """The value and the handler at the validator site (Step-8 finding 2)."""
+
+    def test_the_timeout_is_the_owning_constant(self):
+        tree = _v209_ast.parse(
+            (_V209_SCRIPTS / "issue2pr_mode_driver.py").read_text(encoding="utf-8"))
+        found = None
+        for n in _v209_ast.walk(tree):
+            if (isinstance(n, _v209_ast.Call) and isinstance(n.func, _v209_ast.Attribute)
+                    and n.func.attr == "run" and isinstance(n.func.value, _v209_ast.Name)
+                    and n.func.value.id == "subprocess"):
+                for kw in n.keywords:
+                    if kw.arg == "timeout":
+                        found = kw.value
+        self.assertIsInstance(found, _v209_ast.Name, "the bound must be the named constant")
+        self.assertEqual(found.id, "MANIFEST_VALIDATE_TIMEOUT_S")
+
+    def test_a_timeout_becomes_a_refusal_not_a_traceback(self):
+        source = (_V209_SCRIPTS / "issue2pr_mode_driver.py").read_text(encoding="utf-8")
+        self.assertIn("except subprocess.TimeoutExpired:", source)
+        self.assertIn("did not finish within", source,
+                      "the refusal must name the bound it hit")

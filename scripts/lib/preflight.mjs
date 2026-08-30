@@ -326,13 +326,30 @@ export const RUNTIME_FLOORS = {
 export const RUNTIME_NAMES = ["python3", "node", "git"];
 
 /**
- * The first dotted number in a `--version` line, as integer components.
+ * Each runtime's own `--version` grammar, anchored to the start of a line.
  *
- * Returns `null` when there is nothing version-shaped to read, which the caller turns into the
- * `"unknown"` that `exitCodeFor` already fails.
+ * **Not "the first dotted number anywhere".** That accepted `wrapper 9.0 warning; Python 3.9.18` as
+ * version 9.0 — clearing a 3.11 floor while the actual interpreter was 3.9.18, so preflight called
+ * a machine healthy that was not. Anything a wrapper prints ahead of the real banner is noise, and
+ * only the runtime's documented form counts.
  */
-function parseVersion(text) {
-  const match = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(String(text ?? ""));
+const RUNTIME_VERSION_PATTERNS = {
+  python3: /^Python (\d{1,4})\.(\d{1,4})(?:\.(\d{1,4}))?/m,
+  node: /^v(\d{1,4})\.(\d{1,4})(?:\.(\d{1,4}))?/m,
+  git: /^git version (\d{1,4})\.(\d{1,4})(?:\.(\d{1,4}))?/m,
+};
+
+/**
+ * The runtime's version as integer components, or `null` when its banner is not there.
+ *
+ * Components are bounded to four digits by the patterns above: an absurd component is a sign the
+ * output is not what it claims to be, and `Number` on an arbitrarily long digit run is a value no
+ * floor comparison should be asked to interpret.
+ */
+function parseVersion(name, text) {
+  const pattern = RUNTIME_VERSION_PATTERNS[name];
+  if (!pattern) return null;
+  const match = pattern.exec(String(text ?? ""));
   if (!match) return null;
   return [match[1], match[2], match[3] ?? "0"].map(Number);
 }
@@ -359,7 +376,11 @@ const floorText = (floor) => (floor === null ? null : floor.join("."));
 /** The default effect: run `<name> --version` on PATH, bounded by the same deadline as the engines. */
 async function defaultRuntimeRun(name, timeoutMs, env) {
   try {
-    return await runWithDeadline({ command: name, args: ["--version"], env, timeoutMs });
+    // `detached: true`, like the engine probes. A runtime on PATH may be a wrapper script that
+    // spawns descendants, and only a group-wide deadline reaps those; a non-detached kill leaves
+    // them holding the inherited pipes. The engine lanes already learned this (E1.3 / vibe-13).
+    return await runWithDeadline({ command: name, args: ["--version"], env, timeoutMs,
+      detached: true });
   } catch (error) {
     if (error?.code === "ENOENT" || error?.code === "EACCES") {
       return { exitCode: null, stdout: "", stderr: "", timedOut: false, spawnFailed: true };
@@ -391,14 +412,33 @@ export async function probeRuntime(name, deps = {}) {
       detail: `${name} --version did not return within the probe deadline` };
   }
 
+  // Confirmation, not a timer: an unreaped group means descendants may still be running, and a
+  // probe that could not be bounded is not a probe that succeeded.
+  if (outcome.groupReaped !== true) {
+    return { runtime: name, available: false, version: "unknown", auth: null,
+      detail: `${name} --version could not be confirmed reaped — investigate before trusting it` };
+  }
+  // A non-zero exit means the command FAILED, whatever it printed on the way. Reporting a runtime
+  // as available because a failing invocation happened to mention a version is the same class of
+  // defect as reading a verdict out of a stream instead of an assistant message.
+  if (outcome.exitCode !== 0) {
+    return { runtime: name, available: false, version: "unknown", auth: null,
+      detail: `${name} --version exited ${outcome.exitCode}` };
+  }
+
   // Both streams: `python3 --version` printed to stderr on 3.3 and earlier, and a wrapper may still.
   const text = `${outcome.stdout ?? ""}\n${outcome.stderr ?? ""}`.trim();
-  const parsed = parseVersion(text);
-  const version = boundToken(text.split("\n")[0] ?? "") || "unknown";
+  const parsed = parseVersion(name, text);
   if (parsed === null) {
     return { runtime: name, available: false, version: "unknown", auth: null,
-      detail: `could not read a version from ${name} --version` };
+      detail: `could not read a ${name} version banner from --version` };
   }
+  // The reported token is the matched BANNER, not the first line: a wrapper's own chatter has no
+  // business in the matrix. No `boundToken` here, deliberately — the anchored pattern IS the bound.
+  // It matches a fixed literal plus components of at most four digits, so the result cannot exceed
+  // ~30 characters and cannot contain a control character. Passing it through `boundToken` would be
+  // a line no input can change, which the mutation ledger correctly refused to certify.
+  const version = RUNTIME_VERSION_PATTERNS[name].exec(text)[0];
 
   const ok = meetsFloor(parsed, floor);
   return {

@@ -390,17 +390,36 @@ def _staler_path(skill_md, refreshed):
 RUNTIME_FLOORS = {"python3": (3, 11), "node": (18,), "git": None}
 
 
+#: Each runtime's own `--version` grammar, anchored to the start of a line. NOT "the first dotted
+#: number anywhere": that read `wrapper 9.0 warning; Python 3.9.18` as 9.0, clearing a 3.11 floor
+#: while the real interpreter was below it. Components are bounded — an absurd one means the output
+#: is not what it claims to be.
+RUNTIME_VERSION_PATTERNS = {
+    "python3": re.compile(r"^Python (\d{1,4})\.(\d{1,4})", re.M),
+    "node": re.compile(r"^v(\d{1,4})\.(\d{1,4})", re.M),
+    "git": re.compile(r"^git version (\d{1,4})\.(\d{1,4})", re.M),
+}
+
+
 def probe_runtimes():
-    """The installed version of each runtime, as integer components, or None when absent."""
+    """The installed version of each runtime, as integer components, or None when unreadable.
+
+    `None` covers every way the answer is not a version: the binary is absent, the invocation
+    FAILED, it timed out, or it printed nothing matching the runtime's own banner. A non-zero exit
+    is a failed probe whatever it printed on the way — reporting a runtime present because a failing
+    command mentioned a number would be a false green in the one check meant to prevent them.
+    """
     found = {}
-    for name in ("python3", "node", "git"):
+    for name, pattern in RUNTIME_VERSION_PATTERNS.items():
         try:
             proc = subprocess.run([name, "--version"], capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError):
             found[name] = None
             continue
-        text = f"{proc.stdout}\n{proc.stderr}"
-        match = re.search(r"(\d+)\.(\d+)", text)
+        if proc.returncode != 0:
+            found[name] = None
+            continue
+        match = pattern.search(f"{proc.stdout}\n{proc.stderr}")
         found[name] = (int(match.group(1)), int(match.group(2))) if match else None
     return found
 

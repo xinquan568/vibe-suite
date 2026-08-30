@@ -518,3 +518,71 @@ test("phase B: a background dispatch is unchanged when the event log cannot be w
     "and byte-identical captured output — the record is what a caller reads back");
   assert.equal(eventsOf(blocked).length, 0, "nothing was recorded, which is the point of the fixture");
 });
+
+// --- vibe-209: the runner WIRING, not just the functions -------------------------------------------
+//
+// Step-8 finding 1: `claim-budget.test.mjs` exercises `resolveClaimBudget` and `claimFailureMessage`
+// with invented pids. It never runs the runner, so three wiring points went unprotected — ignoring
+// the resolved seam, passing a fixed timeout to `awaitWorkerClaim`, and building the message from
+// something other than the real `child.pid`. All three would have shipped green.
+//
+// The forcing function is the seam itself, at a value no cold Node start can beat. Nothing is
+// mocked and no test-only hook is invented: the budget expires, the runner takes its no-claim path,
+// and the PERSISTED record is read back — which is the only account of a dispatch that failed
+// before its worker ever wrote anything.
+
+/** Dispatch with a budget too small to win, and return the record the store kept. */
+async function noClaimRecord(budgetMs) {
+  const ws = workspace();
+  const result = spawnSync("node", [RUNNER,
+    "--kind", "review", "--effort", "low", "--sandbox", "read-only",
+    "--timeout-ms", "120000", "--background", "--", "fixture prompt",
+  ], {
+    cwd: ws, encoding: "utf8", timeout: 60_000,
+    env: {
+      ...process.env,
+      VIBE_SUITE_CODEX_BIN: path.join(FIXTURES, "emitter.mjs"),
+      // Below any cold Node start, so the handshake cannot be won and the no-claim path is taken
+      // deterministically. This is the shipped seam, not a test hook.
+      VIBE_SUITE_CLAIM_BUDGET_MS: String(budgetMs),
+    },
+  });
+  assert.notEqual(result.status, 0,
+    `a no-claim dispatch must not report success: ${result.stdout}${result.stderr}`);
+  const ids = readdirSync(jobsDir(ws), { withFileTypes: true })
+    .filter((e) => e.isFile() && /^job_[0-9a-f]{20}\.json$/.test(e.name))
+    .map((e) => e.name.replace(/\.json$/, ""));
+  assert.equal(ids.length, 1, `exactly one job record: ${JSON.stringify(ids)}`);
+  return waitFor(ws, ids[0], (r) => TERMINAL.has(r.status),
+    "the dispatch to settle after the claim never arrives");
+}
+
+test("R11-wiring: the EFFECTIVE budget travels into the stored claim error (vibe-209)", async () => {
+  for (const budgetMs of [1, 7]) {
+    const record = await noClaimRecord(budgetMs);
+    assert.equal(record.status, "failed", `expected the no-claim path: ${JSON.stringify(record)}`);
+    // The EXACT budget, not `\d+`. A runner that resolved the seam and then reported the default
+    // would satisfy any shape-based assertion — which is what the first version of this test did.
+    assert.match(record.error, new RegExp(`within ${budgetMs}ms`),
+      `the effective budget must travel into the message: ${record.error}`);
+  }
+});
+
+test("R11-pid: the pid is the one actually spawned, which a constant cannot fake (vibe-209)", async () => {
+  // The mutation that earned this test: replacing `child.pid` with a literal. A shape check —
+  // "a positive integer that is not this test's pid" — accepts `424242` happily, so it certified
+  // nothing. Two dispatches spawn two different children; a fabricated value is the SAME in both,
+  // and no literal can satisfy an assertion that they differ.
+  const [a, b] = [await noClaimRecord(1), await noClaimRecord(1)];
+  const pidOf = (record) => {
+    const found = /\(pid (\d+)\)/.exec(record.error);
+    assert.ok(found, `a pid must be named at all: ${record.error}`);
+    return Number(found[1]);
+  };
+  const [first, second] = [pidOf(a), pidOf(b)];
+  assert.ok(Number.isInteger(first) && first > 0, `a real pid: ${first}`);
+  assert.notEqual(first, process.pid, "not this test's own pid");
+  assert.notEqual(first, second,
+    `two dispatches spawn two children — an identical pid in both means it was invented, not read `
+    + `(${first} vs ${second})`);
+});

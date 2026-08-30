@@ -400,9 +400,88 @@ test("R-HOSTILE: a runtime's version output is bounded and control-free (vibe-20
     seam: path.join(FIXTURES, "preflight-ok.mjs"), args: ["--json"],
   });
   const { version } = runtimeRow(result, "node");
-  assert.ok(version.length <= 64, `the token must be bounded, got ${version.length} chars`);
-  assert.ok(!/[\u0000-\u001f]/.test(version), `no control characters may survive: ${JSON.stringify(version)}`);
-  assert.ok(!result.stdout.includes("\u0007"), "and none may reach the document either");
+  // The BANNER, exactly — not "something short and clean". The anchored pattern is the bound, so
+  // asserting a length ceiling would pass for any implementation that happened to truncate; this
+  // fails unless the reported token is the runtime's own version line and nothing else.
+  assert.equal(version, "v18.0.0",
+    `only the anchored banner may be reported, got ${JSON.stringify(version)}`);
+  assert.ok(!/[\u0000-\u001f]/.test(version), "and no control character can be in it");
+  assert.ok(!result.stdout.includes("\u0007"), "nor reach the document by another route");
+});
+
+/** A PATH whose named binary runs `script` verbatim — for outputs a version string cannot express. */
+function rawRuntimePath(name, script, others = HEALTHY) {
+  const bin = tempDir("preflight-raw-");
+  for (const [other, out] of Object.entries(others)) {
+    if (other !== name) fakeRuntime(bin, other, out);
+  }
+  const p = path.join(bin, name);
+  writeFileSync(p, script);
+  chmodSync(p, 0o755);
+  return bin;
+}
+
+test("R-REAP: an unreaped probe group is a failure, not a version (vibe-209)", async () => {
+  // Injected rather than raced. `runWithDeadline` confirms a group's disappearance and reports it
+  // through `groupReaped`; a probe whose descendants may still be running has not been bounded, so
+  // its output is not evidence. Producing a genuinely unreaped group on demand is not something a
+  // test can do reliably — the effect seam is, and the branch is what matters.
+  const { probeRuntime } = await import("../../scripts/lib/preflight.mjs");
+  const outcome = {
+    exitCode: 0, stdout: "Python 3.14.6\n", stderr: "", timedOut: false,
+    spawnFailed: false, groupReaped: false,
+  };
+  const row = await probeRuntime("python3", { run: async () => outcome });
+  assert.equal(row.available, false,
+    "an unconfirmed reap must fail closed — a timer that merely expired proves nothing");
+  assert.match(row.detail, /reaped/, `the reason must say so: ${row.detail}`);
+
+  const confirmed = await probeRuntime("python3",
+    { run: async () => ({ ...outcome, groupReaped: true }) });
+  assert.equal(confirmed.available, true, "and the same output WITH confirmation is fine");
+});
+
+test("R-EXIT: a runtime that FAILS is unavailable, whatever it printed on the way (vibe-209)", () => {
+  // Reporting a runtime available because a failing invocation happened to mention a version is the
+  // same class of defect as reading a verdict out of a raw stream instead of an assistant message.
+  const result = cli({
+    pathVar: rawRuntimePath("python3", "#!/bin/sh\nprintf 'Python 3.11.9\\n'\nexit 1\n"),
+    seam: path.join(FIXTURES, "preflight-ok.mjs"), args: ["--json"],
+  });
+  const row = runtimeRow(result, "python3");
+  assert.equal(row.available, false, "a non-zero --version is a failed probe, not a version");
+  assert.match(row.detail, /exited 1/, `the exit status must be reported: ${row.detail}`);
+  assert.equal(result.status, 1);
+});
+
+test("R-BANNER: a wrapper's own version cannot be mistaken for the runtime's (vibe-209)", () => {
+  // The defect this kills, measured before it was fixed: `wrapper 9.0 warning; Python 3.9.18` parsed
+  // as 9.0, cleared the 3.11 floor, and reported available — while the real interpreter was 3.9.18.
+  // Preflight called a machine healthy that was not, which is the exact failure it exists to catch.
+  const result = cli({
+    pathVar: rawRuntimePath("python3",
+      "#!/bin/sh\nprintf 'wrapper 9.0 warning; Python 3.9.18\\n'\n"),
+    seam: path.join(FIXTURES, "preflight-ok.mjs"), args: ["--json"],
+  });
+  const row = runtimeRow(result, "python3");
+  assert.equal(row.available, false,
+    "only the runtime's own anchored banner counts; a leading dotted number is not a version");
+  assert.ok(!/9\.0/.test(row.version), `the wrapper's number must not be reported: ${row.version}`);
+  assert.equal(result.status, 1);
+});
+
+test("R-ANCHOR: the real banner is still read when a wrapper prints ABOVE it (vibe-209)", () => {
+  // The anchor is per LINE, not per output — a wrapper that warns on its own line must not stop the
+  // real banner from being found, or the fix would trade a false green for a false red.
+  const result = cli({
+    pathVar: rawRuntimePath("python3",
+      "#!/bin/sh\nprintf 'wrapper: using pyenv shim\\nPython 3.14.6\\n'\n"),
+    seam: path.join(FIXTURES, "preflight-ok.mjs"), args: ["--json"],
+  });
+  const row = runtimeRow(result, "python3");
+  assert.equal(row.available, true, "the banner is on its own line and must be found");
+  assert.equal(row.version, "Python 3.14.6",
+    "and the REPORTED token is the banner, not the wrapper's first line");
 });
 
 // --- the JSON envelope ---------------------------------------------------------------------------

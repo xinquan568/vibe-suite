@@ -27,7 +27,14 @@ and §7A row 9 (executed 2026-08-13, E8.5 — the receipt lives on the `auditor-
 project-local command does not read; the row records the completed migration).
 
 Do not merge them. `vibe-core` makes `[GOOD]` **exclusive**: a report containing it contains exactly
-that one entry. Filing an unavailable capability as a finding would mean no project could ever
+that one entry.
+
+**Runtimes.** One capability row reports `python3` (3.11+), `node` (18+) and `git`. It is a
+capability rather than a finding because a missing runtime is a fact about the machine, not a
+defect in the project, and `[GOOD]` is exclusive. Its `blocked_on` states the limit plainly:
+doctor is launched *with* `python3`, so an **absent** python3 produces no doctor output at all,
+including that row — `/vibe-suite:preflight` is Node-hosted and is the diagnostic for that case,
+exactly as doctor is for an absent `node`. Filing an unavailable capability as a finding would mean no project could ever
 report clean, which is half of what this command exists to say.
 
 A check that is absent from the output is indistinguishable from one that passed, so every check

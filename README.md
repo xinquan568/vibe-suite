@@ -14,8 +14,10 @@ Commands are namespaced `/vibe-suite:*`, which follows from `name` in
 
 ## Platform support
 
-**POSIX only, Python 3.11+** — bash, `python3` (3.11 or newer), `node`, and symlinks are
-assumed throughout. macOS and Linux are
+**POSIX only, Python 3.11+** — bash, `python3` (3.11 or newer), `node`, `git`, and symlinks are
+assumed throughout. `/vibe-suite:preflight` reports all three runtimes, and
+`VIBE_SUITE_CLAIM_BUDGET_MS` raises or lowers the worker claim-handshake budget (default 5000 ms,
+maximum 300000; an invalid value falls back to the default with a notice). macOS and Linux are
 supported; **Windows is not**, including via cmd/PowerShell. WSL works because it is POSIX. This is a
 deliberate v1 constraint inherited from all three projects this one references, stated explicitly
 rather than left to be discovered.

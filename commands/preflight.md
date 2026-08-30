@@ -1,9 +1,9 @@
 ---
-description: "Probe external-engine readiness for both lanes: version, auth mode, exec smoke, and dynamic model discovery (never hardcoded). The agy lane reports as pending while its contract gate is shut. No arguments."
+description: "Probe engine readiness for both lanes — version, auth mode, exec smoke, and dynamic model discovery (never hardcoded) — and the local runtimes the suite shells to: python3, node and git. The agy lane reports as pending while its contract gate is shut. No arguments."
 argument-hint: "[--json]"
 ---
 
-# /vibe-suite:preflight — engine readiness and model discovery
+# /vibe-suite:preflight — engine and runtime readiness, and model discovery
 
 Answers, before any command trusts an external engine: **is the lane usable from here**, and
 **what models does it offer**. Codex is probed live; the agy column is a pending slot until the agy
@@ -20,9 +20,25 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/preflight-cli.mjs" $ARGUMENTS
 (Working from a checkout of this repo instead of an installed plugin, substitute the checkout path
 for `${CLAUDE_PLUGIN_ROOT}`.)
 
-The only accepted argument is `--json` (the matrix as one JSON document). Exit codes: `0` — every
-probed lane available and no probe degraded; `1` — a probed lane unavailable or a probe degraded to
-`unknown`; `2` — usage. The matrix always prints either way.
+The only accepted argument is `--json` (the matrix as one JSON document, with `engines` and
+`runtimes` as sibling keys). Exit codes: `0` — every probed lane available, every runtime present and
+at its floor, and no probe degraded; `1` — a probed lane or runtime unavailable, or a probe degraded
+to `unknown`; `2` — usage. The matrix always prints either way.
+
+## Runtimes
+
+Beside the engine lanes, preflight reports the three programs the suite shells to: **`python3`
+(3.11+)**, **`node` (18+)** and **`git`**. Without them a missing runtime first announced itself as a
+stack trace mid-run, or as a silent fail-open.
+
+These rows are not engines and do not pretend to be: they carry `runtime` instead of `engine`, and
+`auth: null` — not `unknown` — because a version probe of `git` has no auth mode to fail to read.
+They count toward the exit code through the same two rules every row obeys, `available` and a
+readable `version`.
+
+**Preflight cannot report an absent `node`**, because it runs under it. `/vibe-suite:doctor` is
+Python-hosted and carries the complementary row; between the two, every runtime is covered, and
+neither tool can report the absence of its own host.
 
 ## What the probes do
 

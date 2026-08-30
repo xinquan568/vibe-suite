@@ -394,10 +394,12 @@ RUNTIME_FLOORS = {"python3": (3, 11), "node": (18,), "git": None}
 #: number anywhere": that read `wrapper 9.0 warning; Python 3.9.18` as 9.0, clearing a 3.11 floor
 #: while the real interpreter was below it. Components are bounded — an absurd one means the output
 #: is not what it claims to be.
+#: `(?!\d)` after every component: without it `\d{1,4}` TRUNCATES rather than rejects, so
+#: `Python 3.12345` read as (3, 1234) — a fabricated version handed to the floor comparison.
 RUNTIME_VERSION_PATTERNS = {
-    "python3": re.compile(r"^Python (\d{1,4})\.(\d{1,4})", re.M),
-    "node": re.compile(r"^v(\d{1,4})\.(\d{1,4})", re.M),
-    "git": re.compile(r"^git version (\d{1,4})\.(\d{1,4})", re.M),
+    "python3": re.compile(r"^Python (\d{1,4})(?!\d)\.(\d{1,4})(?!\d)", re.M),
+    "node": re.compile(r"^v(\d{1,4})(?!\d)\.(\d{1,4})(?!\d)", re.M),
+    "git": re.compile(r"^git version (\d{1,4})(?!\d)\.(\d{1,4})(?!\d)", re.M),
 }
 
 

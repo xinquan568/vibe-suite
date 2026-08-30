@@ -333,10 +333,14 @@ export const RUNTIME_NAMES = ["python3", "node", "git"];
  * a machine healthy that was not. Anything a wrapper prints ahead of the real banner is noise, and
  * only the runtime's documented form counts.
  */
+// `(?!\d)` after every component, and it is load-bearing. Without it `\d{1,4}` TRUNCATES rather
+// than rejects: `Python 3.12345` matched as 3.1234 — not a display artefact but a *fabricated*
+// version, handed to the floor comparison as if it were read. An implausible component means the
+// output is not the banner it looks like, and the honest answer is to fail closed.
 const RUNTIME_VERSION_PATTERNS = {
-  python3: /^Python (\d{1,4})\.(\d{1,4})(?:\.(\d{1,4}))?/m,
-  node: /^v(\d{1,4})\.(\d{1,4})(?:\.(\d{1,4}))?/m,
-  git: /^git version (\d{1,4})\.(\d{1,4})(?:\.(\d{1,4}))?/m,
+  python3: /^Python (\d{1,4})(?!\d)\.(\d{1,4})(?!\d)(?:\.(\d{1,4})(?!\d))?/m,
+  node: /^v(\d{1,4})(?!\d)\.(\d{1,4})(?!\d)(?:\.(\d{1,4})(?!\d))?/m,
+  git: /^git version (\d{1,4})(?!\d)\.(\d{1,4})(?!\d)(?:\.(\d{1,4})(?!\d))?/m,
 };
 
 /**
@@ -394,12 +398,15 @@ async function defaultRuntimeRun(name, timeoutMs, env) {
  * ones that do not exist for a runtime (`smoke`, `models`).
  */
 export async function probeRuntime(name, deps = {}) {
-  const { env = process.env } = deps;
-  const run = deps.run ?? ((timeoutMs) => defaultRuntimeRun(name, timeoutMs, env));
+  // `timeoutMs` defaults to the production deadline and exists so a test can shorten it without
+  // replacing the effect: the group-kill behaviour under test IS `defaultRuntimeRun`, so a fake
+  // `run` would prove nothing about it.
+  const { env = process.env, timeoutMs = VERSION_TIMEOUT_MS } = deps;
+  const run = deps.run ?? ((ms) => defaultRuntimeRun(name, ms, env));
   const floor = RUNTIME_FLOORS[name] ?? null;
   const wanted = floorText(floor);
 
-  const outcome = await run(VERSION_TIMEOUT_MS);
+  const outcome = await run(timeoutMs);
   if (outcome.spawnFailed) {
     return {
       runtime: name, available: false, version: null, auth: null,

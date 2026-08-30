@@ -9,7 +9,7 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import path from "node:path";
 import test from "node:test";
@@ -439,6 +439,61 @@ test("R-REAP: an unreaped probe group is a failure, not a version (vibe-209)", a
   const confirmed = await probeRuntime("python3",
     { run: async () => ({ ...outcome, groupReaped: true }) });
   assert.equal(confirmed.available, true, "and the same output WITH confirmation is fine");
+});
+
+test("R-DESCENDANT: only a GROUP-wide deadline reaps a probe's descendant (vibe-209)", async () => {
+  // What `detached: true` is FOR, measured in both directions rather than asserted in one.
+  //
+  // An earlier version of this test called `probeRuntime` and checked the descendant was gone. It
+  // passed — and it ALSO passed with `detached: true` removed, so it certified nothing. The
+  // discriminating measurement is the one below: the same fixture, through the same
+  // `runWithDeadline`, differs only in `detached`, and the descendant survives exactly when the
+  // deadline is not group-wide.
+  //
+  // `probeRuntime`'s use of the detached form is covered separately and behaviourally: without it
+  // `groupReaped` is `null`, which fails the guard R-REAP pins and turns every healthy-runtime row
+  // unavailable.
+  const { runWithDeadline } = await import("../../scripts/lib/process.mjs");
+
+  const spawnHangingParentWithChild = () => {
+    const bin = tempDir("preflight-desc-");
+    const pidFile = path.join(bin, "descendant.pid");
+    const fake = path.join(bin, "python3");
+    // A backgrounded grandchild that would outlive its parent, then a parent that hangs past the
+    // deadline. Only signalling the whole group reaches the grandchild.
+    writeFileSync(fake,
+      `#!/bin/sh\nsh -c 'sleep 30' &\nprintf '%s' "$!" > ${JSON.stringify(pidFile)}\nsleep 30\n`);
+    chmodSync(fake, 0o755);
+    return { fake, pidFile };
+  };
+
+  const observe = async (detached) => {
+    const { fake, pidFile } = spawnHangingParentWithChild();
+    const outcome = await runWithDeadline({
+      command: fake, args: ["--version"], env: process.env, timeoutMs: 1000, detached,
+    });
+    await new Promise((resolve) => { setTimeout(resolve, 600); });
+    assert.ok(existsSync(pidFile), "the fixture must actually have spawned a descendant");
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    assert.ok(Number.isInteger(pid) && pid > 0, `a descendant pid was recorded: ${pid}`);
+    let alive = true;
+    try { process.kill(pid, 0); } catch { alive = false; }
+    if (alive) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+    return { alive, groupReaped: outcome.groupReaped };
+  };
+
+  const grouped = await observe(true);
+  assert.equal(grouped.groupReaped, true, "the detached form confirms the group is gone");
+  assert.equal(grouped.alive, false,
+    "and the descendant dies with it — this is the whole purpose of the detached deadline");
+
+  const ungrouped = await observe(false);
+  assert.notEqual(ungrouped.groupReaped, true,
+    "the plain form cannot confirm a group it never made");
+  assert.equal(ungrouped.alive, true,
+    "and the descendant SURVIVES — which is the failure the runtime probe must not have. If this "
+    + "assertion ever fails, the measurement no longer discriminates and the test above proves "
+    + "nothing.");
 });
 
 test("R-EXIT: a runtime that FAILS is unavailable, whatever it printed on the way (vibe-209)", () => {

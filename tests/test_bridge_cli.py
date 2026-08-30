@@ -706,6 +706,10 @@ class TestMirrorWiring(BridgeCase):
 import ast as _v209_ast                                                              # noqa: E402
 import pathlib as _v209_pathlib                                                      # noqa: E402
 import sys as _v209_sys                                                              # noqa: E402
+from unittest import mock as _v209_mock                                              # noqa: E402
+import io as _v209_io                                                               # noqa: E402
+import contextlib as _v209_contextlib                                               # noqa: E402
+import tempfile as _v209_tempfile                                                   # noqa: E402
 
 _V209_ROOT = _v209_pathlib.Path(__file__).resolve().parent.parent
 _V209_SCRIPTS = _V209_ROOT / "scripts"
@@ -774,9 +778,34 @@ class MirrorRegenTimeoutValueTest(unittest.TestCase):
         self.assertEqual(node.id, "MIRROR_REGEN_TIMEOUT_S")
 
     def test_a_timeout_is_reported_as_a_diagnostic_not_a_traceback(self):
-        # A bound with no handler turns a hang into a crash, which is not an improvement.
-        source = (_V209_SCRIPTS / "bridge_cli.py").read_text(encoding="utf-8")
-        self.assertIn("except subprocess.TimeoutExpired:", source,
-                      "the bound needs the handler it exists for")
-        self.assertIn("regeneration timed out after", source,
-                      "and the handler must say what happened, in the command's own voice")
+        """FORCE the exception; a source search proves only that the words are in the file.
+
+        A bound with no handler turns a hang into a crash, which is not an improvement — and the
+        earlier version of this test would have passed with the `except` deleted, because it read
+        for the string rather than running the path.
+        """
+        import bridge_cli
+        ws = _v209_pathlib.Path(_v209_tempfile.mkdtemp())
+        plugin_root = _v209_pathlib.Path(_v209_tempfile.mkdtemp())
+        gen = plugin_root / "scripts" / "mirror-sync.py"
+        gen.parent.mkdir(parents=True, exist_ok=True)
+        gen.write_text("# stand-in for the generator; never actually run\n")
+
+        def explode(argv, **kwargs):
+            raise bridge_cli.subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+        err = _v209_io.StringIO()
+        with _v209_mock.patch.object(bridge_cli.subprocess, "run", explode), \
+                _v209_contextlib.redirect_stderr(err):
+            rc = bridge_cli.main(["mirrors", "--workspace", str(ws),
+                                  "--plugin-root", str(plugin_root)])
+        self.assertEqual(rc, 1, "a timed-out regeneration is a reported failure, not a crash")
+        # The command's OWN sentence, not Python's. `TimeoutExpired.__str__` is
+        # "Command '[...]' timed out after 60 seconds", so asserting "timed out after" or "60"
+        # passes whether this handler ran or a generic outer one printed the raw exception —
+        # which is exactly how the first version of this test certified nothing.
+        self.assertIn("error: mirrors: regeneration timed out after 60s", err.getvalue(),
+                      "the handler's own diagnostic must be what reaches the operator: %r"
+                      % err.getvalue())
+        self.assertNotIn("Command '[", err.getvalue(),
+                         "and the raw exception must not be what they see")

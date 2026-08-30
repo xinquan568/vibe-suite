@@ -779,13 +779,32 @@ class RuntimeProbeAndWiringTest(unittest.TestCase):
         self.assertIsNone(found["python3"])
         self.assertIsNone(found["git"])
 
-    def test_the_report_actually_CONTAINS_the_runtimes_row(self):
-        """Deleting `runtime_capability(capabilities)` from diagnose leaves every other test green."""
+    def test_the_REPORT_from_diagnose_contains_the_runtimes_row(self):
+        """Through `diagnose`, not a source search.
+
+        Deleting `runtime_capability(capabilities)` leaves a source search passing if the words
+        appear anywhere, and leaves every unit test on the pure function green. The row has to be
+        in what the command actually emits.
+        """
         import doctor
-        capabilities = []
-        doctor.runtime_capability(capabilities)
-        self.assertEqual([row["check"] for row in capabilities], ["runtimes"])
-        # and the wiring: the call site must be present in diagnose's body.
-        source = (_V209_SCRIPTS / "doctor.py").read_text(encoding="utf-8")
-        self.assertIn("runtime_capability(capabilities)", source,
-                      "the row must be assembled into the report, not merely definable")
+        ws = _v209_pathlib.Path(_v209_tempfile.mkdtemp())
+        report = doctor.diagnose(ws)
+        rows = [row for row in report["capabilities"] if row["check"] == "runtimes"]
+        self.assertEqual(len(rows), 1,
+                         "exactly one runtimes row in the emitted report: %r"
+                         % [r["check"] for r in report["capabilities"]])
+        self.assertIn(rows[0]["status"], ("ok", "unavailable"))
+        self.assertIn("preflight", rows[0]["blocked_on"].lower(),
+                      "and it still carries the bootstrap disclosure")
+
+
+class RuntimeVersionBoundsTest(unittest.TestCase):
+    """An implausible component is not a version (vibe-209, Step-9 finding 4)."""
+
+    def test_an_oversized_component_is_rejected_not_truncated(self):
+        import doctor
+        # `\d{1,4}` without a lookahead TRUNCATES: `Python 3.12345` matched as (3, 1234), a version
+        # that was never printed, handed to the floor comparison as if it had been read.
+        self.assertIsNone(doctor.RUNTIME_VERSION_PATTERNS["python3"].search("Python 3.12345"),
+                          "an implausible component means the output is not the banner it resembles")
+        self.assertIsNotNone(doctor.RUNTIME_VERSION_PATTERNS["python3"].search("Python 3.11.9"))

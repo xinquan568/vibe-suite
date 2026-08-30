@@ -1671,6 +1671,8 @@ class TestWatcherDegradationCounters(WatcherCase):
 import ast as _v209_ast                                                              # noqa: E402
 import pathlib as _v209_pathlib                                                      # noqa: E402
 import sys as _v209_sys                                                              # noqa: E402
+from unittest import mock as _v209_mock                                              # noqa: E402
+import types as _v209_types                                                         # noqa: E402
 
 _V209_ROOT = _v209_pathlib.Path(__file__).resolve().parent.parent
 _V209_SCRIPTS = _V209_ROOT / "scripts"
@@ -1724,7 +1726,19 @@ class ManifestValidatorTimeoutValueTest(unittest.TestCase):
         self.assertEqual(found.id, "MANIFEST_VALIDATE_TIMEOUT_S")
 
     def test_a_timeout_becomes_a_refusal_not_a_traceback(self):
-        source = (_V209_SCRIPTS / "issue2pr_mode_driver.py").read_text(encoding="utf-8")
-        self.assertIn("except subprocess.TimeoutExpired:", source)
-        self.assertIn("did not finish within", source,
-                      "the refusal must name the bound it hit")
+        """FORCE the exception rather than reading the source for the handler's words."""
+        import issue2pr_mode_driver as driver
+
+        def explode(argv, **kwargs):
+            raise driver.subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+        decl = _v209_types.SimpleNamespace(block=lambda name: {
+            "validate_via": "scripts/manifest_entry.py", "creates": "x",
+            "containment": "y", "initial_status": "pending"})
+        args = _v209_types.SimpleNamespace(manifest="m.json", profile="vibe-suite")
+
+        with _v209_mock.patch.object(driver.subprocess, "run", explode):
+            with self.assertRaises(driver.Refusal) as caught:
+                driver.mode_manifest(decl, args)
+        self.assertIn("did not finish within", str(caught.exception))
+        self.assertIn("60", str(caught.exception), "the refusal names the bound it hit")

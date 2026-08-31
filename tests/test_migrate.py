@@ -770,6 +770,47 @@ class ConflictsStampHasOneDefinition(unittest.TestCase):
         self.assertTrue(report.read_text(encoding="utf-8")
                         .startswith(bridge.MIGRATION_CONFLICTS_STAMP))
 
+    # T15 — the writer must not OVERWRITE a user's file whose only resemblance is a translated
+    # newline. This is the mirror of the teardown defect: `read_text` normalised CRLF/bare CR to the
+    # LF-only stamp, so a Windows-authored file at the fixed report path was truncated (vibe-265).
+    def test_a_users_crlf_file_at_the_report_path_is_not_overwritten(self):
+        stamp = __import__("bridge").MIGRATION_CONFLICTS_STAMP
+        (self.ws / ".vibe-suite-state").mkdir(parents=True, exist_ok=True)
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.txt"
+        for label, raw in (("crlf", stamp.rstrip("\n").encode() + b"\r\nmy own notes\r\n"),
+                           ("bare-cr", stamp.rstrip("\n").encode() + b"\rmy own notes\r"),
+                           ("stamp-then-invalid-utf8", stamp.encode() + b"\xff\xfe mine\n")):
+            with self.subTest(shape=label):
+                report.write_bytes(raw)
+                for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+                    d = self.ws / name
+                    d.mkdir(exist_ok=True)
+                    (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+                r = subprocess.run(["bash", str(self.SCRIPT), "--workspace", str(self.ws)],
+                                   capture_output=True, text=True)
+                self.assertEqual(report.read_bytes(), raw,
+                                 f"{label}: a user's file at the report path was overwritten")
+                self.assertIn("is not ours", r.stderr)
+                self.assertEqual(r.returncode, 1)
+
+    # T16 — positive control: the guard must still let a re-run replace the writer's OWN output.
+    # A byte-exact check that refuses everything would "pass" T15 while breaking the feature.
+    def test_our_own_txt_report_is_still_replaceable(self):
+        stamp = __import__("bridge").MIGRATION_CONFLICTS_STAMP
+        (self.ws / ".vibe-suite-state").mkdir(parents=True, exist_ok=True)
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.txt"
+        report.write_text(stamp + "an earlier run's rows\n", encoding="utf-8")
+        for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+            d = self.ws / name
+            d.mkdir(exist_ok=True)
+            (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+        r = subprocess.run(["bash", str(self.SCRIPT), "--workspace", str(self.ws)],
+                           capture_output=True, text=True)
+        self.assertNotIn("is not ours", r.stderr, "the guard refused a report this tool wrote")
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertTrue(report.read_text(encoding="utf-8").startswith(stamp))
+        self.assertNotIn("an earlier run's rows", report.read_text(encoding="utf-8"))
+
     # T12 — kills P2: the writer SOURCES the stamp rather than holding its own copy. A value test
     # cannot see this: with an identical private literal the output is byte-identical and T9 passes.
     def test_the_migration_sources_the_stamp_and_keeps_no_literal_of_its_own(self):

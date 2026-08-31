@@ -43,6 +43,33 @@ SENTINEL_PREFIX = "vibe-agent:"
 #: reports already written to a user's workspace.
 MIGRATION_CONFLICTS_STAMP = "# vibe-suite-owned: migration-conflicts\n"
 
+
+def stamp_matches(path, stamp):
+    """Whether the file at `path` begins with EXACTLY `stamp`'s bytes.
+
+    Byte-exact and fail-closed, and shared by both sides of a fixed-path ownership decision:
+    `unbridge` deciding whether to **delete** a file, and `migrate-state` deciding whether to
+    **overwrite** one. Both are destructive, so both need the same answer.
+
+    `read_text` performs universal-newline translation, so a user's Windows-authored file whose
+    first line is the marker followed by CRLF (or a bare CR) was normalised to the LF-only stamp and
+    matched — deleted on the teardown side, truncated on the migration side (vibe-265). The decode
+    below is a *readability* test only, kept because a file we cannot read end to end is one we
+    cannot prove is ours; the shape test is on the raw bytes.
+
+    Sharing the constant was not enough: both sides held the same string and compared it
+    differently. The comparison is the thing that has to be shared.
+    """
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return False        # a directory, an unreadable mode, a file that vanished mid-walk
+    try:
+        raw.decode("utf-8")
+    except ValueError:
+        return False        # undecodable: not provably ours, in either direction
+    return raw.startswith(stamp.encode("utf-8"))
+
 #: Advisor ownership is structural, not nominal (E6.1 / vibe-47): an advisor registers under its
 #: bare name — the skill's `mcp__<name>__<tool_name>` callable identity requires the server key to
 #: BE the name — so the claim of ownership travels inside the entry, exactly as owned hook entries

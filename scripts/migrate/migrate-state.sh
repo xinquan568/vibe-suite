@@ -90,8 +90,9 @@ if len(distinct) > 1:
     if existing.is_symlink():
         sys.stderr.write(f"error: row 5: {report} is a symlink; refusing to write through it\n")
         raise SystemExit(1)
-    if existing.is_file() and not existing.read_text(
-            encoding="utf-8", errors="replace").startswith(stamp):
+    # vibe-265: byte-exact and fail-closed, the same check the teardown uses. `read_text` here
+    # translated CRLF/bare CR to LF, so a user's Windows-authored file matched and was overwritten.
+    if existing.is_file() and not bridge.stamp_matches(report, stamp):
         sys.stderr.write(f"error: row 5: {report} exists and is not ours; refusing to overwrite\n")
         raise SystemExit(1)
     bridge.write_atomic(Path(sys.argv[1]), Path(report), stamp + "\n".join(lines) + "\n")

@@ -300,21 +300,9 @@ def _text_state_is_ours(name, path):
     that quotes our stamp above binary content would be removed. A file we cannot read end to end is
     a file we cannot prove is ours.
     """
-    try:
-        raw = Path(path).read_bytes()
-    except OSError:
-        # A directory, an unreadable mode, a file that vanished mid-walk — all "not ours".
-        return False
-    try:
-        raw.decode("utf-8")
-    except ValueError:
-        # A file we cannot read end to end is a file we cannot prove is ours. Note this is a
-        # readability test only; the shape test below is on BYTES, deliberately.
-        return False
-    # `read_text` would translate CRLF and bare CR to LF, so a user's file whose first line is the
-    # marker with Windows endings normalised to the writer's LF stamp and was DELETED. The writer
-    # emits one byte sequence; anything else is somebody else's file.
-    return raw.startswith(SUITE_STATE_STAMPS[name].encode("utf-8"))
+    # `bridge.stamp_matches` is the SAME check `migrate-state.sh` uses before overwriting this file.
+    # Delete-side and overwrite-side must agree on what "ours" means, byte for byte.
+    return bridge.stamp_matches(path, SUITE_STATE_STAMPS[name])
 
 
 def _is_suite_state(relative, path=None):

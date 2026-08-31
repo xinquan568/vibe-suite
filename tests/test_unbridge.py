@@ -1335,4 +1335,6 @@ class TeardownReportSurvives(UnbridgeCase):
             self.skipTest("this workspace shape did not force an error before the walk")
         self.assertNotIn(".vibe-suite-state/: teardown could not complete", r.stderr,
                          "a failure elsewhere was misattributed to the state directory")
+        # Positively assert the normalised message, so an unrelated non-zero exit cannot false-pass.
+        self.assertIn("teardown could not complete", r.stderr)
         self.assertNotIn("Traceback", r.stderr)

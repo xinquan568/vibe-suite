@@ -293,12 +293,13 @@ def _advisor_record_is_ours(name, path):
 def _text_state_is_ours(name, path):
     """Whether a listed non-JSON member carries its writer's exact stamp line.
 
-    **Strict decoding, deliberately.** `migrate-state.sh:93-94` reads its own report back with
-    `errors="replace"`, which is safe there because it is deciding whether to overwrite *its own
-    output*. Teardown is deciding whether to DELETE, and under `errors="replace"` a file whose first
-    line is the exact stamp and whose remainder is invalid UTF-8 still matches — so a user's file
-    that quotes our stamp above binary content would be removed. A file we cannot read end to end is
-    a file we cannot prove is ours.
+    The check itself is `bridge.stamp_matches`, shared with `migrate-state.sh`, which asks the same
+    question before it OVERWRITES this file. Both decisions are destructive, so both need the same
+    answer — and for a while they did not: the writer read with `errors="replace"` and a translating
+    `read_text`, so it accepted CRLF, bare-CR and stamp-above-invalid-bytes files that the teardown
+    rejected, and overwrote them (vibe-265). An earlier version of this docstring called that lossy
+    read "safe there because it is deciding whether to overwrite its own output". It was not safe,
+    and the reasoning was wrong: overwriting a user's file destroys it exactly as deleting it does.
     """
     # `bridge.stamp_matches` is the SAME check `migrate-state.sh` uses before overwriting this file.
     # Delete-side and overwrite-side must agree on what "ours" means, byte for byte.

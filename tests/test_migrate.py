@@ -811,6 +811,26 @@ class ConflictsStampHasOneDefinition(unittest.TestCase):
         self.assertTrue(report.read_text(encoding="utf-8").startswith(stamp))
         self.assertNotIn("an earlier run's rows", report.read_text(encoding="utf-8"))
 
+    # T17 — the writer's symlink refusal had NO test: deleting it left every migrate test passing.
+    # `write_atomic` still preserves the link, but the controlled one-line diagnostic degrades to a
+    # traceback, and the guard is the thing that keeps a fixed path from being written through.
+    def test_a_symlink_at_the_report_path_is_refused_not_followed(self):
+        (self.ws / ".vibe-suite-state").mkdir(parents=True, exist_ok=True)
+        outside = self.ws / "elsewhere.txt"
+        outside.write_text("a file the user cares about\n", encoding="utf-8")
+        (self.ws / ".vibe-suite-state" / "migration-conflicts.txt").symlink_to(outside)
+        for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+            d = self.ws / name
+            d.mkdir(exist_ok=True)
+            (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+        r = subprocess.run(["bash", str(self.SCRIPT), "--workspace", str(self.ws)],
+                           capture_output=True, text=True)
+        self.assertEqual(outside.read_text(encoding="utf-8"), "a file the user cares about\n",
+                         "the migration wrote through a symlink")
+        self.assertIn("is a symlink; refusing to write through it", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(r.returncode, 1)
+
     # T12 — kills P2: the writer SOURCES the stamp rather than holding its own copy. A value test
     # cannot see this: with an identical private literal the output is byte-identical and T9 passes.
     def test_the_migration_sources_the_stamp_and_keeps_no_literal_of_its_own(self):

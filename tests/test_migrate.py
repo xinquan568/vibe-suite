@@ -812,8 +812,10 @@ class ConflictsStampHasOneDefinition(unittest.TestCase):
         self.assertNotIn("an earlier run's rows", report.read_text(encoding="utf-8"))
 
     # T17 — the writer's symlink refusal had NO test: deleting it left every migrate test passing.
-    # `write_atomic` still preserves the link, but the controlled one-line diagnostic degrades to a
-    # traceback, and the guard is the thing that keeps a fixed path from being written through.
+    # What the guard buys is the SYMLINK-SPECIFIC diagnostic, and only that. `write_atomic` already
+    # refuses a symlink dest and leaves the target untouched (measured), so removing this block is
+    # not a write-through path; it degrades a precise message into the generic "exists and is not
+    # ours". An earlier version of this comment claimed the block prevents write-through. It does not.
     def test_a_symlink_at_the_report_path_is_refused_not_followed(self):
         (self.ws / ".vibe-suite-state").mkdir(parents=True, exist_ok=True)
         outside = self.ws / "elsewhere.txt"

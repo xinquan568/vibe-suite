@@ -1267,6 +1267,26 @@ class ListedNonJsonStateFile(UnbridgeCase):
                          "a path deeper than one component is still rejected")
 
 
+class StampHasOneDefinitionOnTheReaderSide(unittest.TestCase):
+    """T18 — the mirror of `test_migrate`'s T12, and it was missing.
+
+    A value test cannot see this: replacing the shared reference with an identical private literal
+    leaves every behavioural test green while restoring the two-definitions state that vibe-265 was.
+    The writer side was pinned structurally from the start; the reader side was not, so the design's
+    central claim — one definition, nothing to drift — held only by convention on this half.
+    """
+
+    SOURCE = REPO_ROOT / "scripts" / "lib" / "unbridge.py"
+    LITERAL = "# vibe-suite-owned: migration-conflicts"
+
+    def test_unbridge_sources_the_stamp_and_keeps_no_literal_of_its_own(self):
+        text = self.SOURCE.read_text(encoding="utf-8")
+        self.assertIn("bridge.MIGRATION_CONFLICTS_STAMP", text,
+                      "the recogniser must take the stamp from the shared definition")
+        self.assertNotIn(self.LITERAL, text,
+                         "a second copy of the stamp is what vibe-265 was; there must be exactly one")
+
+
 class TeardownReportSurvives(UnbridgeCase):
     """vibe-265: `print` used to sit after the walk, so any raise inside it lost the whole report."""
 

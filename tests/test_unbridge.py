@@ -1287,6 +1287,87 @@ class StampHasOneDefinitionOnTheReaderSide(unittest.TestCase):
                          "a second copy of the stamp is what vibe-265 was; there must be exactly one")
 
 
+DIRECTORY = object()   # sentinel: this fixture class is a directory, not bytes
+
+
+class SharedOwnershipCheckIsUsed(UnbridgeCase):
+    """vibe-271: pin that the ownership DECISION routes through `bridge.stamp_matches`.
+
+    #265 made the delete-side and overwrite-side share one check so they could not disagree about
+    who owns a file. Nothing tested that either side still *calls* it: a byte-identical private copy
+    left the whole suite green, restoring the two-implementation state #265 exists to prevent.
+
+    Three weaker properties were tried and each is defeated by a real mutant, which is why the
+    assertions below look heavier than they might:
+
+    * *the call appears in the source* — satisfied by the docstring and comment above `:306`;
+    * *the call executes* — satisfied by `(stamp_matches(...) or True) and private(...)`;
+    * *the forced answer is followed* — satisfied by a private VETO on a naturally-matching fixture.
+
+    What survives all three is **one shared call per decision, and the decision equals its return**,
+    across fixture classes and repeated visits.
+    """
+
+    STAMP = bridge.MIGRATION_CONFLICTS_STAMP
+
+    def state(self):
+        d = self.ws / ".vibe-suite-state"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def fixtures(self):
+        """The content classes the acceptance criteria enumerate, with their natural answers."""
+        return (
+            ("stamped", self.STAMP.encode() + b"row 5\n"),
+            ("unstamped", b"my own notes\n"),
+            ("crlf", self.STAMP.rstrip("\n").encode() + b"\r\nnotes\r\n"),
+            ("bare-cr", self.STAMP.rstrip("\n").encode() + b"\rnotes\r"),
+            ("invalid-utf8", self.STAMP.encode() + b"\xff\xfe"),
+            ("empty", b""),
+            ("directory", DIRECTORY),
+        )
+
+    def install_class(self, path, raw):
+        """`directory` is a class too: `_is_suite_state` still routes it through the shared check.
+
+        Each cell starts from a clean path — the cells share one workspace, so a file left by an
+        earlier class would make `mkdir()` raise and the cell fail for an unrelated reason.
+        """
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
+        if raw is DIRECTORY:
+            path.mkdir()
+        else:
+            path.write_bytes(raw)
+
+    def test_every_decision_makes_exactly_one_shared_call_and_follows_it(self):
+        import unittest.mock as mock
+        for label, raw in self.fixtures():
+            for forced in (True, False):
+                with self.subTest(fixture=label, forced=forced):
+                    path = self.state() / "migration-conflicts.txt"
+                    self.install_class(path, raw)
+                    with mock.patch.object(bridge, "stamp_matches",
+                                           return_value=forced) as spy:
+                        # TWO decisions on the same path: a first-call cache would make one call.
+                        first = unbridge._is_suite_state(Path("migration-conflicts.txt"), path)
+                        second = unbridge._is_suite_state(Path("migration-conflicts.txt"), path)
+                    self.assertEqual(spy.call_count, 2,
+                                     f"{label}: {spy.call_count} shared call(s) for 2 decisions")
+                    self.assertIs(first, forced, f"{label}: decision ignored the shared answer")
+                    self.assertIs(second, forced, f"{label}: repeat decision diverged")
+
+    def test_the_shared_check_receives_the_path_and_that_members_stamp(self):
+        import unittest.mock as mock
+        path = self.state() / "migration-conflicts.txt"
+        path.write_bytes(self.STAMP.encode())
+        with mock.patch.object(bridge, "stamp_matches", return_value=True) as spy:
+            unbridge._is_suite_state(Path("migration-conflicts.txt"), path)
+        spy.assert_called_once_with(path, unbridge.SUITE_STATE_STAMPS["migration-conflicts.txt"])
+
+
 class TeardownReportSurvives(UnbridgeCase):
     """vibe-265: `print` used to sit after the walk, so any raise inside it lost the whole report."""
 

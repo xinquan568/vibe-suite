@@ -19,6 +19,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -833,6 +834,81 @@ class ConflictsStampHasOneDefinition(unittest.TestCase):
         self.assertNotIn("Traceback", r.stderr)
         self.assertEqual(r.returncode, 1)
 
+    # vibe-271: the writer's ownership DECISION must route through `bridge.stamp_matches`, not a
+    # private copy. `migrate-state.sh:33` derives its lib path from BASH_SOURCE and runs as a
+    # subprocess, so mock.patch cannot reach it; the seam is a copied tree whose lib/bridge.py is a
+    # stub that delegates to the real module and overrides the one function.
+    def _tree_with_stub_bridge(self, forced):
+        """A copy of scripts/{migrate,lib} whose bridge.stamp_matches returns `forced` and logs."""
+        root = Path(tempfile.mkdtemp(prefix="vibe-stub-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "scripts").mkdir()
+        shutil.copytree(REPO_ROOT / "scripts" / "migrate", root / "scripts" / "migrate")
+        shutil.copytree(REPO_ROOT / "scripts" / "lib", root / "scripts" / "lib")
+        log = root / "calls.log"
+        real = REPO_ROOT / "scripts" / "lib" / "bridge.py"
+        (root / "scripts" / "lib" / "bridge.py").write_text(
+            "import importlib.util as _u, json as _j\n"
+            "from pathlib import Path as _P\n"
+            "_s = _u.spec_from_file_location('_real_bridge', %r)\n"
+            "_real = _u.module_from_spec(_s); _s.loader.exec_module(_real)\n"
+            "def __getattr__(n): return getattr(_real, n)\n"
+            "def stamp_matches(path, stamp):\n"
+            "    with open(%r, 'a') as fh:\n"
+            "        fh.write(_j.dumps([str(path), stamp]) + '\\n')\n"
+            "    return %r\n" % (str(real), str(log), forced),
+            encoding="utf-8")
+        return root, log
+
+    def _seed(self, ws, raw):
+        (ws / ".vibe-suite-state").mkdir(parents=True, exist_ok=True)
+        if raw is not None:
+            (ws / ".vibe-suite-state" / "migration-conflicts.txt").write_bytes(raw)
+        for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+            d = ws / name
+            d.mkdir(exist_ok=True)
+            (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+
+    def test_the_writer_routes_every_eligible_decision_through_the_shared_check(self):
+        stamp = __import__("bridge").MIGRATION_CONFLICTS_STAMP
+        # Regular-file reports only: the guard is `existing.is_file() and not stamp_matches(...)`,
+        # so a directory short-circuits and makes ZERO shared calls by design (see the next test).
+        for label, raw in (("ours", stamp.encode() + b"old rows\n"),
+                           ("foreign", b"a user's notes\n")):
+            for forced in (True, False):
+                with self.subTest(report=label, forced=forced):
+                    root, log = self._tree_with_stub_bridge(forced)
+                    ws = Path(tempfile.mkdtemp(prefix="vibe-ws-"))
+                    self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
+                    self._seed(ws, raw)
+                    report = ws / ".vibe-suite-state" / "migration-conflicts.txt"
+                    r = subprocess.run(["bash", str(root / "scripts/migrate/migrate-state.sh"),
+                                        "--workspace", str(ws)], capture_output=True, text=True)
+                    calls = [l for l in log.read_text().splitlines() if l.strip()] if log.exists() else []
+                    self.assertEqual(len(calls), 1,
+                                     f"{label}/{forced}: {len(calls)} shared call(s) for 1 eligible decision")
+                    self.assertEqual(json.loads(calls[0]), [str(report), stamp],
+                                     "the shared check was passed the wrong arguments")
+                    if forced:
+                        self.assertEqual(r.returncode, 3, r.stderr)
+                        self.assertTrue(report.read_bytes().startswith(stamp.encode()))
+                    else:
+                        self.assertEqual(r.returncode, 1, r.stderr)
+                        self.assertIn("is not ours", r.stderr)
+                        self.assertEqual(report.read_bytes(), raw, "a refused report was modified")
+
+    def test_a_directory_report_makes_no_shared_call_and_is_untouched(self):
+        root, log = self._tree_with_stub_bridge(True)
+        ws = Path(tempfile.mkdtemp(prefix="vibe-ws-"))
+        self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
+        self._seed(ws, None)
+        (ws / ".vibe-suite-state" / "migration-conflicts.txt").mkdir()
+        subprocess.run(["bash", str(root / "scripts/migrate/migrate-state.sh"),
+                        "--workspace", str(ws)], capture_output=True, text=True)
+        self.assertFalse(log.exists() and log.read_text().strip(),
+                         "is_file() should short-circuit before the shared check")
+        self.assertTrue((ws / ".vibe-suite-state" / "migration-conflicts.txt").is_dir())
+
     # T19 — the symlink branch's `raise` is load-bearing for the shapes T17 does not reach. The
     # ownership check follows the link, so a link pointing at a STAMPED file of ours passes the
     # guard (the vibe-185 shape), and a dangling link reads as absent — both then reach
@@ -866,16 +942,53 @@ class ConflictsStampHasOneDefinition(unittest.TestCase):
                     self.assertTrue(target.read_text(encoding="utf-8")
                                     .endswith("earlier rows\n"), "the target was rewritten")
 
-    # T20 — the stamp is a PERSISTED on-disk format, so it must be a literal. Deriving it from the
-    # renameable `MARKER` is runtime-identical today and every behavioural test stays green, while
-    # silently arming a future rename to stop recognising reports already written to a workspace.
-    # The production comment forbids exactly this; nothing enforced it.
-    def test_the_persisted_stamp_is_a_literal_not_derived_from_the_marker(self):
-        text = (REPO_ROOT / "scripts" / "lib" / "bridge.py").read_text(encoding="utf-8")
-        line = next(l for l in text.splitlines() if l.startswith("MIGRATION_CONFLICTS_STAMP"))
-        self.assertEqual(line,
-                         'MIGRATION_CONFLICTS_STAMP = "# vibe-suite-owned: migration-conflicts\\n"',
-                         "the persisted stamp must stay a literal, not be derived from MARKER")
+    # vibe-271: T20 pinned MIGRATION_CONFLICTS_STAMP's exact SOURCE LINE, which was wrong in both
+    # directions — it failed a harmless quote change and passed a later reassignment. The invariant
+    # is about the persisted FORMAT, not its spelling, so it is checked as value + exact type +
+    # literal form. `type(...) is str` is not redundant with `==`: a str subclass compares equal
+    # while overriding encode(), which is exactly what stamp_matches consumes.
+    PERSISTED = "# vibe-suite-owned: migration-conflicts\n"
+
+    def test_the_persisted_stamp_keeps_its_value_and_exact_type(self):
+        """A SUBPROCESS import, not `importlib.reload`.
+
+        `reload` rebinds the module object, so identity assertions elsewhere in the suite — e.g.
+        `unbridge.BLOCKS is bridge.OWNED_BLOCKS` — start failing. A fresh interpreter gives the same
+        "as the module actually executes" guarantee with no effect on the parent's module registry.
+        """
+        probe = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "import bridge\n"
+            "v = bridge.MIGRATION_CONFLICTS_STAMP\n"
+            "print(type(v).__name__); print(repr(v))\n" % str(REPO_ROOT / "scripts" / "lib"))
+        r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        kind, value = r.stdout.splitlines()
+        self.assertEqual(kind, "str",
+                         "a str subclass compares equal while overriding encode()")
+        self.assertEqual(eval(value), self.PERSISTED, "the persisted on-disk format changed")
+
+    def test_the_persisted_stamp_is_written_as_one_plain_literal(self):
+        """Rejects f-string, explicit AND implicit concatenation, and name references.
+
+        Permits quote style, spacing, line wrapping and comments: the token count is taken from the
+        VALUE's own source segment, so reformatting the assignment cannot fail this.
+        """
+        import ast, io, tokenize
+        src = (REPO_ROOT / "scripts" / "lib" / "bridge.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        assigns = [n for n in tree.body if isinstance(n, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == "MIGRATION_CONFLICTS_STAMP"
+                           for t in n.targets)]
+        self.assertEqual(len(assigns), 1, "expected one top-level assignment of the stamp")
+        value = assigns[0].value
+        self.assertIsInstance(value, ast.Constant, "the stamp must be a literal, not an expression")
+        self.assertIs(type(value.value), str, "the stamp must be a plain str literal")
+        segment = ast.get_source_segment(src, value)
+        strings = [t for t in tokenize.generate_tokens(io.StringIO(segment).readline)
+                   if t.type == tokenize.STRING]
+        self.assertEqual(len(strings), 1,
+                         "implicit concatenation splits the persisted format across tokens")
 
     # T12 — kills P2: the writer SOURCES the stamp rather than holding its own copy. A value test
     # cannot see this: with an identical private literal the output is byte-identical and T9 passes.

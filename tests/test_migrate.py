@@ -812,10 +812,10 @@ class ConflictsStampHasOneDefinition(unittest.TestCase):
         self.assertNotIn("an earlier run's rows", report.read_text(encoding="utf-8"))
 
     # T17 — the writer's symlink refusal had NO test: deleting it left every migrate test passing.
-    # What the guard buys is the SYMLINK-SPECIFIC diagnostic, and only that. `write_atomic` already
-    # refuses a symlink dest and leaves the target untouched (measured), so removing this block is
-    # not a write-through path; it degrades a precise message into the generic "exists and is not
-    # ours". An earlier version of this comment claimed the block prevents write-through. It does not.
+    # `write_atomic` already refuses a symlink dest and leaves the target untouched (measured), so
+    # removing the block is not a write-through path. THIS fixture's target is unstamped, so with the
+    # block gone the generic "exists and is not ours" guard still catches it — which is why T17 alone
+    # cannot pin the block's `raise`. T19 covers the shapes where the early exit actually matters.
     def test_a_symlink_at_the_report_path_is_refused_not_followed(self):
         (self.ws / ".vibe-suite-state").mkdir(parents=True, exist_ok=True)
         outside = self.ws / "elsewhere.txt"
@@ -832,6 +832,50 @@ class ConflictsStampHasOneDefinition(unittest.TestCase):
         self.assertIn("is a symlink; refusing to write through it", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
         self.assertEqual(r.returncode, 1)
+
+    # T19 — the symlink branch's `raise` is load-bearing for the shapes T17 does not reach. The
+    # ownership check follows the link, so a link pointing at a STAMPED file of ours passes the
+    # guard (the vibe-185 shape), and a dangling link reads as absent — both then reach
+    # `write_atomic`, whose refusal is an uncaught BridgeError. Measured: without the early exit
+    # both cases exit 1 by TRACEBACK. The block converts that into one deliberate line.
+    def test_a_symlink_the_guard_would_accept_is_refused_before_write_atomic(self):
+        import bridge as _bridge
+        for label, make in (("target-is-ours", "stamped"), ("dangling", "dangling")):
+            with self.subTest(shape=label):
+                ws = Path(tempfile.mkdtemp(prefix="vibe-sym-"))
+                self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
+                (ws / ".vibe-suite-state").mkdir(parents=True)
+                for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+                    d = ws / name
+                    d.mkdir()
+                    (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+                if make == "stamped":
+                    target = ws / "ours.txt"
+                    target.write_text(_bridge.MIGRATION_CONFLICTS_STAMP + "earlier rows\n",
+                                      encoding="utf-8")
+                else:
+                    target = ws / "does-not-exist.txt"
+                (ws / ".vibe-suite-state" / "migration-conflicts.txt").symlink_to(target)
+                r = subprocess.run(["bash", str(self.SCRIPT), "--workspace", str(ws)],
+                                   capture_output=True, text=True)
+                self.assertIn("is a symlink; refusing to write through it", r.stderr)
+                self.assertNotIn("Traceback", r.stderr,
+                                 f"{label}: the symlink reached write_atomic and raised")
+                self.assertEqual(r.returncode, 1)
+                if make == "stamped":
+                    self.assertTrue(target.read_text(encoding="utf-8")
+                                    .endswith("earlier rows\n"), "the target was rewritten")
+
+    # T20 — the stamp is a PERSISTED on-disk format, so it must be a literal. Deriving it from the
+    # renameable `MARKER` is runtime-identical today and every behavioural test stays green, while
+    # silently arming a future rename to stop recognising reports already written to a workspace.
+    # The production comment forbids exactly this; nothing enforced it.
+    def test_the_persisted_stamp_is_a_literal_not_derived_from_the_marker(self):
+        text = (REPO_ROOT / "scripts" / "lib" / "bridge.py").read_text(encoding="utf-8")
+        line = next(l for l in text.splitlines() if l.startswith("MIGRATION_CONFLICTS_STAMP"))
+        self.assertEqual(line,
+                         'MIGRATION_CONFLICTS_STAMP = "# vibe-suite-owned: migration-conflicts\\n"',
+                         "the persisted stamp must stay a literal, not be derived from MARKER")
 
     # T12 — kills P2: the writer SOURCES the stamp rather than holding its own copy. A value test
     # cannot see this: with an identical private literal the output is byte-identical and T9 passes.

@@ -735,3 +735,153 @@ class ConfigMigrationUsesThePrimitive(unittest.TestCase):
         self.run_migrate()
         leftovers = [p.name for p in self.ws.iterdir() if p.name.endswith(".tmp")]
         self.assertEqual(leftovers, [], f"scratch files survived: {leftovers}")
+
+
+class ConflictsStampHasOneDefinition(unittest.TestCase):
+    """vibe-265: the stamp the migration writes is the same string `unbridge` recognises.
+
+    Two independently-maintained copies of that literal is exactly what the bug was — the writer
+    stamped its report so a re-run would know its own output, and the teardown read the prose as
+    JSON and never saw the stamp. One definition in `bridge` removes the possibility of drift
+    rather than merely detecting it.
+    """
+
+    SCRIPT = REPO_ROOT / "scripts" / "migrate" / "migrate-state.sh"
+    LITERAL = "# vibe-suite-owned: migration-conflicts"
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-stamp-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+        import sys
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+
+    # T9 — kills P1: the shared constant exists and is what the writer actually emits.
+    def test_the_written_report_starts_with_the_shared_constant(self):
+        import bridge
+        (self.ws / ".vibe-suite-state").mkdir(parents=True)
+        for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+            d = self.ws / name
+            d.mkdir()
+            (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+        r = subprocess.run(["bash", str(self.SCRIPT), "--workspace", str(self.ws)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.txt"
+        self.assertTrue(report.read_text(encoding="utf-8")
+                        .startswith(bridge.MIGRATION_CONFLICTS_STAMP))
+
+    # T15 — the writer must not OVERWRITE a user's file whose only resemblance is a translated
+    # newline. This is the mirror of the teardown defect: `read_text` normalised CRLF/bare CR to the
+    # LF-only stamp, so a Windows-authored file at the fixed report path was truncated (vibe-265).
+    def test_a_users_crlf_file_at_the_report_path_is_not_overwritten(self):
+        stamp = __import__("bridge").MIGRATION_CONFLICTS_STAMP
+        (self.ws / ".vibe-suite-state").mkdir(parents=True, exist_ok=True)
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.txt"
+        for label, raw in (("crlf", stamp.rstrip("\n").encode() + b"\r\nmy own notes\r\n"),
+                           ("bare-cr", stamp.rstrip("\n").encode() + b"\rmy own notes\r"),
+                           ("stamp-then-invalid-utf8", stamp.encode() + b"\xff\xfe mine\n")):
+            with self.subTest(shape=label):
+                report.write_bytes(raw)
+                for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+                    d = self.ws / name
+                    d.mkdir(exist_ok=True)
+                    (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+                r = subprocess.run(["bash", str(self.SCRIPT), "--workspace", str(self.ws)],
+                                   capture_output=True, text=True)
+                self.assertEqual(report.read_bytes(), raw,
+                                 f"{label}: a user's file at the report path was overwritten")
+                self.assertIn("is not ours", r.stderr)
+                self.assertEqual(r.returncode, 1)
+
+    # T16 — positive control: the guard must still let a re-run replace the writer's OWN output.
+    # A byte-exact check that refuses everything would "pass" T15 while breaking the feature.
+    def test_our_own_txt_report_is_still_replaceable(self):
+        stamp = __import__("bridge").MIGRATION_CONFLICTS_STAMP
+        (self.ws / ".vibe-suite-state").mkdir(parents=True, exist_ok=True)
+        report = self.ws / ".vibe-suite-state" / "migration-conflicts.txt"
+        report.write_text(stamp + "an earlier run's rows\n", encoding="utf-8")
+        for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+            d = self.ws / name
+            d.mkdir(exist_ok=True)
+            (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+        r = subprocess.run(["bash", str(self.SCRIPT), "--workspace", str(self.ws)],
+                           capture_output=True, text=True)
+        self.assertNotIn("is not ours", r.stderr, "the guard refused a report this tool wrote")
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertTrue(report.read_text(encoding="utf-8").startswith(stamp))
+        self.assertNotIn("an earlier run's rows", report.read_text(encoding="utf-8"))
+
+    # T17 — the writer's symlink refusal had NO test: deleting it left every migrate test passing.
+    # `write_atomic` already refuses a symlink dest and leaves the target untouched (measured), so
+    # removing the block is not a write-through path. THIS fixture's target is unstamped, so with the
+    # block gone the generic "exists and is not ours" guard still catches it — which is why T17 alone
+    # cannot pin the block's `raise`. T19 covers the shapes where the early exit actually matters.
+    def test_a_symlink_at_the_report_path_is_refused_not_followed(self):
+        (self.ws / ".vibe-suite-state").mkdir(parents=True, exist_ok=True)
+        outside = self.ws / "elsewhere.txt"
+        outside.write_text("a file the user cares about\n", encoding="utf-8")
+        (self.ws / ".vibe-suite-state" / "migration-conflicts.txt").symlink_to(outside)
+        for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+            d = self.ws / name
+            d.mkdir(exist_ok=True)
+            (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+        r = subprocess.run(["bash", str(self.SCRIPT), "--workspace", str(self.ws)],
+                           capture_output=True, text=True)
+        self.assertEqual(outside.read_text(encoding="utf-8"), "a file the user cares about\n",
+                         "the migration wrote through a symlink")
+        self.assertIn("is a symlink; refusing to write through it", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(r.returncode, 1)
+
+    # T19 — the symlink branch's `raise` is load-bearing for the shapes T17 does not reach. The
+    # ownership check follows the link, so a link pointing at a STAMPED file of ours passes the
+    # guard (the vibe-185 shape), and a dangling link reads as absent — both then reach
+    # `write_atomic`, whose refusal is an uncaught BridgeError. Measured: without the early exit
+    # both cases exit 1 by TRACEBACK. The block converts that into one deliberate line.
+    def test_a_symlink_the_guard_would_accept_is_refused_before_write_atomic(self):
+        import bridge as _bridge
+        for label, make in (("target-is-ours", "stamped"), ("dangling", "dangling")):
+            with self.subTest(shape=label):
+                ws = Path(tempfile.mkdtemp(prefix="vibe-sym-"))
+                self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
+                (ws / ".vibe-suite-state").mkdir(parents=True)
+                for name, value in ((".cc-suite-state", True), (".codex-toolkit-state", False)):
+                    d = ws / name
+                    d.mkdir()
+                    (d / "state.json").write_text(json.dumps({"config": {"stopReviewGate": value}}))
+                if make == "stamped":
+                    target = ws / "ours.txt"
+                    target.write_text(_bridge.MIGRATION_CONFLICTS_STAMP + "earlier rows\n",
+                                      encoding="utf-8")
+                else:
+                    target = ws / "does-not-exist.txt"
+                (ws / ".vibe-suite-state" / "migration-conflicts.txt").symlink_to(target)
+                r = subprocess.run(["bash", str(self.SCRIPT), "--workspace", str(ws)],
+                                   capture_output=True, text=True)
+                self.assertIn("is a symlink; refusing to write through it", r.stderr)
+                self.assertNotIn("Traceback", r.stderr,
+                                 f"{label}: the symlink reached write_atomic and raised")
+                self.assertEqual(r.returncode, 1)
+                if make == "stamped":
+                    self.assertTrue(target.read_text(encoding="utf-8")
+                                    .endswith("earlier rows\n"), "the target was rewritten")
+
+    # T20 — the stamp is a PERSISTED on-disk format, so it must be a literal. Deriving it from the
+    # renameable `MARKER` is runtime-identical today and every behavioural test stays green, while
+    # silently arming a future rename to stop recognising reports already written to a workspace.
+    # The production comment forbids exactly this; nothing enforced it.
+    def test_the_persisted_stamp_is_a_literal_not_derived_from_the_marker(self):
+        text = (REPO_ROOT / "scripts" / "lib" / "bridge.py").read_text(encoding="utf-8")
+        line = next(l for l in text.splitlines() if l.startswith("MIGRATION_CONFLICTS_STAMP"))
+        self.assertEqual(line,
+                         'MIGRATION_CONFLICTS_STAMP = "# vibe-suite-owned: migration-conflicts\\n"',
+                         "the persisted stamp must stay a literal, not be derived from MARKER")
+
+    # T12 — kills P2: the writer SOURCES the stamp rather than holding its own copy. A value test
+    # cannot see this: with an identical private literal the output is byte-identical and T9 passes.
+    def test_the_migration_sources_the_stamp_and_keeps_no_literal_of_its_own(self):
+        text = self.SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("stamp = bridge.MIGRATION_CONFLICTS_STAMP", text,
+                      "the writer must take the stamp from the shared definition")
+        self.assertNotIn(self.LITERAL, text,
+                         "a second copy of the stamp is what vibe-265 was; there must be exactly one")

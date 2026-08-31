@@ -1287,6 +1287,9 @@ class StampHasOneDefinitionOnTheReaderSide(unittest.TestCase):
                          "a second copy of the stamp is what vibe-265 was; there must be exactly one")
 
 
+DIRECTORY = object()   # sentinel: this fixture class is a directory, not bytes
+
+
 class SharedOwnershipCheckIsUsed(UnbridgeCase):
     """vibe-271: pin that the ownership DECISION routes through `bridge.stamp_matches`.
 
@@ -1320,7 +1323,23 @@ class SharedOwnershipCheckIsUsed(UnbridgeCase):
             ("crlf", self.STAMP.rstrip("\n").encode() + b"\r\nnotes\r\n"),
             ("invalid-utf8", self.STAMP.encode() + b"\xff\xfe"),
             ("empty", b""),
+            ("directory", DIRECTORY),
         )
+
+    def install_class(self, path, raw):
+        """`directory` is a class too: `_is_suite_state` still routes it through the shared check.
+
+        Each cell starts from a clean path — the cells share one workspace, so a file left by an
+        earlier class would make `mkdir()` raise and the cell fail for an unrelated reason.
+        """
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
+        if raw is DIRECTORY:
+            path.mkdir()
+        else:
+            path.write_bytes(raw)
 
     def test_every_decision_makes_exactly_one_shared_call_and_follows_it(self):
         import unittest.mock as mock
@@ -1328,7 +1347,7 @@ class SharedOwnershipCheckIsUsed(UnbridgeCase):
             for forced in (True, False):
                 with self.subTest(fixture=label, forced=forced):
                     path = self.state() / "migration-conflicts.txt"
-                    path.write_bytes(raw)
+                    self.install_class(path, raw)
                     with mock.patch.object(bridge, "stamp_matches",
                                            return_value=forced) as spy:
                         # TWO decisions on the same path: a first-call cache would make one call.

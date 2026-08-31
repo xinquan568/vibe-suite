@@ -874,7 +874,11 @@ class ConflictsStampHasOneDefinition(unittest.TestCase):
         # Regular-file reports only: the guard is `existing.is_file() and not stamp_matches(...)`,
         # so a directory short-circuits and makes ZERO shared calls by design (see the next test).
         for label, raw in (("ours", stamp.encode() + b"old rows\n"),
-                           ("foreign", b"a user's notes\n")):
+                           ("foreign", b"a user's notes\n"),
+                           ("crlf", stamp.rstrip("\n").encode() + b"\r\nnotes\r\n"),
+                           ("bare-cr", stamp.rstrip("\n").encode() + b"\rnotes\r"),
+                           ("invalid-utf8", stamp.encode() + b"\xff\xfe"),
+                           ("empty", b"")):
             for forced in (True, False):
                 with self.subTest(report=label, forced=forced):
                     root, log = self._tree_with_stub_bridge(forced)
@@ -956,16 +960,23 @@ class ConflictsStampHasOneDefinition(unittest.TestCase):
         `unbridge.BLOCKS is bridge.OWNED_BLOCKS` — start failing. A fresh interpreter gives the same
         "as the module actually executes" guarantee with no effect on the parent's module registry.
         """
+        # `type(v).__name__ == "str"` is NOT an exact-type check: a subclass can be *named* `str`.
+        # Capture the real builtin before importing bridge and compare IDENTITY against it.
         probe = (
+            "_builtin_str = str\n"
             "import sys; sys.path.insert(0, %r)\n"
             "import bridge\n"
             "v = bridge.MIGRATION_CONFLICTS_STAMP\n"
-            "print(type(v).__name__); print(repr(v))\n" % str(REPO_ROOT / "scripts" / "lib"))
+            "print(type(v) is _builtin_str)\n"
+            "print(_builtin_str.encode(v, 'utf-8'))\n"
+            "print(repr(_builtin_str(v)))\n" % str(REPO_ROOT / "scripts" / "lib"))
         r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        kind, value = r.stdout.splitlines()
-        self.assertEqual(kind, "str",
-                         "a str subclass compares equal while overriding encode()")
+        exact, raw, value = r.stdout.splitlines()
+        self.assertEqual(exact, "True",
+                         "not the builtin str: a subclass can be named `str` and override encode()")
+        self.assertEqual(eval(raw), self.PERSISTED.encode("utf-8"),
+                         "the bytes stamp_matches consumes are not the persisted format")
         self.assertEqual(eval(value), self.PERSISTED, "the persisted on-disk format changed")
 
     def test_the_persisted_stamp_is_written_as_one_plain_literal(self):

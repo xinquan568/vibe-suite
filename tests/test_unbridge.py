@@ -1321,6 +1321,7 @@ class SharedOwnershipCheckIsUsed(UnbridgeCase):
             ("stamped", self.STAMP.encode() + b"row 5\n"),
             ("unstamped", b"my own notes\n"),
             ("crlf", self.STAMP.rstrip("\n").encode() + b"\r\nnotes\r\n"),
+            ("bare-cr", self.STAMP.rstrip("\n").encode() + b"\rnotes\r"),
             ("invalid-utf8", self.STAMP.encode() + b"\xff\xfe"),
             ("empty", b""),
             ("directory", DIRECTORY),

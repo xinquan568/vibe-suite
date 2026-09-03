@@ -7,8 +7,8 @@
 // tests below exist only to prove that a failure a reasonable implementation would raise on is
 // swallowed instead.
 //
-// Retention is NOT tested here and is not in this module: bounded retention under concurrent writers
-// is #266. `EVENT_LOG_MAX_BYTES` exists and is measured against, but nothing trims.
+// Retention (vibe-266) is tested in `eventlog-retention.test.mjs`; one test here pins the fact that the
+// live file rotates past `EVENT_LOG_ROTATE_BYTES` and that nothing is lost across the files.
 
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
@@ -17,9 +17,10 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  emit, eventLogPath, tailRecords, EVENT_LOG_MAX_BYTES, EVENT_LOG_NAME,
-  EVENT_LOG_TAIL_MAX_BYTES, STATE_DIRNAME,
+  emit, eventLogPath, tailRecords, EVENT_LOG_MAX_BYTES, EVENT_LOG_NAME, EVENT_LOG_ROTATE_BYTES,
+  EVENT_LOG_TAIL_MAX_BYTES, GENERATION_SHAPE, STATE_DIRNAME,
 } from "../../scripts/lib/eventlog.mjs";
+import { readdirSync } from "node:fs";
 import { EVENT_LINE_MAX } from "../../scripts/lib/write.mjs";
 import { STATE_DIRNAME as STORE_STATE_DIRNAME } from "../../scripts/lib/jobs.mjs";
 
@@ -145,24 +146,31 @@ test("emit reports false and does NOT throw when the state dir is a FILE (vibe-2
 
 // ------------------------------------------------------------------- the cap is measured, not enforced
 
-test("EVENT_LOG_MAX_BYTES is exported for measurement; NOTHING in this module trims (vibe-207)", async () => {
+test("past EVENT_LOG_ROTATE_BYTES the live file is rotated; every record survives across the files; the total stays within the cap plus slack (vibe-266)", async () => {
   assert.equal(typeof EVENT_LOG_MAX_BYTES, "number");
   const workspace = ws();
   await emit(workspace, { component: "runner", event: "dispatch.start", detail: {} });
   const grown = "y".repeat(1024);
-  for (let i = 0; i < 200; i += 1) await emit(workspace, { component: "runner", event: "noise", detail: { grown } });
-  const size = statSync(eventLogPath(workspace)).size;
-  assert.ok(size > 200 * 1024, "the log grew; retention is #266's, not this module's");
-  assert.equal(readRecords(workspace).length, 201, "and every record is still there — nothing was discarded");
+  const n = Math.ceil(EVENT_LOG_ROTATE_BYTES / 1100) + 50;                 // comfortably past one rotation
+  for (let i = 0; i < n; i += 1) await emit(workspace, { component: "runner", event: "noise", detail: { grown } });
+  const dir = path.join(workspace, STATE_DIRNAME);
+  const generations = readdirSync(dir).filter((name) => GENERATION_SHAPE.test(name));
+  assert.ok(generations.length >= 1, "the live file rotated at least once");
+  assert.ok(statSync(eventLogPath(workspace)).size < EVENT_LOG_ROTATE_BYTES, "the live file is fresh, below the threshold");
+  const all = [eventLogPath(workspace), ...generations.map((g) => path.join(dir, g))]
+    .flatMap((p) => readFileSync(p, "utf8").split("\n").filter(Boolean));
+  assert.equal(all.length, n + 1, "every record is in exactly one of the files — rotation discards nothing");
+  const total = [eventLogPath(workspace), ...generations.map((g) => path.join(dir, g))].reduce((sum, p) => sum + statSync(p).size, 0);
+  assert.ok(total <= EVENT_LOG_MAX_BYTES + 8 * 4096, `total ${total} within the nominal cap plus a few records of slack`);
 });
 
 
 // ------------------------------------------------------- tailRecords: the bounded reader (vibe-207)
 //
 // "Read backwards until N complete lines" is NOT a byte bound — the termination condition is finding
-// N newlines, and nothing guarantees the file contains them within any distance of the end. With
-// retention split to #266 the file is unbounded too, so an unbounded scan is reachable. The reader
-// therefore stops at a CEILING that does not depend on finding N lines.
+// N newlines, and nothing guarantees the file contains them within any distance of the end (a torn
+// write, a foreign writer). The reader therefore stops at a CEILING that does not depend on finding N
+// lines; with rotation (vibe-266) that ceiling is a TOTAL across files, tested in the retention suite.
 //
 // The ceiling tests assert BYTES READ, never output: an unbounded reader produces identical output
 // on every well-formed input, so an output assertion would pass with the ceiling removed.

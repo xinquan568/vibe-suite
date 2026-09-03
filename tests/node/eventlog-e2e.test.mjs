@@ -6,8 +6,8 @@
 // to one log — a background runner, the Stop review gate, and the jobs CLI — and a fourth reads it
 // back through the shipped command. Nothing here stubs the log or the writer.
 //
-// Retention is deliberately absent, and the last test proves it: past `EVENT_LOG_MAX_BYTES` the log
-// is NOT trimmed, and `jobs log` says so instead. Bounded retention under concurrent writers is #266.
+// Retention (vibe-266): the last test drives a real emitter past the rotation threshold and proves the
+// live file is rotated into a generation with no record lost.
 
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
@@ -17,7 +17,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { eventLogPath, EVENT_LOG_MAX_BYTES } from "../../scripts/lib/eventlog.mjs";
+import { eventLogPath, EVENT_LOG_ROTATE_BYTES, GENERATION_SHAPE, STATE_DIRNAME } from "../../scripts/lib/eventlog.mjs";
+import { readdirSync } from "node:fs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const CLI = path.join(REPO_ROOT, "scripts", "jobs-cli.mjs");
@@ -98,19 +99,22 @@ test("a dispatch, a gate decision and a prune all reach one log, and jobs log re
   assert.ok(shown.stdout.includes(receipt.jobId), "including the correlation id");
 });
 
-test("past the cap the log is NOT trimmed — jobs log says so and names #266", () => {
+test("past the rotation threshold a real emitter rotates the live file into a generation and loses nothing", () => {
   const ws = workspace();
   const record = `${JSON.stringify({ ts: "2026-08-29T10:00:00.000Z", component: "jobs",
     event: "prune.action", detail: { pad: "x".repeat(900) } })}\n`;
-  const copies = Math.ceil((EVENT_LOG_MAX_BYTES + 1024) / record.length);
+  const copies = Math.ceil((EVENT_LOG_ROTATE_BYTES + 1024) / record.length);
   spawnSync("node", [CLI, "prune"], { cwd: ws, encoding: "utf8", timeout: 60_000 });  // makes the dir
   writeFileSync(eventLogPath(ws), record.repeat(copies), { mode: 0o600 });
-  const before = statSync(eventLogPath(ws)).size;
-  assert.ok(before > EVENT_LOG_MAX_BYTES, "the fixture really is over the cap");
+  assert.ok(statSync(eventLogPath(ws)).size >= EVENT_LOG_ROTATE_BYTES, "the fixture really is at the threshold");
 
-  const shown = spawnSync("node", [CLI, "log"], { cwd: ws, encoding: "utf8", timeout: 60_000 });
-  assert.equal(shown.status, 0, "an oversized log still renders");
-  assert.match(shown.stdout, /#266/, "the accepted liability is named, not left silent");
-  assert.equal(statSync(eventLogPath(ws)).size, before,
-    "and NOTHING was trimmed — a notice is not a cap, which is the whole point of the split");
+  const prune = spawnSync("node", [CLI, "prune"], { cwd: ws, encoding: "utf8", timeout: 60_000 });   // one real emit
+  assert.equal(prune.status, 0, `prune: ${prune.stderr}`);
+  const dir = path.join(ws, STATE_DIRNAME);
+  const generations = readdirSync(dir).filter((name) => GENERATION_SHAPE.test(name));
+  assert.equal(generations.length, 1, "the full live file became one generation");
+  assert.equal(readFileSync(path.join(dir, generations[0]), "utf8"), record.repeat(copies), "byte for byte");
+  const fresh = records(ws);
+  assert.equal(fresh.length, 1, "the fresh live holds exactly the record that triggered the rotation");
+  assert.equal(fresh[0].event, "prune.action");
 });

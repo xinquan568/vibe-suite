@@ -391,8 +391,13 @@ function slotPattern(jobId) {
  * The highest committed version slot, or null. A job's TOP slot is always retained (compaction
  * removes only what lies below it; prune removes the whole job), so this is the true high-water mark.
  */
-async function highestSlot(workspace, jobId, { except = null } = {}) {
-  const names = await readdir(jobsDir(workspace)).catch(() => []);
+async function highestSlot(workspace, jobId, { except = null, listing = null } = {}) {
+  // vibe-205: `listing` lets a caller that has just read this directory supply what it already
+  // holds, so enumerating N jobs costs one readdir instead of N. It must be EVERY entry name --
+  // the loop below matches names without checking file type, so a listing filtered to files would
+  // silently narrow this function's authority (a slot-shaped directory would stop counting).
+  // `commit` deliberately does NOT pass one: its scan is a confirmation, and must be current.
+  const names = listing ?? await readdir(jobsDir(workspace)).catch(() => []);
   const pattern = slotPattern(jobId);
   let best = null;
   for (const name of names) {
@@ -419,7 +424,7 @@ async function highestSlot(workspace, jobId, { except = null } = {}) {
  * writer's orphan, never a record to resurrect. An earlier revision rebuilt the canonical from the
  * highest slot here — exactly how a pruned job would have come back.
  */
-async function readCanonical(workspace, jobId) {
+async function readCanonical(workspace, jobId, { listing = null } = {}) {
   const published = await readPublished(workspace, jobId).catch((error) => {
     if (error.code === "ENOENT" || error.code === "EISDIR") return null;   // absent, or a prune tombstone
     throw error;
@@ -430,7 +435,7 @@ async function readCanonical(workspace, jobId) {
   if ((await inspectMarker(jobsDir(workspace), jobId)).state === "valid") {
     throw new JobStoreError(`${jobId}: no record (pruned)`);
   }
-  const top = await highestSlot(workspace, jobId);
+  const top = await highestSlot(workspace, jobId, { listing });
   if (top === null || published.version >= top) return published;
   let slot;
   try {
@@ -1307,7 +1312,8 @@ export function validateRecord(record, jobId) {
 }
 
 /**
- * Every job in the store: canonical names enumerated, records loaded through `readRecord`.
+ * Every job in the store: canonical names enumerated, records loaded through the private
+ * `readCanonical` — directly, so the one directory snapshot taken here can be reused (vibe-205).
  *
  * The split matters (round-1 plan review, finding 2): enumeration must see ONLY `<jobId>.json` —
  * `.vN` slots and `.tmp./.pub.` temps are CAS protocol state, not records — but the LOAD must go
@@ -1330,6 +1336,9 @@ export async function listRecords(workspace) {
   // vibe-204: a directory at a canonical path is a prune tombstone, and a `<jobId>.pruning` marker
   // means a prune has begun — both are jobs that no longer exist, not records that failed to read.
   const names = entries.filter((entry) => !entry.isDirectory()).map((entry) => entry.name);
+  // vibe-205: the snapshot handed to the slot resolver is EVERY entry name, not `names` -- see the
+  // note on `highestSlot`. Without it each record's resolve re-read this directory: O(jobs x entries).
+  const listing = entries.map((entry) => entry.name);
   const marked = new Set();
   for (const id of names.map((name) => MARKER_NAME.exec(name)?.[1]).filter(Boolean)) {
     if ((await inspectMarker(jobsDir(workspace), id)).state === "valid") marked.add(id);   // a foreign marker hides nothing
@@ -1349,7 +1358,9 @@ export async function listRecords(workspace) {
     if (!match || marked.has(match[1])) continue;
     const jobId = match[1];
     try {
-      const record = await readRecord(workspace, jobId);
+      // The snapshot path stays PRIVATE: `readCanonical` directly, so the exported `readRecord`
+      // never offers callers a `listing` whose completeness and freshness it cannot check.
+      const record = await readCanonical(workspace, jobId, { listing });
       const verdict = validateRecord(record, jobId);
       if (verdict.ok) records.push(record);
       else invalid.push({ jobId, reason: verdict.reason });

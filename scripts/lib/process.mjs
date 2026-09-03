@@ -25,6 +25,20 @@
 import { spawn } from "node:child_process";
 
 export const DEFAULT_GRACE_MS = 2000;
+// vibe-205 -- the cost of a beat. Each background heartbeat is a FULL RECORD TRANSACTION, not a
+// timestamp touch: `onHeartbeat` in codex-runner.mjs calls `updateRecord` -> `transact`, which runs
+// both `publishNew` and, on commit, `writeAtomic` (both in jobs.mjs). Each of those stages a scratch
+// file and then syncs the containing directory (`stage` and `syncDir` in write.mjs), so an
+// uncontended beat costs FOUR `handle.sync()` calls -- more under contention
+// or recovery. At the 30 s default this is negligible; it stops being negligible if the interval is
+// lowered, so measure before lowering it and do not assume a beat is cheap because it writes one
+// field.
+//
+// Design note, NOT implemented: a sidecar `<jobId>.heartbeatAt` file would decouple liveness from
+// the record -- one small write per beat, no CAS, no slot churn. It stays a note because a second
+// source of truth for liveness needs its own crash-recovery and prune story: readers would have to
+// reconcile a record and a sidecar that can disagree, and prune would have to remove both. Recorded
+// as the alternative that was considered, not as pending work.
 export const DEFAULT_HEARTBEAT_MS = 30_000;
 export const DEFAULT_TIMEOUT_MS = 600_000;      // 10 minutes; documented in the runner's --help
 

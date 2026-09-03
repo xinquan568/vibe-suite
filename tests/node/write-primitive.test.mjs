@@ -1145,5 +1145,34 @@ test("judgeGenerationsAt and retireGenerationsAt on a non-directory or an unread
   }
 });
 
+test("the non-ENOENT error branches: a per-entry lstat failure is refused and the scan continues; an unlink failure is refused, not thrown; a rename failure is rethrown (vibe-266)", async () => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) return;   // root is not refused by modes: skip honestly
+  const now = Date.now();
+  // (i) judge: the directory is readable but not searchable -> readdir works, every lstat fails EACCES -> refused, and the scan finishes.
+  { const root = scratchDir(); mkdirSync(path.join(root, "d"), { mode: 0o700 });
+    const g = genName(); writeFileSync(path.join(root, "d", g), "g\n", { mode: 0o600 }); setAge(path.join(root, "d", g), 10 * HOUR, now);
+    chmodSync(path.join(root, "d"), 0o400);
+    try {
+      const j = await judgeGenerationsAt(root, "d", { shape: SHAPE, olderThanMs: HOUR, now });
+      assert.deepEqual(j, { eligible: [], kept: 0, refused: [g] });
+    } finally { chmodSync(path.join(root, "d"), 0o700); } }
+  // (ii) retire: the directory becomes non-writable between qualification and unlink -> EACCES -> refused, never thrown.
+  { const root = scratchDir(); mkdirSync(path.join(root, "d"), { mode: 0o700 });
+    const g = genName(); writeFileSync(path.join(root, "d", g), "g\n", { mode: 0o600 }); setAge(path.join(root, "d", g), 10 * HOUR, now);
+    let swept;
+    try {
+      swept = await retireGenerationsAt(root, "d", { shape: SHAPE, olderThanMs: HOUR, now, onQualified: () => chmodSync(path.join(root, "d"), 0o500) });
+    } finally { chmodSync(path.join(root, "d"), 0o700); }
+    assert.deepEqual(swept, { retired: [], kept: 0, refused: [g] }); assert.ok(existsSync(path.join(root, "d", g))); }
+  // (iii) rotateLogAt: the directory becomes non-writable between the observation window and the rename -> EACCES is RETHROWN (a permission failure is not a race).
+  { const root = scratchDir(); mkdirSync(path.join(root, "d"), { mode: 0o700 });
+    await appendLineAt(root, "d/events.log", rec(1));
+    const ino = statSync(path.join(root, "d", "events.log")).ino;
+    try {
+      await assert.rejects(rotateLogAt(root, "d/events.log", { generationRel: `d/${genName()}`, expectedIno: ino, onChecked: () => chmodSync(path.join(root, "d"), 0o500) }), /EACCES/);
+    } finally { chmodSync(path.join(root, "d"), 0o700); }
+    assert.ok(existsSync(path.join(root, "d", "events.log")), "nothing moved"); }
+});
+
 /** unlink that tolerates a missing file — the peer in a race may already have won. */
 function unlinkSyncSafe(p) { try { unlinkSync(p); } catch (error) { if (error.code !== "ENOENT") throw error; } }

@@ -12,8 +12,8 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import {
-  chmodSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, statSync,
-  utimesSync, writeFileSync, writeSync,
+  appendFileSync, chmodSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync,
+  renameSync, statSync, utimesSync, writeFileSync, writeSync,
 } from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -73,6 +73,13 @@ test("the retention constants relate as the plan states, and the nominal total i
   assert.ok(EVENT_LOG_CLOCK_MARGIN_MS >= 2_000 + 50 * 60_000 + (9 * 60_000 + 58_000),
     "the margin must cover the sum of what it is said to cover");
   assert.equal(EVENT_LOG_NONCE_BYTES * 8, 128, "a 128-bit fresh value is the declared width");
+  // The policy VALUES, pinned literally as well: a change to R or C is a change to the operator's contract
+  // and must fail a test, not merely keep the derivation consistent.
+  assert.equal(EVENT_LOG_ROTATE_BYTES, 1024 * 1024);
+  assert.equal(EVENT_LOG_MAX_GENERATIONS, 7);
+  assert.equal(EVENT_LOG_MAX_BYTES, 8 * 1024 * 1024);
+  assert.equal(EVENT_LOG_RETAIN_MS, 7 * 24 * 60 * 60 * 1000);
+  assert.equal(EVENT_LOG_CLOCK_MARGIN_MS, 60 * 60 * 1000);
 });
 
 test("generationName matches GENERATION_SHAPE and three near-miss names do not (vibe-266)", () => {
@@ -153,6 +160,31 @@ test("two emitters that both observe a full live produce exactly one generation 
   assert.deepEqual(records(live(w)).map((r) => r.event), ["B", "A"]);
 });
 
+test("emit falls through an 'absent' rotation: the live file removed inside the window, the retry creates a fresh one and the record lands (vibe-266)", async () => {
+  const w = ws();
+  fillLive(w);
+  const ok = await emit(w, rec("after-absent"), {
+    onChecked: () => { renameSync(live(w), path.join(stateDir(w), "moved-aside.bin")); },   // not a generation shape: the sweep never sees it
+  });
+  assert.equal(ok, true, "absent is not a refusal — the retry creates the fresh live");
+  assert.deepEqual(records(live(w)).map((r) => r.event), ["after-absent"]);
+  assert.equal(gens(w).length, 0);
+});
+
+test("a peer's replacement that is itself full makes the second append full: the record is refused, not written anywhere (vibe-266)", async () => {
+  const w = ws();
+  fillLive(w);
+  const ok = await emit(w, rec("R2"), {
+    onChecked: async () => {
+      assert.equal(await emit(w, rec("P")), true);                          // rotates A, creates B, writes P
+      appendFileSync(live(w), FILLER.repeat(Math.ceil(R / FILLER.length)));  // B is now at the threshold too
+    },
+  });
+  assert.equal(ok, false, "moved, then the retry observes B full: two attempts at most, then refuse");
+  assert.ok(!allRecords(w).some((r) => r.event === "R2"), "the refused record is nowhere on disk");
+  assert.equal(gens(w).length, 1, "and nothing was rotated by the stale rotator");
+});
+
 test("ROUND 3/4 — a stale rotator does not move a below-threshold replacement; the late writer's record survives (vibe-266)", async () => {
   // R2 judged A full and stalls before its identity observation. Inside the stall: P rotates A and
   // creates B; Q opens B, observes it below the threshold, and writes. R2 resumes: its lstat sees B,
@@ -175,11 +207,14 @@ test("ROUND 3/4 — a stale rotator does not move a below-threshold replacement;
   assert.deepEqual(records(live(w)).map((r) => r.event), ["P", "Q", "R2"], "all three in the live inode B");
 });
 
-test("ROUND 2 — the split stall: a rotator stalled almost the whole delay plus a fresh appender destroys nothing (vibe-266)", async () => {
+test("ROUND 2 — the split-stall ORDERING: a rotator paused before its observation, an appender arriving in the pause, then the sweep — nothing destroyed, because the appender observes full and writes nothing into A (vibe-266)", async () => {
   // The old timeline: rotator R judges A full and stalls 99.5 of 101; appender Q arrives at 99.4 and
-  // writes at 101.2; a sweeper qualifies A's generation at 101.1 and unlinks at 101.3. The mechanism
-  // that defeats it is O2-i: Q observes A AT the threshold through its own fstat and writes NOTHING
-  // into A -- it rotates A itself and lands in the fresh live. R's stall length is irrelevant.
+  // writes at 101.2; a sweeper qualifies A's generation at 101.1 and unlinks at 101.3. This test forces
+  // that ORDERING through the seam, not the virtual times: E is a module constant, the sweep step is
+  // made real by ageing A's generation with utimes, and the mechanism that defeats the timeline is
+  // time-independent -- O2-i: Q observes A AT the threshold through its own fstat and writes NOTHING
+  // into A, so it rotates A itself and lands in the fresh live. R's stall length is irrelevant; the
+  // plan's "E = 101 by injected constants" fixture is therefore not modelled, and that is disclosed.
   const w = ws();
   const original = fillLive(w);
   const ok = await emit(w, rec("R"), {
@@ -291,6 +326,24 @@ test("a nonce collision refuses the record: emit is false and nothing on disk ch
     "rotateLogAt returns exists; the record is refused rather than the generation replaced");
   const after = Object.fromEntries(readdirSync(stateDir(w)).map((n) => [n, readFileSync(path.join(stateDir(w), n)).length]));
   assert.deepEqual(after, before);
+});
+
+test("a REAL filesystem failure inside the retention protocol surfaces as false, never as a throw (property 1) (vibe-266)", async () => {
+  // The plan's read-only-state-directory fixture is defeated by emit itself: `secureDirAt` re-tightens the
+  // directory to 0700 on every call, restoring write permission before the protocol runs. The permission
+  // is therefore removed INSIDE the rotation window, after `secureDirAt` and before the rename.
+  if (typeof process.getuid === "function" && process.getuid() === 0) return;   // root writes anywhere: skip honestly
+  const w = ws();
+  fillLive(w);
+  let ok;
+  try {
+    ok = await emit(w, rec("blocked"), { onChecked: () => { chmodSync(stateDir(w), 0o500); } });   // rename -> EACCES
+  } finally {
+    chmodSync(stateDir(w), 0o700);
+  }
+  assert.equal(ok, false, "EACCES from rename is swallowed by emit's boundary");
+  assert.ok(!allRecords(w).some((r) => r.event === "blocked"));
+  assert.equal(gens(w).length, 0, "nothing was renamed");
 });
 
 test("a failure inside the retention protocol surfaces as false, never as a throw (property 1) (vibe-266)", async () => {

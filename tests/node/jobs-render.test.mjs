@@ -280,3 +280,23 @@ test("renderEventLog still says 'no events' for a genuinely empty log (vibe-207)
     "and the honest empty case must keep its plain answer — otherwise the fix trades one wrong " +
     "message for another");
 });
+
+// --- vibe-266: the retention lines --------------------------------------------------------------------
+
+const RETENTION = { maxGenerations: 7, retainDays: 7, marginHours: 1 };
+
+test("renderEventLog states capacity as 'not yet eligible for retirement' with the real threshold, and only at capacity (vibe-266)", () => {
+  const at = renderEventLog([], { truncated: false, requested: 25, generations: 7, atCapacity: true, retention: RETENTION });
+  assert.match(at, /at capacity/);
+  assert.match(at, /7 generations not yet eligible for retirement/);
+  assert.match(at, /7 days plus the 1-hour clock margin/, "the threshold is the floor PLUS the margin, never the bare window");
+  assert.ok(!at.includes("#266") && !/nothing trims/.test(at), "the pre-retention notice is gone");
+
+  const below = renderEventLog([], { truncated: false, requested: 25, generations: 2, atCapacity: false, retention: RETENTION });
+  assert.ok(!/at capacity/.test(below), "below capacity the notice is absent — a one-sided test would pass an unconditional notice");
+  assert.match(below, /2 rotated generation\(s\) retained, not yet eligible for retirement/);
+  assert.match(below, /7 days plus the 1-hour clock margin/);
+
+  const none = renderEventLog([], { truncated: false, requested: 25, generations: 0, atCapacity: false, retention: RETENTION });
+  assert.ok(!/generation/.test(none) && !/at capacity/.test(none), "no generations, nothing said about them");
+});

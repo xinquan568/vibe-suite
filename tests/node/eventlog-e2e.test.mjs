@@ -117,4 +117,11 @@ test("past the rotation threshold a real emitter rotates the live file into a ge
   const fresh = records(ws);
   assert.equal(fresh.length, 1, "the fresh live holds exactly the record that triggered the rotation");
   assert.equal(fresh[0].event, "prune.action");
+
+  // (b) the shipped reader spans the generation and says what it retains; the pre-retention notice is gone.
+  const shown = spawnSync("node", [CLI, "log"], { cwd: ws, encoding: "utf8", timeout: 60_000 });
+  assert.equal(shown.status, 0, `log: ${shown.stderr}`);
+  assert.ok(shown.stdout.includes("prune.action"), "the record that triggered the rotation is shown");
+  assert.match(shown.stdout, /1 rotated generation\(s\) retained/);
+  assert.ok(!shown.stdout.includes("#266") && !/nothing trims/.test(shown.stdout));
 });

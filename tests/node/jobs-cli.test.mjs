@@ -16,6 +16,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createRecord, jobsDir, newRecord, readRecord } from "../../scripts/lib/jobs.mjs";
+import { generationName, EVENT_LOG_MAX_GENERATIONS, EVENT_LOG_ROTATE_BYTES, STATE_DIRNAME } from "../../scripts/lib/eventlog.mjs";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -379,27 +380,55 @@ test("control characters in a record are stripped before rendering", () => {
     "the text survives; only the control bytes are removed");
 });
 
-test("jobs log says the log is oversized past the cap, and does NOT say it below", () => {
+test("jobs log says the log is at capacity when C generations are inside the floor and the live file is full — and does NOT say it below (vibe-266)", () => {
+  const stateDir = (w) => path.join(w, STATE_DIRNAME);
+  const filler = `${JSON.stringify({ ts: "2026-08-29T10:00:00.000Z", component: "jobs", event: "e", detail: { pad: "x".repeat(900) } })}\n`;
+  const fullLive = (w) => writeFileSync(path.join(stateDir(w), "events.log"), filler.repeat(Math.ceil(EVENT_LOG_ROTATE_BYTES / filler.length)), { mode: 0o600 });
+  const generation = (w) => writeFileSync(path.join(stateDir(w), generationName()), filler, { mode: 0o600 });
+
   const small = workspace();
-  mkdirSync(path.join(small, ".vibe-suite-state"), { recursive: true });
-  writeFileSync(path.join(small, ".vibe-suite-state", "events.log"),
-    `${JSON.stringify({ ts: "2026-08-29T10:00:00.000Z", component: "jobs", event: "e", detail: {} })}\n`,
-    { mode: 0o600 });
+  mkdirSync(stateDir(small), { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(stateDir(small), "events.log"), filler, { mode: 0o600 });
   const under = cli(small, "log");
   assert.equal(under.status, 0);
-  assert.ok(!under.stdout.includes("#266"),
-    "a notice printed unconditionally would satisfy a one-sided test and tell the operator nothing");
+  assert.ok(!/at capacity/.test(under.stdout), "a notice printed unconditionally would satisfy a one-sided test and tell the operator nothing");
+  assert.ok(!under.stdout.includes("#266") && !/nothing trims/.test(under.stdout), "the pre-retention notice is gone");
 
-  const big = workspace();
-  mkdirSync(path.join(big, ".vibe-suite-state"), { recursive: true });
-  const record = `${JSON.stringify({ ts: "2026-08-29T10:00:00.000Z", component: "jobs", event: "e",
-    detail: { pad: "x".repeat(900) } })}\n`;
-  writeFileSync(path.join(big, ".vibe-suite-state", "events.log"), record.repeat(9000), { mode: 0o600 });
-  const over = cli(big, "log");
-  assert.equal(over.status, 0,
-    "an oversized log still renders — the notice is a notice, not a failure");
-  assert.match(over.stdout, /#266/, "the accepted liability is made visible rather than left silent");
-  assert.match(over.stdout, /nothing trims it yet/);
+  const below = workspace();
+  mkdirSync(stateDir(below), { recursive: true, mode: 0o700 });
+  fullLive(below);
+  for (let i = 0; i < EVENT_LOG_MAX_GENERATIONS - 1; i += 1) generation(below);
+  const one = cli(below, "log");
+  assert.equal(one.status, 0);
+  assert.ok(!/at capacity/.test(one.stdout), "one slot free: not at capacity");
+  assert.match(one.stdout, new RegExp(`${EVENT_LOG_MAX_GENERATIONS - 1} rotated generation\\(s\\) retained, not yet eligible for retirement`));
+
+  const full = workspace();
+  mkdirSync(stateDir(full), { recursive: true, mode: 0o700 });
+  fullLive(full);
+  for (let i = 0; i < EVENT_LOG_MAX_GENERATIONS; i += 1) generation(full);
+  const at = cli(full, "log");
+  assert.equal(at.status, 0, "a log at capacity still renders — the notice is a notice, not a failure");
+  assert.match(at.stdout, /at capacity/);
+  assert.match(at.stdout, /not yet eligible for retirement/);
+  assert.match(at.stdout, /7 days plus the 1-hour clock margin/, "the real eligibility threshold, not the bare window");
+  assert.ok(!at.stdout.includes("#266"));
+});
+
+test("jobs log shows records from a rotated generation and from the live file, newest last (vibe-266)", () => {
+  const w = workspace();
+  const stateDir = path.join(w, STATE_DIRNAME);
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const line = (event) => `${JSON.stringify({ ts: "2026-08-29T10:00:00.000Z", component: "jobs", event, detail: {} })}\n`;
+  writeFileSync(path.join(stateDir, generationName(new Date("2026-09-01T00:00:00Z"))), line("older-1") + line("older-2"), { mode: 0o600 });
+  writeFileSync(path.join(stateDir, "events.log"), line("live-1"), { mode: 0o600 });
+  const shown = cli(w, "log");
+  assert.equal(shown.status, 0);
+  const order = ["older-1", "older-2", "live-1"].map((e) => shown.stdout.indexOf(`"event":"${e}"`));
+  assert.ok(order.every((i) => i >= 0), `all three records shown:\n${shown.stdout}`);
+  assert.ok(order[0] < order[1] && order[1] < order[2], "generation records precede the live file's");
+  assert.match(shown.stdout, /3 event\(s\)/);
+  assert.match(shown.stdout, /1 rotated generation\(s\) retained/);
 });
 
 test("the four existing subcommands keep their exit contract (characterization)", () => {

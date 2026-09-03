@@ -23,7 +23,9 @@
 // (cc-suite W7 class). All command logic lives here and in scripts/lib/, never in markdown
 // snippets, so the no-top-level-await sweep covers every line that can execute.
 
-import { emit, eventLogPath, tailRecords, EVENT_LOG_MAX_BYTES } from "./lib/eventlog.mjs";
+import {
+  emit, tailEventLog, EVENT_LOG_CLOCK_MARGIN_MS, EVENT_LOG_MAX_GENERATIONS, EVENT_LOG_RETAIN_MS,
+} from "./lib/eventlog.mjs";
 import { isAbandoned, pruneTerminalJobs, resultLine, TERMINAL_STATUSES } from "./lib/jobs.mjs";
 import {
   abandonedIds, cancelJob, parseOlderThan, resolveResultJob, resolveStatusJobs, settleAbandoned,
@@ -186,19 +188,24 @@ async function runPrune(workspace, options) {
 }
 
 /**
- * `jobs log [--tail N]` — the tail of the event log (vibe-207).
+ * `jobs log [--tail N]` — the tail of the event log across the live file and its rotated generations
+ * (vibe-207, vibe-266).
  *
  * Exit 0 whether or not there are events: an empty log is a true answer, not a failure. The read is
- * bounded by `tailRecords`' ceiling rather than by finding N lines, because a torn write or a
- * foreign writer can leave an arbitrarily long run with no newline in it — and with retention
- * tracked in #266 the file itself is unbounded.
+ * bounded by ONE byte ceiling across every file it touches rather than by finding N lines, because a
+ * torn write or a foreign writer can leave an arbitrarily long run with no newline in it. The reader is
+ * also where the at-capacity refusal becomes visible — a full log cannot record its own refusal — and
+ * what it reports comes from the same judgment admission uses, never from a count of names.
  */
 async function runLog(workspace, options) {
   const requested = options.tail ?? DEFAULT_TAIL;
-  const logPath = eventLogPath(workspace);
-  const { records, truncated, size } = await tailRecords(logPath, requested);
-  const oversized = size > EVENT_LOG_MAX_BYTES ? { size, cap: EVENT_LOG_MAX_BYTES } : null;
-  process.stdout.write(`${renderEventLog(records, { truncated, oversized, requested })}\n`);
+  const { records, truncated, generations, atCapacity } = await tailEventLog(workspace, requested);
+  const retention = {
+    maxGenerations: EVENT_LOG_MAX_GENERATIONS,
+    retainDays: EVENT_LOG_RETAIN_MS / (24 * 60 * 60 * 1000),
+    marginHours: EVENT_LOG_CLOCK_MARGIN_MS / (60 * 60 * 1000),
+  };
+  process.stdout.write(`${renderEventLog(records, { truncated, requested, generations, atCapacity, retention })}\n`);
   return 0;
 }
 

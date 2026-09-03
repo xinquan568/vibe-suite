@@ -110,7 +110,9 @@ export const EVENT_LOG_STALL_BOUND_MS = Math.floor(EVENT_LOG_ELIGIBILITY_MS / 2)
  * Bytes of CSPRNG entropy in a generation name. 128 bits: the chance that any two of N lifetime
  * rotations draw the same value is at most N² · 2⁻¹²⁹ — at the declared operational maximum of 2²⁴
  * rotations per workspace (16 TiB of log at a megabyte a generation) that is 2⁻⁸¹, against a
- * declared budget of 2⁻⁶⁴. A repeated draw is refused by `rotateLogAt`, never renamed over.
+ * declared budget of 2⁻⁶⁴. A draw that collides with a name STILL IN USE is refused by `rotateLogAt`,
+ * never renamed over; a value that repeats one whose earlier binding has already been unlinked is not
+ * detected — that is the identity residue the probability above bounds, declared, not closed.
  */
 export const EVENT_LOG_NONCE_BYTES = 16;
 
@@ -200,7 +202,8 @@ const LOG_REL = path.join(STATE_DIRNAME, EVENT_LOG_NAME);
  *      itself — otherwise a workspace that once filled its cap would stay deaf forever.
  *   3. Count. If the cap is full of generations still inside the floor, REFUSE this record. Nothing
  *      inside the floor is ever discarded to make room.
- *   4. Rotate the inode we judged, to a fresh name. `"exists"` (a repeated draw) refuses the record;
+ *   4. Rotate the inode we judged, to a fresh name. `"exists"` (a draw colliding with a name still in use)
+ *      refuses the record;
  *      every other outcome — rotated, or a peer got there first — falls through to
  *   5. one more append. A fresh live file receives the record, or a peer's fresh live does; if even
  *      that is full, the record is refused.
@@ -243,7 +246,7 @@ export async function emit(workspace, { component, event, jobId = null, detail =
       generationRel: path.join(STATE_DIRNAME, name), expectedIno: first.ino,
       onChecked: hooks.onChecked ?? null,
     });                                                                          // step 4
-    if (rotated === "exists") return false;                                      // a repeated draw refuses the record
+    if (rotated === "exists") return false;                                      // a name still in use refuses the record
 
     const second = await appendLineAt(workspace, LOG_REL, line, { maxBytes: EVENT_LOG_ROTATE_BYTES });   // step 5
     return second.outcome === "appended";

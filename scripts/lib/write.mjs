@@ -465,7 +465,9 @@ function isWriterShape(info) {
  *      and its inode compared with `expectedIno` — the inode the caller judged oversized through its
  *      own descriptor. A different inode means a peer rotated and an appender created a replacement:
  *      `"moved"`, and nothing is renamed. Moving a replacement that never crossed the threshold is the
- *      interleaving that defeated the single-term temporal argument in review; it is refused here.
+ *      interleaving that defeated the single-term temporal argument in review; it is refused here for
+ *      every replacement created BEFORE this observation — a replacement created inside the gap of step 4
+ *      is the declared temporal residue, not detected here.
  *   4. `rename` is the NEXT syscall after the comparison. Nothing is awaited between them, so the
  *      rotator's interval — from the observation that authorises the rename to the rename — is one
  *      syscall gap. A replacement created inside that gap is the declared temporal residue (the

@@ -156,9 +156,10 @@ because a reader who assumes more will be wrong:
   its position is not** — reading causality out of adjacency will mislead you.
 - **Retention is bounded and has a floor.** The live file rotates at 1 MiB into a dated generation
   beside it (`events.log.<timestamp>.<hex>`). A generation is retired only once its newest record is
-  older than 7 days plus a one-hour clock margin; at most 7 generations are kept — 8 MiB in all with
-  the live file — and when all 7 are still inside that window a new record is **refused** rather than
-  any generation destroyed. `jobs log` says which it is. What that promise rests on: the state
+  older than 7 days plus a one-hour clock margin; nominally at most 7 generations are kept — 8 MiB in
+  all with the live file, before the concurrency slack described below — and when all 7 are still inside
+  that window **and the live file has reached its rotation size**, a new record is **refused** rather
+  than any generation destroyed. `jobs log` says which it is. What that promise rests on: the state
   directory sits on a local filesystem whose timestamps come from this host's clock; the clock's total
   forward movement since a generation's last write stays under 50 minutes (steps and slew together);
   and no process spends more than 3 days 12 hours between observing the log's size and writing to it,

@@ -41,7 +41,7 @@ retrying.
 | `cancel <job-id>` | cancel that job (see lifecycle below) |
 | `cancel` | cancel the single running background job; refuses to guess when there are several |
 | `prune [--older-than <n>d\|h\|m\|s]` | delete **terminal** jobs that ended more than the cutoff ago (default `7d`; `0` = every terminal job), whole — canonical record and every version slot. Running and claimed jobs are never touched; explicit only, never run by a hook |
-| `log [--tail <n>]` | the event log: what the runner, the gate, the hooks and prune recorded, newest last (default 25). Read-only |
+| `log [--tail <n>]` | the event log: what the runner, the gate, the hooks and prune recorded, newest last (default 25), read across the live file and its rotated generations. Read-only |
 
 ## What the detail view carries (diagnostics)
 
@@ -143,7 +143,7 @@ It exists because everything else the suite prints is terminal-bound. *Why did t
 yesterday*, *why was that job abandoned*, *how often does codex return no terminal event* are
 questions about the past, and until now the suite kept none.
 
-**What it is, and what it is not.** This is a diagnostic record, not a ledger. Four properties,
+**What it is, and what it is not.** This is a diagnostic record, not a ledger. Five properties,
 because a reader who assumes more will be wrong:
 
 - **Recording never changes what is recorded.** If the log cannot be written — a permission problem,
@@ -154,19 +154,30 @@ because a reader who assumes more will be wrong:
 - **File order is not a sequence.** Several processes append concurrently, so two records can appear
   in an order their timestamps disagree with. `ts` is metadata. **A record's presence is the fact;
   its position is not** — reading causality out of adjacency will mislead you.
-- **Nothing trims it yet.** The log grows. `jobs log` tells you when it has passed 8 MiB and names
-  the issue that will bound it (#266), but a notice is not a cap: if the file is large, that is
-  yours to act on today.
+- **Retention is bounded and has a floor.** The live file rotates at 1 MiB into a dated generation
+  beside it (`events.log.<timestamp>.<hex>`). A generation is retired only once its newest record is
+  older than 7 days plus a one-hour clock margin; nominally at most 7 generations are kept — 8 MiB in
+  all with the live file, before the concurrency slack described below — and when all 7 are still inside
+  that window **and the live file has reached its rotation size**, a new record is **refused** rather
+  than any generation destroyed. `jobs log` says which it is. What that promise rests on: the state
+  directory sits on a local filesystem whose timestamps come from this host's clock; the clock's total
+  forward movement since a generation's last write stays under 50 minutes (steps and slew together);
+  and no process spends more than 3 days 12 hours between observing the log's size and writing to it,
+  or between judging the live file and renaming it. What it does not promise: a record written past
+  those bounds can be lost together with a correctly retired generation; the cap is exact only up to
+  how many suite processes run at once — each concurrent writer can add one record past the rotation
+  size and each concurrent rotator one generation past the cap; and a crash between creating the log
+  and setting its mode can leave it unwritable, which predates retention and is unchanged by it.
 
-`jobs log` reads **backwards from the end** and stops at a byte ceiling, so a large log is still
-cheap to inspect — and so is one whose tail is damaged, which is the case a line-counting reader
-cannot bound. Records are fenced and control-stripped, for the same reason the detail view is: see
+`jobs log` reads **backwards from the end** — the live file first, then the rotated generations,
+newest first — and stops at one byte ceiling for the whole read, so a large log is still cheap to
+inspect, and so is one whose tail is damaged, which is the case a line-counting reader cannot bound. Records are fenced and control-stripped, for the same reason the detail view is: see
 the untrusted-content rule below.
 
 **Teardown leaves the log behind.** `/vibe-suite:unbridge` reports it as *"not a suite state file —
 left alone"* and does not remove it. That is deliberate for now — making teardown recognise a
 line-oriented file safely is #265 — so if you are removing the suite from a workspace, delete
-`.vibe-suite-state/events.log` yourself.
+`.vibe-suite-state/events.log` and its rotated generations (`events.log.*`) yourself.
 
 ## Untrusted content rule
 

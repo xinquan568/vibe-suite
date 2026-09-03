@@ -301,7 +301,7 @@ export async function openSinkAt(root, dest, { mode = PRIVATE_FILE_MODE } = {}) 
 }
 
 /**
- * Append ONE line to a shared, reopenable log inside `root` (vibe-207).
+ * Append ONE line to a shared, reopenable log inside `root` (vibe-207), observing its size first (vibe-266).
  *
  * `openSinkAt` is `O_EXCL` — "a sink is created once, never reopened" — which is exactly right for
  * one child's stderr and exactly wrong for a log that every process in the workspace must reopen.
@@ -329,8 +329,29 @@ export async function openSinkAt(root, dest, { mode = PRIVATE_FILE_MODE } = {}) 
  *
  * `line` must not contain a newline: a record is one line by construction, and splitting it here
  * would silently produce two malformed ones.
+ *
+ * **vibe-266 — the size is observed through the handle before anything is written, on BOTH paths.**
+ * With `maxBytes` set, a descriptor that observes the file at or above the threshold writes NOTHING
+ * and reports `full` with the inode it observed; only a descriptor that observed the file below the
+ * threshold ever writes. Under `O_APPEND` a file's size never decreases, so a writer that observed
+ * "below" observed the inode before the write that crossed the threshold — which is what lets a
+ * retention sweep reason about who can still write into a rotated generation (the frozen analysis's
+ * obligation O2-i). The creator observes too: an exclusive create proves the inode was empty, and the
+ * `fstat` makes that observation explicit and returns the inode, so every writer's interval is the
+ * same shape — its own `fstat` on the handle it writes through, then its `write`.
+ *
+ * **vibe-266 — one retry across the `EEXIST`→`ENOENT` gap.** (`onBeforeCreate` and `onBeforeReopen` are
+ * test seams at the two windows of that retry.) The create fails `EEXIST` because the
+ * live file exists; a rotator renames it away; the reopen finds nothing. That interleaving was
+ * unreachable before rotation existed and would have dropped the record silently. One more attempt
+ * — a fresh exclusive create — is made; a second `ENOENT` is thrown as before.
+ *
+ * Returns `{ outcome: "appended" | "full", ino, size }`. Without `maxBytes` the outcome is always
+ * `appended`, exactly as before; `ino` and `size` are the values observed through the handle.
  */
-export async function appendLineAt(root, rel, line, { mode = PRIVATE_FILE_MODE } = {}) {
+export async function appendLineAt(root, rel, line, {
+  mode = PRIVATE_FILE_MODE, maxBytes = null, onBeforeCreate = null, onBeforeReopen = null,
+} = {}) {
   await assertRoot(root);
   const dest = path.resolve(root, rel);
   await assertInside(root, dest);
@@ -344,23 +365,44 @@ export async function appendLineAt(root, rel, line, { mode = PRIVATE_FILE_MODE }
   }
 
   let handle = null;
-  try {
-    handle = await fs.open(dest, OPEN_SINK, mode);   // O_CREAT|O_EXCL|O_NOFOLLOW|O_WRONLY|O_APPEND
-    await handle.chmod(mode);                        // we created it, so the umask cannot loosen it
-  } catch (error) {
-    if (error.code !== "EEXIST") {
-      await handle?.close().catch(() => {});
+  let info = null;
+  for (let attempt = 1; ; attempt += 1) {
+    if (onBeforeCreate) await onBeforeCreate(attempt);   // test seam: before each exclusive-create attempt
+    try {
+      handle = await fs.open(dest, OPEN_SINK, mode);   // O_CREAT|O_EXCL|O_NOFOLLOW|O_WRONLY|O_APPEND
+      await handle.chmod(mode);                        // we created it, so the umask cannot loosen it
+      info = await handle.stat();                      // vibe-266: the creator's own observation — size 0, and the inode
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST") {
+        await handle?.close().catch(() => {});
+        throw error;
+      }
+    }
+    // vibe-266: a documented test seam at the one window rotation opens in this call — the live file
+    // exists at the EEXIST and may be renamed away before the reopen.
+    if (onBeforeReopen) await onBeforeReopen(attempt);
+    try {
+      ({ handle, info } = await reopenForAppend(dest, mode));
+      break;
+    } catch (error) {
+      if (error.code === "ENOENT" && attempt < 2) continue;   // renamed away between the EEXIST and the reopen: once more
       throw error;
     }
-    handle = await reopenForAppend(dest, mode);
   }
 
   try {
+    if (maxBytes !== null && info.size >= maxBytes) {
+      // Observed at or above the threshold through the handle we would have written through:
+      // nothing is written, and the caller learns which inode it judged.
+      return { outcome: "full", ino: info.ino, size: info.size };
+    }
     const { bytesWritten } = await handle.write(buf);
     if (bytesWritten !== buf.length) {
       throw new WriteError(
         `${dest}: short write (${bytesWritten}/${buf.length}) — the record is torn and is not retried`);
     }
+    return { outcome: "appended", ino: info.ino, size: info.size + buf.length };
   } finally {
     await handle.close().catch(() => {});
   }
@@ -389,11 +431,155 @@ async function reopenForAppend(dest, mode) {
     }
     if ((info.mode & 0o077) !== 0) throw new WriteError(
       `${dest}: mode ${(info.mode & 0o777).toString(8)} is not private (${mode.toString(8)} required) — refused, not repaired`);
+    return { handle, info };
   } catch (error) {
     await handle.close().catch(() => {});
     throw error;
   }
-  return handle;
+}
+
+/** The writer's exact shape, judged from an `lstat` (never followed): a regular file with one name, ours, private. */
+function isWriterShape(info) {
+  if (!info.isFile()) return false;                                            // a symlink, directory or FIFO fails here
+  if (info.nlink !== 1) return false;
+  if (typeof process.getuid === "function" && info.uid !== process.getuid()) return false;
+  return (info.mode & 0o077) === 0;
+}
+
+/**
+ * Rotate a live log: move the inode at `rel` to the fresh name `generationRel` (vibe-266).
+ *
+ * `"rotated"` | `"moved"` | `"absent"` | `"exists"` | `"refused"`. Nothing here destroys content: a
+ * `rename` onto an absent name moves the inode, keeps its `mtime`, and leaves every descriptor already
+ * open on it writing into the renamed file.
+ *
+ * **The order of the checks is the safety argument, so it is fixed and commented step by step.**
+ *
+ *   1. The destination must be ABSENT, checked first (obligation O1). A generation name is a fresh
+ *      CSPRNG value that no other actor derives, so this is a guard against a repeated draw, not a
+ *      reservation — reserving the name is what let two earlier designs hand the sweep an aged, empty,
+ *      qualifiable placeholder to unlink while the rename was in flight. `"exists"` means the caller
+ *      drew a value that is in use; the record is refused rather than the file replaced.
+ *   2. The test seam sits HERE, before the observation that authorises the rename — never after it.
+ *   3. The live file is observed by `lstat` (never followed), judged to be the writer's exact shape,
+ *      and its inode compared with `expectedIno` — the inode the caller judged oversized through its
+ *      own descriptor. A different inode means a peer rotated and an appender created a replacement:
+ *      `"moved"`, and nothing is renamed. Moving a replacement that never crossed the threshold is the
+ *      interleaving that defeated the single-term temporal argument in review; it is refused here for
+ *      every replacement created BEFORE this observation — a replacement created inside the gap of step 4
+ *      is the declared temporal residue, not detected here.
+ *   4. `rename` is the NEXT syscall after the comparison. Nothing is awaited between them, so the
+ *      rotator's interval — from the observation that authorises the rename to the rename — is one
+ *      syscall gap. A replacement created inside that gap is the declared temporal residue (the
+ *      frozen analysis's non-guarantee (a)); this primitive does not claim to detect it, and a seam
+ *      in that gap would recreate the very non-adjacency step 2 exists to avoid.
+ *
+ * `expectedIno` is required: a caller without an observed inode has no business rotating.
+ */
+export async function rotateLogAt(root, rel, { generationRel, expectedIno, onChecked = null } = {}) {
+  if (typeof expectedIno !== "number") {
+    throw new WriteError(`${rel}: rotateLogAt needs the inode the caller judged (expectedIno)`);
+  }
+  await assertRoot(root);
+  const dest = path.resolve(root, rel);
+  const target = path.resolve(root, generationRel);
+  await assertInside(root, dest);
+  await assertInside(root, target);
+  if ((await classify(target)) !== "absent") return "exists";              // 1. O1: never onto a name in use
+  if (onChecked) await onChecked();                                          // 2. the seam, BEFORE the observation
+  let info;
+  try {
+    info = await fs.lstat(dest);                                             // 3. the authoritative observation
+  } catch (error) {
+    if (error.code === "ENOENT") return "absent";
+    throw error;
+  }
+  if (!isWriterShape(info)) return "refused";
+  if (info.ino !== expectedIno) return "moved";
+  try {
+    await fs.rename(dest, target);                                           // 4. the next syscall — no await between
+  } catch (error) {
+    if (error.code === "ENOENT") return "absent";                            // reachable only inside the gap above; declared, not tested
+    throw error;
+  }
+  return "rotated";
+}
+
+/**
+ * Judge the generations under `dirRel` (vibe-266) — READ-ONLY, the one recogniser both the sweep
+ * and the reader use, so "eligible to retire" and "counts toward the cap" are the same set.
+ *
+ * `{ eligible, kept, refused }`: `eligible` names whose content age exceeds `olderThanMs`; `kept` the
+ * count of generations of ours still inside it; `refused` names that match the shape but are not the
+ * writer's (a symlink, a directory, a FIFO, a hard-linked or non-private file — reported, never counted,
+ * never touched). Six clauses, in order: the name shape (which the live file fails, so it is never a
+ * candidate), a regular file by `lstat` (never followed), one link, our uid, no group/other bits, and
+ * the age — `mtime`, which every write refreshes and `rename` preserves, against `now`. The caller
+ * supplies `now` so the boundary is testable without sleeping.
+ *
+ * Every failure to read is an empty judgment, never a throw: a directory that is not there, a listing
+ * that fails, a name that vanishes between the listing and its `lstat` (`onListed` is the seam for
+ * that window) all yield less, not an error.
+ */
+export async function judgeGenerationsAt(root, dirRel, { shape, olderThanMs, now = Date.now(), onListed = null } = {}) {
+  const empty = { eligible: [], kept: 0, refused: [] };
+  await assertRoot(root);
+  const dir = path.resolve(root, dirRel);
+  await assertInside(root, dir);
+  if ((await classify(dir)) !== "dir") return empty;
+  let names;
+  try {
+    names = await fs.readdir(dir);
+  } catch {
+    return empty;
+  }
+  if (onListed) await onListed(names);
+  const eligible = [];
+  const refused = [];
+  let kept = 0;
+  for (const name of names) {
+    if (!shape.test(name)) continue;                                         // clause 1 — the live file exits here
+    let info;
+    try {
+      info = await fs.lstat(path.join(dir, name));
+    } catch (error) {
+      if (error.code === "ENOENT") continue;                                 // listed, then gone: neither kept nor eligible
+      refused.push(name);
+      continue;
+    }
+    if (!isWriterShape(info)) { refused.push(name); continue; }             // clauses 2–5
+    if (now - info.mtimeMs <= olderThanMs) { kept += 1; continue; }          // clause 6 — inside the floor
+    eligible.push(name);
+  }
+  return { eligible, kept, refused };
+}
+
+/**
+ * Retire the generations `judgeGenerationsAt` found eligible (vibe-266): `{ retired, kept, refused }`.
+ *
+ * The unlink is by name after a judgment by `lstat` — the one path-addressed mutation this module adds
+ * after an inode judgment, and it is safe exactly to the extent the frozen analysis states: no
+ * in-protocol operation rebinds a generation name (O1, up to a repeated fresh draw), and a write can
+ * land in a retired inode only from a descriptor whose interval exceeded the declared bound (O2).
+ * `onQualified` is the seam between the judgment and the unlink. A peer that unlinked first is a lost
+ * race (`ENOENT`, skipped); anything else that stops an unlink is reported in `refused`, never thrown.
+ */
+export async function retireGenerationsAt(root, dirRel, { shape, olderThanMs, now = Date.now(), onQualified = null } = {}) {
+  const judged = await judgeGenerationsAt(root, dirRel, { shape, olderThanMs, now });
+  const dir = path.resolve(root, dirRel);
+  const retired = [];
+  const refused = [...judged.refused];
+  for (const name of judged.eligible) {
+    if (onQualified) await onQualified(name);
+    try {
+      await fs.unlink(path.join(dir, name));
+      retired.push(name);
+    } catch (error) {
+      if (error.code === "ENOENT") continue;                                 // a peer retired it first
+      refused.push(name);
+    }
+  }
+  return { retired, kept: judged.kept, refused };
 }
 
 /** Create `rel` under `root` at an explicit mode, refusing a symlinked component it observes. */

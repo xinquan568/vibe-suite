@@ -8,15 +8,16 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, closeSync, constants as fsConstants, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  appendLineAt, classify, ensureDirAt, isOwnedTempRoot, makeOwnedTempDir, publishNew,
-  removeOwnedTree, scratch, openSinkAt, secureDirAt, unlinkOwned, writeAtomic,
+  appendLineAt, classify, ensureDirAt, isOwnedTempRoot, judgeGenerationsAt, makeOwnedTempDir, publishNew,
+  removeOwnedTree, retireGenerationsAt, rotateLogAt, scratch, openSinkAt, secureDirAt, unlinkOwned, writeAtomic,
   EVENT_LINE_MAX, PRIVATE_FILE_MODE, STAMP_KEY,
 } from "../../scripts/lib/write.mjs";
 
@@ -859,3 +860,319 @@ test("appendLineAt chmods what it creates, restoring bits a RESTRICTIVE umask re
     process.umask(previous);
   }
 });
+
+// ------------------------------------------------- vibe-266: rotation and retention, the primitives
+//
+// Every mutation retention needs lives here: `appendLineAt` learns to observe the live file's size
+// through its own descriptor before writing; `rotateLogAt` moves a judged inode to a fresh name;
+// `judgeGenerationsAt` is the one recogniser the sweep and the reader share; `retireGenerationsAt`
+// unlinks what it found eligible. The interleavings that defeated six designs are forced through
+// seams, never raced. The uid clause of the recogniser and of `rotateLogAt`'s shape check, and
+// `rotateLogAt`'s final-`rename` `ENOENT`, are DECLARED untestable here — the first because an
+// unprivileged test cannot make a file another uid owns (as `appendLineAt`'s uid clause is declared
+// above), the second because the comparison→rename gap deliberately has no seam.
+
+const SHAPE = /^events\.log\.\d{8}T\d{6}Z\.[0-9a-f]{32}$/;
+const genName = (stamp = "20260903T120000Z") => `events.log.${stamp}.${randomBytes(16).toString("hex")}`;
+const HOUR = 60 * 60 * 1000;
+const setAge = (p, ageMs, now) => { const t = new Date(now - ageMs); utimesSync(p, t, t); };
+const rec = (n) => JSON.stringify({ event: "e", n });
+/** Presence by lstat — `existsSync` follows symlinks and reports a dangling link as absent. */
+const present = (p) => { try { lstatSync(p); return true; } catch { return false; } };
+
+test("appendLineAt with maxBytes appends below the threshold and reports the inode and size it observed (vibe-266)", async () => {
+  const root = scratchDir();
+  const r1 = await appendLineAt(root, "events.log", rec(1), { maxBytes: 10_000 });
+  assert.equal(r1.outcome, "appended");
+  assert.equal(r1.ino, statSync(path.join(root, "events.log")).ino, "the creator's own fstat, through the handle it wrote through");
+  assert.equal(r1.size, statSync(path.join(root, "events.log")).size);
+  const r2 = await appendLineAt(root, "events.log", rec(2), { maxBytes: 10_000 });
+  assert.equal(r2.outcome, "appended");
+  assert.equal(r2.ino, r1.ino, "the reopen observed the same inode");
+});
+
+test("appendLineAt with maxBytes returns full and writes NOTHING when the live file is at the threshold (vibe-266)", async () => {
+  const root = scratchDir();
+  const dest = path.join(root, "events.log");
+  await appendLineAt(root, "events.log", "x".repeat(200));
+  const before = readFileSync(dest);
+  const r = await appendLineAt(root, "events.log", rec(1), { maxBytes: 100 });
+  assert.equal(r.outcome, "full");
+  assert.equal(r.ino, statSync(dest).ino, "the caller learns which inode it judged");
+  assert.equal(r.size, before.length);
+  assert.deepEqual(readFileSync(dest), before, "an observer of a full file never writes into it (O2-i)");
+});
+
+test("appendLineAt without maxBytes behaves exactly as before, and its result carries the inode (vibe-266)", async () => {
+  const root = scratchDir();
+  await appendLineAt(root, "events.log", "x".repeat(3000));
+  const r = await appendLineAt(root, "events.log", rec(1));
+  assert.equal(r.outcome, "appended", "no threshold, no refusal — the vibe-207 contract is unchanged");
+  assert.equal(readFileSync(path.join(root, "events.log"), "utf8").split("\n").filter(Boolean).length, 2);
+});
+
+test("a rename between the EEXIST and the reopen is retried once and the record lands (vibe-266)", async () => {
+  const root = scratchDir();
+  const dest = path.join(root, "events.log");
+  await appendLineAt(root, "events.log", rec(0));                                  // the live exists: the next call's create sees EEXIST
+  const calls = [];
+  const r = await appendLineAt(root, "events.log", rec(1), {
+    onBeforeReopen: (attempt) => { calls.push(attempt); if (attempt === 1) renameSync(dest, `${dest}.rotated`); },
+  });
+  assert.equal(r.outcome, "appended");
+  assert.deepEqual(calls, [1], "the retry's create succeeded — no second reopen");
+  assert.equal(readFileSync(dest, "utf8"), `${rec(1)}\n`, "the record is in the fresh live file");
+  assert.equal(readFileSync(`${dest}.rotated`, "utf8"), `${rec(0)}\n`, "and the rotated file holds only the old record");
+});
+
+test("two renames-away exhaust the single retry and the ENOENT is thrown, as before (vibe-266)", async () => {
+  // The exhaustion needs a live file to REAPPEAR between the retry's create and its reopen, which
+  // no single seam before the reopen can arrange; `onBeforeCreate` is the additive seam for it.
+  const root = scratchDir();
+  const dest = path.join(root, "events.log");
+  await appendLineAt(root, "events.log", rec(0));
+  const trail = [];
+  await assert.rejects(appendLineAt(root, "events.log", rec(1), {
+    onBeforeCreate: (attempt) => { trail.push(`create${attempt}`); if (attempt === 2) writeFileSync(dest, "", { mode: 0o600 }); },
+    onBeforeReopen: (attempt) => { trail.push(`reopen${attempt}`); renameSync(dest, `${dest}.moved${attempt}`); },
+  }), /ENOENT/, "a second ENOENT is not retried: the record is dropped by the caller's catch, not looped on");
+  assert.deepEqual(trail, ["create1", "reopen1", "create2", "reopen2"]);
+});
+
+test("rotateLogAt moves the judged inode to a fresh name, preserving content and mtime, and a fresh live can follow (vibe-266)", async () => {
+  const root = scratchDir();
+  const dest = path.join(root, "events.log");
+  await appendLineAt(root, "events.log", rec(1));
+  const now = Date.now(); setAge(dest, 3 * HOUR, now);
+  const before = statSync(dest);
+  const name = genName();
+  assert.equal(await rotateLogAt(root, "events.log", { generationRel: name, expectedIno: before.ino }), "rotated");
+  const gen = statSync(path.join(root, name));
+  assert.equal(gen.ino, before.ino, "the same inode under a new name");
+  assert.equal(gen.mtimeMs, before.mtimeMs, "rename does not touch mtime — content age survives rotation");
+  assert.equal(readFileSync(path.join(root, name), "utf8"), `${rec(1)}\n`);
+  assert.equal(existsSync(dest), false);
+  const r = await appendLineAt(root, "events.log", rec(2), { maxBytes: 100 });
+  assert.equal(r.outcome, "appended", "the next appender creates a fresh live");
+  assert.notEqual(r.ino, before.ino);
+});
+
+test("rotateLogAt refuses to rename onto a name that exists — 'exists', nothing moved (vibe-266)", async () => {
+  const root = scratchDir();
+  await appendLineAt(root, "events.log", rec(1));
+  const taken = genName();
+  writeFileSync(path.join(root, taken), "occupied\n", { mode: 0o600 });
+  const ino = statSync(path.join(root, "events.log")).ino;
+  assert.equal(await rotateLogAt(root, "events.log", { generationRel: taken, expectedIno: ino }), "exists");
+  assert.equal(readFileSync(path.join(root, taken), "utf8"), "occupied\n", "the occupant is untouched");
+  assert.equal(statSync(path.join(root, "events.log")).ino, ino, "the live file is untouched");
+});
+
+test("rotateLogAt returns moved and renames nothing when the seam replaces the live before the observation (vibe-266)", async () => {
+  const root = scratchDir();
+  const dest = path.join(root, "events.log");
+  await appendLineAt(root, "events.log", rec(1));
+  const judged = statSync(dest).ino;
+  const name = genName();
+  const outcome = await rotateLogAt(root, "events.log", {
+    generationRel: name, expectedIno: judged,
+    onChecked: () => { renameSync(dest, path.join(root, genName())); writeFileSync(dest, `${rec(2)}\n`, { mode: 0o600 }); },
+  });
+  assert.equal(outcome, "moved", "the pathname denotes a replacement inode: the stale rotator moves nothing");
+  assert.equal(existsSync(path.join(root, name)), false);
+  assert.equal(readFileSync(dest, "utf8"), `${rec(2)}\n`, "the replacement live is exactly where it was");
+});
+
+test("rotateLogAt returns absent when the live file is removed inside the seam — the pre-comparison lstat site (vibe-266)", async () => {
+  const root = scratchDir();
+  const dest = path.join(root, "events.log");
+  await appendLineAt(root, "events.log", rec(1));
+  const ino = statSync(dest).ino;
+  assert.equal(await rotateLogAt(root, "events.log", {
+    generationRel: genName(), expectedIno: ino, onChecked: () => renameSync(dest, path.join(root, genName())),
+  }), "absent");
+  assert.equal(await rotateLogAt(root, "events.log", { generationRel: genName(), expectedIno: ino }), "absent", "and when it was never there");
+});
+
+test("rotateLogAt refuses a live path that is not the writer's shape: a symlink, a directory, a hard-linked file, a 0644 file (vibe-266)", async () => {
+  const cases = {
+    symlink: (root) => symlinkSync(path.join(tmpdir(), "vibe-266-nowhere"), path.join(root, "events.log")),
+    directory: (root) => mkdirSync(path.join(root, "events.log")),
+    "hard link": (root) => { writeFileSync(path.join(root, "events.log"), "x\n", { mode: 0o600 }); linkSync(path.join(root, "events.log"), path.join(root, "alias")); },
+    "0644": (root) => { writeFileSync(path.join(root, "events.log"), "x\n", { mode: 0o600 }); chmodSync(path.join(root, "events.log"), 0o644); },
+  };
+  for (const [label, arrange] of Object.entries(cases)) {
+    const root = scratchDir();
+    arrange(root);
+    const ino = lstatSync(path.join(root, "events.log")).ino;
+    assert.equal(await rotateLogAt(root, "events.log", { generationRel: genName(), expectedIno: ino }), "refused", label);
+    assert.equal(present(path.join(root, "events.log")), true, `${label}: nothing moved`);   // lstat: a dangling symlink is still THERE
+  }
+});
+
+test("rotateLogAt requires the inode the caller judged (vibe-266)", async () => {
+  const root = scratchDir();
+  await assert.rejects(rotateLogAt(root, "events.log", { generationRel: genName() }), /expectedIno/);
+});
+
+test("judgeGenerationsAt and retireGenerationsAt: past the eligibility delay retired, inside it kept — with an injected clock (vibe-266)", async () => {
+  const root = scratchDir();
+  const now = Date.now();
+  const old = genName("20260801T000000Z"); writeFileSync(path.join(root, old), "old\n", { mode: 0o600 }); setAge(path.join(root, old), 10 * HOUR, now);
+  const young = genName("20260903T000000Z"); writeFileSync(path.join(root, young), "young\n", { mode: 0o600 }); setAge(path.join(root, young), 1 * HOUR, now);
+  const judged = await judgeGenerationsAt(root, ".", { shape: SHAPE, olderThanMs: 5 * HOUR, now });
+  assert.deepEqual(judged, { eligible: [old], kept: 1, refused: [] });
+  const swept = await retireGenerationsAt(root, ".", { shape: SHAPE, olderThanMs: 5 * HOUR, now });
+  assert.deepEqual(swept, { retired: [old], kept: 1, refused: [] });
+  assert.equal(existsSync(path.join(root, old)), false);
+  assert.equal(existsSync(path.join(root, young)), true);
+});
+
+test("the eligibility boundary is exact to the millisecond of the injected clock, not the host filesystem's precision (vibe-266)", async () => {
+  const root = scratchDir();
+  const now = Date.now();
+  const g = genName(); writeFileSync(path.join(root, g), "g\n", { mode: 0o600 }); setAge(path.join(root, g), 10_000, now);
+  const age = now - statSync(path.join(root, g)).mtimeMs;              // whatever the filesystem stored
+  assert.equal((await judgeGenerationsAt(root, ".", { shape: SHAPE, olderThanMs: age + 1, now })).kept, 1, "one ms inside: kept");
+  assert.deepEqual((await judgeGenerationsAt(root, ".", { shape: SHAPE, olderThanMs: age - 1, now })).eligible, [g], "one ms past: eligible");
+});
+
+test("the live file is never a candidate, however old (vibe-266)", async () => {
+  const root = scratchDir();
+  const now = Date.now();
+  writeFileSync(path.join(root, "events.log"), "ancient\n", { mode: 0o600 }); setAge(path.join(root, "events.log"), 400 * 24 * HOUR, now);
+  const swept = await retireGenerationsAt(root, ".", { shape: SHAPE, olderThanMs: HOUR, now });
+  assert.deepEqual(swept, { retired: [], kept: 0, refused: [] }, "fails the name clause: not kept, not eligible, not refused");
+  assert.equal(existsSync(path.join(root, "events.log")), true);
+});
+
+test("the sibling recogniser: five near-miss negatives, each failing exactly ONE clause, plus two non-isolating defences (vibe-266)", async () => {
+  const now = Date.now();
+  const aged = (root, name, mode = 0o600) => { const p = path.join(root, name); writeFileSync(p, "aged\n", { mode }); chmodSync(p, mode); setAge(p, 10 * HOUR, now); return p; };
+  const judge = (root) => judgeGenerationsAt(root, ".", { shape: SHAPE, olderThanMs: HOUR, now });
+
+  // clause 1 — the name: 31 hex digits, everything else valid. Not a candidate at all.
+  { const root = scratchDir(); const p = aged(root, genName().slice(0, -1));
+    assert.deepEqual(await judge(root), { eligible: [], kept: 0, refused: [] }); assert.ok(existsSync(p)); }
+  // clause 2 — a regular file: a FIFO with one link and mode 0600 fails only this clause.
+  { const root = scratchDir(); const name = genName(); const fifo = path.join(root, name);
+    if (spawnSync("mkfifo", [fifo]).status === 0) {
+      chmodSync(fifo, 0o600); setAge(fifo, 10 * HOUR, now);
+      const j = await judge(root); assert.deepEqual(j.refused, [name]); assert.deepEqual(j.eligible, []); assert.ok(existsSync(fifo));
+    } }                                                                 // no mkfifo: skipped, not faked
+  // clause 3 — one link: a second name that does NOT match the shape, so only one candidate exists and it fails nlink alone.
+  { const root = scratchDir(); const name = genName(); const p = aged(root, name); linkSync(p, path.join(root, "alias.txt"));
+    const j = await judge(root); assert.deepEqual(j.refused, [name]); assert.ok(existsSync(p)); assert.ok(existsSync(path.join(root, "alias.txt"))); }
+  // clause 4 — our uid: DECLARED untestable unprivileged (see the header comment of this section).
+  // clause 5 — private mode: 0644, everything else valid.
+  { const root = scratchDir(); const name = genName(); const p = aged(root, name, 0o644);
+    const j = await judge(root); assert.deepEqual(j.refused, [name]); assert.ok(existsSync(p)); }
+  // clause 6 — the age: inside the delay, everything else valid.
+  { const root = scratchDir(); const name = genName(); const p = path.join(root, name); writeFileSync(p, "fresh\n", { mode: 0o600 }); setAge(p, 10 * 60_000, now);
+    assert.deepEqual(await judge(root), { eligible: [], kept: 1, refused: [] }); assert.ok(existsSync(p)); }
+  // Non-isolating defences: a symlink and a directory with valid names fail the regular-file clause (and more); neither is unlinked or followed.
+  { const root = scratchDir(); const target = path.join(scratchDir(), "target"); writeFileSync(target, "target\n", { mode: 0o600 }); setAge(target, 10 * HOUR, now);
+    const name = genName(); symlinkSync(target, path.join(root, name));
+    const j = await judge(root); assert.deepEqual(j.refused, [name]);
+    await retireGenerationsAt(root, ".", { shape: SHAPE, olderThanMs: HOUR, now });
+    assert.ok(existsSync(path.join(root, name)) && existsSync(target), "not unlinked, not followed"); }
+  { const root = scratchDir(); const name = genName(); mkdirSync(path.join(root, name)); setAge(path.join(root, name), 10 * HOUR, now);
+    const j = await judge(root); assert.deepEqual(j.refused, [name]); assert.ok(existsSync(path.join(root, name))); }
+});
+
+test("mtime is the retention clock, not the timestamp in the name — design 5's failure (vibe-266)", async () => {
+  const root = scratchDir();
+  const now = Date.now();
+  const oldName = genName("20200101T000000Z"); writeFileSync(path.join(root, oldName), "fresh content\n", { mode: 0o600 }); setAge(path.join(root, oldName), 60_000, now);
+  const newName = genName("20990101T000000Z"); writeFileSync(path.join(root, newName), "old content\n", { mode: 0o600 }); setAge(path.join(root, newName), 10 * HOUR, now);
+  const j = await judgeGenerationsAt(root, ".", { shape: SHAPE, olderThanMs: HOUR, now });
+  assert.deepEqual(j.eligible, [newName], "the name says 2099, the content is ten hours old: eligible");
+  assert.equal(j.kept, 1, "the name says 2020, the content is a minute old: kept");
+});
+
+test("a peer that unlinks the qualified generation first is a lost race, skipped — designs 1, 2 and 6 (vibe-266)", async () => {
+  const root = scratchDir();
+  const now = Date.now();
+  const g = genName(); writeFileSync(path.join(root, g), "g\n", { mode: 0o600 }); setAge(path.join(root, g), 10 * HOUR, now);
+  let newer;
+  const swept = await retireGenerationsAt(root, ".", {
+    shape: SHAPE, olderThanMs: HOUR, now,
+    onQualified: (name) => { unlinkSyncSafe(path.join(root, name)); newer = genName(); writeFileSync(path.join(root, newer), "newer\n", { mode: 0o600 }); },
+  });
+  assert.deepEqual(swept.retired, [], "the peer got there first: ENOENT, not a throw, not a retired row");
+  assert.deepEqual(swept.refused, []);
+  assert.ok(existsSync(path.join(root, newer)), "a generation created inside the window is untouched — its name was never qualified");
+});
+
+test("a straggler write through a pre-rotation descriptor BEFORE qualification refreshes mtime and protects the generation (vibe-266)", async () => {
+  const root = scratchDir();
+  const dest = path.join(root, "events.log");
+  const now = Date.now();
+  await appendLineAt(root, "events.log", rec(1)); setAge(dest, 10 * HOUR, now);
+  const fd = openSync(dest, "a");
+  try {
+    const name = genName();
+    assert.equal(await rotateLogAt(root, "events.log", { generationRel: name, expectedIno: statSync(dest).ino }), "rotated");
+    writeSync(fd, `${rec(2)}\n`);                                                // lands in the rotated inode
+    const j = await judgeGenerationsAt(root, ".", { shape: SHAPE, olderThanMs: HOUR, now: Date.now() });
+    assert.equal(j.kept, 1, "the straggler's write moved mtime to now: inside the floor");
+    assert.deepEqual(j.eligible, []);
+  } finally { closeSync(fd); }
+});
+
+test("a name listed by readdir but gone before its lstat is skipped — neither kept nor eligible nor refused (vibe-266)", async () => {
+  const root = scratchDir();
+  const now = Date.now();
+  const g = genName(); writeFileSync(path.join(root, g), "g\n", { mode: 0o600 }); setAge(path.join(root, g), 10 * HOUR, now);
+  const j = await judgeGenerationsAt(root, ".", {
+    shape: SHAPE, olderThanMs: HOUR, now, onListed: (names) => { assert.ok(names.includes(g)); unlinkSyncSafe(path.join(root, g)); },
+  });
+  assert.deepEqual(j, { eligible: [], kept: 0, refused: [] });
+});
+
+test("judgeGenerationsAt and retireGenerationsAt on a non-directory or an unreadable directory answer empty, never throw (vibe-266)", async () => {
+  const root = scratchDir();
+  writeFileSync(path.join(root, "notadir"), "x\n", { mode: 0o600 });
+  assert.deepEqual(await judgeGenerationsAt(root, "notadir", { shape: SHAPE, olderThanMs: HOUR }), { eligible: [], kept: 0, refused: [] });
+  assert.deepEqual(await retireGenerationsAt(root, "notadir", { shape: SHAPE, olderThanMs: HOUR }), { retired: [], kept: 0, refused: [] });
+  if (typeof process.getuid === "function" && process.getuid() !== 0) {   // root reads anything: skip honestly
+    mkdirSync(path.join(root, "sealed"), { mode: 0o700 });
+    writeFileSync(path.join(root, "sealed", genName()), "g\n", { mode: 0o600 });
+    chmodSync(path.join(root, "sealed"), 0o000);
+    try {
+      assert.deepEqual(await judgeGenerationsAt(root, "sealed", { shape: SHAPE, olderThanMs: HOUR }), { eligible: [], kept: 0, refused: [] });
+    } finally { chmodSync(path.join(root, "sealed"), 0o700); }
+  }
+});
+
+test("the non-ENOENT error branches: a per-entry lstat failure is refused and the scan continues; an unlink failure is refused, not thrown; a rename failure is rethrown (vibe-266)", async () => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) return;   // root is not refused by modes: skip honestly
+  const now = Date.now();
+  // (i) judge: the directory is readable but not searchable -> readdir works, every lstat fails EACCES -> refused, and the scan finishes.
+  { const root = scratchDir(); mkdirSync(path.join(root, "d"), { mode: 0o700 });
+    const g = genName(); writeFileSync(path.join(root, "d", g), "g\n", { mode: 0o600 }); setAge(path.join(root, "d", g), 10 * HOUR, now);
+    chmodSync(path.join(root, "d"), 0o400);
+    try {
+      const j = await judgeGenerationsAt(root, "d", { shape: SHAPE, olderThanMs: HOUR, now });
+      assert.deepEqual(j, { eligible: [], kept: 0, refused: [g] });
+    } finally { chmodSync(path.join(root, "d"), 0o700); } }
+  // (ii) retire: the directory becomes non-writable between qualification and unlink -> EACCES -> refused, never thrown.
+  { const root = scratchDir(); mkdirSync(path.join(root, "d"), { mode: 0o700 });
+    const g = genName(); writeFileSync(path.join(root, "d", g), "g\n", { mode: 0o600 }); setAge(path.join(root, "d", g), 10 * HOUR, now);
+    let swept;
+    try {
+      swept = await retireGenerationsAt(root, "d", { shape: SHAPE, olderThanMs: HOUR, now, onQualified: () => chmodSync(path.join(root, "d"), 0o500) });
+    } finally { chmodSync(path.join(root, "d"), 0o700); }
+    assert.deepEqual(swept, { retired: [], kept: 0, refused: [g] }); assert.ok(existsSync(path.join(root, "d", g))); }
+  // (iii) rotateLogAt: the directory becomes non-writable between the observation window and the rename -> EACCES is RETHROWN (a permission failure is not a race).
+  { const root = scratchDir(); mkdirSync(path.join(root, "d"), { mode: 0o700 });
+    await appendLineAt(root, "d/events.log", rec(1));
+    const ino = statSync(path.join(root, "d", "events.log")).ino;
+    try {
+      await assert.rejects(rotateLogAt(root, "d/events.log", { generationRel: `d/${genName()}`, expectedIno: ino, onChecked: () => chmodSync(path.join(root, "d"), 0o500) }), /EACCES/);
+    } finally { chmodSync(path.join(root, "d"), 0o700); }
+    assert.ok(existsSync(path.join(root, "d", "events.log")), "nothing moved"); }
+});
+
+/** unlink that tolerates a missing file — the peer in a race may already have won. */
+function unlinkSyncSafe(p) { try { unlinkSync(p); } catch (error) { if (error.code !== "ENOENT") throw error; } }

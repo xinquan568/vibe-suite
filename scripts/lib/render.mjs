@@ -218,9 +218,12 @@ export function renderPruneOutcome(report, { olderThan }) {
  *
  * **This renderer displays; it never sequences.** Property 5 of the log's contract says no total
  * order is guaranteed across processes or rotation boundaries, so records appear in file order and
- * the header says that is what it is.
+ * the header says that is what it is. `generations` and `atCapacity` (vibe-266) are the reader's
+ * judgment, passed in; the renderer holds no retention numbers of its own.
  */
-export function renderEventLog(records, { truncated = false, oversized = null, requested = 0 } = {}) {
+export function renderEventLog(records, {
+  truncated = false, requested = 0, generations = 0, atCapacity = false, retention = null,
+} = {}) {
   const lines = [];
   if (records.length === 0) {
     // `truncated` is the operator's question — "am I seeing everything?" — so answering "no events
@@ -242,9 +245,18 @@ export function renderEventLog(records, { truncated = false, oversized = null, r
   if (truncated && records.length > 0) {
     lines.push(`showing the last ${Math.min(requested, records.length) || records.length}; older events are in the log`);
   }
-  if (oversized !== null) {
-    lines.push(`the log is ${Math.round(oversized.size / 1024 / 1024)} MiB, over the ${Math.round(oversized.cap / 1024 / 1024)} MiB mark — ` +
-      "nothing trims it yet; bounded retention is tracked in #266");
+  // vibe-266: the retention lines. Both say "not yet eligible for retirement" and both give the REAL
+  // threshold — the floor plus the clock margin — because a reader told "7 days" would misjudge the
+  // extra hour in which a generation is old but not yet eligible. Numbers come from the constants the
+  // caller passes, never from literals here.
+  if (retention !== null && atCapacity) {
+    lines.push(`the log is at capacity: ${retention.maxGenerations} generations not yet eligible for retirement and the live ` +
+      "file at its rotation size — new records are being refused until the oldest generation becomes eligible " +
+      `(a generation is eligible once its newest record is older than ${retention.retainDays} days plus the ` +
+      `${retention.marginHours}-hour clock margin)`);
+  } else if (retention !== null && generations > 0) {
+    lines.push(`${generations} rotated generation(s) retained, not yet eligible for retirement — a generation becomes ` +
+      `eligible once its newest record is older than ${retention.retainDays} days plus the ${retention.marginHours}-hour clock margin`);
   }
   return lines.join("\n");
 }

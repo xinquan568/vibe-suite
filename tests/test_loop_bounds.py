@@ -233,6 +233,32 @@ class StubCase(TempDirMixin, unittest.TestCase):
         return match.group(1) if match else None
 
 
+class TestMarkerTolerance(StubCase):
+    """vibe-274: a bounded capture carries disclosure markers, which are deliberately NOT JSON.
+
+    The helper must skip them exactly as the Stop gate's verdict fold does. Without this the module
+    would raise on any over-budget run, so the tolerance is load-bearing, not cosmetic.
+    """
+
+    MARKER = "[vibe-274: 4096 bytes elided to fit the record byte cap]"
+
+    @staticmethod
+    def event(text="the answer"):
+        return json.dumps({"type": "item.completed", "text": text})
+
+    def test_answer_skips_a_marker_that_precedes_the_event(self):
+        raw = self.MARKER + "\n" + self.event() + "\n"
+        self.assertEqual(self.answer({"rawOutput": raw}), "the answer")
+
+    def test_answer_skips_a_marker_that_follows_the_event(self):
+        raw = self.event() + "\n" + self.MARKER + "\n"
+        self.assertEqual(self.answer({"rawOutput": raw}), "the answer")
+
+    def test_answer_still_raises_when_every_line_is_a_marker(self):
+        with self.assertRaises(AssertionError):
+            self.answer({"rawOutput": self.MARKER + "\n"})
+
+
 class TestNeverClean(StubCase):
     """AC-4's first stimulus. Its subject is the stub, which is a program."""
 

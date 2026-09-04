@@ -11,7 +11,9 @@
 import { announcePid, probeStdin, writeProbe } from "./record.mjs";
 
 const MARKER = "SEEDED-DEFECT-MARKER";
-const PAD_EVENTS = 700;                                   // ~110 bytes each, comfortably over 128 KiB
+// VIBE_TEST_PAD=0 emits the SAME verdict with no padding at all, so a test can compare a
+// bounded run against its own unbounded control rather than against a different fixture.
+const PAD_EVENTS = process.env.VIBE_TEST_PAD === "0" ? 0 : 700;   // ~110 bytes each, over 128 KiB
 const PAD_TEXT = "z".repeat(160);
 
 async function main() {
@@ -38,7 +40,10 @@ async function main() {
   verdict();
   for (let i = before; i < PAD_EVENTS; i += 1) pad();
   process.stdout.write(JSON.stringify({ type: "turn.completed", usage: {} }) + "\n");
-  process.exit(0);
+  // NOT process.exit(0): this fixture writes more than a pipe buffer, and exit() does not
+  // wait for stdout to drain — the stream would be cut mid-line and the runner would see a
+  // truncated capture rather than an over-budget one.
+  process.exitCode = 0;
 }
 
 main().catch((error) => { process.stderr.write(String(error?.stack ?? error) + "\n"); process.exit(1); });

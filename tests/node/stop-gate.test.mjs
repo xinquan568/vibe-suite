@@ -1027,12 +1027,19 @@ function soleRecord(dir) {
 }
 
 for (const at of ["start", "middle", "end"]) {
-  test(`vibe-274: an over-budget capture with the verdict at the ${at} still blocks`, () => {
-    const small = repo({ enabled: true });
-    seedDefect(small);
-    const unbounded = runHook(small, { fixture: "gate-marker.mjs" });
+  test(`vibe-274: an over-budget capture with the verdict at the ${at} decides identically`, () => {
+    // The control is the SAME fixture with its padding switched off, so the two runs differ only in
+    // whether the bound engaged — not in which engine, prompt or verdict text was involved.
+    const control = repo({ enabled: true });
+    seedDefect(control);
+    const unbounded = runHook(control, {
+      fixture: "gate-verbose.mjs", env: { VIBE_TEST_VERDICT_AT: at, VIBE_TEST_PAD: "0" },
+    });
     const expected = decisionOf(unbounded);
-    assert.equal(expected?.decision, "block", "the small-stream control must block");
+    const controlRecord = soleRecord(control);
+    assert.equal(expected?.decision, "block", "the unbounded control must block");
+    assert.ok(!String(controlRecord.rawOutput ?? "").includes("[vibe-274: "),
+      "the control must NOT be bounded, or it is not a control");
 
     const dir = repo({ enabled: true });
     seedDefect(dir);
@@ -1040,9 +1047,11 @@ for (const at of ["start", "middle", "end"]) {
       fixture: "gate-verbose.mjs", env: { VIBE_TEST_VERDICT_AT: at },
     });
     assert.equal(result.status, 0);
-    const decision = decisionOf(result);
-    assert.equal(decision?.decision, expected.decision,
-      `bounded stream must reach the same verdict as unbounded (verdict at ${at})`);
+
+    // Acceptance bullet 2 says "the same verdict as unbounded" — the whole decision object, not a
+    // string that happens to match.
+    assert.deepEqual(decisionOf(result), expected,
+      `bounded and unbounded must reach the SAME decision object (verdict at ${at})`);
 
     const record = soleRecord(dir);
     const size = Buffer.byteLength(String(record.rawOutput ?? ""), "utf8");
@@ -1050,10 +1059,38 @@ for (const at of ["start", "middle", "end"]) {
       `persisted rawOutput is ${size} bytes, over the ${RAW_OUTPUT_BYTES} cap`);
     assert.ok(String(record.rawOutput).includes("[vibe-274: "),
       "an elided capture must disclose the elision, not truncate silently");
-    assert.equal(record.verdictState, unbounded && soleRecord(small).verdictState,
-      "verdictState is unchanged across bounding");
+
+    // Bullet 9: the record's other fields are unchanged across bounding.
+    for (const field of ["status", "errorClass", "verdictText", "verdictState"]) {
+      assert.deepEqual(record[field], controlRecord[field],
+        `${field} changed across bounding (verdict at ${at})`);
+    }
+    assert.equal(typeof record.threadId, typeof controlRecord.threadId, "threadId shape unchanged");
   });
 }
+
+test("vibe-274: an OVERSIZED controlling verdict leaves no parseable agent_message (bullet 3)", () => {
+  // Decision 8: when the controlling event cannot be retained, surfacing the stale earlier verdict
+  // is worse than surfacing none. The fixture emits BLOCK first, then an unretainable ALLOW.
+  const dir = repo({ enabled: true });
+  seedDefect(dir);
+  const result = runHook(dir, { fixture: "gate-oversized.mjs" });
+  assert.equal(result.status, 0);
+
+  const record = soleRecord(dir);
+  const raw = String(record.rawOutput ?? "");
+  assert.ok(Buffer.byteLength(raw, "utf8") <= RAW_OUTPUT_BYTES, "still within cap");
+  for (const l of raw.split("\n")) {
+    if (!l.trim() || l.startsWith("[vibe-274: ")) continue;
+    let ev = null;
+    try { ev = JSON.parse(l); } catch { continue; }
+    assert.ok(!(ev?.type === "item.completed" && ev.item?.type === "agent_message"),
+      "a parseable completed agent_message survived suppression — the gate could read a stale verdict");
+  }
+  const decision = decisionOf(result);
+  assert.notEqual(decision?.decision, "block",
+    "the gate must NOT block on the superseded earlier verdict");
+});
 
 test("vibe-274: an under-budget capture is stored byte-identical, with no marker", () => {
   const dir = repo({ enabled: true });

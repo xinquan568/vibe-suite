@@ -23,7 +23,10 @@ import {
 // so sizes in the tests are the sizes the allocator actually prices.
 // ---------------------------------------------------------------------------
 
-const line = (n) => "x".repeat(n - 1) + "\n";
+/** An n-byte line INCLUDING its newline. `ch` makes a line distinguishable: a run of one
+ *  character contains every shorter run of it, so `includes` on same-character lines matches
+ *  spuriously — that mistake made a budget test pass for the wrong reason. */
+const line = (n, ch = "x") => ch.repeat(n - 1) + "\n";
 const fragment = (n) => "x".repeat(n);
 
 /** A completed agent_message event line of exactly `n` bytes, newline included. */
@@ -361,14 +364,34 @@ test("P2: a nullish `text` is not a controlling event (acceptance bullet 4)", ()
 // ---------------------------------------------------------------------------
 
 test("every retained line is complete and byte-identical, malformed included (bullet 6)", () => {
+  // The malformed line must actually SURVIVE, or this asserts nothing about malformed lines. It
+  // leads the source so a `partial` pre side fixes it as its boundary and keeps it.
   const malformed = "{not json at all\n";
-  const src = line(300) + malformed + controller(100) + line(50);
-  const out = boundRawOutput(src, 300);
+  const src = malformed + line(300) + controller(100) + line(50);
+  const out = boundRawOutput(src, 250);
+  assert.ok(out.startsWith(malformed), "the malformed line is retained, byte-identical");
+  assert.equal(bytes(out), 223, "17 + markerWidth(300) + 100 + 50");
   const sourceLines = new Set(src.split("\n").map((l) => l + "\n"));
   for (const l of out.split("\n")) {
     if (!l.trim() || l.startsWith(MARKER_PREFIX)) continue;
     assert.ok(sourceLines.has(l + "\n"), `retained line is not byte-identical: ${JSON.stringify(l)}`);
   }
+});
+
+test('bullet 4: `text: ""` IS a controlling event, `text: null` is not', () => {
+  const empty = JSON.stringify(
+    { type: "item.completed", item: { type: "agent_message", text: "" } }) + "\n";
+  const earlier = controller(100, "ALLOW: earlier");
+  // With an empty-text message last, IT is the core — it deliberately overrides the earlier verdict
+  // with no verdict. With a null-text message last, the earlier one still is.
+  const withEmpty = earlier + line(400) + empty;
+  const outEmpty = boundRawOutput(withEmpty, bytes(empty) + markerWidth(500));
+  assert.ok(outEmpty.includes(empty), "the empty-text message is the core");
+  assert.ok(!outEmpty.includes(earlier), "and it displaces the earlier verdict");
+
+  const withNull = earlier + line(400) + nullTextMessage;
+  const outNull = boundRawOutput(withNull, 100 + markerWidth(400 + bytes(nullTextMessage)));
+  assert.ok(outNull.includes(earlier), "a null-text message does not displace the earlier verdict");
 });
 
 test("the unterminated final fragment is never retained (decision 13)", () => {
@@ -423,4 +446,102 @@ test("seam: round-1's counterexample selects (empty,all) — 61+100+10 = 171", (
   const r = selectTopology({ text: src, cap: 171, mandatory: "controller", renderMarker: mkFixed(61) });
   assert.equal(r.ok, true);
   assert.equal(bytes(r.text), 171);
+});
+
+// ---------------------------------------------------------------------------
+// Step-8 blocker 1 — I3 forbids EVERY parseable completed `agent_message`
+// surviving suppression, whatever its `text`. Decision 4's nullish rule says
+// which message CONTROLS the verdict; it does not say a nullish one stops being
+// a message. Drawing the suppression boundary with the narrower predicate let a
+// `text: null` message through.
+// ---------------------------------------------------------------------------
+
+const nullTextMessage =
+  JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: null } }) + "\n";
+const noTextMessage =
+  JSON.stringify({ type: "item.completed", item: { type: "agent_message" } }) + "\n";
+
+function assertNoCompletedAgentMessage(out, why) {
+  for (const l of out.split("\n")) {
+    if (!l.trim() || l.startsWith(MARKER_PREFIX)) continue;
+    let ev = null;
+    try { ev = JSON.parse(l); } catch { continue; }
+    assert.ok(!(ev?.type === "item.completed" && ev.item?.type === "agent_message"),
+      `${why}: a parseable completed agent_message survived — ${JSON.stringify(l).slice(0, 90)}`);
+  }
+}
+
+for (const [label, trailer] of [["null", nullTextMessage], ["missing", noTextMessage]]) {
+  test(`S4: suppression excludes a completed agent_message with ${label} text (I3)`, () => {
+    const src = controller(2000, "ALLOW: current") + trailer;
+    const out = boundRawOutput(src, 200);
+    assertNoCompletedAgentMessage(out, `${label}-text trailer`);
+    assert.equal(bytes(out), markerWidth(bytes(src)), "the whole capture is elided behind one marker");
+  });
+}
+
+for (const [label, leader] of [["null", nullTextMessage], ["missing", noTextMessage]]) {
+  test(`S4: the LEADING suppression run also stops at a ${label}-text message (I3)`, () => {
+    // The trailing scan and the leading scan are separate code paths; a fixture that only puts the
+    // message after the controller exercises one of them. Here it comes first.
+    const src = leader + line(400) + controller(2000, "ALLOW: current");
+    const out = boundRawOutput(src, 200);
+    assertNoCompletedAgentMessage(out, `${label}-text leader`);
+    assert.equal(bytes(out), markerWidth(bytes(src)), "the whole capture is elided behind one marker");
+  });
+}
+
+test("a nullish-text message is still not the CONTROLLING core (decision 4)", () => {
+  // The two predicates are different on purpose: this message is a completed agent_message for
+  // suppression's boundary, and not a controller for core selection.
+  const src = controller(100, "ALLOW: ok") + line(400) + nullTextMessage;
+  const out = boundRawOutput(src, 100 + markerWidth(400 + bytes(nullTextMessage)));
+  assert.ok(out.includes(controller(100, "ALLOW: ok")), "the real controller is the core");
+});
+
+// ---------------------------------------------------------------------------
+// Step-8 blocker 2 — each side's budget is a ceiling on that side's TOTAL
+// growth, measured from that side's own baseline. The old check compared
+// cumulative growth against `spent + budget`, re-granting the allowance on every
+// line, and charged head bytes against the tail's share.
+// ---------------------------------------------------------------------------
+
+test("B2: head and tail each spend their OWN budget, and both fit together", () => {
+  // pre [A(100), h(40), pad(900)] · controller 100 · post [pad(900), t(40), B(100)].
+  // Distinct fill characters: `h` and `t` cannot be found inside the padding by accident.
+  const src = line(100, "A") + line(40, "h") + line(900, "p") + controller(100)
+            + line(900, "q") + line(40, "t") + line(100, "B");
+  // (partial,partial) floor = A + mk(h+p) + ctrl + mk(q+t) + B = 100+56+100+56+100 = 412.
+  // A residual of 80 splits 40/40, and each side's own line costs exactly 40.
+  const floor = 100 + markerWidth(940) + 100 + markerWidth(940) + 100;
+  assert.equal(floor, 412, "floor arithmetic");
+  const out = boundRawOutput(src, floor + 80);
+  assert.equal(bytes(out), 492, "452 means one side was starved by the other");
+  assert.ok(out.includes(line(40, "h")), "the head spent its own share");
+  assert.ok(out.includes(line(40, "t")), "the tail spent its own share — not starved by the head");
+});
+
+test("B2: a side's budget is not re-granted per line", () => {
+  // Three cheap head lines would each pass a per-line check but together exceed the head's share.
+  const src = line(100) + line(40) + line(40) + line(40) + line(900) + controller(100) + line(900);
+  const out = boundRawOutput(src, 400);
+  assert.ok(bytes(out) <= 400, "never over cap");
+  const head = out.slice(0, out.indexOf(MARKER_PREFIX));
+  assert.ok(bytes(head) - 100 <= Math.ceil((400 - bytes(out) + bytes(head)) / 2) + 100,
+    "the head cannot spend an allowance it was granted only once");
+});
+
+// ---------------------------------------------------------------------------
+// Step-8 major 3 — candidate order is the APPROVED one: rank[pre] + rank[post],
+// so a mode pair that retains something on BOTH sides outranks one that gives a
+// whole side away. That is a provenance policy, not a byte-count policy: it can
+// return fewer bytes, and deliberately does.
+// ---------------------------------------------------------------------------
+
+test("M3: (partial,all) outranks (all,empty) — the approved sum order", () => {
+  const src = line(20) + line(180) + controller(100) + line(20) + line(80);
+  const out = boundRawOutput(src, 360);
+  assert.equal(bytes(out), 276,
+    "356 means the base-3 order shipped: (all,empty) was reached before (partial,all)");
+  assert.ok(out.endsWith(line(20) + line(80)), "the whole post side is retained");
 });

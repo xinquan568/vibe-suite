@@ -315,11 +315,23 @@ function splitLines(text) {
   return { lines, fragment: text.slice(cut + 1) };
 }
 
-const isControllingLine = (line) => {
+/** A parseable completed `agent_message`, whatever its `text`. This is what I3 forbids surviving
+ *  suppression: the Stop gate's fold reads `event.item.text ?? text`, so even a nullish-text message
+ *  is an event the fold will visit, and leaving one in a suppressed capture is exactly the stale
+ *  surface decision 8 rules out. */
+const isCompletedAgentMessage = (line) => {
   let event;
   try { event = JSON.parse(line); } catch { return false; }
-  return event?.type === "item.completed" && event.item?.type === "agent_message"
-    && event.item.text !== null && event.item.text !== undefined;
+  return event?.type === "item.completed" && event.item?.type === "agent_message";
+};
+
+/** A message that CONTROLS the verdict: decision 4 — `text: null` does not displace an earlier
+ *  verdict, `text: ""` does. Strictly narrower than `isCompletedAgentMessage`, and used only to
+ *  choose the mandatory core, never to draw a suppression boundary. */
+const isControllingLine = (line) => {
+  if (!isCompletedAgentMessage(line)) return false;
+  const { item } = JSON.parse(line);
+  return item.text !== null && item.text !== undefined;
 };
 
 const byteLen = (s) => Buffer.byteLength(s, "utf8");
@@ -375,9 +387,9 @@ export function selectTopology({ text, cap, mandatory = "controller", renderMark
     // the runs are truncated. A run must never cross a controlling line — an EARLIER one carries a
     // stale verdict, and decision 8 calls surfacing that worse than surfacing none.
     let lo = 0;
-    while (lo < lines.length && !isControllingLine(lines[lo])) lo += 1;
+    while (lo < lines.length && !isCompletedAgentMessage(lines[lo])) lo += 1;
     let hi = lines.length - 1;
-    while (hi >= 0 && !isControllingLine(lines[hi])) hi -= 1;
+    while (hi >= 0 && !isCompletedAgentMessage(lines[hi])) hi -= 1;
     for (let i = 0; i < lo; i += 1) preIdx.push(i);
     for (let i = hi + 1; i < lines.length; i += 1) postIdx.push(i);
   }
@@ -401,7 +413,7 @@ export function selectTopology({ text, cap, mandatory = "controller", renderMark
     const key = `${[...fixed].sort((a, b) => a - b).join(",")}|${hasPartial ? regime : "-"}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    candidates.push({ pre, post, regime, fixed, order: rank[pre] * 3 + rank[post] });
+    candidates.push({ pre, post, regime, fixed, order: rank[pre] + rank[post] });
   }
   candidates.sort((a, b) => a.order - b.order);
 
@@ -422,22 +434,28 @@ export function selectTopology({ text, cap, mandatory = "controller", renderMark
       const headPool = cand.pre === "partial" ? preIdx.filter((i) => !kept.has(i)) : [];
       const tailPool = cand.post === "partial" ? postIdx.filter((i) => !kept.has(i)).reverse() : [];
       const residual = cap - floor.bytes;
+      // With nothing to divide, the two regimes are the same candidate; the plan normalises them,
+      // so only the head-first twin is evaluated.
+      if (residual === 0 && cand.regime === "head-empty") return null;
       // An empty head transfers its allocation to the tail; an empty tail does NOT transfer back.
       const headBudget = cand.regime === "head-empty" || !headPool.length
         ? 0 : Math.ceil(residual / 2);
       const tailBudget = residual - headBudget;
-      const fill = (pool, budget) => {
-        let spent = 0;
+      // Each side spends against ITS OWN baseline, and `budget` is a ceiling on that side's TOTAL
+      // growth — not an allowance re-granted per line. The tail's baseline is the assembled size
+      // AFTER the head has filled, so head bytes are not charged to the tail's share.
+      const fill = (pool, budget, baseline) => {
         for (const i of pool) {
           const next = new Set(kept); next.add(i);
           const grown = assemble(lines, fragment, next, renderMarker);
-          if (grown.bytes > cap || grown.bytes - floor.bytes > spent + budget) break;
-          spent = grown.bytes - floor.bytes;
+          if (grown.bytes > cap) break;
+          if (grown.bytes - baseline > budget) break;
           kept.add(i);
         }
       };
-      fill(headPool, headBudget);
-      fill(tailPool, tailBudget);
+      fill(headPool, headBudget, floor.bytes);
+      const afterHead = assemble(lines, fragment, kept, renderMarker).bytes;
+      fill(tailPool, tailBudget, afterHead);
     }
 
     const result = assemble(lines, fragment, kept, renderMarker);

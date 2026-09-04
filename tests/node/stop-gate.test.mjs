@@ -19,6 +19,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { jobsDir } from "../../scripts/lib/jobs.mjs";
+import { RAW_OUTPUT_BYTES } from "../../scripts/lib/render.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const HOOK = path.join(REPO_ROOT, "scripts", "stop-review-gate-hook.mjs");
@@ -1008,4 +1009,57 @@ test("B19: the toggle flipping BETWEEN the two reads is still silent (vibe-208)"
     env: { PATH: `${shimDir}:${process.env.PATH}` },
   });
   assertSilent(result, "the toggle was disabled between the fast-path read and the resolver's read");
+});
+
+// ---------------------------------------------------------------------------
+// vibe-274 — an over-budget capture is bounded with a disclosed marker, and the
+// gate reaches the SAME verdict it would have reached unbounded. Driven through
+// the real hook: the fixture emits well past RAW_OUTPUT_BYTES, so the runner's
+// bound is what is under test, not a contrived cap.
+// ---------------------------------------------------------------------------
+
+/** The single job record the hook just wrote. */
+function soleRecord(dir) {
+  const files = readdirSync(jobsDir(dir), { withFileTypes: true })
+    .filter((e) => e.isFile() && /^job_[0-9a-f]{20}\.json$/.test(e.name));
+  assert.equal(files.length, 1, `expected exactly one job record, got ${files.length}`);
+  return JSON.parse(readFileSync(path.join(jobsDir(dir), files[0].name), "utf8"));
+}
+
+for (const at of ["start", "middle", "end"]) {
+  test(`vibe-274: an over-budget capture with the verdict at the ${at} still blocks`, () => {
+    const small = repo({ enabled: true });
+    seedDefect(small);
+    const unbounded = runHook(small, { fixture: "gate-marker.mjs" });
+    const expected = decisionOf(unbounded);
+    assert.equal(expected?.decision, "block", "the small-stream control must block");
+
+    const dir = repo({ enabled: true });
+    seedDefect(dir);
+    const result = runHook(dir, {
+      fixture: "gate-verbose.mjs", env: { VIBE_TEST_VERDICT_AT: at },
+    });
+    assert.equal(result.status, 0);
+    const decision = decisionOf(result);
+    assert.equal(decision?.decision, expected.decision,
+      `bounded stream must reach the same verdict as unbounded (verdict at ${at})`);
+
+    const record = soleRecord(dir);
+    const size = Buffer.byteLength(String(record.rawOutput ?? ""), "utf8");
+    assert.ok(size <= RAW_OUTPUT_BYTES,
+      `persisted rawOutput is ${size} bytes, over the ${RAW_OUTPUT_BYTES} cap`);
+    assert.ok(String(record.rawOutput).includes("[vibe-274: "),
+      "an elided capture must disclose the elision, not truncate silently");
+    assert.equal(record.verdictState, unbounded && soleRecord(small).verdictState,
+      "verdictState is unchanged across bounding");
+  });
+}
+
+test("vibe-274: an under-budget capture is stored byte-identical, with no marker", () => {
+  const dir = repo({ enabled: true });
+  seedDefect(dir);
+  runHook(dir, { fixture: "gate-marker.mjs" });
+  const record = soleRecord(dir);
+  assert.ok(!String(record.rawOutput ?? "").includes("[vibe-274: "),
+    "a capture that fits must carry no marker at all");
 });

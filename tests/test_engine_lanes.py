@@ -328,7 +328,11 @@ class TestLaneStimulus(unittest.TestCase):
         for line in result["rawOutput"].splitlines():
             if not line.strip():
                 continue
-            event = json.loads(line)
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                # vibe-274: disclosure markers in an over-budget capture are deliberately not JSON.
+                continue
             if event.get("type") == "item.completed":
                 return event["text"]
         raise AssertionError("no item.completed event in the stream")

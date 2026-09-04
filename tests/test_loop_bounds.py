@@ -211,7 +211,13 @@ class StubCase(TempDirMixin, unittest.TestCase):
         for line in payload["rawOutput"].splitlines():
             if not line.strip():
                 continue
-            event = json.loads(line)
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                # vibe-274: an over-budget capture carries disclosure markers, which are
+                # deliberately not JSON so the Stop gate's verdict fold cannot mistake one for an
+                # event. Skipping unparseable lines is the same rule that fold applies.
+                continue
             if event.get("type") == "item.completed":
                 return event["text"]
         raise AssertionError("no item.completed event")

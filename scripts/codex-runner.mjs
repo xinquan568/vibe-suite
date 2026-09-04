@@ -62,7 +62,7 @@ import { fileURLToPath } from "node:url";
 import { claimFailureMessage, resolveClaimBudget } from "./lib/claim-budget.mjs";
 import { emit } from "./lib/eventlog.mjs";
 import { billableTokens, readEventStream } from "./lib/events.mjs";
-import { noTerminalEvent, stderrTail } from "./lib/render.mjs";
+import { boundRawOutput, noTerminalEvent, stderrTail } from "./lib/render.mjs";
 import { loadConfig, resolveDefaults } from "./lib/config-bridge.mjs";
 import {
   DEFAULT_TIMEOUT_MS, heartbeatInterval, runWithDeadline, signalGroup,
@@ -364,7 +364,9 @@ async function execute(workspace, record, prompt) {
     status,
     errorClass,
     threadId: events.threadId ?? record.threadId ?? null,
-    rawOutput: outcome.stdout,
+    // vibe-274: bounded with a disclosed marker. `outcome.stdout` is `undefined` when the
+    // engine produced nothing, and stays `undefined` — an absent capture is not an empty one.
+    rawOutput: boundRawOutput(outcome.stdout),
     verdictText: verdict.verdictText,
     verdictState: verdict.verdictState,
     exitCode: outcome.exitCode,

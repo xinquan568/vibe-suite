@@ -415,7 +415,10 @@ export function selectTopology({ text, cap, mandatory = "controller", renderMark
     seen.add(key);
     candidates.push({ pre, post, regime, fixed, order: rank[pre] + rank[post] });
   }
-  candidates.sort((a, b) => a.order - b.order);
+  // Sort into the approved TOTAL order: by rank sum, then by the pre mode, which reproduces the
+  // plan's listed sequence exactly — (all,all), (all,partial), (partial,all), (all,empty),
+  // (partial,partial), (empty,all), (partial,empty), (empty,partial), (empty,empty).
+  candidates.sort((a, b) => a.order - b.order || rank[a.pre] - rank[b.pre]);
 
   // Candidates are grouped by mode pair. Both regimes of a pair are evaluated and the one that
   // retains MORE is taken: `head-empty` exists precisely to stop a head that cannot use its half of
@@ -470,10 +473,13 @@ export function selectTopology({ text, cap, mandatory = "controller", renderMark
     return result;
   };
 
+  // A group is the two REGIMES of ONE mode pair — never a whole rank. Equal-rank pairs are
+  // genuinely different topologies and the approved order decides between them; maximising across
+  // them would silently replace that order with a byte-count policy.
   for (let i = 0; i < candidates.length; ) {
-    const rank = candidates[i].order;
+    const { pre, post } = candidates[i];
     let best = null;
-    while (i < candidates.length && candidates[i].order === rank) {
+    while (i < candidates.length && candidates[i].pre === pre && candidates[i].post === post) {
       const r = evaluate(candidates[i]);
       if (r && (!best || r.bytes > best.bytes)) best = r;
       i += 1;

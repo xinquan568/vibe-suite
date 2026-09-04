@@ -1065,7 +1065,8 @@ for (const at of ["start", "middle", "end"]) {
       assert.deepEqual(record[field], controlRecord[field],
         `${field} changed across bounding (verdict at ${at})`);
     }
-    assert.equal(typeof record.threadId, typeof controlRecord.threadId, "threadId shape unchanged");
+    assert.deepEqual(record.threadId, controlRecord.threadId,
+      "threadId VALUE is unchanged across bounding — comparing only its type asserts nothing");
   });
 }
 
@@ -1087,9 +1088,8 @@ test("vibe-274: an OVERSIZED controlling verdict leaves no parseable agent_messa
     assert.ok(!(ev?.type === "item.completed" && ev.item?.type === "agent_message"),
       "a parseable completed agent_message survived suppression — the gate could read a stale verdict");
   }
-  const decision = decisionOf(result);
-  assert.notEqual(decision?.decision, "block",
-    "the gate must NOT block on the superseded earlier verdict");
+  // Acceptance bullet 3 names the DECLARED no-verdict route, not merely "did not block".
+  assertFailOpen(result, "an unretainable controlling verdict must take the declared no-verdict route");
 });
 
 test("vibe-274: an under-budget capture is stored byte-identical, with no marker", () => {

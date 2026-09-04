@@ -521,14 +521,21 @@ test("B2: head and tail each spend their OWN budget, and both fit together", () 
   assert.ok(out.includes(line(40, "t")), "the tail spent its own share — not starved by the head");
 });
 
-test("B2: a side's budget is not re-granted per line", () => {
-  // Three cheap head lines would each pass a per-line check but together exceed the head's share.
-  const src = line(100) + line(40) + line(40) + line(40) + line(900) + controller(100) + line(900);
-  const out = boundRawOutput(src, 400);
-  assert.ok(bytes(out) <= 400, "never over cap");
-  const head = out.slice(0, out.indexOf(MARKER_PREFIX));
-  assert.ok(bytes(head) - 100 <= Math.ceil((400 - bytes(out) + bytes(head)) / 2) + 100,
-    "the head cannot spend an allowance it was granted only once");
+test("B2: a side's budget is a TOTAL, not an allowance re-granted per line", () => {
+  // pre [A(100), h(20), i(20), pad(900)] · controller 100 · post [pad(900), t(20), B(100)].
+  // (partial,partial) floor = 100 + mk(940) + 100 + mk(920) + 100 = 412. At cap 472 the residual is
+  // 60, so the head's share is ceil(60/2) = 30. `h` costs 20 and fits; `i` brings the head's
+  // CUMULATIVE growth to 40, which exceeds 30, so it must be refused — 452.
+  //
+  // Restoring the `spent + budget` comparison alone, with the per-side baselines left correct,
+  // re-grants the 30 after `h` is taken and admits `i` at 472. This case is what separates the two
+  // halves of that defect; the earlier both-sides fixture does not, because it has one line a side.
+  const src = line(100, "A") + line(20, "h") + line(20, "i") + line(900, "p") + controller(100)
+            + line(900, "q") + line(20, "t") + line(100, "B");
+  const out = boundRawOutput(src, 472);
+  assert.equal(bytes(out), 452, "472 means the head spent its share twice");
+  assert.ok(out.includes(line(20, "h")), "the first head line fits the share");
+  assert.ok(!out.includes(line(20, "i")), "the second exceeds it and must be refused");
 });
 
 // ---------------------------------------------------------------------------
@@ -537,6 +544,17 @@ test("B2: a side's budget is not re-granted per line", () => {
 // whole side away. That is a provenance policy, not a byte-count policy: it can
 // return fewer bytes, and deliberately does.
 // ---------------------------------------------------------------------------
+
+test("N1: equal-rank mode pairs keep the approved order — they are not maximised across", () => {
+  // pre [20,80] · controller 100 · post [180,20], cap 380. `(all,partial)` and `(partial,all)` share
+  // rank 1 and are DIFFERENT topologies; the approved total order takes `(all,partial)` at 276.
+  // Grouping a whole rank and keeping the largest returns `(partial,all)` at 375, which silently
+  // replaces the approved order with a byte-count policy.
+  const src = line(20) + line(80) + controller(100) + line(180) + line(20);
+  const out = boundRawOutput(src, 380);
+  assert.equal(bytes(out), 276, "375 means equal-rank pairs were maximised across");
+  assert.ok(out.startsWith(line(20) + line(80)), "the whole pre side is retained — (all,partial)");
+});
 
 test("M3: (partial,all) outranks (all,empty) — the approved sum order", () => {
   const src = line(20) + line(180) + controller(100) + line(20) + line(80);

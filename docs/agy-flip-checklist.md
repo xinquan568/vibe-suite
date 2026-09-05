@@ -71,6 +71,23 @@ Two consequences worth stating rather than discovering:
   them. They exist so that a graduation is done deliberately and visibly, by someone who has followed
   the steps — not because the code would stop them otherwise.
 
+## The decision gate — `v0.0.1-alpha1` (recorded 2026-09-05)
+
+The lane is **staged; unavailable in this release**. It is frozen, not abandoned, and the freeze has
+an end date rather than an open one.
+
+| | |
+|---|---|
+| **Decision point** | the `v0.0.1-alpha1` cut |
+| **Owner** | **`@xinquan568` — PROPOSED, pending maintainer confirmation.** Owning the repository is not the same as accepting accountability for a release gate, so this names a candidate, not an assignment. |
+| **Frozen until then** | no gate weakening, and **no new agy work** |
+| **Graduation requires** | every check in `tests/agy-contract/gate-status.json` `passed`, including manual write-denial evidence for `read_only_write_denied` (see the section above on why a probe alone cannot supply it) |
+| **If not verified at the cut** | **demote** — the `engine` enum stops accepting `agy` (`ConfigValueError: not available in this release`), and the lane moves to a staging branch |
+
+Consensus source: the grill report of 2026-08-22, finding **M14**, agreed by both reviewing models.
+The demotion is a **decision recorded here, not an action taken here** — nothing in this repository
+performs it today, and performing it early would be exactly the gate-rescoping the freeze forbids.
+
 ## Before the flip — every item, in order
 
 1. **Authenticate** the agy CLI in the environment where the probe will run.

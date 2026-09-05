@@ -23,6 +23,18 @@ import { fileURLToPath } from "node:url";
 
 export const GATE_SCHEMA = 1;
 
+/**
+ * How the product describes a shut gate to a person (vibe-210 / grill M14, the FREEZE decision).
+ *
+ * `gate.reason` says WHICH check is unsatisfied — diagnostic, and it stays. This says what the
+ * closure MEANS: the lane is deliberate, scoped to this release, and not a defect. It lives here,
+ * beside the one predicate that decides reachability, so every surface reads the same words from the
+ * same place; five literals would agree today and diverge on the next edit.
+ *
+ * It is presentation only. Nothing in `resolveAgyGate` reads it, and adding it cannot change a verdict.
+ */
+export const STAGED_NOTICE = "staged; unavailable in this release";
+
 // The canonical definitions are PRIVATE and immutable, and the resolver reads only these. Exporting
 // the arrays the predicate consumes let a reviewer delete `read_only_write_denied` from the
 // mandatory set in-process and open the gate — the same defect as the mutable signature registry,

@@ -61,6 +61,11 @@ test("gated shut: exit 2, nothing dispatched, no records", () => {
   assert.match(result.stderr, /agy-flip-checklist/);
   assert.equal(result.stdout.trim(), "", "stdout carries results only");
   assert.equal(result.records, 0);
+  // vibe-210: this is a SEPARATE emitted refusal from the runner's — `agy-fallback.mjs` constructs
+  // the reason and this CLI prints it, before either runner is invoked. Labelling only the runner
+  // would leave this reachable surface unlabelled.
+  assert.match(result.stderr, /staged; unavailable in this release/,
+    "the audit entry point's refusal must carry the staged notice too");
 });
 
 test("agy answers: one result on stdout, no header, exit 0", () => {

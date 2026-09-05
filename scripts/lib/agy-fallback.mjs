@@ -22,6 +22,11 @@
 // refused outright (`fallback.md` requires refusal, not hand-off, pre-graduation), which is why
 // the gate resolver — not PATH — decides whether this module is reachable at all.
 
+
+// The one wording for a shut gate (vibe-210). A frozen string, not a seam: the `deps` object
+// injects BEHAVIOUR, and `agy-gate.mjs` imports only node builtins and reads no record at
+// module init, so this stays acyclic and side-effect free.
+import { STAGED_NOTICE } from "./agy-gate.mjs";
 export const EXIT = { ok: 0, refused: 2, manual: 3 };
 
 // `commands/shared/fallback.md` specifies the diagnostic header as a *structured* block — three
@@ -110,7 +115,7 @@ export async function runWithFallback(deps) {
   if (gate?.passed !== true) {
     return {
       outcome: "refused", result: null, header: false, exitCode: EXIT.refused,
-      reason: `the agy lane is gated shut — ${gate?.reason ?? "no gate verdict supplied"}`,
+      reason: `the agy lane is ${STAGED_NOTICE} — gated shut: ${gate?.reason ?? "no gate verdict supplied"}`,
     };
   }
 

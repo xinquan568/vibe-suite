@@ -669,6 +669,40 @@ def _v209_unbounded_runs(source_path):
     return calls, [c for c in calls if "timeout" not in [kw.arg for kw in c.keywords]]
 
 
+class ConnectivityCapabilityStagedNoticeTest(DoctorCase):
+    """vibe-210 / grill M14 — doctor states the agy lane's RELEASE status, not only its gate status.
+
+    The freeze requires every surface to describe the lane in the same words. Doctor's single agy
+    sentence lives in the `connectivity` capability's `blocked_on`, which is the field a user reads
+    when they ask why the lane is not available. Asserting it through the real report — rather than
+    grepping the source — is what makes this a statement about what the user is shown.
+    """
+
+    def connectivity(self, report):
+        rows = {c["check"]: c for c in report["capabilities"]}
+        self.assertIn("connectivity", rows, "doctor must still emit the connectivity capability")
+        return rows["connectivity"]
+
+    def test_connectivity_states_the_staged_release_status(self):
+        cap = self.connectivity(self.report())
+        self.assertIn("staged; unavailable in this release", cap["blocked_on"])
+
+    def test_connectivity_still_defers_to_preflight_and_names_the_gate(self):
+        # The notice ADDS a release statement; it must not replace the two facts already there —
+        # who owns the normalised lane result, and that agy's verdict is PENDING behind a gate.
+        #
+        # Asserting the bare word "gate" was not enough: replacing the whole pending-verdict clause
+        # with "see the gate notes in docs/agy-flip-checklist.md" still contained it, so the test
+        # passed while the fact it names had been deleted. Each clause is now pinned by the words
+        # that carry its meaning, and the mutation that exposed this is in the run's battery record.
+        cap = self.connectivity(self.report())
+        self.assertEqual(cap["status"], "see-preflight")
+        self.assertIn("/vibe-suite:preflight owns the normalised lane result", cap["blocked_on"],
+                      "the preflight-ownership fact must survive the notice")
+        self.assertIn("verdict stays pending behind its gate", cap["blocked_on"],
+                      "the pending-verdict fact must survive the notice")
+
+
 class RuntimeCapabilityRowTest(unittest.TestCase):
     """R18/R19 — doctor's runtime capability row (vibe-209 / grill P4).
 

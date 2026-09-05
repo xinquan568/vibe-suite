@@ -523,9 +523,12 @@ def diagnose(ws):
     elif knowledge:
         findings.append(knowledge)
     runtime_capability(capabilities)
+    # vibe-210 (grill M14): the agy lane is FROZEN, and every surface says so in the same words.
+    # `pending behind its gate` explains the mechanism; the notice explains the decision.
     capabilities.append({"check": "connectivity", "status": "see-preflight",
                          "blocked_on": "/vibe-suite:preflight owns the normalised lane result; "
-                                       "agy's 'available' verdict stays pending behind its gate"})
+                                       "agy is staged; unavailable in this release — its "
+                                       "'available' verdict stays pending behind its gate"})
 
     if not findings:
         # `[GOOD]` is exclusive: a report containing it contains exactly that one entry.

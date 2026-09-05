@@ -26,7 +26,7 @@
 
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { agyGate } from "./lib/agy-gate.mjs";
+import { agyGate, STAGED_NOTICE } from "./lib/agy-gate.mjs";
 import { loadConfig } from "./lib/config-bridge.mjs";
 import { runWithDeadline } from "./lib/process.mjs";
 import {
@@ -142,7 +142,7 @@ async function main() {
   const gate = agyGate();
   if (!gate.passed) {
     process.stderr.write(
-      `agy-runner: the agy lane is gated shut — ${gate.reason}. ` +
+      `agy-runner: the agy lane is ${STAGED_NOTICE} — gated shut: ${gate.reason}. ` +
       `See docs/agy-flip-checklist.md; the cross-model audit engine remains codex.\n`);
     return 2;
   }

@@ -85,6 +85,10 @@ record is `tests/agy-contract/gate-status.json`; the single consumer is
 `scripts/lib/agy-gate.mjs`; the flip procedure is `docs/agy-flip-checklist.md`. Until every check
 passes, `--engine agy` errors with the gate status and this default stays `codex`.
 
+**Release status:** the agy lane is **staged; unavailable in this release**. The freeze has a
+decision gate at the `v0.0.1-alpha1` cut — graduate, or demote and move the lane to a staging
+branch. See [`docs/agy-flip-checklist.md`](../../docs/agy-flip-checklist.md).
+
 ## `.vibe-suite.md` keys
 
 The keys these rules read. Types and domains are fixed here so the config reader and this partial

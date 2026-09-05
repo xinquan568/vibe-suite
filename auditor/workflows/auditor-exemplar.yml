@@ -8,7 +8,10 @@
 # and appends the exemplar_published event.
 # Authority split: the `exemplar` job runs the model and holds read-only
 # authority (contents: read, credential-free checkouts, no PAT); the
-# model-free `publish` job owns every write.
+# model-free `publish` job owns every write. The target reaches `publish` as a
+# JOB OUTPUT written before the model step — never as artifact content, which
+# the model could rewrite; a stray `.exemplar-env` in the workspace is refused
+# unread (vibe-211).
 name: auditor-exemplar
 on:
   issues:
@@ -45,6 +48,8 @@ jobs:
       contents: read
       issues: read
       id-token: write
+    outputs:
+      target_repo: ${{ steps.derive.outputs.target_repo }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,7 +60,8 @@ jobs:
             ref: auditor-data
             path: _data
             persist-credentials: false
-      - run: |
+      - id: derive
+        run: |
           set -euo pipefail
           # derive the target, enforce the prior-audit precondition, and
           # clone at the audited commit (legacy registry entries may hold
@@ -100,7 +106,10 @@ jobs:
             echo "TARGET_REPO=$TARGET"
             echo "EXEMPLAR_SCORE=$SCORE"
             echo "EXEMPLAR_ELIGIBLE=$ELIGIBLE"
-          } | tee "$CODE_DIR/.exemplar-env" >> "$GITHUB_ENV"
+          } >> "$GITHUB_ENV"
+          # the target reaches publish as a JOB OUTPUT, fixed here before the model step;
+          # the artifact carries no values (vibe-211)
+          echo "target_repo=$TARGET" >> "$GITHUB_OUTPUT"
       -     if: ${{ env.EXEMPLAR_ELIGIBLE == 'true' }}
             uses: anthropics/claude-code-action@v1
             with:
@@ -121,10 +130,7 @@ jobs:
       -       uses: actions/upload-artifact@v4
               with:
                 name: exemplar-model-output
-                path: |
-                  _data/exemplars
-                  .exemplar-env
-                  .exemplar-context.json
+                path: _data/exemplars
                 if-no-files-found: error
   publish:
     needs: exemplar
@@ -145,8 +151,10 @@ jobs:
       -     uses: actions/download-artifact@v4
             with:
               name: exemplar-model-output
-              path: ${{ github.workspace }}
+              path: ${{ github.workspace }}/_data/exemplars
       - name: Validate and publish the exemplar
+        env:
+          TARGET_REPO: ${{ needs.exemplar.outputs.target_repo }}
         run: |
           # logic:exemplar
           set -euo pipefail
@@ -166,14 +174,23 @@ jobs:
             echo "REFUSE:registry-missing"
             exit 1
           fi
-          if [ -f "$CODE_DIR/.exemplar-env" ]; then
-            . "$CODE_DIR/.exemplar-env"
+          # vibe-211: the artifact is DATA. A `.exemplar-env` in the workspace means a producer
+          # is still shipping values through the artifact — refuse without reading it.
+          if [ -e "$CODE_DIR/.exemplar-env" ]; then
+            echo "REFUSE:artifact-env-present"
+            exit 1
           fi
-          TARGET="${TARGET_REPO:-$(jq -r '.repo.full_name // empty' "$FIXTURE")}"
+          TARGET="${TARGET_REPO:-}"
           if [ -z "$TARGET" ]; then
             echo "REFUSE:target-repo-missing"
             exit 1
           fi
+          # the WHOLE value must be owner/name: no newline, no other characters, exactly one slash
+          case "$TARGET" in
+            *[!A-Za-z0-9._/-]*|/*|*/|*/*/*) echo "REFUSE:target-repo-invalid"; exit 1 ;;
+            */*) ;;
+            *) echo "REFUSE:target-repo-invalid"; exit 1 ;;
+          esac
           SLUG="$(printf '%s' "$TARGET" | tr '/' '-')"
           SCORE="${SCORE:-$(jq -r --arg r "$TARGET" '.repos[$r].score // 0' "$REGISTRY")}"
           SECURITY="${SECURITY:-$(jq -r --arg r "$TARGET" '.repos[$r].security // "UNKNOWN"' "$REGISTRY")}"

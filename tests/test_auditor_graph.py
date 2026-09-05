@@ -412,7 +412,7 @@ class ExemplarTopology(unittest.TestCase):
 
     def test_derive_step_writes_target_repo_to_github_output_before_the_model_step(self):
         st = self._steps("exemplar")
-        derive = [i for i, s in enumerate(st) if re.search(r"^\s+id: derive\s*$", s, re.M)]
+        derive = [i for i, s in enumerate(st) if re.search(r"^\s+(?:- )?id: derive\s*$", s, re.M)]
         self.assertEqual(len(derive), 1, "exactly one step in 'exemplar' must carry `id: derive`")
         model = [i for i, s in enumerate(st) if MODEL_ACTION.search(s)]
         self.assertEqual(len(model), 1, "exactly one model step expected in 'exemplar'")

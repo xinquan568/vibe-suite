@@ -15,8 +15,8 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  agyRow, buildMatrix, AUTH_MODES, MODELS_CACHE_TTL_MS, probeAgy, probeCodex, readModelsCache,
-  ROW_KEYS, SMOKE_RESULTS,
+  agyRow, buildMatrix, AUTH_MODES, exitCodeFor, MODELS_CACHE_TTL_MS, probeAgy, probeCodex,
+  readModelsCache, ROW_KEYS, SMOKE_RESULTS,
 } from "../../scripts/lib/preflight.mjs";
 
 function tempHome() {
@@ -354,3 +354,50 @@ test("agy: an unconfirmed reap is not a healthy lane, and auth is never invented
   assert.equal(healthy.auth, "unknown",
     "agy exposes no auth mode — reporting `api-key` would be inventing an observation");
 });
+
+// --- vibe-210: the staged notice reaches preflight's detail, and NOTHING else moves ------------
+//
+// The row's non-detail fields are the load-bearing part. `available: null` under a shut gate is a
+// deliberate statement that the lane is UNVERIFIED, not broken, and `exitCodeFor` skips a null row
+// entirely — so a change that turned it into `false` would fail a preflight over a lane nobody is
+// allowed to use. `models.status` is likewise NOT a constant: it is `fresh` when slugs list,
+// `missing` when signed out, and `pending` only when the binary is absent. Asserting a blanket
+// `pending` here would be a test greenable only by breaking the row, which is why each case carries
+// its own expected value.
+
+const SIGNED_OUT = {
+  ...HEALTHY,
+  print: { stdout: "Authentication required. Please visit the URL to log in:\n" },
+};
+const ABSENT = { "--version": { spawnFailed: true } };
+
+const STAGED = /staged; unavailable in this release/;
+
+for (const [name, answers, expectedModels] of [
+  ["healthy", HEALTHY, "fresh"],
+  ["signed out", SIGNED_OUT, "missing"],
+  ["binary absent", ABSENT, "pending"],
+]) {
+  test(`vibe-210: gate shut / ${name} — the notice is in detail and the row is untouched`, async () => {
+    const shut = await probeAgy({ run: agyRun(answers), gate: GATE_SHUT, env: {} });
+    const open = await probeAgy({ run: agyRun(answers), gate: GATE_OPEN, env: {} });
+
+    assert.match(shut.detail, STAGED, "the gate-shut detail states the release status");
+    assert.match(shut.detail, /contract gate not passed/, "and still names the gate");
+    assert.match(shut.detail, /agy-flip-checklist/, "and still points at the checklist");
+
+    // Every non-detail field is what it was before this change.
+    assert.equal(shut.available, null, "unverified is pending, never unavailable");
+    assert.equal(shut.models.status, expectedModels, `${name} keeps its own models.status`);
+    assert.deepEqual(Object.keys(shut), ROW_KEYS, "the frozen row shape is unchanged");
+    assert.equal(shut.auth, open.auth, "auth is unaffected by the notice");
+    assert.equal(shut.version, open.version, "version is unaffected by the notice");
+
+    // The exit-code contract: a pending row never counts against preflight.
+    assert.equal(exitCodeFor([shut]), 0, "a shut-gate agy row must not fail preflight");
+
+    // The OPEN-gate row must not carry the notice at all — it describes a release decision about a
+    // staged lane, and a graduated lane is not staged.
+    assert.doesNotMatch(open.detail, STAGED, "an open gate is not 'staged'");
+  });
+}

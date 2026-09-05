@@ -14,7 +14,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import * as gateModule from "../../scripts/lib/agy-gate.mjs";
-const { agyGate, gateRecordPath, MANDATORY_CHECKS, readGateRecord, resolveAgyGate } = gateModule;
+const { agyGate, gateRecordPath, MANDATORY_CHECKS, readGateRecord, resolveAgyGate,
+        STAGED_NOTICE } = gateModule;
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -171,4 +172,22 @@ test("no exported surface of the gate module can weaken the mandatory predicate"
       .map((n) => [n, { state: "passed", note: "" }])),
   };
   assert.equal(resolveAgyGate(withoutWriteCheck).passed, false);
+});
+
+// --- vibe-210: one wording, exported once -------------------------------------------------------
+//
+// The freeze (grill M14) requires every surface to describe the lane in the SAME words. Five string
+// literals would satisfy five separate assertions today and drift on the next edit, so the phrase is
+// a single export and this is the test that pins it. Changing the wording is then one deliberate
+// edit here, not a silent divergence between the runner, the audit entry, preflight and doctor.
+
+test("vibe-210: the staged notice is exported and is exactly the agreed wording", () => {
+  assert.equal(STAGED_NOTICE, "staged; unavailable in this release");
+});
+
+test("vibe-210: the staged notice does not disturb the gate predicate", () => {
+  // A presentation string living beside the predicate must not become an input to it. The gate's
+  // verdict for a fully-passing record is unchanged by the export's existence.
+  assert.equal(resolveAgyGate(allPassed()).passed, true);
+  assert.equal(resolveAgyGate(null).passed, false);
 });

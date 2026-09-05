@@ -61,6 +61,10 @@ test("pre-gate: the committed gate is shut, so nothing dispatches and no record 
   assert.match(result.stderr, /gated shut/);
   assert.match(result.stderr, /agy-flip-checklist/, "the refusal points at the checklist");
   assert.equal(jobCount(dir), 0, "a refused lane must not leave a job record behind");
+  // vibe-210: the refusal states the RELEASE status, not only the gate status. `gated shut` says the
+  // lane is closed; it does not say the closure is deliberate and scoped to this release.
+  assert.match(result.stderr, /staged; unavailable in this release/,
+    "the refusal a user actually sees must carry the staged notice");
 });
 
 test("with the gate simulated open: a record, the five-key line, and threadId null", async () => {

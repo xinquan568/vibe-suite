@@ -79,7 +79,7 @@ an end date rather than an open one.
 | | |
 |---|---|
 | **Decision point** | the `v0.0.1-alpha1` cut |
-| **Owner** | **`@xinquan568` — PROPOSED, pending maintainer confirmation.** Owning the repository is not the same as accepting accountability for a release gate, so this names a candidate, not an assignment. |
+| **Owner** | **`@xinquan568` — confirmed by the maintainer on 2026-09-05.** Owning the repository is not the same as accepting accountability for a release gate; this row records that the accountability was accepted explicitly, not inferred from ownership. |
 | **Frozen until then** | no gate weakening, and **no new agy work** |
 | **Graduation requires** | every check in `tests/agy-contract/gate-status.json` `passed`, including manual write-denial evidence for `read_only_write_denied` (see the section above on why a probe alone cannot supply it) |
 | **If not verified at the cut** | **demote** — the `engine` enum stops accepting `agy` (`ConfigValueError: not available in this release`), and the lane moves to a staging branch |

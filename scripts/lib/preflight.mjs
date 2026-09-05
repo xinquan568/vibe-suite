@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { runWithDeadline } from "./process.mjs";
+import { STAGED_NOTICE } from "./agy-gate.mjs";
 
 export const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const ROW_KEYS = ["engine", "available", "version", "auth", "smoke", "models", "detail"];
@@ -235,7 +236,8 @@ export async function probeAgy(deps = {}) {
       models: { status: gateOpen ? "missing" : "pending", slugs: [] },
       detail: gateOpen
         ? "agy CLI not found on PATH"
-        : "agy CLI not found on PATH · contract gate not passed — see docs/agy-flip-checklist.md",
+        : `agy CLI not found on PATH · ${STAGED_NOTICE} · contract gate not passed — `
+          + "see docs/agy-flip-checklist.md",
     };
   }
   const version = boundToken((versionOutcome.stdout ?? "").trim().split("\n")[0] ?? "", 32) || "unknown";
@@ -285,7 +287,9 @@ export async function probeAgy(deps = {}) {
     // Gate shut ⇒ pending (null), never "unavailable": the lane is unverified, not broken.
     available: gateOpen ? smoke === "ok" : null,
     version, auth, smoke, models,
-    detail: gateOpen ? detail : `${detail} · contract gate not passed — see docs/agy-flip-checklist.md`,
+    detail: gateOpen
+      ? detail
+      : `${detail} · ${STAGED_NOTICE} · contract gate not passed — see docs/agy-flip-checklist.md`,
   };
 }
 

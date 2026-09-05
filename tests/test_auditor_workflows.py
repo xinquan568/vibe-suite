@@ -3936,3 +3936,483 @@ class TestExpressionGrammar(unittest.TestCase):
                 if not _expr_ok(m.group(1).strip()):
                     bad.append(f"{path.name}: {m.group(1).strip()[:80]}")
         self.assertEqual(bad, [], f"the new grammar over-rejects: {bad}")
+
+
+# ---------------------------------------------------------------------------------------------
+# vibe-211 (grill S16): no PRIVILEGED job may `source` / `.` artifact content.
+#
+# The defect this guards: auditor-exemplar.yml's publish job (contents: write, issues: write,
+# GH_TOKEN) sourced `.exemplar-env`, a file uploaded from the job that ran Claude with Bash. Sourcing
+# turns a data channel into a code channel. The check is written at the level of the CLASS the
+# acceptance names — "artifact paths" in "privileged jobs" — not the one instance:
+#
+#   * privileged  — effective write authority (job-level `permissions:` REPLACES the workflow-level
+#                   block; `id-token` excluded by test_auditor_graph's documented decision) OR
+#                   `secrets.PAT_TOKEN` / `secrets['PAT_TOKEN']` anywhere in the job's subtree or the
+#                   workflow-level `env:`. Resolved from the PARSED document (Psych), so flow
+#                   permissions, quoted job keys and bracket secret access are all seen. A document
+#                   that does not parse is an error, never a silent pass.
+#   * sourcing    — `.` or `source` in command position (after `{ ( ! if then else elif do while
+#                   until time command builtin env --` and `VAR=` prefixes), including inside `$(…)`,
+#                   backticks, `bash -c '…'` strings and the substitutions of UNQUOTED heredocs.
+#                   Commands are segmented with quote / $( / backtick / heredoc state tracked across
+#                   newlines (the corpus is full of multi-line quoted jq programs). A command that
+#                   cannot be tokenised is itself a violation (fail closed).
+#   * allowed     — ONLY an operand that is exactly `<code-checkout root>/auditor/scripts/<name>.sh`,
+#                   where the root is one of eight recognised spellings (a `:-` default may name only
+#                   another recognised root; `$PWD` only as the innermost fallback). Traversal, foreign
+#                   prefixes, unresolved roots and relative paths are violations.
+# ---------------------------------------------------------------------------------------------
+
+_CODE_ROOT = (r"(?:\$CODE_DIR|\$\{CODE_DIR\}"
+              r"|\$\{CODE_DIR:-(?:\$GITHUB_WORKSPACE|\$\{GITHUB_WORKSPACE\}|\$\{GITHUB_WORKSPACE:-\$PWD\})\}"
+              r"|\$GITHUB_WORKSPACE|\$\{GITHUB_WORKSPACE\}|\$\{GITHUB_WORKSPACE:-\$PWD\})")
+CODE_CHECKOUT_HELPER = re.compile(r"^" + _CODE_ROOT + r"/auditor/scripts/[A-Za-z0-9_-]+\.sh$")
+PAT_REF = re.compile(r"secrets(?:\.|\[['\"])PAT_TOKEN")
+_SOURCE_PREFIXES = {"{", "(", "!", "if", "then", "else", "elif", "do", "while", "until", "time",
+                    "command", "builtin", "env", "--"}
+_SHELLS = {"bash", "sh", "zsh", "dash"}
+_HEREDOC = re.compile(r"<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)")
+
+#: The privileged jobs of the corpus at 1fe3bf5, measured — a change detector like the census: a job
+#: added, removed or re-scoped surfaces here rather than passing silently.
+EXPECTED_PRIVILEGED = {
+    ("auditor-audit.yml", "publish"), ("auditor-batch-processor.yml", "process"),
+    ("auditor-case-study.yml", "gate"), ("auditor-case-study.yml", "publish"),
+    ("auditor-cite-exemplars.yml", "cite"), ("auditor-classify.yml", "record"),
+    ("auditor-contribute.yml", "reserve"), ("auditor-contribute.yml", "submit"),
+    ("auditor-contribute.yml", "finalize"), ("auditor-daily-report.yml", "report"),
+    ("auditor-discover.yml", "discover"), ("auditor-docs-diff.yml", "diff"),
+    ("auditor-exemplar.yml", "publish"), ("auditor-refine-rules.yml", "publish"),
+    ("auditor-render-dashboard.yml", "render"), ("auditor-repo-report.yml", "backfill"),
+    ("auditor-rule-review.yml", "review"), ("auditor-suppressions.yml", "scan"),
+    ("auditor-track.yml", "track"), ("auditor-vocab-drift.yml", "record"),
+}
+
+
+def _perm_dict(node):
+    """A permissions node → {scope: value}, {"__inline__": scalar}, or None when absent."""
+    if node is None:
+        return None
+    if node.get("t") == "m":
+        return {_scalar(k): _scalar(v) for k, v in node.get("c", [])}
+    if node.get("t") == "s":
+        return {"__inline__": node.get("v")}
+    return {"__unparsed__": str(node.get("t"))}
+
+
+def _scalars(node):
+    """Every scalar value in a subtree, as strings."""
+    if not isinstance(node, dict):
+        return
+    if node.get("t") == "s" and node.get("v") is not None:
+        yield str(node["v"])
+    elif node.get("t") == "m":
+        for k, v in node.get("c", []):
+            yield from _scalars(k)
+            yield from _scalars(v)
+    elif node.get("t") == "q":
+        for child in node.get("c", []):
+            yield from _scalars(child)
+
+
+def privileged_jobs(text):
+    """job name → reason, for every job with effective write authority or PAT_TOKEN in reach.
+
+    Resolved from the PARSED document. Raises RuntimeError when the document cannot be parsed —
+    ruby absent or malformed YAML — so a classification never silently narrows to nothing.
+    """
+    import sys
+    tests_dir = str(Path(__file__).resolve().parent)
+    if tests_dir not in sys.path:
+        sys.path.insert(0, tests_dir)
+    from test_auditor_graph import has_write   # stdlib-only module; no cycle
+    root, _census, err = parsed_workflow(text)
+    if root is None or err is not None:
+        raise RuntimeError(f"workflow did not parse: {err or 'ruby unavailable'}")
+    resolved, _ = resolve_aliases(root)
+    if resolved is None or resolved.get("t") != "m":
+        raise RuntimeError("workflow root is not a mapping")
+    top_perm = _perm_dict(_map_get(resolved, "permissions")) or {}
+    top_env = _map_get(resolved, "env")
+    top_pat = any(PAT_REF.search(s) for s in _scalars(top_env))
+    out = {}
+    jobs = _map_get(resolved, "jobs")
+    if jobs is None or jobs.get("t") != "m":
+        return out
+    for jk, jv in jobs.get("c", []):
+        name = _scalar(jk)
+        if jv.get("t") != "m":
+            continue
+        own = _perm_dict(_map_get(jv, "permissions"))
+        eff = own if own is not None else top_perm
+        reasons = []
+        if has_write(eff):
+            reasons.append("write")
+        if top_pat or any(PAT_REF.search(s) for s in _scalars(jv)):
+            reasons.append("PAT_TOKEN")
+        if reasons:
+            out[name] = "+".join(reasons)
+    return out
+
+
+def _extract_substitutions(line):
+    """Contents of every $(…) and `…` span in a line — what an UNQUOTED heredoc body executes."""
+    subs, i, n = [], 0, len(line)
+    while i < n:
+        if line[i:i + 2] == "$(":
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if line[j:j + 2] == "$(":
+                    depth += 1
+                    j += 1
+                elif line[j] == "(":
+                    depth += 1
+                elif line[j] == ")":
+                    depth -= 1
+                j += 1
+            subs.append(line[i + 2:j - 1] if not depth else line[i + 2:])
+            i = j
+        elif line[i] == "`":
+            j = line.find("`", i + 1)
+            subs.append(line[i + 1:j] if j != -1 else line[i + 1:])
+            i = (j + 1) if j != -1 else n
+        else:
+            i += 1
+    return subs
+
+
+def _commands(text):
+    """Segment a run block into commands with quote / $( / backtick / heredoc state tracked ACROSS
+    newlines — a newline ends a command only outside quotes, parentheses and heredoc bodies.
+
+    Yields ("cmd", chunk) for each command text and ("sub", text) for every $(…) / `…` substitution
+    found inside an UNQUOTED heredoc body (those execute; the rest of the body is prose).
+    """
+    i, n = 0, len(text)
+    cur, sq, dq, bt, depth = [], False, False, False, 0
+
+    def flush():
+        chunk = "".join(cur)
+        cur.clear()
+        return chunk
+
+    while i < n:
+        c = text[i]
+        if sq:
+            cur.append(c)
+            if c == "'":
+                sq = False
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            if text[i + 1] == "\n":        # backslash-newline is a continuation in double quotes too
+                cur.append(" ")
+            else:
+                cur.append(c)
+                cur.append(text[i + 1])
+            i += 2
+            continue
+        if dq:
+            if text[i:i + 2] == "$(":
+                depth += 1
+                cur.append("$(")
+                i += 2
+                continue
+            cur.append(c)
+            if c == '"':
+                dq = False
+            elif c == ")" and depth > 0:
+                depth -= 1
+            i += 1
+            continue
+        if bt:
+            cur.append(c)
+            if c == "`":
+                bt = False
+            i += 1
+            continue
+        if c == "#" and (not cur or cur[-1] in " \t\n;|&("):
+            j = text.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        if c == "'":
+            sq = True
+        elif c == '"':
+            dq = True
+        elif c == "`":
+            bt = True
+        elif text[i:i + 2] == "$(":
+            depth += 1
+            cur.append("$(")
+            i += 2
+            continue
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth = max(0, depth - 1)
+        elif c == "\n" and depth == 0:
+            chunk = flush()
+            i += 1
+            for m in _HEREDOC.finditer(chunk):
+                tag, quoted = m.group("tag"), bool(m.group("q"))
+                while i < n:
+                    j = text.find("\n", i)
+                    line = text[i:] if j == -1 else text[i:j]
+                    i = n if j == -1 else j + 1
+                    if line.strip() == tag:
+                        break
+                    if not quoted:
+                        for sub in _extract_substitutions(line):
+                            yield ("sub", sub)
+            if chunk.strip():
+                yield ("cmd", chunk)
+            continue
+        cur.append(c)
+        i += 1
+    tail = flush()
+    if tail.strip():
+        yield ("cmd", tail)
+
+
+def _lift_backticks(line):
+    """(line with each `…` span replaced by a placeholder, [span contents]); None on an unterminated span.
+
+    Single quotes protect a backtick; double quotes do not (the shell substitutes inside them).
+    """
+    out, spans, cur, q = [], [], None, None
+    for c in line:
+        if cur is not None:
+            if c == "`":
+                spans.append("".join(cur))
+                cur = None
+                out.append(" __BT__ ")
+            else:
+                cur.append(c)
+        elif q == "'":
+            out.append(c)
+            if c == "'":
+                q = None
+        elif c == "'":
+            q = "'"
+            out.append(c)
+        elif c == "`":
+            cur = []
+        else:
+            out.append(c)
+    if cur is not None:
+        return None, spans
+    return "".join(out), spans
+
+
+def _scan_line(line):
+    """Yield ('source', operand) / ('unparseable', why) for one command chunk."""
+    import shlex
+    lifted, spans = _lift_backticks(line)
+    if lifted is None:
+        yield ("unparseable", f"unterminated backtick: {line.strip()[:60]}")
+        return
+    for span in spans:
+        yield from _scan_line(span)
+    segments, ok = _split_commands(lifted)
+    if not ok:
+        yield ("unparseable", f"unbalanced $(: {line.strip()[:60]}")
+        return
+    for _sep, body, _stdin in segments:
+        try:
+            toks = shlex.split(body, comments=True)
+        except ValueError as exc:
+            yield ("unparseable", f"{exc}: {body.strip()[:60]}")
+            continue
+        k = 0
+        while k < len(toks) and (toks[k] in _SOURCE_PREFIXES
+                                 or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[k])):
+            k += 1
+        if k >= len(toks):
+            continue
+        cmd = toks[k]
+        if cmd in (".", "source"):
+            yield ("source", toks[k + 1] if k + 1 < len(toks) else "<missing operand>")
+        elif cmd in _SHELLS:
+            for idx in range(k + 1, len(toks) - 1):
+                if toks[idx] == "-c":
+                    yield from _scan_line(toks[idx + 1])
+                    break
+
+
+def sourcing_sites(run_text):
+    """Every sourcing (or untokenisable command) in a run block; heredocs handled by quoting."""
+    for _kind, chunk in _commands(run_text):
+        yield from _scan_line(chunk)
+
+
+def artifact_source_violations(workflow_texts):
+    """[messages] — every `.`/`source` of a non-code-checkout operand in a privileged job, plus every
+    command in such a job that could not be tokenised. Empty means clean."""
+    out = []
+    for wf_name, text in sorted(workflow_texts.items()):
+        priv = privileged_jobs(text)
+        if not priv:
+            continue
+        entries = parsed_run_steps(text)
+        if entries is None:
+            raise RuntimeError(f"{wf_name}: run steps could not be enumerated")
+        for job, idx, run_text, _line in entries:
+            if job not in priv:
+                continue
+            for kind, what in sourcing_sites(run_text):
+                if kind == "unparseable":
+                    out.append(f"{wf_name}:{job} step {idx}: unparseable command in a privileged "
+                               f"job — {what}")
+                elif not CODE_CHECKOUT_HELPER.match(what):
+                    out.append(f"{wf_name}:{job} step {idx}: sources {what} — not a code-checkout "
+                               f"helper")
+    return out
+
+
+class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
+    """vibe-211 (S16). The corpus test is the acceptance; the anchors prove the detector, not the corpus."""
+
+    @staticmethod
+    def _synthetic(run, job_perm="contents: write", top_perm="contents: read", job_key="a",
+                   top_env=None, job_env=None):
+        text = "name: t\non:\n  workflow_dispatch:\n"
+        if top_perm is not None:
+            text += ("permissions: " + top_perm + "\n") if top_perm.startswith("{") else \
+                    ("permissions:\n  " + top_perm + "\n")
+        if top_env:
+            text += "env:\n  " + top_env + "\n"
+        text += "jobs:\n  " + job_key + ":\n    runs-on: ubuntu-latest\n"
+        if job_perm is not None:
+            text += ("    permissions: " + job_perm + "\n") if job_perm.startswith("{") else \
+                    ("    permissions:\n      " + job_perm + "\n")
+        if job_env:
+            text += "    env:\n      " + job_env + "\n"
+        text += "    steps:\n      - run: |\n"
+        for ln in run.split("\n"):
+            text += "          " + ln + "\n"
+        return {"wf.yml": text}
+
+    def _flags(self, run, **kw):
+        return artifact_source_violations(self._synthetic(run, **kw))
+
+    ENV_FILE = '. "$CODE_DIR/.exemplar-env"'
+
+    def test_the_corpus_has_no_privileged_job_sourcing_artifact_content(self):
+        texts = {p.name: p.read_text(encoding="utf-8")
+                 for p in sorted((REPO / "auditor" / "workflows").glob("*.yml"))}
+        self.assertEqual(artifact_source_violations(texts), [])
+
+    def test_the_privileged_roster_is_exactly_the_measured_twenty(self):
+        got = set()
+        for p in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            for job in privileged_jobs(p.read_text(encoding="utf-8")):
+                got.add((p.name, job))
+        self.assertEqual(got, EXPECTED_PRIVILEGED,
+                         f"privileged roster drifted: +{sorted(got - EXPECTED_PRIVILEGED)} "
+                         f"-{sorted(EXPECTED_PRIVILEGED - got)}")
+
+    # --- privilege predicate ---------------------------------------------------------------
+    def test_a_job_level_write_scope_is_privileged_and_flagged(self):
+        self.assertTrue(any("sources $CODE_DIR/.exemplar-env" in v for v in self._flags(self.ENV_FILE)))
+
+    def test_no_write_scope_and_no_pat_is_not_privileged(self):
+        self.assertEqual(self._flags(self.ENV_FILE, job_perm="contents: read"), [])
+
+    def test_flow_style_permissions_are_privileged(self):
+        self.assertTrue(self._flags(self.ENV_FILE, job_perm="{contents: write}"))
+
+    def test_a_quoted_job_key_is_still_seen(self):
+        v = self._flags(self.ENV_FILE, job_key='"publish"')
+        self.assertTrue(any(":publish " in s for s in v), v)
+
+    def test_bracket_secret_access_is_pat_bearing(self):
+        for spelling in ("${{ secrets['PAT_TOKEN'] }}", '${{ secrets["PAT_TOKEN"] }}'):
+            with self.subTest(spelling=spelling):
+                self.assertTrue(self._flags(self.ENV_FILE, job_perm="contents: read",
+                                            job_env="TOK: " + spelling))
+
+    def test_a_workflow_level_pat_env_makes_every_job_privileged(self):
+        self.assertTrue(self._flags(self.ENV_FILE, job_perm="contents: read",
+                                    top_env="PAT: ${{ secrets.PAT_TOKEN }}"))
+
+    def test_a_job_block_replaces_the_workflow_block(self):
+        self.assertEqual(self._flags(self.ENV_FILE, job_perm="contents: read",
+                                     top_perm="contents: write"), [])
+
+    def test_a_job_with_no_block_inherits_the_workflow_writes(self):
+        self.assertTrue(self._flags(self.ENV_FILE, job_perm=None, top_perm="contents: write"))
+
+    def test_id_token_write_alone_is_not_privileged(self):
+        self.assertEqual(self._flags(self.ENV_FILE, job_perm="id-token: write"), [])
+
+    def test_an_unparseable_document_is_an_error_not_a_pass(self):
+        with self.assertRaises(RuntimeError):
+            artifact_source_violations({"wf.yml": "jobs: [unclosed\n"})
+
+    # --- the exception ---------------------------------------------------------------------
+    def test_code_checkout_helpers_are_allowed_in_every_recognised_root_spelling(self):
+        for operand in ("$CODE_DIR/auditor/scripts/log-event.sh",
+                        "${CODE_DIR}/auditor/scripts/x.sh",
+                        "${CODE_DIR:-${GITHUB_WORKSPACE:-$PWD}}/auditor/scripts/compute-fingerprint.sh",
+                        "${CODE_DIR:-$GITHUB_WORKSPACE}/auditor/scripts/x.sh",
+                        "$GITHUB_WORKSPACE/auditor/scripts/x.sh",
+                        "${GITHUB_WORKSPACE:-$PWD}/auditor/scripts/x.sh"):
+            with self.subTest(operand=operand):
+                self.assertEqual(self._flags(f'. "{operand}"'), [])
+
+    def test_the_five_corpus_sourcing_sites_are_all_code_checkout_helpers(self):
+        found = []
+        for p in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
+            for _job, _idx, run_text, _line in parsed_run_steps(p.read_text(encoding="utf-8")):
+                for kind, what in sourcing_sites(run_text):
+                    if kind == "source" and CODE_CHECKOUT_HELPER.match(what):
+                        found.append((p.name, what))
+        self.assertEqual(len(found), 5, found)
+
+    def test_operands_outside_the_grammar_are_violations(self):
+        for operand in ("$CODE_DIR/_patches/auditor/scripts/log-event.sh",
+                        "$CODE_DIR/auditor/scripts/../../.exemplar-env",
+                        "$OTHER/auditor/scripts/x.sh", "auditor/scripts/x.sh", "./auditor/scripts/x.sh",
+                        "${CODE_DIR:-$OTHER}/auditor/scripts/x.sh", "${CODE_DIR:-..}/auditor/scripts/x.sh",
+                        "${CODE_DIR:-/tmp}/auditor/scripts/x.sh", "$PWD/auditor/scripts/x.sh",
+                        "${GITHUB_WORKSPACE:-$OTHER}/auditor/scripts/x.sh",
+                        "${CODE_DIR:-${GITHUB_WORKSPACE:-$OTHER}}/auditor/scripts/x.sh",
+                        "$CODE_DIR/auditor/scripts/x.py", "$CODE_DIR/auditor/scripts/sub/x.sh",
+                        "_patches/x.sh"):
+            with self.subTest(operand=operand):
+                self.assertTrue(self._flags(f'. "{operand}"'), operand)
+
+    # --- sourcing spellings ----------------------------------------------------------------
+    def test_every_sourcing_spelling_is_seen(self):
+        for spelling in ('{ . x; }', '( . x )', 'command -- . x', 'builtin source x', "bash -c 'source x'",
+                         '`. x`', 'v=$(. x)', 'if [ -f x ]; then . x; fi', 'time . x', '! . x',
+                         'A=1 B=2 . x', 'source _patches/x.sh', 'sh -c ". x"'):
+            with self.subTest(spelling=spelling):
+                self.assertTrue(self._flags(spelling), spelling)
+
+    def test_a_continuation_line_is_joined_before_scanning(self):
+        self.assertTrue(self._flags('. \\\n  "$CODE_DIR/.env"'))
+
+    def test_a_quoted_heredoc_body_is_prose(self):
+        self.assertEqual(self._flags("cat > f <<'EOS'\n. foo\nsource bar\nEOS\necho ok"), [])
+
+    def test_an_unquoted_heredoc_substitution_executes_and_is_seen(self):
+        self.assertTrue(self._flags("cat > f <<EOS\nvalue: $(. x)\nEOS"))
+
+    def test_unquoted_heredoc_prose_is_not_a_command(self):
+        self.assertEqual(self._flags("cat > f <<EOS\n. foo is prose here\nEOS"), [])
+
+    def test_a_multi_line_quoted_program_is_one_token(self):
+        self.assertEqual(self._flags("jq -r '\n  .foo\n  | . as $x\n' f.json\necho ok"), [])
+
+    def test_an_unbalanced_substitution_fails_closed(self):
+        v = self._flags('echo "$(. x"')
+        self.assertTrue(any("unparseable" in s for s in v), v)
+
+    def test_an_unterminated_quote_fails_closed(self):
+        v = self._flags("echo 'oops")
+        self.assertTrue(any("unparseable" in s for s in v), v)
+
+    def test_a_quoted_word_source_is_not_a_command(self):
+        self.assertEqual(self._flags('echo "source of truth: . here"'), [])

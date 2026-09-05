@@ -689,11 +689,18 @@ class ConnectivityCapabilityStagedNoticeTest(DoctorCase):
 
     def test_connectivity_still_defers_to_preflight_and_names_the_gate(self):
         # The notice ADDS a release statement; it must not replace the two facts already there —
-        # who owns the normalised lane result, and that a gate is what holds agy pending.
+        # who owns the normalised lane result, and that agy's verdict is PENDING behind a gate.
+        #
+        # Asserting the bare word "gate" was not enough: replacing the whole pending-verdict clause
+        # with "see the gate notes in docs/agy-flip-checklist.md" still contained it, so the test
+        # passed while the fact it names had been deleted. Each clause is now pinned by the words
+        # that carry its meaning, and the mutation that exposed this is in the run's battery record.
         cap = self.connectivity(self.report())
         self.assertEqual(cap["status"], "see-preflight")
-        self.assertIn("/vibe-suite:preflight", cap["blocked_on"])
-        self.assertIn("gate", cap["blocked_on"])
+        self.assertIn("/vibe-suite:preflight owns the normalised lane result", cap["blocked_on"],
+                      "the preflight-ownership fact must survive the notice")
+        self.assertIn("verdict stays pending behind its gate", cap["blocked_on"],
+                      "the pending-verdict fact must survive the notice")
 
 
 class RuntimeCapabilityRowTest(unittest.TestCase):

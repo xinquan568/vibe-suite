@@ -1,0 +1,3 @@
+TARGET_REPO=$(touch "$CODE_DIR/PAYLOAD-RAN"; printf acme/claude-toolkit)
+EXEMPLAR_SCORE=92
+EXEMPLAR_ELIGIBLE=true

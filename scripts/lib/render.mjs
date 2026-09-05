@@ -265,3 +265,241 @@ export function renderEventLog(records, {
 export function renderJson(payload) {
   return JSON.stringify(payload, null, 2);
 }
+
+/**
+ * Bounding `rawOutput` (vibe-274) — the Codex line-based lane. The agy character-boundary
+ * allocator is #277's and is deliberately not here: Codex's atom is a `\n`-terminated line
+ * selected by parseable events, agy's is a UTF-8 character with no events at all, and treating
+ * them as one mechanism is what defeated six designs.
+ *
+ * The problem is a FIXED POINT, not a truncation: the marker announcing an elided region is itself
+ * sized by how much was elided, so retaining more content shrinks the marker, which frees budget,
+ * which may allow retaining more. Iterating toward that point oscillates. Instead we ENUMERATE a
+ * small finite set of complete candidate topologies, price each from its exact omissions, fill only
+ * within a fixed regime, then MEASURE the assembled result and accept only if its real gap
+ * structure matches the candidate's. Nothing is repriced after selection.
+ *
+ * A candidate is (pre mode x post mode x regime) where a mode is `all`, `partial` or `empty`.
+ * `all` and `empty` are fully determined and so are regime-free; only `partial` consumes a regime.
+ * Candidates are canonicalised on (fixed content, gap structure, regime) before evaluation, because
+ * on any given source several combinations collapse together — `all` and `empty` coincide on a side
+ * with no complete lines. `(empty, empty)` is the marker-only candidate and is always present, so
+ * the fallback is structural rather than a special case.
+ */
+export const RAW_OUTPUT_BYTES = 128 * 1024;
+
+const MARKER_PREFIX = "[vibe-274: ";
+const MARKER_SUFFIX = " bytes elided to fit the record byte cap]";
+// The fixed part is exactly 52 bytes plus the newline, so `markerWidth(n) === 53 + digits(n)`.
+// Every fixture in tests/node/raw-output-bound.test.mjs is derived from that identity.
+
+/** Deliberately NOT valid JSON: `verdictFrom` folds only parseable completed agent_messages, so a
+ * marker that parsed could displace a real verdict. The width includes the trailing newline
+ * (decision 9) so a reservation is exactly what the assembled line costs. */
+export function renderMarkerDefault(elidedBytes) {
+  return `${MARKER_PREFIX}${elidedBytes}${MARKER_SUFFIX}\n`;
+}
+
+export function markerWidth(elidedBytes) {
+  return Buffer.byteLength(renderMarkerDefault(elidedBytes), "utf8");
+}
+
+/** Lines keep their own `\n`; the trailing `fragment` is whatever follows the last one. A fragment
+ * is never retainable — a partial line is invalid NDJSON (decision 7) — so it always lies inside an
+ * omitted interval. */
+function splitLines(text) {
+  const cut = text.lastIndexOf("\n");
+  if (cut === -1) return { lines: [], fragment: text };
+  const head = text.slice(0, cut + 1);
+  const lines = head.length ? head.split("\n").slice(0, -1).map((l) => l + "\n") : [];
+  return { lines, fragment: text.slice(cut + 1) };
+}
+
+/** A parseable completed `agent_message`, whatever its `text`. This is what I3 forbids surviving
+ *  suppression: the Stop gate's fold reads `event.item.text ?? text`, so even a nullish-text message
+ *  is an event the fold will visit, and leaving one in a suppressed capture is exactly the stale
+ *  surface decision 8 rules out. */
+const isCompletedAgentMessage = (line) => {
+  let event;
+  try { event = JSON.parse(line); } catch { return false; }
+  return event?.type === "item.completed" && event.item?.type === "agent_message";
+};
+
+/** A message that CONTROLS the verdict: decision 4 — `text: null` does not displace an earlier
+ *  verdict, `text: ""` does. Strictly narrower than `isCompletedAgentMessage`, and used only to
+ *  choose the mandatory core, never to draw a suppression boundary. */
+const isControllingLine = (line) => {
+  if (!isCompletedAgentMessage(line)) return false;
+  const { item } = JSON.parse(line);
+  return item.text !== null && item.text !== undefined;
+};
+
+const byteLen = (s) => Buffer.byteLength(s, "utf8");
+const sumBytes = (parts) => parts.reduce((n, p) => n + byteLen(p), 0);
+
+/**
+ * Assemble a topology and measure it EXACTLY: its real omitted intervals, their real widths, its
+ * real byte length. This is what makes an unsound candidate fail closed instead of shipping.
+ */
+function assemble(lines, fragment, keptIdx, renderMarker) {
+  const kept = [...keptIdx].sort((a, b) => a - b);
+  const out = [];
+  let gaps = 0;
+  let cursor = 0;
+  const flushGap = (untilIdx) => {
+    const omitted = lines.slice(cursor, untilIdx);
+    const trailing = untilIdx === lines.length ? fragment : "";
+    const n = sumBytes(omitted) + byteLen(trailing);
+    if (n > 0) { out.push(renderMarker(n)); gaps += 1; }
+  };
+  for (const i of kept) {
+    flushGap(i);
+    out.push(lines[i]);
+    cursor = i + 1;
+  }
+  flushGap(lines.length);
+  const text = out.join("");
+  return { text, gaps, bytes: byteLen(text) };
+}
+
+/**
+ * One enumeration, parameterised. `mandatory` is the line index that must survive (the controller)
+ * or `null` for the suppression and controller-absent stages; `allowed` is the set of indices that
+ * may survive. Returns `{ok:true, text}` or `{ok:false}` — never a bare string, so the caller can
+ * tell "no candidate fit" from "the answer is the empty string".
+ */
+export function selectTopology({ text, cap, mandatory = "controller", renderMarker = renderMarkerDefault }) {
+  const { lines, fragment } = splitLines(String(text));
+
+  let core = null;
+  const preIdx = [];
+  const postIdx = [];
+  if (mandatory === "controller") {
+    for (let i = lines.length - 1; i >= 0; i -= 1) {                 // the LAST one wins, as verdictFrom folds
+      if (isControllingLine(lines[i])) { core = i; break; }
+    }
+    if (core === null) return { ok: false };
+    for (let i = 0; i < core; i += 1) preIdx.push(i);
+    for (let i = core + 1; i < lines.length; i += 1) postIdx.push(i);
+  } else {
+    // Suppression: the two sides are the maximal LEADING and TRAILING runs that contain no
+    // controlling line at all, so no parseable completed agent_message can survive (I3) however
+    // the runs are truncated. A run must never cross a controlling line — an EARLIER one carries a
+    // stale verdict, and decision 8 calls surfacing that worse than surfacing none.
+    let lo = 0;
+    while (lo < lines.length && !isCompletedAgentMessage(lines[lo])) lo += 1;
+    let hi = lines.length - 1;
+    while (hi >= 0 && !isCompletedAgentMessage(lines[hi])) hi -= 1;
+    for (let i = 0; i < lo; i += 1) preIdx.push(i);
+    for (let i = hi + 1; i < lines.length; i += 1) postIdx.push(i);
+  }
+  const MODES = ["all", "partial", "empty"];
+  const seen = new Set();
+  const candidates = [];
+  // Descending retention: the first accepted candidate is the best one, and `(empty,empty)` is last.
+  const rank = { all: 0, partial: 1, empty: 2 };
+  for (const pre of MODES) for (const post of MODES) for (const regime of ["head-first", "head-empty"]) {
+    // A candidate's fixed content is decided BEFORE pricing: `all` fixes the whole side, `partial`
+    // fixes its boundary line — the one adjacent to the gap — so its exact gaps are computable up
+    // front, and `empty` fixes nothing.
+    const fixed = new Set(core === null ? [] : [core]);
+    if (pre === "all") preIdx.forEach((i) => fixed.add(i));
+    else if (pre === "partial") { if (!preIdx.length) continue; fixed.add(preIdx[0]); }
+    if (post === "all") postIdx.forEach((i) => fixed.add(i));
+    else if (post === "partial") { if (!postIdx.length) continue; fixed.add(postIdx[postIdx.length - 1]); }
+    const hasPartial = pre === "partial" || post === "partial";
+    // The regime is part of the canonical key and is normalised only where no regime-dependent fill
+    // can occur; head-first and head-empty otherwise share fixed content and gaps yet fill differently.
+    const key = `${[...fixed].sort((a, b) => a - b).join(",")}|${hasPartial ? regime : "-"}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push({ pre, post, regime, fixed, order: rank[pre] + rank[post] });
+  }
+  // Sort into the approved TOTAL order: by rank sum, then by the pre mode, which reproduces the
+  // plan's listed sequence exactly — (all,all), (all,partial), (partial,all), (all,empty),
+  // (partial,partial), (empty,all), (partial,empty), (empty,partial), (empty,empty).
+  candidates.sort((a, b) => a.order - b.order || rank[a.pre] - rank[b.pre]);
+
+  // Candidates are grouped by mode pair. Both regimes of a pair are evaluated and the one that
+  // retains MORE is taken: `head-empty` exists precisely to stop a head that cannot use its half of
+  // the residual from stranding it, so accepting whichever regime is merely tried first would make
+  // the distinction inert. Ranks are ordered by retention, so the first rank that yields anything
+  // wins.
+  const evaluate = (cand) => {
+    const kept = new Set(cand.fixed);
+    const floor = assemble(lines, fragment, kept, renderMarker);
+    if (floor.bytes > cap) return null;                               // infeasible before any filling
+
+    if (cand.pre === "partial" || cand.post === "partial") {
+      // Fill inward from each partial side's boundary, monotonically: a selected line is never
+      // removed and the regime never changes, so retention only grows and each added line can only
+      // shrink its own gap. That is what makes this terminate instead of oscillating.
+      const headPool = cand.pre === "partial" ? preIdx.filter((i) => !kept.has(i)) : [];
+      const tailPool = cand.post === "partial" ? postIdx.filter((i) => !kept.has(i)).reverse() : [];
+      const residual = cap - floor.bytes;
+      // With nothing to divide, the two regimes are the same candidate; the plan normalises them,
+      // so only the head-first twin is evaluated.
+      if (residual === 0 && cand.regime === "head-empty") return null;
+      // An empty head transfers its allocation to the tail; an empty tail does NOT transfer back.
+      const headBudget = cand.regime === "head-empty" || !headPool.length
+        ? 0 : Math.ceil(residual / 2);
+      const tailBudget = residual - headBudget;
+      // Each side spends against ITS OWN baseline, and `budget` is a ceiling on that side's TOTAL
+      // growth — not an allowance re-granted per line. The tail's baseline is the assembled size
+      // AFTER the head has filled, so head bytes are not charged to the tail's share.
+      const fill = (pool, budget, baseline) => {
+        for (const i of pool) {
+          const next = new Set(kept); next.add(i);
+          const grown = assemble(lines, fragment, next, renderMarker);
+          if (grown.bytes > cap) break;
+          if (grown.bytes - baseline > budget) break;
+          kept.add(i);
+        }
+      };
+      fill(headPool, headBudget, floor.bytes);
+      const afterHead = assemble(lines, fragment, kept, renderMarker).bytes;
+      fill(tailPool, tailBudget, afterHead);
+    }
+
+    const result = assemble(lines, fragment, kept, renderMarker);
+    if (result.bytes > cap) return null;                              // measured, not assumed
+    if (core !== null && !kept.has(core)) return null;
+    // The candidate's ASSUMED gap structure, and the one the assembled result actually has. A
+    // `partial` side whose fill ran all the way to the core closes its own gap, so the result is
+    // really the `all` topology — which is enumerated separately and priced directly. Accepting it
+    // here would mean shipping a result whose structure was never priced, so it is rejected and the
+    // `all` candidate (already tried, at a higher rank) is the one that may serve it.
+    if (result.gaps !== floor.gaps) return null;
+    return result;
+  };
+
+  // A group is the two REGIMES of ONE mode pair — never a whole rank. Equal-rank pairs are
+  // genuinely different topologies and the approved order decides between them; maximising across
+  // them would silently replace that order with a byte-count policy.
+  for (let i = 0; i < candidates.length; ) {
+    const { pre, post } = candidates[i];
+    let best = null;
+    while (i < candidates.length && candidates[i].pre === pre && candidates[i].post === post) {
+      const r = evaluate(candidates[i]);
+      if (r && (!best || r.bytes > best.bytes)) best = r;
+      i += 1;
+    }
+    if (best) return { ok: true, text: best.text };
+  }
+  return { ok: false };
+}
+
+/**
+ * The two-stage pipeline. `""` is returned only when suppression itself cannot fit a single marker;
+ * an input that is already `""` comes back through the identity fast path, unchanged.
+ */
+export function boundRawOutput(raw, cap = RAW_OUTPUT_BYTES) {
+  if (raw === null || raw === undefined) return raw;                  // undefined stays undefined
+  const text = String(raw);
+  if (byteLen(text) <= cap) return raw;                               // byte-identical, no marker
+  const withController = selectTopology({ text, cap, mandatory: "controller" });
+  if (withController.ok) return withController.text;
+  const suppressed = selectTopology({ text, cap, mandatory: null });
+  if (suppressed.ok) return suppressed.text;
+  return "";
+}

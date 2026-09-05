@@ -278,6 +278,32 @@ class TestSharedLaneDiscipline(unittest.TestCase):
                 self.assertNotIn("workspace-write", text)
 
 
+class TestLaneAnswerMarkerTolerance(unittest.TestCase):
+    """vibe-274: `lane_answer` walks `rawOutput` line by line and must skip disclosure markers.
+
+    They are deliberately not JSON — that is what stops the Stop gate's fold mistaking one for an
+    event — so every line-by-line reader of `rawOutput` has to apply the same rule.
+    """
+
+    MARKER = "[vibe-274: 4096 bytes elided to fit the record byte cap]"
+
+    @staticmethod
+    def event(text="the answer"):
+        return json.dumps({"type": "item.completed", "text": text})
+
+    def test_marker_before_the_event_is_skipped(self):
+        raw = self.MARKER + "\n" + self.event() + "\n"
+        self.assertEqual(TestLaneStimulus.lane_answer({"rawOutput": raw}), "the answer")
+
+    def test_marker_after_the_event_is_skipped(self):
+        raw = self.event() + "\n" + self.MARKER + "\n"
+        self.assertEqual(TestLaneStimulus.lane_answer({"rawOutput": raw}), "the answer")
+
+    def test_a_stream_of_only_markers_still_raises(self):
+        with self.assertRaises(AssertionError):
+            TestLaneStimulus.lane_answer({"rawOutput": self.MARKER + "\n"})
+
+
 class TestLaneStimulus(unittest.TestCase):
     """Drive the real runner against a fake engine — the coverage the contract tests cannot give.
 
@@ -328,7 +354,11 @@ class TestLaneStimulus(unittest.TestCase):
         for line in result["rawOutput"].splitlines():
             if not line.strip():
                 continue
-            event = json.loads(line)
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                # vibe-274: disclosure markers in an over-budget capture are deliberately not JSON.
+                continue
             if event.get("type") == "item.completed":
                 return event["text"]
         raise AssertionError("no item.completed event in the stream")

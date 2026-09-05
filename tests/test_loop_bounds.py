@@ -211,7 +211,13 @@ class StubCase(TempDirMixin, unittest.TestCase):
         for line in payload["rawOutput"].splitlines():
             if not line.strip():
                 continue
-            event = json.loads(line)
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                # vibe-274: an over-budget capture carries disclosure markers, which are
+                # deliberately not JSON so the Stop gate's verdict fold cannot mistake one for an
+                # event. Skipping unparseable lines is the same rule that fold applies.
+                continue
             if event.get("type") == "item.completed":
                 return event["text"]
         raise AssertionError("no item.completed event")
@@ -225,6 +231,32 @@ class StubCase(TempDirMixin, unittest.TestCase):
         """
         match = re.search(r"(?s)```yaml\s*(.*?)```\s*\Z", text)
         return match.group(1) if match else None
+
+
+class TestMarkerTolerance(StubCase):
+    """vibe-274: a bounded capture carries disclosure markers, which are deliberately NOT JSON.
+
+    The helper must skip them exactly as the Stop gate's verdict fold does. Without this the module
+    would raise on any over-budget run, so the tolerance is load-bearing, not cosmetic.
+    """
+
+    MARKER = "[vibe-274: 4096 bytes elided to fit the record byte cap]"
+
+    @staticmethod
+    def event(text="the answer"):
+        return json.dumps({"type": "item.completed", "text": text})
+
+    def test_answer_skips_a_marker_that_precedes_the_event(self):
+        raw = self.MARKER + "\n" + self.event() + "\n"
+        self.assertEqual(self.answer({"rawOutput": raw}), "the answer")
+
+    def test_answer_skips_a_marker_that_follows_the_event(self):
+        raw = self.event() + "\n" + self.MARKER + "\n"
+        self.assertEqual(self.answer({"rawOutput": raw}), "the answer")
+
+    def test_answer_still_raises_when_every_line_is_a_marker(self):
+        with self.assertRaises(AssertionError):
+            self.answer({"rawOutput": self.MARKER + "\n"})
 
 
 class TestNeverClean(StubCase):

@@ -19,6 +19,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { jobsDir } from "../../scripts/lib/jobs.mjs";
+import { RAW_OUTPUT_BYTES } from "../../scripts/lib/render.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const HOOK = path.join(REPO_ROOT, "scripts", "stop-review-gate-hook.mjs");
@@ -1008,4 +1009,94 @@ test("B19: the toggle flipping BETWEEN the two reads is still silent (vibe-208)"
     env: { PATH: `${shimDir}:${process.env.PATH}` },
   });
   assertSilent(result, "the toggle was disabled between the fast-path read and the resolver's read");
+});
+
+// ---------------------------------------------------------------------------
+// vibe-274 — an over-budget capture is bounded with a disclosed marker, and the
+// gate reaches the SAME verdict it would have reached unbounded. Driven through
+// the real hook: the fixture emits well past RAW_OUTPUT_BYTES, so the runner's
+// bound is what is under test, not a contrived cap.
+// ---------------------------------------------------------------------------
+
+/** The single job record the hook just wrote. */
+function soleRecord(dir) {
+  const files = readdirSync(jobsDir(dir), { withFileTypes: true })
+    .filter((e) => e.isFile() && /^job_[0-9a-f]{20}\.json$/.test(e.name));
+  assert.equal(files.length, 1, `expected exactly one job record, got ${files.length}`);
+  return JSON.parse(readFileSync(path.join(jobsDir(dir), files[0].name), "utf8"));
+}
+
+for (const at of ["start", "middle", "end"]) {
+  test(`vibe-274: an over-budget capture with the verdict at the ${at} decides identically`, () => {
+    // The control is the SAME fixture with its padding switched off, so the two runs differ only in
+    // whether the bound engaged — not in which engine, prompt or verdict text was involved.
+    const control = repo({ enabled: true });
+    seedDefect(control);
+    const unbounded = runHook(control, {
+      fixture: "gate-verbose.mjs", env: { VIBE_TEST_VERDICT_AT: at, VIBE_TEST_PAD: "0" },
+    });
+    const expected = decisionOf(unbounded);
+    const controlRecord = soleRecord(control);
+    assert.equal(expected?.decision, "block", "the unbounded control must block");
+    assert.ok(!String(controlRecord.rawOutput ?? "").includes("[vibe-274: "),
+      "the control must NOT be bounded, or it is not a control");
+
+    const dir = repo({ enabled: true });
+    seedDefect(dir);
+    const result = runHook(dir, {
+      fixture: "gate-verbose.mjs", env: { VIBE_TEST_VERDICT_AT: at },
+    });
+    assert.equal(result.status, 0);
+
+    // Acceptance bullet 2 says "the same verdict as unbounded" — the whole decision object, not a
+    // string that happens to match.
+    assert.deepEqual(decisionOf(result), expected,
+      `bounded and unbounded must reach the SAME decision object (verdict at ${at})`);
+
+    const record = soleRecord(dir);
+    const size = Buffer.byteLength(String(record.rawOutput ?? ""), "utf8");
+    assert.ok(size <= RAW_OUTPUT_BYTES,
+      `persisted rawOutput is ${size} bytes, over the ${RAW_OUTPUT_BYTES} cap`);
+    assert.ok(String(record.rawOutput).includes("[vibe-274: "),
+      "an elided capture must disclose the elision, not truncate silently");
+
+    // Bullet 9: the record's other fields are unchanged across bounding.
+    for (const field of ["status", "errorClass", "verdictText", "verdictState"]) {
+      assert.deepEqual(record[field], controlRecord[field],
+        `${field} changed across bounding (verdict at ${at})`);
+    }
+    assert.deepEqual(record.threadId, controlRecord.threadId,
+      "threadId VALUE is unchanged across bounding — comparing only its type asserts nothing");
+  });
+}
+
+test("vibe-274: an OVERSIZED controlling verdict leaves no parseable agent_message (bullet 3)", () => {
+  // Decision 8: when the controlling event cannot be retained, surfacing the stale earlier verdict
+  // is worse than surfacing none. The fixture emits BLOCK first, then an unretainable ALLOW.
+  const dir = repo({ enabled: true });
+  seedDefect(dir);
+  const result = runHook(dir, { fixture: "gate-oversized.mjs" });
+  assert.equal(result.status, 0);
+
+  const record = soleRecord(dir);
+  const raw = String(record.rawOutput ?? "");
+  assert.ok(Buffer.byteLength(raw, "utf8") <= RAW_OUTPUT_BYTES, "still within cap");
+  for (const l of raw.split("\n")) {
+    if (!l.trim() || l.startsWith("[vibe-274: ")) continue;
+    let ev = null;
+    try { ev = JSON.parse(l); } catch { continue; }
+    assert.ok(!(ev?.type === "item.completed" && ev.item?.type === "agent_message"),
+      "a parseable completed agent_message survived suppression — the gate could read a stale verdict");
+  }
+  // Acceptance bullet 3 names the DECLARED no-verdict route, not merely "did not block".
+  assertFailOpen(result, "an unretainable controlling verdict must take the declared no-verdict route");
+});
+
+test("vibe-274: an under-budget capture is stored byte-identical, with no marker", () => {
+  const dir = repo({ enabled: true });
+  seedDefect(dir);
+  runHook(dir, { fixture: "gate-marker.mjs" });
+  const record = soleRecord(dir);
+  assert.ok(!String(record.rawOutput ?? "").includes("[vibe-274: "),
+    "a capture that fits must carry no marker at all");
 });

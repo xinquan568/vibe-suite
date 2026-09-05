@@ -1599,13 +1599,14 @@ class TestExemplarArtifactEnvInert(TempDirMixin, unittest.TestCase):
 
     def test_the_value_is_validated_as_a_whole(self):
         for bad in ("acme/claude-toolkit\n$(id)", "acme/claude-toolkit/x", "acme/claude toolkit",
-                    "acme", "/acme/x", "acme/"):
+                    "acme", "/acme", "/acme/x", "acme/"):
             with self.subTest(value=bad):
                 sb, r = self._run({"TARGET_REPO": bad})
+                before = json.loads((FIX / "registry.json").read_text())
                 self.assertNotEqual(r.returncode, 0, r.stdout)
                 self.assertIn("REFUSE:target-repo-invalid", r.stdout)
                 self.assertEqual(sb.events(), [])
-                self.assertIsNone(sb.registry()["repos"].get("acme/claude-toolkit", {}).get("exemplar_published"))
+                self.assertEqual(sb.registry(), before, "the registry changed on a refused value")
 
 
 def _lca(paths):
@@ -1656,10 +1657,16 @@ class TestExemplarDelivery(TempDirMixin, unittest.TestCase):
         subst = lambda s: s.replace("${{ github.workspace }}", str(ws))
         for name in ("DATA_DIR", "REGISTRY", "EVENT_LOG"):
             self.assertIn(name, env, f"{name} is no longer a workspace-relative workflow env binding")
-        data = Path(subst("${{ github.workspace }}" + env["DATA_DIR"]))
-        for c in ("exemplars", "ledgers", "registry"):
-            (data / c).mkdir(parents=True, exist_ok=True)
-        shutil.copy(FIX / "registry.json", data / "registry" / "repos.json")
+        resolved = {name: Path(subst("${{ github.workspace }}" + env[name]))
+                    for name in ("DATA_DIR", "REGISTRY", "EVENT_LOG")}
+        for name, value in resolved.items():
+            self.assertTrue(value.is_absolute(), f"{name} resolved relative: {value}")
+            self.assertNotIn("${{", str(value), f"{name}: an expression survived substitution")
+        data, registry, events = resolved["DATA_DIR"], resolved["REGISTRY"], resolved["EVENT_LOG"]
+        (data / "exemplars").mkdir(parents=True, exist_ok=True)
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        events.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(FIX / "registry.json", registry)          # seeded at the DECLARED registry path
         old = (_VALID_EXEMPLAR if old_valid else _INVALID_EXEMPLAR).format(body="OLD checkout copy")
         new = (_VALID_EXEMPLAR if new_valid else _INVALID_EXEMPLAR).format(body="NEW artifact bytes")
         (data / "exemplars" / f"{self.SLUG}.md").write_text(old, encoding="utf-8")
@@ -1681,8 +1688,7 @@ class TestExemplarDelivery(TempDirMixin, unittest.TestCase):
         # consumer side: unpack under the declared download destination
         dest = Path(subst(download))
         self.assertTrue(dest.is_absolute(), f"download destination resolved relative: {dest}")
-        for value in (str(dest), str(data)):
-            self.assertNotIn("${{", value, "an expression survived substitution")
+        self.assertNotIn("${{", str(dest), "an expression survived substitution")
         for rel, b in archive.items():
             target = dest / rel
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1693,22 +1699,23 @@ class TestExemplarDelivery(TempDirMixin, unittest.TestCase):
                       f"the exemplar landed at {sorted(str(p) for p in landed)}, publish reads {read_path}")
         bytes_at_read_path = read_path.read_text(encoding="utf-8")   # before the block: a refusal deletes the file
         r = sb.run(_exemplar_block(), env={
-            "DATA_DIR": str(data), "REGISTRY": str(data / "registry" / "repos.json"),
-            "EVENT_LOG": str(data / "ledgers" / "events.jsonl"),
+            "DATA_DIR": str(data), "REGISTRY": str(registry), "EVENT_LOG": str(events),
             "TARGET_REPO": "acme/claude-toolkit", "SCORE": "92", "SECURITY": "CLEAR"})
-        events = data / "ledgers" / "events.jsonl"
-        return r, bytes_at_read_path, (len(events.read_text().splitlines()) if events.exists() else 0)
+        published = json.loads(registry.read_text()).get("repos", {}).get("acme/claude-toolkit", {}).get("exemplar_published")
+        return r, bytes_at_read_path, (len(events.read_text().splitlines()) if events.exists() else 0), published
 
     def test_the_new_artifact_bytes_reach_publish_and_are_published(self):
-        r, bytes_read, events = self._deliver(old_valid=False, new_valid=True)
+        r, bytes_read, events, published = self._deliver(old_valid=False, new_valid=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("PASS", r.stdout)
         self.assertIn("NEW artifact bytes", bytes_read)
         self.assertEqual(events, 1)
+        self.assertTrue(published, "the DECLARED registry path was not updated — publish wrote elsewhere")
 
     def test_the_verdict_follows_the_delivered_bytes_not_the_checkout_copy(self):
-        r, bytes_read, events = self._deliver(old_valid=True, new_valid=False)
+        r, bytes_read, events, published = self._deliver(old_valid=True, new_valid=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("REFUSE:exemplifies-not-a-list", r.stdout)
         self.assertIn("NEW artifact bytes", bytes_read)
         self.assertEqual(events, 0)
+        self.assertIsNone(published)

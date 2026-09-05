@@ -3944,50 +3944,73 @@ class TestExpressionGrammar(unittest.TestCase):
 # The defect this guards: auditor-exemplar.yml's publish job (contents: write, issues: write,
 # GH_TOKEN) sourced `.exemplar-env`, a file uploaded from the job that ran Claude with Bash. Sourcing
 # turns a data channel into a code channel. The check is written at the level of the CLASS the
-# acceptance names — "artifact paths" in "privileged jobs" — not the one instance:
+# acceptance names — "artifact paths" in "privileged jobs" — over ALL 26 workflows (auditor/ and
+# .github/), not the one instance:
 #
 #   * privileged  — effective write authority (job-level `permissions:` REPLACES the workflow-level
 #                   block; `id-token` excluded by test_auditor_graph's documented decision) OR
-#                   `secrets.PAT_TOKEN` / `secrets['PAT_TOKEN']` anywhere in the job's subtree or the
-#                   workflow-level `env:`. Resolved from the PARSED document (Psych), so flow
-#                   permissions, quoted job keys and bracket secret access are all seen. A document
-#                   that does not parse is an error, never a silent pass.
-#   * sourcing    — `.` or `source` in command position (after `{ ( ! if then else elif do while
-#                   until time command builtin env --` and `VAR=` prefixes), including inside `$(…)`,
-#                   backticks, `bash -c '…'` strings and the substitutions of UNQUOTED heredocs.
-#                   Commands are segmented with quote / $( / backtick / heredoc state tracked across
-#                   newlines (the corpus is full of multi-line quoted jq programs). A command that
-#                   cannot be tokenised is itself a violation (fail closed).
-#   * allowed     — ONLY an operand that is exactly `<code-checkout root>/auditor/scripts/<name>.sh`,
-#                   where the root is one of eight recognised spellings (a `:-` default may name only
-#                   another recognised root; `$PWD` only as the innermost fallback). Traversal, foreign
-#                   prefixes, unresolved roots and relative paths are violations.
+#                   `secrets.PAT_TOKEN` / `secrets['PAT_TOKEN']` (dot or bracket, whitespace allowed,
+#                   exact identifier) anywhere in the job's subtree or the workflow-level `env:`.
+#                   Resolved from the PARSED document (Psych), so flow permissions, quoted job keys
+#                   and bracket secret access are all seen. A document that does not parse is an
+#                   error, never a silent pass.
+#   * sourcing    — `.` or `source` in command position, found by a single-pass shell tokeniser that
+#                   keeps quote / escape / `$(…)` / backtick / `${…}` / heredoc state across newlines,
+#                   recurses into every substitution (including inside double quotes, unquoted
+#                   heredoc bodies and `bash -c` strings), treats `(`, `{`, `f()` and `case`
+#                   patterns as command boundaries, drops redirect targets, and removes
+#                   backslash-newline without inserting a space. Unterminated syntax is a violation
+#                   (fail closed); an operand that is itself a substitution renders as __SUBST__,
+#                   which no recognised root spelling matches, so it is a violation by the grammar.
+#   * allowed     — ONLY an operand that is exactly `<code-checkout root>/auditor/scripts/<name>.sh`
+#                   (fullmatch), where the root is one of eight recognised spellings (a `:-` default
+#                   may name only another recognised root; `$PWD` only as the innermost fallback).
 # ---------------------------------------------------------------------------------------------
 
 _CODE_ROOT = (r"(?:\$CODE_DIR|\$\{CODE_DIR\}"
               r"|\$\{CODE_DIR:-(?:\$GITHUB_WORKSPACE|\$\{GITHUB_WORKSPACE\}|\$\{GITHUB_WORKSPACE:-\$PWD\})\}"
               r"|\$GITHUB_WORKSPACE|\$\{GITHUB_WORKSPACE\}|\$\{GITHUB_WORKSPACE:-\$PWD\})")
-CODE_CHECKOUT_HELPER = re.compile(r"^" + _CODE_ROOT + r"/auditor/scripts/[A-Za-z0-9_-]+\.sh$")
-PAT_REF = re.compile(r"secrets(?:\.|\[['\"])PAT_TOKEN")
+CODE_CHECKOUT_HELPER = re.compile(_CODE_ROOT + r"/auditor/scripts/[A-Za-z0-9_-]+\.sh")   # used with fullmatch()
+PAT_REF = re.compile(r"secrets\s*(?:\.\s*PAT_TOKEN\b|\[\s*['\"]PAT_TOKEN['\"]\s*\])")
 _SOURCE_PREFIXES = {"{", "(", "!", "if", "then", "else", "elif", "do", "while", "until", "time",
                     "command", "builtin", "env", "--"}
+_OPTION_TAKERS = {"command", "builtin", "env", "time"}
 _SHELLS = {"bash", "sh", "zsh", "dash"}
-_HEREDOC = re.compile(r"<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)")
+_SUBST = "__SUBST__"
 
-#: The privileged jobs of the corpus at 1fe3bf5, measured — a change detector like the census: a job
-#: added, removed or re-scoped surfaces here rather than passing silently.
+#: The privileged jobs of the 26-workflow corpus at 1fe3bf5, measured (auditor/ AND .github/) — a
+#: change detector like the census: a job added, removed or re-scoped surfaces here.
 EXPECTED_PRIVILEGED = {
-    ("auditor-audit.yml", "publish"), ("auditor-batch-processor.yml", "process"),
-    ("auditor-case-study.yml", "gate"), ("auditor-case-study.yml", "publish"),
-    ("auditor-cite-exemplars.yml", "cite"), ("auditor-classify.yml", "record"),
-    ("auditor-contribute.yml", "reserve"), ("auditor-contribute.yml", "submit"),
-    ("auditor-contribute.yml", "finalize"), ("auditor-daily-report.yml", "report"),
-    ("auditor-discover.yml", "discover"), ("auditor-docs-diff.yml", "diff"),
-    ("auditor-exemplar.yml", "publish"), ("auditor-refine-rules.yml", "publish"),
-    ("auditor-render-dashboard.yml", "render"), ("auditor-repo-report.yml", "backfill"),
-    ("auditor-rule-review.yml", "review"), ("auditor-suppressions.yml", "scan"),
-    ("auditor-track.yml", "track"), ("auditor-vocab-drift.yml", "record"),
+    ("auditor/workflows/auditor-audit.yml", "publish"),
+    ("auditor/workflows/auditor-batch-processor.yml", "process"),
+    ("auditor/workflows/auditor-case-study.yml", "gate"),
+    ("auditor/workflows/auditor-case-study.yml", "publish"),
+    ("auditor/workflows/auditor-cite-exemplars.yml", "cite"),
+    ("auditor/workflows/auditor-classify.yml", "record"),
+    ("auditor/workflows/auditor-contribute.yml", "reserve"),
+    ("auditor/workflows/auditor-contribute.yml", "submit"),
+    ("auditor/workflows/auditor-contribute.yml", "finalize"),
+    ("auditor/workflows/auditor-daily-report.yml", "report"),
+    ("auditor/workflows/auditor-discover.yml", "discover"),
+    ("auditor/workflows/auditor-docs-diff.yml", "diff"),
+    ("auditor/workflows/auditor-exemplar.yml", "publish"),
+    ("auditor/workflows/auditor-refine-rules.yml", "publish"),
+    ("auditor/workflows/auditor-render-dashboard.yml", "render"),
+    ("auditor/workflows/auditor-repo-report.yml", "backfill"),
+    ("auditor/workflows/auditor-rule-review.yml", "review"),
+    ("auditor/workflows/auditor-suppressions.yml", "scan"),
+    ("auditor/workflows/auditor-track.yml", "track"),
+    ("auditor/workflows/auditor-vocab-drift.yml", "record"),
+    (".github/workflows/deploy-site.yml", "deploy"),
+    (".github/workflows/site-preview-cleanup.yml", "cleanup"),
 }
+
+
+def corpus_workflow_texts():
+    """{repo-relative path: text} for every workflow in BOTH directories — the 26-file corpus."""
+    paths = sorted(WF_DIR.glob("*.yml")) + sorted(set(LIVE_WF_DIR.glob("*.yml"))
+                                                  | set(LIVE_WF_DIR.glob("*.yaml")))
+    return {str(p.relative_to(REPO)): p.read_text(encoding="utf-8") for p in paths}
 
 
 def _perm_dict(node):
@@ -4056,199 +4079,364 @@ def privileged_jobs(text):
     return out
 
 
-def _extract_substitutions(line):
-    """Contents of every $(…) and `…` span in a line — what an UNQUOTED heredoc body executes."""
-    subs, i, n = [], 0, len(line)
+class _ShellSyntax(Exception):
+    """Unterminated quote / substitution / backtick — the caller fails closed."""
+
+
+def _read_balanced(text, i, open_, close_):
+    """Index just past the `close_` that balances an already-consumed `open_` at position i,
+    skipping quoted spans and escapes. Raises _ShellSyntax when unterminated."""
+    depth, n, q = 1, len(text), None
+    while i < n and depth:
+        c = text[i]
+        if q:
+            if c == "\\" and q == '"':
+                i += 2
+                continue
+            if c == q:
+                q = None
+        elif c == "\\":
+            i += 2
+            continue
+        elif c in "'\"":
+            q = c
+        elif c == open_:
+            depth += 1
+        elif c == close_:
+            depth -= 1
+        i += 1
+    if depth:
+        raise _ShellSyntax(f"unterminated {open_}")
+    return i
+
+
+def _read_backtick(text, i):
+    """Index just past the closing backtick for a span opened at i-1."""
+    n = len(text)
     while i < n:
-        if line[i:i + 2] == "$(":
-            depth, j = 1, i + 2
-            while j < n and depth:
-                if line[j:j + 2] == "$(":
-                    depth += 1
-                    j += 1
-                elif line[j] == "(":
-                    depth += 1
-                elif line[j] == ")":
-                    depth -= 1
-                j += 1
-            subs.append(line[i + 2:j - 1] if not depth else line[i + 2:])
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == "`":
+            return i + 1
+        i += 1
+    raise _ShellSyntax("unterminated backtick")
+
+
+def _substitutions_in(text, depth):
+    """Yield argv lists for every $(…) / `…` inside text that is NOT quote-parsed (unquoted heredoc
+    bodies, ${…} contents). `\\$` and `\\`` are literal."""
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+        elif text.startswith("$(", i):
+            j = _read_balanced(text, i + 2, "(", ")")
+            yield from _simple_commands(text[i + 2:j - 1], depth + 1)
             i = j
-        elif line[i] == "`":
-            j = line.find("`", i + 1)
-            subs.append(line[i + 1:j] if j != -1 else line[i + 1:])
-            i = (j + 1) if j != -1 else n
+        elif c == "`":
+            j = _read_backtick(text, i + 1)
+            yield from _simple_commands(text[i + 1:j - 1], depth + 1)
+            i = j
         else:
             i += 1
-    return subs
 
 
-def _commands(text):
-    """Segment a run block into commands with quote / $( / backtick / heredoc state tracked ACROSS
-    newlines — a newline ends a command only outside quotes, parentheses and heredoc bodies.
-
-    Yields ("cmd", chunk) for each command text and ("sub", text) for every $(…) / `…` substitution
-    found inside an UNQUOTED heredoc body (those execute; the rest of the body is prose).
-    """
+def _simple_commands(text, depth=0):
+    """Yield argv lists (quotes removed, escapes resolved, substitutions → __SUBST__ and recursed)
+    for every simple command in a shell text. Raises _ShellSyntax on unterminated syntax."""
+    if depth > 12:
+        raise _ShellSyntax("substitution nesting too deep")
     i, n = 0, len(text)
-    cur, sq, dq, bt, depth = [], False, False, False, 0
+    argv, word, have_word = [], [], False
+    discard_next = None          # None | "redirect" | ("heredoc", strip_tabs)
+    pending_heredocs = []        # (tag, quoted, strip_tabs)
+    open_parens = 0
+    q = None                     # None | "'" | '"'
 
-    def flush():
-        chunk = "".join(cur)
-        cur.clear()
-        return chunk
+    def end_word():
+        nonlocal word, have_word, discard_next
+        if have_word:
+            w = "".join(word)
+            if discard_next is None:
+                argv.append(w)
+            elif discard_next == "redirect":
+                pass
+            else:
+                strip = discard_next[1]
+                raw = _heredoc_tag_raw[0]
+                quoted = raw is not None and raw != w      # `'EOS'`, `"EOS"`, `\EOS` ≠ EOS → quoted
+                pending_heredocs.append((w, quoted, strip))
+            discard_next = None
+        word, have_word = [], False
+
+    _heredoc_tag_raw = [None]    # raw (unprocessed) text of the word being read, for quoted-ness
+
+    def end_command():
+        nonlocal argv, open_parens
+        end_word()
+        if argv:
+            yield_list.append(list(argv))
+        argv = []
+
+    yield_list = []
+    word_raw_start = None
 
     while i < n:
         c = text[i]
-        if sq:
-            cur.append(c)
+        if q == "'":
             if c == "'":
-                sq = False
+                q = None
+            else:
+                word.append(c)
             i += 1
             continue
-        if c == "\\" and i + 1 < n:
-            if text[i + 1] == "\n":        # backslash-newline is a continuation in double quotes too
-                cur.append(" ")
-            else:
-                cur.append(c)
-                cur.append(text[i + 1])
-            i += 2
-            continue
-        if dq:
-            if text[i:i + 2] == "$(":
-                depth += 1
-                cur.append("$(")
+        if q == '"':
+            if c == "\\" and i + 1 < n:
+                nxt = text[i + 1]
+                if nxt == "\n":
+                    i += 2
+                    continue
+                if nxt in '$`"\\':
+                    word.append(nxt)
+                else:
+                    word.append(c)
+                    word.append(nxt)
                 i += 2
                 continue
-            cur.append(c)
             if c == '"':
-                dq = False
-            elif c == ")" and depth > 0:
-                depth -= 1
-            i += 1
-            continue
-        if bt:
-            cur.append(c)
+                q = None
+                i += 1
+                continue
+            if text.startswith("$(", i):
+                j = _read_balanced(text, i + 2, "(", ")")
+                yield_list.extend(_simple_commands(text[i + 2:j - 1], depth + 1))
+                word.append(_SUBST)
+                i = j
+                continue
+            if text.startswith("${", i):
+                j = _read_balanced(text, i + 2, "{", "}")
+                yield_list.extend(_substitutions_in(text[i + 2:j - 1], depth))
+                word.append(text[i:j])
+                i = j
+                continue
             if c == "`":
-                bt = False
+                j = _read_backtick(text, i + 1)
+                yield_list.extend(_simple_commands(text[i + 1:j - 1], depth + 1))
+                word.append(_SUBST)
+                i = j
+                continue
+            word.append(c)
             i += 1
             continue
-        if c == "#" and (not cur or cur[-1] in " \t\n;|&("):
+        # ---- normal state ----
+        if c == "\\":
+            if i + 1 >= n:
+                raise _ShellSyntax("trailing backslash")
+            if text[i + 1] != "\n":
+                word.append(text[i + 1])
+                have_word = True
+                if word_raw_start is None:
+                    word_raw_start = i
+            i += 2
+            continue
+        if c in "'\"":
+            q = c
+            have_word = True
+            if word_raw_start is None:
+                word_raw_start = i
+            i += 1
+            continue
+        if c == "#" and not have_word:
             j = text.find("\n", i)
             i = n if j == -1 else j
             continue
-        if c == "'":
-            sq = True
-        elif c == '"':
-            dq = True
-        elif c == "`":
-            bt = True
-        elif text[i:i + 2] == "$(":
-            depth += 1
-            cur.append("$(")
-            i += 2
+        if text.startswith("$(", i) or text.startswith("<(", i) or text.startswith(">(", i):
+            if text[i] != "$":
+                end_word()
+            j = _read_balanced(text, i + 2, "(", ")")
+            yield_list.extend(_simple_commands(text[i + 2:j - 1], depth + 1))
+            if text[i] == "$":
+                word.append(_SUBST)
+                have_word = True
+                if word_raw_start is None:
+                    word_raw_start = i
+            i = j
             continue
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth = max(0, depth - 1)
-        elif c == "\n" and depth == 0:
-            chunk = flush()
+        if text.startswith("${", i):
+            j = _read_balanced(text, i + 2, "{", "}")
+            yield_list.extend(_substitutions_in(text[i + 2:j - 1], depth))
+            word.append(text[i:j])
+            have_word = True
+            if word_raw_start is None:
+                word_raw_start = i
+            i = j
+            continue
+        if c == "`":
+            j = _read_backtick(text, i + 1)
+            yield_list.extend(_simple_commands(text[i + 1:j - 1], depth + 1))
+            word.append(_SUBST)
+            have_word = True
+            if word_raw_start is None:
+                word_raw_start = i
+            i = j
+            continue
+        if c in " \t":
+            if have_word:
+                _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
+            end_word()
+            word_raw_start = None
             i += 1
-            for m in _HEREDOC.finditer(chunk):
-                tag, quoted = m.group("tag"), bool(m.group("q"))
+            continue
+        if c == "\n":
+            if have_word:
+                _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
+            end_command()
+            word_raw_start = None
+            i += 1
+            for tag, quoted, strip in pending_heredocs:
+                body = []
                 while i < n:
                     j = text.find("\n", i)
                     line = text[i:] if j == -1 else text[i:j]
                     i = n if j == -1 else j + 1
-                    if line.strip() == tag:
+                    cmp = line.lstrip("\t") if strip else line
+                    if cmp == tag:
                         break
-                    if not quoted:
-                        for sub in _extract_substitutions(line):
-                            yield ("sub", sub)
-            if chunk.strip():
-                yield ("cmd", chunk)
+                    body.append(line)
+                if not quoted:
+                    yield_list.extend(_substitutions_in("\n".join(body), depth))
+            pending_heredocs.clear()
             continue
-        cur.append(c)
-        i += 1
-    tail = flush()
-    if tail.strip():
-        yield ("cmd", tail)
-
-
-def _lift_backticks(line):
-    """(line with each `…` span replaced by a placeholder, [span contents]); None on an unterminated span.
-
-    Single quotes protect a backtick; double quotes do not (the shell substitutes inside them).
-    """
-    out, spans, cur, q = [], [], None, None
-    for c in line:
-        if cur is not None:
-            if c == "`":
-                spans.append("".join(cur))
-                cur = None
-                out.append(" __BT__ ")
+        if c in ";&|":
+            if text.startswith(">&", i) or text.startswith("<&", i):
+                pass
+            if c == "&" and i + 1 < n and text[i + 1] in ">":
+                # &> / &>> redirect
+                end_word()
+                i += 2
+                while i < n and text[i] == ">":
+                    i += 1
+                while i < n and text[i] in " \t":
+                    i += 1
+                discard_next = "redirect"
+                continue
+            if have_word:
+                _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
+            end_command()
+            word_raw_start = None
+            i += 2 if text[i:i + 2] in ("&&", "||", ";;") else 1
+            continue
+        if c in "<>":
+            fd_word = have_word and "".join(word).isdigit() and word_raw_start is not None \
+                and text[word_raw_start:i].isdigit()
+            if fd_word:
+                word, have_word = [], False
             else:
-                cur.append(c)
-        elif q == "'":
-            out.append(c)
-            if c == "'":
-                q = None
-        elif c == "'":
-            q = "'"
-            out.append(c)
-        elif c == "`":
-            cur = []
-        else:
-            out.append(c)
-    if cur is not None:
-        return None, spans
-    return "".join(out), spans
-
-
-def _scan_line(line):
-    """Yield ('source', operand) / ('unparseable', why) for one command chunk."""
-    import shlex
-    lifted, spans = _lift_backticks(line)
-    if lifted is None:
-        yield ("unparseable", f"unterminated backtick: {line.strip()[:60]}")
-        return
-    for span in spans:
-        yield from _scan_line(span)
-    segments, ok = _split_commands(lifted)
-    if not ok:
-        yield ("unparseable", f"unbalanced $(: {line.strip()[:60]}")
-        return
-    for _sep, body, _stdin in segments:
-        try:
-            toks = shlex.split(body, comments=True)
-        except ValueError as exc:
-            yield ("unparseable", f"{exc}: {body.strip()[:60]}")
+                if have_word:
+                    _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
+                end_word()
+            word_raw_start = None
+            if text.startswith("<<<", i):
+                i += 3
+                discard_next = "redirect"
+            elif text.startswith("<<", i):
+                i += 2
+                strip = False
+                if i < n and text[i] == "-":
+                    strip = True
+                    i += 1
+                discard_next = ("heredoc", strip)
+            else:
+                i += 1
+                while i < n and text[i] in ">&":
+                    i += 1
+                discard_next = "redirect"
+            while i < n and text[i] in " \t":
+                i += 1
             continue
-        k = 0
-        while k < len(toks) and (toks[k] in _SOURCE_PREFIXES
-                                 or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[k])):
+        if c in "()":
+            if have_word:
+                _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
+            end_word()
+            word_raw_start = None
+            if c == "(":
+                open_parens += 1
+                argv.append("(")
+            else:
+                if open_parens > 0:
+                    open_parens -= 1
+                    argv.append(")")
+                else:
+                    # a `case` pattern terminator: the pattern is not a command; what follows is
+                    argv = []
+            i += 1
+            continue
+        if c in "{}" and not have_word and (i + 1 >= n or text[i + 1] in " \t\n;"):
+            argv.append(c)
+            i += 1
+            continue
+        word.append(c)
+        have_word = True
+        if word_raw_start is None:
+            word_raw_start = i
+        i += 1
+    if q is not None:
+        raise _ShellSyntax(f"unterminated {q} quote")
+    if have_word:
+        _heredoc_tag_raw[0] = text[word_raw_start:n] if word_raw_start is not None else None
+    end_command()
+    for tag, quoted, strip in pending_heredocs:
+        pass   # heredoc opened on the last line with no body: nothing to scan
+    return yield_list
+
+
+def _argv_sourcings(argv, depth=0):
+    """('source', operand) for a simple command whose command word is `.`/`source`; recurses into
+    `bash -c` strings."""
+    if len(argv) >= 3 and argv[1] == "(" and argv[2] == ")":      # f() { … }
+        argv = argv[3:]
+    k = 0
+    while k < len(argv):
+        t = argv[k]
+        if t in _SOURCE_PREFIXES or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t):
             k += 1
-        if k >= len(toks):
             continue
-        cmd = toks[k]
-        if cmd in (".", "source"):
-            yield ("source", toks[k + 1] if k + 1 < len(toks) else "<missing operand>")
-        elif cmd in _SHELLS:
-            for idx in range(k + 1, len(toks) - 1):
-                if toks[idx] == "-c":
-                    yield from _scan_line(toks[idx + 1])
-                    break
+        if k > 0 and argv[k - 1] in _OPTION_TAKERS and t.startswith("-"):
+            k += 1
+            continue
+        break
+    if k >= len(argv):
+        return
+    cmd = argv[k]
+    if cmd in (".", "source"):
+        yield ("source", argv[k + 1] if k + 1 < len(argv) else "<missing operand>")
+    elif cmd in _SHELLS:
+        for idx in range(k + 1, len(argv) - 1):
+            if argv[idx] == "-c":
+                try:
+                    for inner in _simple_commands(argv[idx + 1], depth + 1):
+                        yield from _argv_sourcings(inner, depth + 1)
+                except _ShellSyntax as exc:
+                    yield ("unparseable", f"bash -c string: {exc}")
+                break
 
 
 def sourcing_sites(run_text):
-    """Every sourcing (or untokenisable command) in a run block; heredocs handled by quoting."""
-    for _kind, chunk in _commands(run_text):
-        yield from _scan_line(chunk)
+    """Every sourcing (or unparseable construct) in a run block."""
+    try:
+        commands = _simple_commands(run_text)
+    except _ShellSyntax as exc:
+        yield ("unparseable", str(exc))
+        return
+    for argv in commands:
+        yield from _argv_sourcings(argv)
 
 
 def artifact_source_violations(workflow_texts):
     """[messages] — every `.`/`source` of a non-code-checkout operand in a privileged job, plus every
-    command in such a job that could not be tokenised. Empty means clean."""
+    construct in such a job that could not be tokenised. Empty means clean."""
     out = []
     for wf_name, text in sorted(workflow_texts.items()):
         priv = privileged_jobs(text)
@@ -4264,7 +4452,7 @@ def artifact_source_violations(workflow_texts):
                 if kind == "unparseable":
                     out.append(f"{wf_name}:{job} step {idx}: unparseable command in a privileged "
                                f"job — {what}")
-                elif not CODE_CHECKOUT_HELPER.match(what):
+                elif not CODE_CHECKOUT_HELPER.fullmatch(what):   # a __SUBST__ operand can never match the root grammar
                     out.append(f"{wf_name}:{job} step {idx}: sources {what} — not a code-checkout "
                                f"helper")
     return out
@@ -4275,7 +4463,7 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
 
     @staticmethod
     def _synthetic(run, job_perm="contents: write", top_perm="contents: read", job_key="a",
-                   top_env=None, job_env=None):
+                   top_env=None, job_env=None, name="wf.yml"):
         text = "name: t\non:\n  workflow_dispatch:\n"
         if top_perm is not None:
             text += ("permissions: " + top_perm + "\n") if top_perm.startswith("{") else \
@@ -4291,26 +4479,31 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
         text += "    steps:\n      - run: |\n"
         for ln in run.split("\n"):
             text += "          " + ln + "\n"
-        return {"wf.yml": text}
+        return {name: text}
 
     def _flags(self, run, **kw):
         return artifact_source_violations(self._synthetic(run, **kw))
 
     ENV_FILE = '. "$CODE_DIR/.exemplar-env"'
 
+    # --- the acceptance ---------------------------------------------------------------------
     def test_the_corpus_has_no_privileged_job_sourcing_artifact_content(self):
-        texts = {p.name: p.read_text(encoding="utf-8")
-                 for p in sorted((REPO / "auditor" / "workflows").glob("*.yml"))}
+        texts = corpus_workflow_texts()
+        self.assertEqual(len(texts), 26, sorted(texts))
         self.assertEqual(artifact_source_violations(texts), [])
 
-    def test_the_privileged_roster_is_exactly_the_measured_twenty(self):
+    def test_the_privileged_roster_is_exactly_the_measured_twenty_two(self):
         got = set()
-        for p in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
-            for job in privileged_jobs(p.read_text(encoding="utf-8")):
-                got.add((p.name, job))
+        for rel, text in corpus_workflow_texts().items():
+            for job in privileged_jobs(text):
+                got.add((rel, job))
         self.assertEqual(got, EXPECTED_PRIVILEGED,
                          f"privileged roster drifted: +{sorted(got - EXPECTED_PRIVILEGED)} "
                          f"-{sorted(EXPECTED_PRIVILEGED - got)}")
+
+    def test_live_workflows_are_inside_the_gate(self):
+        self.assertIn((".github/workflows/deploy-site.yml", "deploy"), EXPECTED_PRIVILEGED)
+        self.assertTrue(self._flags(self.ENV_FILE, name=".github/workflows/x.yml"))
 
     # --- privilege predicate ---------------------------------------------------------------
     def test_a_job_level_write_scope_is_privileged_and_flagged(self):
@@ -4326,11 +4519,18 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
         v = self._flags(self.ENV_FILE, job_key='"publish"')
         self.assertTrue(any(":publish " in s for s in v), v)
 
-    def test_bracket_secret_access_is_pat_bearing(self):
-        for spelling in ("${{ secrets['PAT_TOKEN'] }}", '${{ secrets["PAT_TOKEN"] }}'):
+    def test_bracket_secret_access_is_pat_bearing_including_spaced(self):
+        for spelling in ("${{ secrets['PAT_TOKEN'] }}", '${{ secrets["PAT_TOKEN"] }}',
+                         "${{ secrets[ 'PAT_TOKEN' ] }}", "${{ secrets . PAT_TOKEN }}"):
             with self.subTest(spelling=spelling):
                 self.assertTrue(self._flags(self.ENV_FILE, job_perm="contents: read",
                                             job_env="TOK: " + spelling))
+
+    def test_a_similarly_prefixed_secret_is_not_the_pat(self):
+        for spelling in ("${{ secrets.PAT_TOKEN_BACKUP }}", "${{ secrets['PAT_TOKEN_OLD'] }}"):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(self._flags(self.ENV_FILE, job_perm="contents: read",
+                                             job_env="TOK: " + spelling), [])
 
     def test_a_workflow_level_pat_env_makes_every_job_privileged(self):
         self.assertTrue(self._flags(self.ENV_FILE, job_perm="contents: read",
@@ -4354,20 +4554,22 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
     def test_code_checkout_helpers_are_allowed_in_every_recognised_root_spelling(self):
         for operand in ("$CODE_DIR/auditor/scripts/log-event.sh",
                         "${CODE_DIR}/auditor/scripts/x.sh",
-                        "${CODE_DIR:-${GITHUB_WORKSPACE:-$PWD}}/auditor/scripts/compute-fingerprint.sh",
                         "${CODE_DIR:-$GITHUB_WORKSPACE}/auditor/scripts/x.sh",
+                        "${CODE_DIR:-${GITHUB_WORKSPACE}}/auditor/scripts/x.sh",
+                        "${CODE_DIR:-${GITHUB_WORKSPACE:-$PWD}}/auditor/scripts/compute-fingerprint.sh",
                         "$GITHUB_WORKSPACE/auditor/scripts/x.sh",
+                        "${GITHUB_WORKSPACE}/auditor/scripts/x.sh",
                         "${GITHUB_WORKSPACE:-$PWD}/auditor/scripts/x.sh"):
             with self.subTest(operand=operand):
                 self.assertEqual(self._flags(f'. "{operand}"'), [])
 
     def test_the_five_corpus_sourcing_sites_are_all_code_checkout_helpers(self):
         found = []
-        for p in sorted((REPO / "auditor" / "workflows").glob("*.yml")):
-            for _job, _idx, run_text, _line in parsed_run_steps(p.read_text(encoding="utf-8")):
+        for rel, text in corpus_workflow_texts().items():
+            for _job, _idx, run_text, _line in parsed_run_steps(text):
                 for kind, what in sourcing_sites(run_text):
-                    if kind == "source" and CODE_CHECKOUT_HELPER.match(what):
-                        found.append((p.name, what))
+                    if kind == "source" and CODE_CHECKOUT_HELPER.fullmatch(what):
+                        found.append((rel, what))
         self.assertEqual(len(found), 5, found)
 
     def test_operands_outside_the_grammar_are_violations(self):
@@ -4379,40 +4581,56 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
                         "${GITHUB_WORKSPACE:-$OTHER}/auditor/scripts/x.sh",
                         "${CODE_DIR:-${GITHUB_WORKSPACE:-$OTHER}}/auditor/scripts/x.sh",
                         "$CODE_DIR/auditor/scripts/x.py", "$CODE_DIR/auditor/scripts/sub/x.sh",
-                        "_patches/x.sh"):
-            with self.subTest(operand=operand):
-                self.assertTrue(self._flags(f'. "{operand}"'), operand)
+                        "_patches/x.sh", "$CODE_DIR/auditor/scripts/x.sh\n"):
+            with self.subTest(operand=repr(operand)):
+                self.assertTrue(self._flags(f'. "{operand}"'), repr(operand))
+
+    def test_a_substitution_as_operand_is_unresolved_and_flagged(self):
+        self.assertTrue(self._flags('. "$(printf %s "$CODE_DIR")/auditor/scripts/x.sh"'))
 
     # --- sourcing spellings ----------------------------------------------------------------
     def test_every_sourcing_spelling_is_seen(self):
-        for spelling in ('{ . x; }', '( . x )', 'command -- . x', 'builtin source x', "bash -c 'source x'",
-                         '`. x`', 'v=$(. x)', 'if [ -f x ]; then . x; fi', 'time . x', '! . x',
-                         'A=1 B=2 . x', 'source _patches/x.sh', 'sh -c ". x"'):
+        for spelling in ('{ . x; }', '( . x )', '(source x)', 'command -- . x', 'command -p . x',
+                         'builtin source x', "bash -c 'source x'", 'sh -c ". x"', '`. x`', 'v=$(. x)',
+                         'if [ -f x ]; then . x; fi', 'time . x', '! . x', 'A=1 B=2 . x',
+                         'source _patches/x.sh', 'f() { source x; }; f', 'sou\\\nrce x',
+                         'v="$(\n. x\n)"', 'v=`\n. x\n`', '. x > log 2>&1', '. x | cat',
+                         'case $v in\n  *) . x ;;\nesac', 'echo "it\'s fine" && `. x`',
+                         'echo "<<EOF"\n. x', 'cat <(. x)', 'v=${x:-$(. y)}',
+                         'echo "`. x`"'):     # backticks substitute inside double quotes
             with self.subTest(spelling=spelling):
                 self.assertTrue(self._flags(spelling), spelling)
 
-    def test_a_continuation_line_is_joined_before_scanning(self):
+    def test_a_continuation_line_is_joined_without_a_space(self):
         self.assertTrue(self._flags('. \\\n  "$CODE_DIR/.env"'))
+        self.assertEqual(self._flags('echo sou\\\nrce'), [])     # `sou\<nl>rce` as an ARGUMENT is text
+
+    def test_quoted_and_escaped_text_is_not_a_command(self):
+        for run in ('echo "source of truth: . here"', "echo '. x'", 'echo "\\$(. x)"',
+                    "echo '$(. x)'", 'echo "\\`. x\\`"'):
+            with self.subTest(run=run):
+                self.assertEqual(self._flags(run), [], run)
 
     def test_a_quoted_heredoc_body_is_prose(self):
-        self.assertEqual(self._flags("cat > f <<'EOS'\n. foo\nsource bar\nEOS\necho ok"), [])
+        self.assertEqual(self._flags("cat > f <<'EOS'\n. foo\nsource bar\n$(. x)\nEOS\necho ok"), [])
 
     def test_an_unquoted_heredoc_substitution_executes_and_is_seen(self):
         self.assertTrue(self._flags("cat > f <<EOS\nvalue: $(. x)\nEOS"))
+        self.assertTrue(self._flags("cat > f <<EOS\nvalue: $(\n. x\n)\nEOS"))
+        self.assertTrue(self._flags("cat > f <<-EOS\n\tvalue: `. x`\n\tEOS"))
 
     def test_unquoted_heredoc_prose_is_not_a_command(self):
-        self.assertEqual(self._flags("cat > f <<EOS\n. foo is prose here\nEOS"), [])
+        self.assertEqual(self._flags("cat > f <<EOS\n. foo is prose here\n\\$(. x) is escaped\nEOS"), [])
 
     def test_a_multi_line_quoted_program_is_one_token(self):
         self.assertEqual(self._flags("jq -r '\n  .foo\n  | . as $x\n' f.json\necho ok"), [])
 
-    def test_an_unbalanced_substitution_fails_closed(self):
-        v = self._flags('echo "$(. x"')
-        self.assertTrue(any("unparseable" in s for s in v), v)
+    def test_unterminated_syntax_fails_closed(self):
+        for run in ('echo "$(. x"', "echo 'oops", 'echo `oops', 'echo "unterminated'):
+            with self.subTest(run=run):
+                v = self._flags(run)
+                self.assertTrue(any("unparseable" in s for s in v), (run, v))
 
-    def test_an_unterminated_quote_fails_closed(self):
-        v = self._flags("echo 'oops")
-        self.assertTrue(any("unparseable" in s for s in v), v)
-
-    def test_a_quoted_word_source_is_not_a_command(self):
-        self.assertEqual(self._flags('echo "source of truth: . here"'), [])
+    def test_a_case_pattern_is_not_a_command_but_its_body_is(self):
+        self.assertEqual(self._flags('case $v in\n  source) echo pattern ;;\nesac'), [])
+        self.assertTrue(self._flags('case $v in\n  a) . x ;;\nesac'))

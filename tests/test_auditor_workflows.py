@@ -4196,7 +4196,10 @@ def _simple_commands(text, depth=0):
             w = "".join(word)
             if discard_next is None:
                 argv.append(w)
-                bare = _heredoc_tag_raw[0] == w         # unquoted, unescaped: `esac`/`in` as KEYWORDS, not 'esac'
+                # a KEYWORD is the bare word: no quotes, no escapes — but a backslash-newline inside it is a
+                # continuation (`i\⏎n` is `in`), so those are removed from the raw text before comparing
+                raw = _heredoc_tag_raw[0]
+                bare = raw is not None and raw.replace("\\\n", "") == w
                 if pattern_mode:
                     if bare and w == "esac" and pattern_tokens == 0 and not pattern_paren:
                         case_depth -= 1                 # `;;` (or `in`) then `esac`: the case is over
@@ -4684,7 +4687,10 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
                          # round 2, Step 9: a QUOTED or escaped `esac` is a pattern word, never the terminator
                          "(case esac in 'esac') source x ;; esac)",
                          '(case esac in "esac") source x ;; esac)',
-                         '(case esac in \\esac) source x ;; esac)'):
+                         '(case esac in \\esac) source x ;; esac)',
+                         # round 2, Step 9 iter 3: a backslash-newline INSIDE a keyword is a continuation, not quoting
+                         '(case x i\\\nn (x) source x ;; esac)',
+                         'case x in (x) : ;; e\\\nsac\n: | source x'):
             with self.subTest(spelling=spelling):
                 self.assertTrue(self._flags(spelling), spelling)
 

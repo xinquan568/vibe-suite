@@ -3960,8 +3960,8 @@ class TestExpressionGrammar(unittest.TestCase):
 #                   heredoc bodies and `bash -c` strings), treats `(`, `{`, `f()` and `case`
 #                   patterns as command boundaries, drops redirect targets, and removes
 #                   backslash-newline without inserting a space. Unterminated syntax is a violation
-#                   (fail closed); an operand that is itself a substitution renders as __SUBST__,
-#                   which no recognised root spelling matches, so it is a violation by the grammar.
+#                   (fail closed); an operand containing a substitution renders with __SUBST__ and is a
+#                   violation by an explicit check — the name class would otherwise accept it.
 #   * allowed     — ONLY an operand that is exactly `<code-checkout root>/auditor/scripts/<name>.sh`
 #                   (fullmatch), where the root is one of eight recognised spellings (a `:-` default
 #                   may name only another recognised root; `$PWD` only as the innermost fallback).
@@ -4154,13 +4154,35 @@ def _simple_commands(text, depth=0):
     pending_heredocs = []        # (tag, quoted, strip_tabs)
     open_parens = 0
     q = None                     # None | "'" | '"'
+    case_depth = 0               # nesting of `case … esac`
+    pattern_mode = False         # between `in`/`;;` and the `)` that ends an arm's pattern
+
+    def _after_prefixes(tokens):
+        k = 0
+        while k < len(tokens) and (tokens[k] in _SOURCE_PREFIXES
+                                   or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[k])):
+            k += 1
+        return tokens[k:]
 
     def end_word():
-        nonlocal word, have_word, discard_next
+        nonlocal word, have_word, discard_next, case_depth, pattern_mode
         if have_word:
             w = "".join(word)
             if discard_next is None:
                 argv.append(w)
+                if pattern_mode:
+                    if w == "esac":                     # `;;` then `esac`: the case is over
+                        case_depth -= 1
+                        pattern_mode = False
+                        argv.clear()
+                elif w == "in" and _after_prefixes(argv)[:1] == ["case"] \
+                        and len(_after_prefixes(argv)) == 3:
+                    case_depth += 1                     # `case WORD in` (after any prefixes)
+                    pattern_mode = True
+                    argv.clear()
+                elif w == "esac" and case_depth > 0 and _after_prefixes(argv) == ["esac"]:
+                    case_depth -= 1                     # an arm whose body ended without `;;`
+                    argv.clear()
             elif discard_next == "redirect":
                 pass
             else:
@@ -4309,9 +4331,14 @@ def _simple_commands(text, depth=0):
                     yield_list.extend(_substitutions_in("\n".join(body), depth))
             pending_heredocs.clear()
             continue
+        if c == "|" and pattern_mode:            # alternation inside a case pattern
+            word.append(c)
+            have_word = True
+            if word_raw_start is None:
+                word_raw_start = i
+            i += 1
+            continue
         if c in ";&|":
-            if text.startswith(">&", i) or text.startswith("<&", i):
-                pass
             if c == "&" and i + 1 < n and text[i + 1] in ">":
                 # &> / &>> redirect
                 end_word()
@@ -4326,7 +4353,12 @@ def _simple_commands(text, depth=0):
                 _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
             end_command()
             word_raw_start = None
-            i += 2 if text[i:i + 2] in ("&&", "||", ";;") else 1
+            if text.startswith(";;&", i) or text.startswith(";;", i) or text.startswith(";&", i):
+                i += 3 if text.startswith(";;&", i) else 2
+                if case_depth > 0:                       # the next arm's pattern follows
+                    pattern_mode = True
+                continue
+            i += 2 if text[i:i + 2] in ("&&", "||") else 1
             continue
         if c in "<>":
             fd_word = have_word and "".join(word).isdigit() and word_raw_start is not None \
@@ -4361,6 +4393,12 @@ def _simple_commands(text, depth=0):
                 _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
             end_word()
             word_raw_start = None
+            if pattern_mode:
+                if c == ")":                             # the pattern ends; its words are not commands
+                    argv.clear()
+                    pattern_mode = False
+                i += 1                                   # a leading `(` is optional and ignored
+                continue
             if c == "(":
                 open_parens += 1
                 argv.append("(")
@@ -4395,6 +4433,10 @@ def _simple_commands(text, depth=0):
 def _argv_sourcings(argv, depth=0):
     """('source', operand) for a simple command whose command word is `.`/`source`; recurses into
     `bash -c` strings."""
+    if len(argv) >= 2 and argv[0] == "function":                    # function f { … } / function f() { … }
+        argv = argv[2:]
+        if len(argv) >= 2 and argv[0] == "(" and argv[1] == ")":
+            argv = argv[2:]
     if len(argv) >= 3 and argv[1] == "(" and argv[2] == ")":      # f() { … }
         argv = argv[3:]
     k = 0
@@ -4414,7 +4456,7 @@ def _argv_sourcings(argv, depth=0):
         yield ("source", argv[k + 1] if k + 1 < len(argv) else "<missing operand>")
     elif cmd in _SHELLS:
         for idx in range(k + 1, len(argv) - 1):
-            if argv[idx] == "-c":
+            if re.match(r"^-[A-Za-z]*c[A-Za-z]*$", argv[idx]):          # -c, -ec, -ce, -xec …
                 try:
                     for inner in _simple_commands(argv[idx + 1], depth + 1):
                         yield from _argv_sourcings(inner, depth + 1)
@@ -4452,7 +4494,9 @@ def artifact_source_violations(workflow_texts):
                 if kind == "unparseable":
                     out.append(f"{wf_name}:{job} step {idx}: unparseable command in a privileged "
                                f"job — {what}")
-                elif not CODE_CHECKOUT_HELPER.fullmatch(what):   # a __SUBST__ operand can never match the root grammar
+                elif _SUBST in what or not CODE_CHECKOUT_HELPER.fullmatch(what):
+                    # `_SUBST in what` is load-bearing: the name class [A-Za-z0-9_-]+ ACCEPTS __SUBST__, so
+                    # `…/auditor/scripts/$(…).sh` would otherwise pass the grammar (round-2 finding)
                     out.append(f"{wf_name}:{job} step {idx}: sources {what} — not a code-checkout "
                                f"helper")
     return out
@@ -4597,7 +4641,14 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
                          'v="$(\n. x\n)"', 'v=`\n. x\n`', '. x > log 2>&1', '. x | cat',
                          'case $v in\n  *) . x ;;\nesac', 'echo "it\'s fine" && `. x`',
                          'echo "<<EOF"\n. x', 'cat <(. x)', 'v=${x:-$(. y)}',
-                         'echo "`. x`"'):     # backticks substitute inside double quotes
+                         'echo "`. x`"',     # backticks substitute inside double quotes
+                         # round 2: the function keyword, parenthesised case arms, combined -c flags
+                         'function f { source x; }; f', 'function f() { source x; }; f',
+                         'function f () { source x; }; f',
+                         'case x in (x) source x ;; esac', 'case x in\n(x) source x ;;\nesac',
+                         'case x in (a|b) source x ;; esac',
+                         'case x in\n  a|b) source x ;;\nesac',     # guard: the unmatched-) reset already sees it
+                         "bash -ec 'source x'", "bash -ce 'source x'", "sh -xec 'source x'"):
             with self.subTest(spelling=spelling):
                 self.assertTrue(self._flags(spelling), spelling)
 
@@ -4634,3 +4685,35 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
     def test_a_case_pattern_is_not_a_command_but_its_body_is(self):
         self.assertEqual(self._flags('case $v in\n  source) echo pattern ;;\nesac'), [])
         self.assertTrue(self._flags('case $v in\n  a) . x ;;\nesac'))
+        # round 2: parenthesised patterns, on the header line (guard) and on their own line (RED)
+        self.assertEqual(self._flags('case x in (source) echo p ;; esac'), [])
+        self.assertEqual(self._flags('case x in\n  (a|source) echo p ;;\nesac'), [])
+        self.assertEqual(self._flags('case x in\n  (source|a) echo p ;;\nesac'), [])   # anchors the pipe mutation
+
+    def test_case_state_transitions(self):
+        # a nested case after a prefix enters pattern mode too
+        self.assertTrue(self._flags('case x in (x) if true; then case y in (y) source x ;; esac; fi ;; esac'))
+        # sourcing after an inner esac (still inside the outer arm) and after the outer esac
+        v = self._flags('case x in\n  a) case y in\n       b) echo b ;;\n     esac\n     . x ;;\nesac')
+        self.assertEqual(len(v), 1, v)
+        v = self._flags('case x in\n  a) echo a ;;\nesac\n. x')
+        self.assertEqual(len(v), 1, v)
+        # three arms; pattern words are not commands; bodies with if and $(…); exactly one arm sources
+        v = self._flags('case $v in\n  (source|.) echo pattern ;;\n  (b) if true; then v=$(echo hi); fi ;;\n  (c) . x ;;\nesac')
+        self.assertEqual(len(v), 1, v)
+        self.assertIn("sources x", v[0])
+        # the corpus\'s numeric-validation pattern does not swallow the command after esac
+        v = self._flags('case "$SCORE" in \'\'|*[!0-9]*) SCORE=0 ;; esac\n. x')
+        self.assertEqual(len(v), 1, v)
+        # esac reached without a preceding ;;
+        v = self._flags('case x in\n  a) echo a\nesac\n. x')
+        self.assertEqual(len(v), 1, v)
+        # `for … in` never enters pattern mode
+        self.assertTrue(self._flags('for x in a b; do . x; done'))
+        # after esac, `|` is a PIPE again: if pattern mode were stuck, `echo y | . x` would read as one word
+        v = self._flags('case x in\n  a) echo a ;;\nesac\necho y | . x')
+        self.assertEqual(len(v), 1, v)
+
+    def test_a_substitution_in_the_operand_basename_is_flagged(self):
+        self.assertTrue(self._flags('. "$CODE_DIR/auditor/scripts/$(printf %s payload).sh"'))   # RED: __SUBST__ matches the name class
+        self.assertTrue(self._flags('. "$CODE_DIR/auditor/scripts/${NAME}.sh"'))                # guard: $ and { are outside it

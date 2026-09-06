@@ -88,7 +88,7 @@ class WorkflowShape(unittest.TestCase):
         self.assertRegex(text, r"\n  pinned-trees:\n")
         self.assertRegex(text, r"\n  test-shard:\n(?:.*\n)*?\s*needs:\s*\[pinned-trees\]")
         # exactly one cache writer, saving only on a cold miss AND a proven-complete tree set
-        self.assertEqual(text.count("actions/cache/save@v4"), 1, "there must be exactly one cache writer")
+        self.assertEqual(text.count("actions/cache/save@"), 1, "there must be exactly one cache writer")
         self.assertRegex(text, r"steps\.fetch\.outputs\.complete == 'true'")
         self.assertRegex(text, r"cache-hit != 'true'")
         # the fetch hard-fails on an empty/broken pin list so an empty tree is never cached: the

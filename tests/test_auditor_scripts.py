@@ -13,11 +13,20 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from auditor_helpers_support import NOOP, REPO, SCRIPTS, source_and_call  # noqa: E402
 from tmpdirs import TempDirMixin  # noqa: E402
+
+
+def _scrubbed_env():
+    """os.environ without CODE_DIR. auditor-integration-test.yml exports CODE_DIR at workflow level and
+    runs this module, and guard-protected-paths.sh now honours CODE_DIR (vibe-213) — so the standalone
+    guard oracles must run without it, or they would inspect the runner checkout instead of their own
+    temporary repository."""
+    return {k: v for k, v in os.environ.items() if k != "CODE_DIR"}
 
 
 class Test_compute_fingerprint(unittest.TestCase):
@@ -167,7 +176,119 @@ class Test_guard_protected_paths(TempDirMixin, unittest.TestCase):
     def _run(self, root, script_text=None):
         path = root / "guard.sh"
         path.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
-        return subprocess.run(["bash", str(path)], cwd=root, capture_output=True, text=True)
+        return subprocess.run(["bash", str(path)], cwd=root, env=_scrubbed_env(),
+                              capture_output=True, text=True)
+
+# ---- appended to Test_guard_protected_paths (vibe-213 / S17): the workflow's invocation shape ----
+    # The guard is called from every auditor workflow AFTER `cd "$DATA_DIR"`, with CODE_DIR bound at
+    # workflow level. Until vibe-213 the script probed its cwd, so it inspected the DATA checkout: a
+    # protected edit in the code checkout passed (rc 0) and a data-branch README edit was a
+    # VIOLATION. These tests run that shape — cwd = data, CODE_DIR = code — against real repositories.
+    def _two_checkouts(self):
+        tmp = Path(self.mkdtemp())
+        code = self._repo_at(tmp / "code", {"skills/x.md": "ok\n", "sub/.keep": ""})
+        data = self._repo_at(tmp / "data", {"README.md": "r\n", "ledgers/events.jsonl": "e\n"})
+        (tmp / "empty").mkdir()
+        return tmp, code, data
+
+    def _repo_at(self, root, files):
+        root.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.email", "t@e"], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
+        for rel, body in files.items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body, encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-qm", "seed"], check=True)
+        return root
+
+    def _run_from(self, cwd, code_dir=None):
+        env = _scrubbed_env()
+        if code_dir is not None:
+            env["CODE_DIR"] = str(code_dir)
+        return subprocess.run(["bash", str(self.HELPER)], cwd=str(cwd), env=env,
+                              capture_output=True, text=True)
+
+    def test_a_protected_edit_in_the_code_checkout_is_blocked_from_the_data_checkout(self):
+        _tmp, code, data = self._two_checkouts()
+        (code / "skills" / "x.md").write_text("INJECTED\n", encoding="utf-8")
+        r = self._run_from(data, code)
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("VIOLATION", r.stdout)
+        self.assertIn("skills", r.stdout)
+
+    def test_a_clean_code_checkout_passes_from_the_data_checkout(self):
+        _tmp, code, data = self._two_checkouts()
+        r = self._run_from(data, code)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("Guard passed", r.stdout)
+
+    def test_a_data_branch_readme_edit_is_not_a_violation(self):
+        # the data branch carries a top-level README.md, a protected NAME; the guard must not judge it
+        _tmp, code, data = self._two_checkouts()
+        (data / "README.md").write_text("r\nchanged\n", encoding="utf-8")
+        r = self._run_from(data, code)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+
+    def test_a_missing_or_non_repository_target_refuses(self):
+        tmp, _code, data = self._two_checkouts()
+        f = tmp / "a-file"
+        f.write_text("x\n", encoding="utf-8")
+        for target in (tmp / "nonexistent", tmp / "empty", f):
+            with self.subTest(target=target.name):
+                r = self._run_from(data, target)
+                self.assertEqual(2, r.returncode, r.stdout + r.stderr)
+                self.assertIn("REFUSE", r.stdout)
+                self.assertNotIn("Guard passed", r.stdout)
+
+    def test_a_bare_repository_or_git_dir_target_refuses(self):
+        # `git rev-parse --is-inside-work-tree` exits 0 and prints `false` here; the ANSWER is what counts
+        tmp, code, data = self._two_checkouts()
+        bare = tmp / "bare"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        for target in (bare, code / ".git"):
+            with self.subTest(target=target.name):
+                r = self._run_from(data, target)
+                self.assertEqual(2, r.returncode, r.stdout + r.stderr)
+                # the ANSWER check must be the one that refuses — the later top-level step would
+                # also refuse these targets, with its own message
+                self.assertIn("REFUSE: guard target is not a git work tree", r.stdout)
+                self.assertNotIn("Guard passed", r.stdout)
+
+    def test_a_subdirectory_target_still_sees_root_protected_paths(self):
+        _tmp, code, data = self._two_checkouts()
+        (code / "skills" / "x.md").write_text("INJECTED\n", encoding="utf-8")
+        r = self._run_from(data, code / "sub")
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("skills", r.stdout)
+
+    def test_an_unset_code_dir_inspects_the_current_directory(self):
+        # the standalone shape every test above this block uses — unchanged by vibe-213
+        _tmp, code, _data = self._two_checkouts()
+        (code / "skills" / "x.md").write_text("INJECTED\n", encoding="utf-8")
+        self.assertEqual(1, self._run_from(code).returncode)
+
+    def test_a_non_repository_cwd_with_no_code_dir_refuses(self):
+        tmp, _code, _data = self._two_checkouts()
+        r = self._run_from(tmp / "empty")
+        self.assertEqual(2, r.returncode, r.stdout + r.stderr)
+        self.assertIn("REFUSE", r.stdout)
+
+    def test_the_standalone_shape_ignores_an_inherited_code_dir(self):
+        """auditor-integration-test.yml exports CODE_DIR at workflow level and runs this module (:27,
+        :105-107). `_run` and `_run_from` scrub it, or every oracle in this class would inspect the
+        runner checkout instead of its temporary repository."""
+        tmp, code, _data = self._two_checkouts()
+        other = self._repo_at(tmp / "other", {"README.md": "clean\n"})
+        (code / "skills" / "x.md").write_text("INJECTED\n", encoding="utf-8")
+        with unittest.mock.patch.dict(os.environ, {"CODE_DIR": str(other)}):
+            self.assertEqual(1, self._run(code).returncode, "the scrubbed standalone run must still see cwd")
+            unscrubbed = subprocess.run(["bash", str(self.HELPER)], cwd=str(code), env=dict(os.environ),
+                                        capture_output=True, text=True)
+        self.assertEqual(0, unscrubbed.returncode,
+                         "sanity: without the scrub an inherited CODE_DIR redirects the guard to the other repo")
 
     # --- oracle -------------------------------------------------------------------------
     def test_an_ordinary_data_change_passes(self):

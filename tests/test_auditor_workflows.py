@@ -5171,3 +5171,202 @@ class TestResolveStepsBindTheirInputsInEnv(unittest.TestCase):
                     self.assertTrue(_expr_ok(expr[3:-2].strip()))
                 run = _scalar(_map_get(st, "run")) or ""
                 self.assertNotIn("${{", run, f"{wf}: the resolve block still carries an expression")
+
+
+# ---------------------------------------------------------------------------
+# vibe-213 (grill S17): every action reference pinned to a commit (with its exact release tag as the
+# comment), the CI template's authority declared, and every guard caller binding CODE_DIR.
+#
+# Psych drops comments, so the pin lint reads two layers: the parsed `uses` scalar proves the 40-hex
+# ref, the raw source line at the node's own `line` proves the comment. The lint reaches the workflow
+# corpus AND templates/ci-vibe-check.yml (outside corpus_workflow_texts()). Any reference form other
+# than `owner/repo[/path]@<40-hex>  # v…` is a violation, so a new form is reviewed rather than admitted.
+# ---------------------------------------------------------------------------
+
+PINNED_USES = re.compile(r"^\s*-?\s*uses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?)@([0-9a-f]{40})\s+#\s*(v\d[\w.-]*)\s*$")
+RAW_USES = re.compile(r"^\s*-?\s*uses:", re.M)
+TEMPLATE_WORKFLOW = REPO / "templates" / "ci-vibe-check.yml"
+#: action → (commit, exact release tag) — resolved read-only through `gh api` on 2026-09-06 (the run's
+#: evidence table); one commit per action across every file. A bumped hash, an inconsistent pin or a new
+#: action surfaces here as a roster inequality.
+EXPECTED_PINS = {
+    "actions/checkout": (
+        "11d5960a326750d5838078e36cf38b85af677262",
+        "v4.4.0"
+    ),
+    "actions/upload-artifact": (
+        "ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "v4.6.2"
+    ),
+    "actions/download-artifact": (
+        "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "v4.3.0"
+    ),
+    "anthropics/claude-code-action": (
+        "9c5ddab2e6d17b83ea679153b31f1d5f023cf636",
+        "v1.0.217"
+    ),
+    "actions/setup-python": (
+        "a26af69be951a213d495a4c3e4e4022e16d87065",
+        "v5.6.0"
+    ),
+    "actions/setup-node": (
+        "49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "v4.4.0"
+    ),
+    "actions/cache/restore": (
+        "0057852bfaa89a56745cba8c7296529d2fc39830",
+        "v4.3.0"
+    ),
+    "actions/cache/save": (
+        "0057852bfaa89a56745cba8c7296529d2fc39830",
+        "v4.3.0"
+    ),
+    "actions/upload-pages-artifact": (
+        "56afc609e74202658d3ffba0e8f6dda462b719fa",
+        "v3.0.1"
+    ),
+    "actions/deploy-pages": (
+        "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+        "v4.0.5"
+    )
+}
+GUARD = "guard-protected-paths.sh"
+EXPECTED_GUARD_CALLERS = tuple(sorted(f"auditor/workflows/auditor-{n}.yml" for n in (
+    "audit", "case-study", "classify", "daily-report", "discover", "exemplar", "render-dashboard",
+    "repo-report", "suppressions", "track", "vocab-drift")))
+
+
+def pinned_texts():
+    texts = dict(corpus_workflow_texts())
+    texts["templates/ci-vibe-check.yml"] = TEMPLATE_WORKFLOW.read_text()
+    return texts
+
+
+def _uses_nodes(resolved):
+    jobs = _map_get(resolved, "jobs")
+    for jk, jv in (jobs or {}).get("c", []):
+        if jv.get("t") != "m":
+            continue
+        ju = _map_get(jv, "uses")
+        if ju is not None:
+            yield _scalar(jk), "job", ju
+        steps = _map_get(jv, "steps")
+        if not steps or steps.get("t") != "q":
+            continue
+        for idx, st in enumerate(steps.get("c", []), 1):
+            if st.get("t") == "m" and _map_get(st, "uses") is not None:
+                yield _scalar(jk), idx, _map_get(st, "uses")
+
+
+def _reason(raw, ref):
+    if ref.startswith("./") or ref.startswith("docker://") or "@" not in ref:
+        return "unsupported-reference-form"
+    tail = ref.split("@", 1)[1]
+    if re.fullmatch(r"[0-9a-f]{40}", tail):
+        return "no-version-comment"
+    if re.fullmatch(r"[0-9a-f]{4,39}", tail):
+        return "short-hash"
+    return "comment-without-hash" if "#" in raw else "tag-pinned"
+
+
+def action_pin_violations(texts):
+    out = []
+    for name, text in texts.items():
+        lines = text.split("\n")
+        for job, where, node in _uses_nodes(resolved_document(text)):
+            raw = lines[node["line"] - 1]
+            if not PINNED_USES.match(raw):
+                out.append((name, job, where, node["line"], _reason(raw, node.get("v") or "")))
+    return out
+
+
+def action_pins(texts):
+    seen = {}
+    for name, text in texts.items():
+        lines = text.split("\n")
+        for _j, _w, node in _uses_nodes(resolved_document(text)):
+            m = PINNED_USES.match(lines[node["line"] - 1])
+            if m:
+                seen.setdefault(m.group(1), set()).add((m.group(2), m.group(3)))
+    return seen
+
+
+def uses_count_by_ast(texts):
+    return sum(1 for t in texts.values() for _ in _uses_nodes(resolved_document(t)))
+
+
+def guard_callers(texts):
+    out = {}
+    for name, text in texts.items():
+        if GUARD not in text:
+            continue
+        env = _map_get(resolved_document(text), "env")
+        out[name] = {_scalar(k) for k, _v in (env or {}).get("c", [])}
+    return out
+
+
+def _with_step(step_yaml):
+    return TestMutations.GOOD.replace("      - name: x\n        run: echo ok\n", step_yaml)
+
+
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+class TestActionsArePinnedToCommits(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.texts = pinned_texts()
+
+    def test_corpus_and_template(self):
+        v = action_pin_violations(self.texts)
+        self.assertEqual([], v, f"{len(v)} unpinned action references:\n  " + "\n  ".join(map(str, v[:12])))
+
+    def test_every_action_resolves_to_one_pin_and_the_roster_is_frozen(self):
+        pins = action_pins(self.texts)
+        multi = {a: s for a, s in pins.items() if len(s) != 1}
+        self.assertEqual({}, multi, "an action is pinned to more than one commit")
+        self.assertEqual(EXPECTED_PINS, {a: next(iter(s)) for a, s in pins.items()})
+
+    def test_the_lint_sees_every_reference(self):
+        raw = sum(len(RAW_USES.findall(t)) for t in self.texts.values())
+        self.assertEqual(raw, uses_count_by_ast(self.texts))
+        self.assertGreater(raw, 100)
+
+    def test_reference_forms(self):
+        ok = _with_step(f"      - uses: actions/checkout@{SHA}  # v4.4.0\n")
+        self.assertEqual([], action_pin_violations({"t.yml": ok}))
+        for step, reason in ((f"      - uses: actions/checkout@v4\n", "tag-pinned"),
+                             (f"      - uses: actions/checkout@abc1234\n", "short-hash"),
+                             (f"      - uses: actions/checkout@{SHA[:39]}  # v4\n", "short-hash"),
+                             (f"      - uses: actions/checkout@{SHA}\n", "no-version-comment"),
+                             (f"      - uses: actions/checkout@v4  # v4.4.0\n", "comment-without-hash"),
+                             (f"      - uses: ./local-action\n", "unsupported-reference-form"),
+                             (f"      - uses: docker://alpine:3.20\n", "unsupported-reference-form")):
+            with self.subTest(step=step.strip()):
+                v = action_pin_violations({"t.yml": _with_step(step)})
+                self.assertEqual([reason], [x[4] for x in v])
+        job_level = TestMutations.GOOD + "  reuse:\n    uses: octo/wf/.github/workflows/x.yml@v1\n"
+        self.assertIn(("t.yml", "reuse", "job", 13, "tag-pinned"), action_pin_violations({"t.yml": job_level}))
+        with self.assertRaises(RuntimeError):
+            action_pin_violations({"t.yml": "jobs: [\n"})
+
+
+class TestCiTemplate(unittest.TestCase):
+    def test_the_template_passes_the_workflow_lint(self):
+        self.assertEqual([], lint(TEMPLATE_WORKFLOW.read_text(), "ci-vibe-check.yml"))
+
+    def test_the_template_declares_read_only_permissions(self):
+        res = resolved_document(TEMPLATE_WORKFLOW.read_text())
+        self.assertEqual({"contents": "read"}, _perm_dict(_map_get(res, "permissions")))
+        job = _map_get(_map_get(res, "jobs"), "vibe-check")
+        self.assertIsNone(_map_get(job, "permissions"), "the job must not widen the workflow's read-only grant")
+
+
+class TestGuardCallersBindCodeDir(unittest.TestCase):
+    def test_every_guard_caller_binds_code_dir_at_workflow_level(self):
+        callers = guard_callers(corpus_workflow_texts())
+        self.assertEqual(EXPECTED_GUARD_CALLERS, tuple(sorted(callers)))
+        for name, env in callers.items():
+            with self.subTest(workflow=name):
+                self.assertIn("CODE_DIR", env)

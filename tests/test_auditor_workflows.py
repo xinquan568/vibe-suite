@@ -4083,6 +4083,34 @@ class _ShellSyntax(Exception):
     """Unterminated quote / substitution / backtick — the caller fails closed."""
 
 
+def _command_position(argv):
+    """Index of the command word: past prefixes (`if then else elif do while until time command builtin
+    env ! { ( --` and `VAR=`), options after an option-taking prefix, and function-definition tokens
+    (`function NAME [()]`, `NAME ( )`), repeated until nothing more can be skipped. Shared by the
+    tokeniser's `case` entry and the classifier, so a construct recognised in one place is recognised
+    in the other."""
+    k = 0
+    while True:
+        moved = False
+        while k < len(argv) and (argv[k] in _SOURCE_PREFIXES
+                                 or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[k])
+                                 or (k > 0 and argv[k - 1] in _OPTION_TAKERS
+                                     and argv[k].startswith("-") and argv[k] != "--")):
+            k += 1
+            moved = True
+        if k + 1 < len(argv) and argv[k] == "function":
+            k += 2
+            moved = True
+            if k + 1 < len(argv) and argv[k] == "(" and argv[k + 1] == ")":
+                k += 2
+        elif (k + 2 < len(argv) and argv[k + 1] == "(" and argv[k + 2] == ")"
+              and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", argv[k])):
+            k += 3
+            moved = True
+        if not moved:
+            return k
+
+
 def _read_balanced(text, i, open_, close_):
     """Index just past the `close_` that balances an already-consumed `open_` at position i,
     skipping quoted spans and escapes. Raises _ShellSyntax when unterminated."""
@@ -4156,29 +4184,30 @@ def _simple_commands(text, depth=0):
     q = None                     # None | "'" | '"'
     case_depth = 0               # nesting of `case … esac`
     pattern_mode = False         # between `in`/`;;` and the `)` that ends an arm's pattern
+    pattern_tokens = 0           # words read in the current pattern (esac is a terminator only at 0)
+    pattern_paren = False        # the arm's optional `(` has been read (esac after it is a pattern word)
 
     def _after_prefixes(tokens):
-        k = 0
-        while k < len(tokens) and (tokens[k] in _SOURCE_PREFIXES
-                                   or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[k])):
-            k += 1
-        return tokens[k:]
+        return tokens[_command_position(tokens):]
 
     def end_word():
-        nonlocal word, have_word, discard_next, case_depth, pattern_mode
+        nonlocal word, have_word, discard_next, case_depth, pattern_mode, pattern_tokens, pattern_paren
         if have_word:
             w = "".join(word)
             if discard_next is None:
                 argv.append(w)
                 if pattern_mode:
-                    if w == "esac":                     # `;;` then `esac`: the case is over
-                        case_depth -= 1
+                    if w == "esac" and pattern_tokens == 0 and not pattern_paren:
+                        case_depth -= 1                 # `;;` (or `in`) then `esac`: the case is over
                         pattern_mode = False
                         argv.clear()
+                    else:
+                        pattern_tokens += 1             # a pattern word — `esac` included, after `(` or `|`
                 elif w == "in" and _after_prefixes(argv)[:1] == ["case"] \
                         and len(_after_prefixes(argv)) == 3:
-                    case_depth += 1                     # `case WORD in` (after any prefixes)
+                    case_depth += 1                     # `case WORD in` (after any prefixes, or on the next line)
                     pattern_mode = True
+                    pattern_tokens, pattern_paren = 0, False
                     argv.clear()
                 elif w == "esac" and case_depth > 0 and _after_prefixes(argv) == ["esac"]:
                     case_depth -= 1                     # an arm whose body ended without `;;`
@@ -4198,6 +4227,9 @@ def _simple_commands(text, depth=0):
     def end_command():
         nonlocal argv, open_parens
         end_word()
+        rest = _after_prefixes(argv)
+        if len(rest) == 2 and rest[0] == "case":
+            return                                       # `case WORD` — `in` may follow on the next line
         if argv:
             yield_list.append(list(argv))
         argv = []
@@ -4357,6 +4389,7 @@ def _simple_commands(text, depth=0):
                 i += 3 if text.startswith(";;&", i) else 2
                 if case_depth > 0:                       # the next arm's pattern follows
                     pattern_mode = True
+                    pattern_tokens, pattern_paren = 0, False
                 continue
             i += 2 if text[i:i + 2] in ("&&", "||") else 1
             continue
@@ -4397,7 +4430,9 @@ def _simple_commands(text, depth=0):
                 if c == ")":                             # the pattern ends; its words are not commands
                     argv.clear()
                     pattern_mode = False
-                i += 1                                   # a leading `(` is optional and ignored
+                else:
+                    pattern_paren = True                 # a leading `(` is optional; `esac` after it is a word
+                i += 1
                 continue
             if c == "(":
                 open_parens += 1
@@ -4433,22 +4468,7 @@ def _simple_commands(text, depth=0):
 def _argv_sourcings(argv, depth=0):
     """('source', operand) for a simple command whose command word is `.`/`source`; recurses into
     `bash -c` strings."""
-    if len(argv) >= 2 and argv[0] == "function":                    # function f { … } / function f() { … }
-        argv = argv[2:]
-        if len(argv) >= 2 and argv[0] == "(" and argv[1] == ")":
-            argv = argv[2:]
-    if len(argv) >= 3 and argv[1] == "(" and argv[2] == ")":      # f() { … }
-        argv = argv[3:]
-    k = 0
-    while k < len(argv):
-        t = argv[k]
-        if t in _SOURCE_PREFIXES or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t):
-            k += 1
-            continue
-        if k > 0 and argv[k - 1] in _OPTION_TAKERS and t.startswith("-"):
-            k += 1
-            continue
-        break
+    k = _command_position(argv)                                     # prefixes, options, `function f`, `f()`
     if k >= len(argv):
         return
     cmd = argv[k]
@@ -4648,7 +4668,18 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
                          'case x in (x) source x ;; esac', 'case x in\n(x) source x ;;\nesac',
                          'case x in (a|b) source x ;; esac',
                          'case x in\n  a|b) source x ;;\nesac',     # guard: the unmatched-) reset already sees it
-                         "bash -ec 'source x'", "bash -ce 'source x'", "sh -xec 'source x'"):
+                         "bash -ec 'source x'", "bash -ce 'source x'", "sh -xec 'source x'",
+                         # round 2, Step 8: esac as a pattern word; function after a prefix; a newline
+                         # before `in`; case after an option-taker or as a function body
+                         '(case esac in (esac) source x ;; esac)',
+                         'if true; then function f { source x; }; f; fi',
+                         '{ function f() { source x; }; f; }',
+                         'if true; then function f () { source x; }; fi; f',
+                         'case x\nin (x) source x ;; esac',
+                         'case x  # header\nin (x) source x ;; esac',
+                         'time -p case x in (x) source x ;; esac',
+                         'function f { case x in (x) source x ;; esac; }; f',
+                         'f() { case x in (x) source x ;; esac; }; f'):
             with self.subTest(spelling=spelling):
                 self.assertTrue(self._flags(spelling), spelling)
 
@@ -4689,6 +4720,9 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
         self.assertEqual(self._flags('case x in (source) echo p ;; esac'), [])
         self.assertEqual(self._flags('case x in\n  (a|source) echo p ;;\nesac'), [])
         self.assertEqual(self._flags('case x in\n  (source|a) echo p ;;\nesac'), [])   # anchors the pipe mutation
+        # round 2, Step 8: `esac` is a terminator only where a pattern could not begin
+        self.assertEqual(self._flags('case x in (source | esac) echo p ;; (source | a) echo p ;; esac'), [])
+        self.assertEqual(self._flags('case x in\n  (esac|source) echo p ;;\nesac'), [])
 
     def test_case_state_transitions(self):
         # a nested case after a prefix enters pattern mode too

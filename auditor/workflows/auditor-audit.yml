@@ -55,11 +55,19 @@ jobs:
             ref: auditor-data
             path: _data
             persist-credentials: false
-      - run: |
+      - id: resolve
+        # S17 (vibe-212): the dispatch/event values reach the shell as ENVIRONMENT, never
+        # spliced into the script; tests/test_auditor_state_machine.py runs the block below
+        # from exactly this mapping on both triggers.
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number || github.event.issue.number }}
+          TARGET_REPO: ${{ inputs.repo }}
+        run: |
           # resolve the target, clone it, and stage the context the logic reads
+          # stage-logic:resolve-audit
           set -euo pipefail
-          ISSUE_NUMBER="${{ inputs.issue_number || github.event.issue.number }}"
-          TARGET_REPO="${{ inputs.repo }}"
+          ISSUE_NUMBER="${ISSUE_NUMBER:-}"
+          TARGET_REPO="${TARGET_REPO:-}"
           if [ -z "$TARGET_REPO" ]; then
             TITLE="$(gh issue view "$ISSUE_NUMBER" --json title --jq .title)"
             TARGET_REPO="${TITLE#Audit candidate: }"
@@ -76,6 +84,7 @@ jobs:
             echo "SLUG=$SLUG"
             echo "TARGET_SHA=$TARGET_SHA"
           } >> "$GITHUB_ENV"
+          # /stage-logic
       - run: |
           # triage: bounded artifact list (100-file cap) and scoring strategy
           set -euo pipefail

@@ -86,7 +86,8 @@ jobs:
                 - Before finishing, self-check every emitted line for the exact event name maintainer_rejected and for verbatim fingerprints, rule_ids and comments_hash.
                 - Write the JSON lines to the file named by env CLASSIFY_RAW and write nothing else anywhere.
               claude_args: |
-                --disallowedTools "WebSearch,Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ncat:*),Bash(socat:*),Bash(telnet:*),Bash(ssh:*),Bash(scp:*),Bash(sftp:*),Bash(rsync:*),WebFetch"
+                --allowedTools "Read,Grep,Glob,Write,Edit"
+                --disallowedTools "Bash,WebSearch,Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ncat:*),Bash(socat:*),Bash(telnet:*),Bash(ssh:*),Bash(scp:*),Bash(sftp:*),Bash(rsync:*),WebFetch"
       -       uses: actions/upload-artifact@v4
               if: ${{ steps.batch.outputs.count != '0' }}
               with:

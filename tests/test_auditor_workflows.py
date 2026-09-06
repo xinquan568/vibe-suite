@@ -42,6 +42,7 @@ import os
 import random
 import re
 import json
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -4764,3 +4765,386 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
     def test_a_substitution_in_the_operand_basename_is_flagged(self):
         self.assertTrue(self._flags('. "$CODE_DIR/auditor/scripts/$(printf %s payload).sh"'))   # RED: __SUBST__ matches the name class
         self.assertTrue(self._flags('. "$CODE_DIR/auditor/scripts/${NAME}.sh"'))                # guard: $ and { are outside it
+
+
+# ---------------------------------------------------------------------------
+# vibe-212 (grill S17): three hygiene contracts over the PARSED document.
+#
+#   1. No `inputs` context is ever spliced into a `run:` scalar — the value must travel
+#      through the step's `env:` so bash never parses attacker-shaped text as code.
+#   2. Every model step (`anthropics/claude-code-action`) carries an allow-list; a step with a
+#      token in its env scope allows no Bash and denies bare `Bash`; the three steps S17 changed
+#      declare exactly the prescribed grants; the steps that DO allow Bash are a frozen roster.
+#   3. The two resolve steps bind ISSUE_NUMBER/TARGET_REPO in their own env, with exactly the
+#      expressions that used to sit inside the shell, and their run blocks carry no `${{` at all.
+#
+# All three read the Psych AST (`parsed_workflow` → `resolve_aliases`), never raw text: a quoted
+# `"run":` key, a folded scalar and a decoded value are the cases the raw helpers miss (see
+# `test_run_steps_enumerated_from_the_parsed_document`). A document that does not parse RAISES.
+# ---------------------------------------------------------------------------
+
+#: The action every model step uses.
+CLAUDE_ACTION = "anthropics/claude-code-action"
+#: A token-shaped binding in an `env:` mapping at workflow, job or step level. The action's own
+#: `claude_code_oauth_token` input is NOT counted: it is the credential the action spends to run,
+#: not one the model can spend through a tool.
+TOKEN_REF = re.compile(r"github\.token|secrets\s*(?:\.|\[)|\bGH_TOKEN\b|\bPAT_TOKEN\b")
+#: The grants S17 prescribes for the changed steps, in the issue's order.
+PRESCRIBED_GRANTS = ("Read", "Grep", "Glob", "Write", "Edit")
+#: (workflow path, job, 1-based step) → exact allow-list, for the three steps S17 changed. Keys are
+#: the relative paths corpus_workflow_texts() uses. Unchanged workflows are deliberately not pinned
+#: here; the Bash property of every step is pinned by EXPECTED_BASH_ALLOWED instead.
+EXPECTED_GRANTS = {
+    ("auditor/workflows/auditor-classify.yml", "classify", 4): PRESCRIBED_GRANTS,
+    ("auditor/workflows/auditor-exemplar.yml", "exemplar", 4): PRESCRIBED_GRANTS,
+    ("auditor/workflows/auditor-refine-rules.yml", "refine", 4): PRESCRIBED_GRANTS,
+}
+#: The model steps whose allow-list contains Bash — a frozen roster, asserted EQUAL to the computed
+#: set so a new Bash-capable step surfaces in review rather than passing silently. Both have no
+#: token in their env scope and prompts that rely on a shell (vibe-212 decision 3).
+EXPECTED_BASH_ALLOWED = {
+    ("auditor/workflows/auditor-case-study.yml", "narrate", 7),
+    ("auditor/workflows/auditor-contribute.yml", "propose", 5),
+}
+#: The two resolve steps (workflow file, job) and the bindings that moved out of their shell.
+RESOLVE_STEPS = (("auditor-audit.yml", "audit"), ("auditor-case-study.yml", "gate"))
+RESOLVE_BINDINGS = {
+    "ISSUE_NUMBER": "${{ inputs.issue_number || github.event.issue.number }}",
+    "TARGET_REPO": "${{ inputs.repo }}",
+}
+
+_RESOLVED_DOCS = {}
+
+
+def resolved_document(text):
+    """The alias-resolved Psych AST of a workflow, cached by text. Raises RuntimeError when the
+    document does not parse (ruby absent or malformed YAML) so no contract narrows to nothing."""
+    if text in _RESOLVED_DOCS:
+        return _RESOLVED_DOCS[text]
+    root, _census, err = parsed_workflow(text)
+    if root is None or err is not None:
+        raise RuntimeError(f"workflow did not parse: {err or 'ruby unavailable'}")
+    resolved, _ = resolve_aliases(root)
+    if resolved is None or resolved.get("t") != "m":
+        raise RuntimeError("workflow root is not a mapping")
+    _RESOLVED_DOCS[text] = resolved
+    return resolved
+
+
+def _job_steps(resolved):
+    """Yield (job name, job node, 1-based step index, step node) over the parsed document."""
+    jobs = _map_get(resolved, "jobs")
+    for jk, jv in (jobs or {}).get("c", []):
+        if jv.get("t") != "m":
+            continue
+        steps = _map_get(jv, "steps")
+        if not steps or steps.get("t") != "q":
+            continue
+        for idx, st in enumerate(steps.get("c", []), 1):
+            if st.get("t") == "m":
+                yield _scalar(jk), jv, idx, st
+
+
+def _expr_tokens(inner):
+    """The expression's tokens by the parser's own lexer, whitespace dropped."""
+    toks, pos = [], 0
+    while pos < len(inner):
+        m = _EXPR_LEX.match(inner, pos)
+        if not m:
+            raise ValueError(f"expression does not lex at {pos}: {inner!r}")
+        if not m.group(0).isspace():
+            toks.append(m.group(0))
+        pos = m.end()
+    return toks
+
+
+def inputs_context_referenced(inner):
+    """True when the expression reaches the `inputs` context: the root token `inputs` (bare,
+    `inputs.x`, `inputs['x']`, `toJSON(inputs)`), or root `github` → `event` → `inputs` in any
+    mix of dot and bracket access. A root is a token not preceded by `.`; so `steps.inputs.x` is a
+    property, the string literal `'inputs.repo'` is one token, and `env.inputs_repo` is another
+    name. Judged on tokens, not spelling, because the grammar accepts bracket access."""
+    toks = _expr_tokens(inner)
+    n = len(toks)
+
+    def segment(j, name):
+        if j < n and toks[j] == "." and j + 1 < n and toks[j + 1] == name:
+            return j + 2
+        if j + 2 < n and toks[j] == "[" and toks[j + 1] == f"'{name}'" and toks[j + 2] == "]":
+            return j + 3
+        return None
+
+    for i, tok in enumerate(toks):
+        if i and toks[i - 1] == ".":
+            continue
+        if tok == "inputs":
+            return True
+        if tok == "github":
+            j = segment(i + 1, "event")
+            if j is not None and segment(j, "inputs") is not None:
+                return True
+    return False
+
+
+def _expression_line(run_node, run_text, match_start):
+    """The line an expression sits on: the scalar's line, plus one for a literal/folded block
+    scalar (Psych styles 4/5, whose content starts on the next line), plus the newlines before
+    the match."""
+    base = run_node["line"] + (1 if run_node.get("style") in (4, 5) else 0)
+    return base + run_text[:match_start].count("\n")
+
+
+def inputs_in_run_violations(text):
+    """[(job, step index, line, expression)] for every `${{ }}` inside a `run:` scalar that
+    reaches the `inputs` context. Parsed document; raises when it does not parse."""
+    out = []
+    for job, _jv, idx, st in _job_steps(resolved_document(text)):
+        for k, v in st.get("c", []):
+            if _scalar(k) == "run" and v.get("t") == "s":
+                run = v.get("v") or ""
+                for m in EXPR.finditer(run):
+                    if inputs_context_referenced(m.group(1)):
+                        out.append((job, idx, _expression_line(v, run, m.start()), m.group(0).strip()))
+    return out
+
+
+def parse_tool_args(text):
+    """(allowed, disallowed) from a `claude_args` scalar, each a list or None. Lines whose first
+    non-blank character is `#` are dropped first — integration-test's args carry comment lines
+    with an apostrophe that shlex would otherwise refuse. Each option takes the following tokens
+    up to the next `--option` (contribute passes several quoted tokens); `--opt=value` is
+    accepted; every value token is split on commas."""
+    kept = [ln for ln in (text or "").splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    toks = shlex.split("\n".join(kept))
+    allowed = disallowed = None
+    i = 0
+    while i < len(toks):
+        name, eq, inline = toks[i].partition("=")
+        if name in ("--allowedTools", "--disallowedTools"):
+            values = []
+            if eq:
+                values.append(inline)
+                i += 1
+            else:
+                i += 1
+                while i < len(toks) and not toks[i].startswith("--"):
+                    values.append(toks[i])
+                    i += 1
+            flat = [v.strip() for chunk in values for v in chunk.split(",") if v.strip()]
+            if name == "--allowedTools":
+                allowed = flat
+            else:
+                disallowed = flat
+        else:
+            i += 1
+    return allowed, disallowed
+
+
+def claude_steps(text):
+    """Every model step in a workflow: job, 1-based step index, line, claude_args, prompt and
+    whether a token-shaped binding is in its env scope (workflow, job or step `env:`)."""
+    resolved = resolved_document(text)
+    wf_env = _map_get(resolved, "env")
+    out = []
+    for job, jv, idx, st in _job_steps(resolved):
+        if CLAUDE_ACTION not in (_scalar(_map_get(st, "uses")) or ""):
+            continue
+        with_map = _map_get(st, "with")
+        scope = (wf_env, _map_get(jv, "env"), _map_get(st, "env"))
+        out.append({
+            "job": job, "step": idx, "line": st.get("line"),
+            "args": (_scalar(_map_get(with_map, "claude_args")) if with_map else None) or "",
+            "prompt": (_scalar(_map_get(with_map, "prompt")) if with_map else None) or "",
+            "token": any(TOKEN_REF.search(s) for node in scope for s in _scalars(node)),
+        })
+    return out
+
+
+def _is_bash(entry):
+    return entry == "Bash" or entry.startswith("Bash(")
+
+
+def tool_policy_violations(texts):
+    """(workflow, job, step, reason) for every model step that (a) has no allow-list, or with a
+    token in scope (b) allows Bash or (c) does not deny bare `Bash`."""
+    out = []
+    for name, text in texts.items():
+        for s in claude_steps(text):
+            allowed, disallowed = parse_tool_args(s["args"])
+            where = (name, s["job"], s["step"])
+            if not allowed:
+                out.append((*where, "no allow-list"))
+            elif s["token"] and any(_is_bash(e) for e in allowed):
+                out.append((*where, "Bash allowed with a token in scope"))
+            if s["token"] and "Bash" not in (disallowed or []):
+                out.append((*where, "bare Bash not denied with a token in scope"))
+    return out
+
+
+def step_by_id(text, job, step_id):
+    """The step node with `id: <step_id>` in the named job, or None."""
+    for jname, _jv, _idx, st in _job_steps(resolved_document(text)):
+        if jname == job and _scalar(_map_get(st, "id")) == step_id:
+            return st
+    return None
+
+
+def _with_run(step_yaml):
+    return TestMutations.GOOD.replace("      - name: x\n        run: echo ok\n", step_yaml)
+
+
+class TestNoInputsExpressionInsideRunScalars(unittest.TestCase):
+    """S17 acceptance 1: no `inputs` context inside a `run:` scalar, judged on the parsed
+    document and on expression tokens (dot and bracket access alike)."""
+
+    def test_corpus(self):
+        found = [(name, *v) for name, text in corpus_workflow_texts().items()
+                 for v in inputs_in_run_violations(text)]
+        self.assertEqual([], found, "an `inputs` context is spliced into shell — bind it in the "
+                                    "step's env: instead:\n  " + "\n  ".join(map(str, found)))
+
+    def test_the_detector_sees_the_pre_fix_shape(self):
+        """The exact shape audit :61-62 had before vibe-212 yields two violations on the lines
+        the expressions sit on, so the corpus test's RED was the detector working."""
+        wf = _with_run('      - run: |\n          set -euo pipefail\n'
+                       '          ISSUE_NUMBER="${{ inputs.issue_number || github.event.issue.number }}"\n'
+                       '          TARGET_REPO="${{ inputs.repo }}"\n')
+        v = inputs_in_run_violations(wf)
+        self.assertEqual(["${{ inputs.issue_number || github.event.issue.number }}", "${{ inputs.repo }}"],
+                         [x[3] for x in v])
+        self.assertEqual([12, 13], [x[2] for x in v])
+
+    def test_positive_forms(self):
+        for expr in ("inputs.x", "inputs['x']", "github.event.inputs.x",
+                     "github['event']['inputs']['x']", "github.event['inputs'].x", "toJSON(inputs)",
+                     "inputs", "inputs.a || github.event.issue.number", "inputs[format('{0}','x')]"):
+            with self.subTest(expr=expr):
+                self.assertTrue(inputs_context_referenced(expr))
+                self.assertEqual(1, len(inputs_in_run_violations(
+                    _with_run(f"      - run: echo ${{{{ {expr} }}}}\n"))))
+
+    def test_negative_forms(self):
+        for expr in ("matrix.x", "needs.a.outputs.b", "github.event.issue.number",
+                     "'inputs.repo' == env.X", "steps.inputs.outputs.x", "env.inputs_repo",
+                     "github.event.inputs_x"):
+            with self.subTest(expr=expr):
+                self.assertFalse(inputs_context_referenced(expr))
+        self.assertEqual([], inputs_in_run_violations(
+            _with_run("      - run: echo hi # reads inputs.repo later\n")))
+        self.assertEqual([], inputs_in_run_violations(
+            _with_run("      - env:\n          R: ${{ inputs.repo }}\n        run: echo \"$R\"\n")))
+
+    def test_quoted_run_key_is_seen(self):
+        self.assertEqual(1, len(inputs_in_run_violations(
+            _with_run('      - "run": |\n          echo ${{ inputs.x }}\n'))))
+
+    def test_unparseable_document_fails_closed(self):
+        with self.assertRaises(RuntimeError):
+            inputs_in_run_violations("jobs: [\n")
+
+
+class TestClaudeToolPolicy(unittest.TestCase):
+    """S17 acceptance 2: every model step has an allow-list; a token-scoped step allows no Bash
+    and denies bare Bash; the three changed steps carry exactly the prescribed grants; the
+    Bash-allowed steps are a frozen roster.
+
+    A text contract proves the policy is DECLARED. What the action does with it is the fixture
+    record's evidence (tests/test_auditor_fixture.py, runs 31763526443 / 31764825588 /
+    31766155221): a denylist-only step is not granted its writes, and a path-scoped
+    Write(...) is not granted either."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.texts = corpus_workflow_texts()
+        cls.steps = [(name, s) for name, text in cls.texts.items() for s in claude_steps(text)]
+
+    def test_corpus(self):
+        self.assertEqual([], tool_policy_violations(self.texts))
+
+    def test_fifteen_model_steps_are_seen(self):
+        # 14 distinct plus the mirrored integration-test copy; a drift is a corpus change to look at
+        self.assertEqual(15, len(self.steps))
+        self.assertEqual(9, len({(name, s["job"]) for name, s in self.steps}))
+
+    def test_bash_allowed_roster_is_exactly_the_frozen_set(self):
+        got = {(name, s["job"], s["step"]) for name, s in self.steps
+               if any(_is_bash(e) for e in (parse_tool_args(s["args"])[0] or []))}
+        self.assertEqual(EXPECTED_BASH_ALLOWED, got)
+
+    def test_the_three_changed_steps_declare_the_prescribed_grants(self):
+        got = {(name, s["job"], s["step"]): tuple(parse_tool_args(s["args"])[0] or ())
+               for name, s in self.steps}
+        for key, grants in EXPECTED_GRANTS.items():
+            with self.subTest(step=key):
+                self.assertEqual(grants, got.get(key))
+
+    def test_a_bash_denied_prompt_does_not_promise_a_shell(self):
+        for name, s in self.steps:
+            if not any(_is_bash(e) for e in (parse_tool_args(s["args"])[0] or [])):
+                with self.subTest(step=(name, s["job"], s["step"])):
+                    self.assertNotIn("Shell is enabled", s["prompt"])
+
+    def test_parse_tool_args_shapes(self):
+        commented = ("# a comment carrying the ORACLE's apostrophe\n"
+                     '--allowedTools "Read,Grep,Glob,Write"\n--disallowedTools "WebSearch,Bash,Bash(curl:*)"\n')
+        self.assertEqual((["Read", "Grep", "Glob", "Write"], ["WebSearch", "Bash", "Bash(curl:*)"]),
+                         parse_tool_args(commented))
+        with self.assertRaises(ValueError):          # the stripping is load-bearing
+            shlex.split(commented)
+        folded = ('--allowedTools Read,Glob,Grep,Write,Edit,Bash --disallowedTools "Bash(curl:*)" '
+                  '"Bash(wget:*)" WebSearch WebFetch')
+        self.assertEqual((["Read", "Glob", "Grep", "Write", "Edit", "Bash"],
+                          ["Bash(curl:*)", "Bash(wget:*)", "WebSearch", "WebFetch"]), parse_tool_args(folded))
+        self.assertEqual((["Read", "Write"], None), parse_tool_args("--allowedTools=Read,Write"))
+        self.assertEqual((None, None), parse_tool_args("--max-turns 3"))
+        self.assertTrue(_is_bash("Bash(git:*)"))
+        self.assertFalse(_is_bash("WebFetch"))
+
+    def test_token_scope_levels(self):
+        base = ("name: t\non:\n  workflow_dispatch:\npermissions:\n  contents: read\n{wf}"
+                "jobs:\n  a:\n    runs-on: ubuntu-latest\n{job}    steps:\n"
+                "      - uses: anthropics/claude-code-action@v1\n{step}        with:\n"
+                "          claude_code_oauth_token: ${{{{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}}}\n"
+                '          claude_args: --allowedTools "Read"\n'
+                "      - name: sibling\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n"
+                "        run: echo ok\n")
+        cases = {
+            "none": base.format(wf="", job="", step=""),
+            "workflow": base.format(wf="env:\n  GH_TOKEN: ${{ github.token }}\n", job="", step=""),
+            "job": base.format(wf="", job="    env:\n      PAT: ${{ secrets.PAT_TOKEN }}\n", step=""),
+            "step": base.format(wf="", job="", step="        env:\n          T: ${{ github.token }}\n"),
+        }
+        for level, text in cases.items():
+            with self.subTest(level=level):
+                (step,) = claude_steps(text)
+                self.assertEqual(level != "none", step["token"])
+        # the sibling step's GH_TOKEN and the action's own oauth input never put a token in scope
+        (step,) = claude_steps(cases["none"])
+        self.assertFalse(step["token"])
+        self.assertEqual([], tool_policy_violations({"t.yml": cases["none"]}))
+        self.assertEqual([("t.yml", "a", 1, "bare Bash not denied with a token in scope")],
+                         tool_policy_violations({"t.yml": cases["workflow"]}))
+        bashy = cases["workflow"].replace('--allowedTools "Read"', '--allowedTools "Read,Bash(git:*)"')
+        self.assertIn(("t.yml", "a", 1, "Bash allowed with a token in scope"),
+                      tool_policy_violations({"t.yml": bashy}))
+        empty = cases["none"].replace('--allowedTools "Read"', "--max-turns 3")
+        self.assertEqual([("t.yml", "a", 1, "no allow-list")], tool_policy_violations({"t.yml": empty}))
+
+
+class TestResolveStepsBindTheirInputsInEnv(unittest.TestCase):
+    """S17 `Do` 1: the audit and case-study resolve steps read ISSUE_NUMBER and TARGET_REPO from
+    their own declared env — exactly the expressions that used to be spliced into the shell —
+    and their run blocks carry no expression at all."""
+
+    def test_each_resolve_step_binds_exactly_the_moved_expressions(self):
+        for wf, job in RESOLVE_STEPS:
+            with self.subTest(workflow=wf):
+                text = (WF_DIR / wf).read_text()
+                st = step_by_id(text, job, "resolve")
+                self.assertIsNotNone(st, f"{wf}: no step with id: resolve in job {job}")
+                env = {_scalar(k): _scalar(v) for k, v in (_map_get(st, "env") or {}).get("c", [])}
+                for name, expr in RESOLVE_BINDINGS.items():
+                    self.assertEqual(expr, env.get(name), f"{wf}: {name} is not bound to the moved expression")
+                    self.assertTrue(_expr_ok(expr[3:-2].strip()))
+                run = _scalar(_map_get(st, "run")) or ""
+                self.assertNotIn("${{", run, f"{wf}: the resolve block still carries an expression")

@@ -63,15 +63,20 @@ jobs:
             persist-credentials: false
       -     name: Resolve the target and derive the gate inputs
             id: resolve
+            # S17 (vibe-212): the dispatch/event values reach the shell as ENVIRONMENT, never
+            # spliced into the script; tests/test_auditor_state_machine.py runs the block below
+            # from exactly this mapping on both triggers.
             env:
               GH_TOKEN: ${{ github.token }}
+              ISSUE_NUMBER: ${{ inputs.issue_number || github.event.issue.number }}
+              TARGET_REPO: ${{ inputs.repo }}
             run: |
-
+              # stage-logic:resolve-case-study
               set -euo pipefail
               # resolve the target, honor force_rewrite, and derive the gate inputs
               # (MERGED, APPLIED_SEP, SCORE, SECURITY, RULE_ADOPTED) from the registry
-              ISSUE_NUMBER="${{ inputs.issue_number || github.event.issue.number }}"
-              TARGET_REPO="${{ inputs.repo }}"
+              ISSUE_NUMBER="${ISSUE_NUMBER:-}"
+              TARGET_REPO="${TARGET_REPO:-}"
               if [ -z "$TARGET_REPO" ]; then
                 TITLE="$(gh issue view "$ISSUE_NUMBER" --json title --jq .title)"
                 TARGET_REPO="${TITLE#Audit candidate: }"
@@ -108,6 +113,7 @@ jobs:
                 echo "target_repo=$TARGET_REPO"
                 echo "slug=$SLUG"
               } >> "$GITHUB_OUTPUT"
+              # /stage-logic
       -       name: Gate on the existing article and the worthiness bar
               id: gate
               env:

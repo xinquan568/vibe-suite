@@ -1182,6 +1182,256 @@ class TestMirrorBearingCommitPaths(unittest.TestCase):
                                      f"manifest may be left behind")
 
 
+# ---------------------------------------------------------------------------
+# vibe-212 (grill S17): the two resolve steps run from their DECLARED env, and the refine-rules
+# staging step stages only the rulebook. Both executed, not read.
+# ---------------------------------------------------------------------------
+
+_GIT_IDENTITY = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+
+#: A `git` that answers exactly what the audit resolve block asks — `clone` (creates the target
+#: directory) and `-C <dir> rev-parse HEAD` (a fixed sha) — and fails loudly on anything else.
+GIT_STUB_RESOLVE = ('#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  clone) mkdir -p "${@: -1}" ;;\n'
+                    '  -C) echo 0123456789abcdef0123456789abcdef01234567 ;;\n'
+                    '  *) echo "git stub: unexpected $*" >&2; exit 1 ;;\n'
+                    'esac\n')
+
+
+def _workflow_ast():
+    """The workflow lint module's parsed-document helpers, imported lazily (no cycle: that module
+    imports only test_auditor_graph)."""
+    import sys as _sys
+    tests_dir = str(Path(__file__).resolve().parent)
+    if tests_dir not in _sys.path:
+        _sys.path.insert(0, tests_dir)
+    import test_auditor_workflows as wf
+    return wf
+
+
+def declared_step_env(path, job, step_id):
+    """{name: expression} declared on the step `id: <step_id>` of `job`, or None when the step
+    does not exist. Read from the Psych AST, not from text."""
+    wf = _workflow_ast()
+    st = wf.step_by_id(path.read_text(), job, step_id)
+    if st is None:
+        return None
+    return {wf._scalar(k): wf._scalar(v) for k, v in (wf._map_get(st, "env") or {}).get("c", [])}
+
+
+def evaluate_expression(expr, event, inputs):
+    """Evaluate a declared `${{ … }}` against a simulated trigger. Models exactly the atoms the
+    resolve steps use — `inputs.<k>`, `github.event.issue.number`, `github.token` and `||`
+    chains — and RAISES on anything else: an unmodelled expression reading as empty is how a
+    missing binding stays invisible (the TriggerBase rule in test_auditor_context.py)."""
+    e = expr.strip()
+    if not (e.startswith("${{") and e.endswith("}}")):
+        return e
+    for alt in e[3:-2].split("||"):
+        atom = alt.strip()
+        if atom.startswith("inputs."):
+            value = str(inputs.get(atom.split(".", 1)[1], "") or "")
+        elif atom == "github.event.issue.number":
+            n = event.get("number")
+            value = "" if n is None else str(n)
+        elif atom == "github.token":
+            value = "stub-token"
+        else:
+            raise AssertionError(f"unmodelled expression atom {atom!r}; model it rather than "
+                                 f"letting it read as empty")
+        if value:
+            return value
+    return ""
+
+
+def _tool_dirs(*names):
+    dirs = []
+    for n in names:
+        p = shutil.which(n)
+        if p and os.path.dirname(p) not in dirs:
+            dirs.append(os.path.dirname(p))
+    return dirs
+
+
+def run_isolated(sb, script, env):
+    """Run a block with an environment built FROM SCRATCH — Sandbox.run starts from os.environ and
+    stays that way for its other callers; here an ambient variable must not be able to stand in
+    for a binding the workflow does not declare. Carries PATH (the sandbox stubs first), the
+    runner facts, the harness plumbing, and whatever `env` (the declared mapping's yield) adds."""
+    base = {
+        "PATH": ":".join([str(sb.bin)] + _tool_dirs("bash", "jq") + ["/usr/bin", "/bin"]),
+        "HOME": str(sb.root), "TMPDIR": str(sb.root), "LANG": "C.UTF-8",
+        "GITHUB_WORKSPACE": str(sb.root), "GITHUB_REPOSITORY": "example/host-repo",
+        "GH_LOG": str(sb.gh_log), "CODE_DIR": str(sb.code), "DATA_DIR": str(sb.data),
+        "REGISTRY": str(sb.data / "registry" / "repos.json"),
+        "EVENT_LOG": str(sb.data / "ledgers" / "events.jsonl"),
+        # the audit block WRITES $FIXTURE — never the committed fixture Sandbox.run defaults to
+        "FIXTURE": str(sb.root / "fixture.json"),
+        "GITHUB_ENV": str(sb.root / "github.env"), "GITHUB_OUTPUT": str(sb.root / "github.out"),
+        "FORCE_REWRITE": "false",
+    }
+    base.update(env)
+    sh = sb.root / "block.sh"
+    sh.write_text(script)
+    return subprocess.run(["bash", str(sh)], capture_output=True, text=True, env=base,
+                          cwd=str(sb.root), timeout=60)
+
+
+def _kv_file(path):
+    return dict(line.split("=", 1) for line in Path(path).read_text().splitlines() if "=" in line)
+
+
+class TestResolveStepsRunFromTheirDeclaredEnv(unittest.TestCase):
+    """S17 `Do` 1, executed: each resolve block is run with ONLY what its declared env yields on a
+    simulated trigger (dispatch inputs, or an `issues` event with no inputs), plus plumbing and
+    stubs. Before vibe-212 the two values were spliced in as `${{ … }}` text; a block that still
+    did that fails here on bash's `bad substitution` before any output is written."""
+
+    CASES = {"auditor-audit.yml": ("audit", "resolve-audit"),
+             "auditor-case-study.yml": ("gate", "resolve-case-study")}
+
+    def _prepare(self, wf, event, inputs, canned_title=None):
+        job, marker = self.CASES[wf]
+        path = WF_DIR / wf
+        env = declared_step_env(path, job, "resolve")
+        self.assertIsNotNone(env, f"{wf}: no step with id: resolve in job {job}")
+        for name in ("ISSUE_NUMBER", "TARGET_REPO"):
+            self.assertIn(name, env, f"{wf}: the resolve step does not bind {name} in its env")
+        block = extract(path, "stage-logic", marker)
+        self.assertIsNotNone(block, f"{wf}: no stage-logic:{marker} marker")
+        sb = Sandbox()
+        self.addCleanup(sb.cleanup)
+        (sb.bin / "git").write_text(GIT_STUB_RESOLVE)
+        (sb.bin / "git").chmod(0o755)
+        run_env = {k: evaluate_expression(v, event, inputs) for k, v in env.items()}
+        if canned_title is not None:
+            title = sb.root / "title.txt"
+            title.write_text(canned_title + "\n")
+            run_env["GH_CANNED_ISSUE_VIEW"] = str(title)
+        return sb, block, run_env
+
+    def test_audit_dispatch_trigger(self):
+        sb, block, env = self._prepare("auditor-audit.yml", {}, {"repo": "acme/w", "issue_number": "12"})
+        r = run_isolated(sb, block, env)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual({"issue": {"number": 12}, "repo": {"full_name": "acme/w"}},
+                         json.loads((sb.root / "fixture.json").read_text()))
+        ge = _kv_file(sb.root / "github.env")
+        self.assertEqual(("acme/w", "12", "acme-w"), (ge.get("TARGET_REPO"), ge.get("ISSUE_NUMBER"), ge.get("SLUG")))
+        self.assertTrue(ge.get("TARGET_SHA", "").startswith("0123456789abcdef"))
+        self.assertNotIn("issue view", " ".join(sb.gh_calls()))
+
+    def test_audit_issues_trigger(self):
+        sb, block, env = self._prepare("auditor-audit.yml", {"number": 12}, {},
+                                       canned_title="Audit candidate: acme/w")
+        r = run_isolated(sb, block, env)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual("acme/w", json.loads((sb.root / "fixture.json").read_text())["repo"]["full_name"])
+        self.assertIn("issue view 12", " ".join(sb.gh_calls()))
+
+    def test_case_study_dispatch_trigger(self):
+        sb, block, env = self._prepare("auditor-case-study.yml", {},
+                                       {"repo": "acme/claude-toolkit", "issue_number": "12"})
+        r = run_isolated(sb, block, env)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        ctx = json.loads((sb.code / "stage-context.json").read_text())
+        self.assertEqual(("acme/claude-toolkit", 12), (ctx["repo"]["full_name"], ctx["issue"]["number"]))
+        self.assertEqual("acme/claude-toolkit", _kv_file(sb.root / "github.env").get("TARGET_REPO"))
+        self.assertEqual("acme/claude-toolkit", _kv_file(sb.root / "github.out").get("target_repo"))
+
+    def test_case_study_issues_trigger(self):
+        sb, block, env = self._prepare("auditor-case-study.yml", {"number": 12}, {},
+                                       canned_title="Audit candidate: acme/claude-toolkit")
+        r = run_isolated(sb, block, env)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual("acme/claude-toolkit",
+                         json.loads((sb.code / "stage-context.json").read_text())["repo"]["full_name"])
+        self.assertIn("issue view 12", " ".join(sb.gh_calls()))
+
+    def test_an_unmodelled_atom_is_refused_not_emptied(self):
+        with self.assertRaises(AssertionError):
+            evaluate_expression("${{ github.event.issue.title }}", {}, {})
+        self.assertEqual("12", evaluate_expression("${{ inputs.issue_number || github.event.issue.number }}",
+                                                   {"number": 7}, {"issue_number": "12"}))
+        self.assertEqual("7", evaluate_expression("${{ inputs.issue_number || github.event.issue.number }}",
+                                                  {"number": 7}, {}))
+        self.assertEqual("", evaluate_expression("${{ inputs.repo }}", {"number": 7}, {}))
+
+
+class TestRefineRulesPatchIsScopedToTheRulebook(unittest.TestCase):
+    """S17 `Do` 3 / acceptance 3, executed on a real git repository: the staging step's patch
+    carries only skills/rules/SKILL.md; a stray tracked edit is dropped AND named on the log
+    (`DROPPED:stray-edits`), so the publish guard's refusal is no longer how a stray edit is
+    noticed; an empty diff stages an empty patch. Run with cwd=CODE_DIR because the block does
+    `mkdir -p refine-out` before `cd "$CODE_DIR"` — in production the two are one directory."""
+
+    WF = WF_DIR / "auditor-refine-rules.yml"
+    RULEBOOK = "skills/rules/SKILL.md"
+
+    def _repo(self, tmp):
+        code = Path(tmp) / "code"
+        (code / "skills" / "rules").mkdir(parents=True)
+        (code / "auditor").mkdir()
+        shutil.copy(REPO / self.RULEBOOK, code / self.RULEBOOK)
+        (code / "auditor" / "decoy.txt").write_text("decoy\n")
+        env = {**os.environ, **_GIT_IDENTITY}
+        subprocess.run(["git", "init", "-q", "-b", "main", str(code)], check=True)
+        subprocess.run(["git", "-C", str(code), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(code), "commit", "-q", "-m", "seed"], env=env, check=True)
+        data = Path(tmp) / "data"
+        data.mkdir()
+        (data / "refine-event.jsonl").write_text('{"event":"proposals_prepared"}\n')
+        return code, data
+
+    def _run(self, code, data):
+        block = extract(self.WF, "stage-logic", "refine-stage")
+        self.assertIsNotNone(block, "no stage-logic:refine-stage marker in auditor-refine-rules.yml")
+        return subprocess.run(["bash", "-c", block], cwd=str(code), capture_output=True, text=True,
+                              env={**os.environ, **_GIT_IDENTITY, "CODE_DIR": str(code), "DATA_DIR": str(data)})
+
+    def _numstat_paths(self, code):
+        r = subprocess.run(["git", "-C", str(code), "apply", "--numstat", "refine-out/rules.patch"],
+                           capture_output=True, text=True, check=True)
+        return [line.split("\t")[2] for line in r.stdout.splitlines() if line.strip()]
+
+    def test_a_stray_edit_is_dropped_and_named(self):
+        with tempfile.TemporaryDirectory(prefix="refine-stage-") as tmp:
+            code, data = self._repo(tmp)
+            with (code / self.RULEBOOK).open("a") as f:
+                f.write("\n<!-- refined -->\n")
+            (code / "auditor" / "decoy.txt").write_text("changed\n")
+            r = self._run(code, data)
+            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+            self.assertEqual([self.RULEBOOK], self._numstat_paths(code))
+            self.assertIn("DROPPED:stray-edits", r.stdout)
+            self.assertIn("auditor/decoy.txt", r.stdout)
+            self.assertTrue((code / "refine-out" / "refine-event.jsonl").is_file())
+            self.assertIn("No pull-request body", (code / "refine-out" / "pr-body.md").read_text())
+
+    def test_a_clean_rulebook_edit_reports_no_drop(self):
+        with tempfile.TemporaryDirectory(prefix="refine-stage-") as tmp:
+            code, data = self._repo(tmp)
+            with (code / self.RULEBOOK).open("a") as f:
+                f.write("\n<!-- refined -->\n")
+            r = self._run(code, data)
+            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+            self.assertEqual([self.RULEBOOK], self._numstat_paths(code))
+            self.assertNotIn("DROPPED", r.stdout)
+
+    def test_no_edit_stages_an_empty_patch(self):
+        with tempfile.TemporaryDirectory(prefix="refine-stage-") as tmp:
+            code, data = self._repo(tmp)
+            r = self._run(code, data)
+            self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+            self.assertEqual(0, (code / "refine-out" / "rules.patch").stat().st_size)
+
+    def test_producer_and_publish_guard_name_the_same_path(self):
+        text = self.WF.read_text()
+        self.assertIn(f"git diff -- {self.RULEBOOK} > refine-out/rules.patch", text)
+        self.assertIn(f'ALLOWED="{self.RULEBOOK}"', text)
+
 if __name__ == "__main__":
     unittest.main()
 

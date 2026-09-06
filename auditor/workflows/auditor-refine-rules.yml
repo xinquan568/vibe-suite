@@ -124,17 +124,25 @@ jobs:
             - Write the pull-request body to refine-out/pr-body.md. Quote the evidence for every edited rule verbatim, not paraphrased, under a per-rule heading, and open the body with a warning banner that a named human must review and that this PR is never auto-merged.
             - Write nothing outside the rules catalog file and refine-out/.
           claude_args: |
-            --disallowedTools "Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ncat:*),Bash(socat:*),Bash(telnet:*),Bash(ssh:*),Bash(scp:*),Bash(sftp:*),Bash(rsync:*),Bash(npm:*),Bash(pip:*),Bash(apt-get:*),WebSearch,WebFetch"
+            --allowedTools "Read,Grep,Glob,Write,Edit"
+            --disallowedTools "Bash,Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ncat:*),Bash(socat:*),Bash(telnet:*),Bash(ssh:*),Bash(scp:*),Bash(sftp:*),Bash(rsync:*),Bash(npm:*),Bash(pip:*),Bash(apt-get:*),WebSearch,WebFetch"
       - if: ${{ always() }}
         name: Stage the model's edits for the publish job
         run: |
           # Hand-off boundary: everything the model produced leaves this job
           # as an inert artifact — a patch and a body file, no credential and
           # no remote. An empty patch is normal (skip paths) and not an error.
+          # stage-logic:refine-stage
           set -euo pipefail
           mkdir -p refine-out
           cd "$CODE_DIR"
-          git diff > refine-out/rules.patch || : > refine-out/rules.patch
+          # S17 (vibe-212): only the rulebook may travel. A stray tracked-file edit is dropped
+          # HERE and named on the log; the publish guard below stays the authority.
+          git diff -- skills/rules/SKILL.md > refine-out/rules.patch || : > refine-out/rules.patch
+          STRAY="$(git diff --name-only -- . ':(exclude)skills/rules/SKILL.md')"
+          if [ -n "$STRAY" ]; then
+            echo "DROPPED:stray-edits — outside the rulebook, not staged: $STRAY"
+          fi
           if [ -f "$DATA_DIR/refine-event.jsonl" ]; then
             cp "$DATA_DIR/refine-event.jsonl" refine-out/refine-event.jsonl
           fi
@@ -142,6 +150,7 @@ jobs:
             printf '%s\n' "No pull-request body was produced." > refine-out/pr-body.md
           fi
           ls -l refine-out
+          # /stage-logic
       - if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:

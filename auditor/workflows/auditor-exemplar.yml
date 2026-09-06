@@ -124,9 +124,10 @@ jobs:
                 - After the frontmatter, write a narrative of the concrete practices worth citing, one section per rule id you listed.
                 - If you cannot evidence at least one rule id, write no file at all. A placeholder is worse than nothing: the validator refuses a missing exemplar and never invents one for you.
                 - The phrase EXEMPLAR-PROMPT-SENTINEL must never appear in the file you write; a validation gate deletes any file containing it.
-                - Shell is enabled only so you can survey the clone read-only; use file read, glob, grep and write for everything else. Never use git, network, delete, move or package-manager commands.
+                - Shell is not available. Survey the clone with file read, glob and grep, and use write for the exemplar. Never attempt git, network, delete, move or package-manager commands.
               claude_args: |
-                --disallowedTools "Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ncat:*),Bash(socat:*),Bash(telnet:*),Bash(ssh:*),Bash(scp:*),Bash(sftp:*),Bash(rsync:*),Bash(git:*),Bash(rm:*),Bash(mv:*),Bash(npm:*),Bash(pip:*),Bash(apt-get:*),WebSearch,WebFetch"
+                --allowedTools "Read,Grep,Glob,Write,Edit"
+                --disallowedTools "Bash,Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ncat:*),Bash(socat:*),Bash(telnet:*),Bash(ssh:*),Bash(scp:*),Bash(sftp:*),Bash(rsync:*),Bash(git:*),Bash(rm:*),Bash(mv:*),Bash(npm:*),Bash(pip:*),Bash(apt-get:*),WebSearch,WebFetch"
       -       uses: actions/upload-artifact@v4
               with:
                 name: exemplar-model-output

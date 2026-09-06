@@ -1193,11 +1193,16 @@ _GIT_IDENTITY = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid"
 #: A `git` that answers exactly what the audit resolve block asks — `clone` (creates the target
 #: directory) and `-C <dir> rev-parse HEAD` (a fixed sha) — and fails loudly on anything else.
 GIT_STUB_RESOLVE = ('#!/usr/bin/env bash\n'
+                    '# exactly two shapes: `clone [opts] <url> <dir>` and `-C <existing dir> rev-parse HEAD`\n'
                     'case "$1" in\n'
-                    '  clone) mkdir -p "${@: -1}" ;;\n'
-                    '  -C) echo 0123456789abcdef0123456789abcdef01234567 ;;\n'
+                    '  clone) [ "$#" -ge 3 ] || { echo "git stub: clone needs a url and a directory: $*" >&2; exit 1; }\n'
+                    '         mkdir -p "${@: -1}" ;;\n'
+                    '  -C) if [ "$#" -eq 4 ] && [ -d "$2" ] && [ "$3" = rev-parse ] && [ "$4" = HEAD ]; then\n'
+                    '        echo 0123456789abcdef0123456789abcdef01234567\n'
+                    '      else echo "git stub: unexpected $*" >&2; exit 1; fi ;;\n'
                     '  *) echo "git stub: unexpected $*" >&2; exit 1 ;;\n'
                     'esac\n')
+STUB_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
 def _workflow_ast():
@@ -1231,8 +1236,9 @@ def evaluate_expression(expr, event, inputs):
         return e
     for alt in e[3:-2].split("||"):
         atom = alt.strip()
-        if atom.startswith("inputs."):
-            value = str(inputs.get(atom.split(".", 1)[1], "") or "")
+        key = re.fullmatch(r"inputs\.([A-Za-z_][A-Za-z0-9_-]*)", atom)
+        if key:
+            value = str(inputs.get(key.group(1), "") or "")
         elif atom == "github.event.issue.number":
             n = event.get("number")
             value = "" if n is None else str(n)
@@ -1312,47 +1318,77 @@ class TestResolveStepsRunFromTheirDeclaredEnv(unittest.TestCase):
             run_env["GH_CANNED_ISSUE_VIEW"] = str(title)
         return sb, block, run_env
 
-    def test_audit_dispatch_trigger(self):
-        sb, block, env = self._prepare("auditor-audit.yml", {}, {"repo": "acme/w", "issue_number": "12"})
-        r = run_isolated(sb, block, env)
+    def _assert_audit_resolved(self, sb, r, repo, number):
+        """The complete audit context: the fixture JSON, every GITHUB_ENV export, the stub sha."""
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
-        self.assertEqual({"issue": {"number": 12}, "repo": {"full_name": "acme/w"}},
+        self.assertEqual({"issue": {"number": int(number)}, "repo": {"full_name": repo}},
                          json.loads((sb.root / "fixture.json").read_text()))
         ge = _kv_file(sb.root / "github.env")
-        self.assertEqual(("acme/w", "12", "acme-w"), (ge.get("TARGET_REPO"), ge.get("ISSUE_NUMBER"), ge.get("SLUG")))
-        self.assertTrue(ge.get("TARGET_SHA", "").startswith("0123456789abcdef"))
+        self.assertEqual({"ISSUE_NUMBER": number, "TARGET_REPO": repo, "SLUG": repo.replace("/", "-"),
+                          "TARGET_SHA": STUB_SHA}, ge)
+
+    def _assert_case_study_resolved(self, sb, r, repo, number):
+        """The complete case-study context: stage-context.json, every GITHUB_ENV export the gate
+        block reads, and all three GITHUB_OUTPUT values."""
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertEqual({"issue": {"number": int(number)}, "repo": {"full_name": repo}},
+                         json.loads((sb.code / "stage-context.json").read_text()))
+        ge = _kv_file(sb.root / "github.env")
+        self.assertEqual({"ISSUE_NUMBER": number, "TARGET_REPO": repo, "SLUG": repo.replace("/", "-"),
+                          "FIXTURE": str(sb.code / "stage-context.json")},
+                         {k: ge.get(k) for k in ("ISSUE_NUMBER", "TARGET_REPO", "SLUG", "FIXTURE")})
+        for name in ("MERGED", "APPLIED_SEP", "SCORE", "SECURITY", "RULE_ADOPTED"):
+            self.assertIn(name, ge, f"{name} not exported for the gate block")
+        self.assertEqual({"issue_number": number, "target_repo": repo, "slug": repo.replace("/", "-")},
+                         _kv_file(sb.root / "github.out"))
+
+    def test_audit_dispatch_trigger(self):
+        sb, block, env = self._prepare("auditor-audit.yml", {}, {"repo": "acme/w", "issue_number": "12"})
+        self._assert_audit_resolved(sb, run_isolated(sb, block, env), "acme/w", "12")
         self.assertNotIn("issue view", " ".join(sb.gh_calls()))
 
     def test_audit_issues_trigger(self):
         sb, block, env = self._prepare("auditor-audit.yml", {"number": 12}, {},
                                        canned_title="Audit candidate: acme/w")
-        r = run_isolated(sb, block, env)
-        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
-        self.assertEqual("acme/w", json.loads((sb.root / "fixture.json").read_text())["repo"]["full_name"])
+        self._assert_audit_resolved(sb, run_isolated(sb, block, env), "acme/w", "12")
         self.assertIn("issue view 12", " ".join(sb.gh_calls()))
 
     def test_case_study_dispatch_trigger(self):
         sb, block, env = self._prepare("auditor-case-study.yml", {},
                                        {"repo": "acme/claude-toolkit", "issue_number": "12"})
-        r = run_isolated(sb, block, env)
-        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
-        ctx = json.loads((sb.code / "stage-context.json").read_text())
-        self.assertEqual(("acme/claude-toolkit", 12), (ctx["repo"]["full_name"], ctx["issue"]["number"]))
-        self.assertEqual("acme/claude-toolkit", _kv_file(sb.root / "github.env").get("TARGET_REPO"))
-        self.assertEqual("acme/claude-toolkit", _kv_file(sb.root / "github.out").get("target_repo"))
+        self._assert_case_study_resolved(sb, run_isolated(sb, block, env), "acme/claude-toolkit", "12")
+        self.assertNotIn("issue view", " ".join(sb.gh_calls()))
 
     def test_case_study_issues_trigger(self):
         sb, block, env = self._prepare("auditor-case-study.yml", {"number": 12}, {},
                                        canned_title="Audit candidate: acme/claude-toolkit")
-        r = run_isolated(sb, block, env)
-        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
-        self.assertEqual("acme/claude-toolkit",
-                         json.loads((sb.code / "stage-context.json").read_text())["repo"]["full_name"])
+        self._assert_case_study_resolved(sb, run_isolated(sb, block, env), "acme/claude-toolkit", "12")
         self.assertIn("issue view 12", " ".join(sb.gh_calls()))
 
+    def test_the_git_stub_answers_only_the_two_shapes(self):
+        sb = Sandbox()
+        self.addCleanup(sb.cleanup)
+        stub = sb.bin / "git"
+        stub.write_text(GIT_STUB_RESOLVE)
+        stub.chmod(0o755)
+        run = lambda *a: subprocess.run([str(stub), *a], capture_output=True, text=True)
+        self.assertEqual(0, run("clone", "--depth", "1", "https://example.invalid/o/r", str(sb.root / "t")).returncode)
+        self.assertTrue((sb.root / "t").is_dir())
+        self.assertEqual(STUB_SHA, run("-C", str(sb.root / "t"), "rev-parse", "HEAD").stdout.strip())
+        for argv in (("-C", "/does-not-exist", "push", "origin", "main"),
+                     ("-C", str(sb.root / "t"), "push", "origin", "main"),
+                     ("-C", "/does-not-exist", "rev-parse", "HEAD"),
+                     ("clone", "https://example.invalid/o/r"),
+                     ("status",)):
+            with self.subTest(argv=argv):
+                self.assertNotEqual(0, run(*argv).returncode)
+
     def test_an_unmodelled_atom_is_refused_not_emptied(self):
-        with self.assertRaises(AssertionError):
-            evaluate_expression("${{ github.event.issue.title }}", {}, {})
+        for expr in ("${{ github.event.issue.title }}", "${{ inputs.repo == 'acme/w' }}",
+                     "${{ inputs.repo.unknown }}", "${{ inputs['repo'] }}", "${{ inputs }}",
+                     "${{ toJSON(inputs.repo) }}"):
+            with self.subTest(expr=expr), self.assertRaises(AssertionError):
+                evaluate_expression(expr, {}, {"repo": "acme/w"})
         self.assertEqual("12", evaluate_expression("${{ inputs.issue_number || github.event.issue.number }}",
                                                    {"number": 7}, {"issue_number": "12"}))
         self.assertEqual("7", evaluate_expression("${{ inputs.issue_number || github.event.issue.number }}",

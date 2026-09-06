@@ -4886,25 +4886,37 @@ def inputs_context_referenced(inner):
     return False
 
 
-def _expression_line(run_node, run_text, match_start):
-    """The line an expression sits on: the scalar's line, plus one for a literal/folded block
-    scalar (Psych styles 4/5, whose content starts on the next line), plus the newlines before
-    the match."""
+def _expression_line(source_lines, run_node, run_text, match, cursor):
+    """The PHYSICAL line an expression sits on. Decoded text cannot say: folding removes
+    newlines, so the source is scanned from the scalar's own line for the raw expression text
+    (`cursor` keeps two identical expressions on successive lines apart). The decoded-offset
+    arithmetic remains as the fallback — for a spelling the raw text does not carry verbatim, and
+    for a second identical expression on the SAME line, which the scan past `cursor` cannot see."""
+    needle = match.group(0)
+    start = max(run_node["line"] - 1, cursor)
+    stop = min(len(source_lines), run_node["line"] + 2 * run_text.count("\n") + 4)
+    for i in range(start, stop):
+        if needle in source_lines[i]:
+            return i + 1
     base = run_node["line"] + (1 if run_node.get("style") in (4, 5) else 0)
-    return base + run_text[:match_start].count("\n")
+    return base + run_text[:match.start()].count("\n")
 
 
 def inputs_in_run_violations(text):
     """[(job, step index, line, expression)] for every `${{ }}` inside a `run:` scalar that
     reaches the `inputs` context. Parsed document; raises when it does not parse."""
     out = []
+    source_lines = text.split("\n")
     for job, _jv, idx, st in _job_steps(resolved_document(text)):
         for k, v in st.get("c", []):
             if _scalar(k) == "run" and v.get("t") == "s":
                 run = v.get("v") or ""
+                cursor = 0
                 for m in EXPR.finditer(run):
                     if inputs_context_referenced(m.group(1)):
-                        out.append((job, idx, _expression_line(v, run, m.start()), m.group(0).strip()))
+                        line = _expression_line(source_lines, v, run, m, cursor)
+                        cursor = line          # the next search starts on the following line
+                        out.append((job, idx, line, m.group(0).strip()))
     return out
 
 
@@ -5013,6 +5025,17 @@ class TestNoInputsExpressionInsideRunScalars(unittest.TestCase):
         self.assertEqual(["${{ inputs.issue_number || github.event.issue.number }}", "${{ inputs.repo }}"],
                          [x[3] for x in v])
         self.assertEqual([12, 13], [x[2] for x in v])
+
+    def test_the_line_is_physical_for_a_folded_scalar(self):
+        """Folding removes the newlines the decoded-offset arithmetic would count, so the
+        expression on physical line 13 (after a blank line) must still be reported as 13."""
+        wf = _with_run('      - run: >-\n          echo safe\n\n          echo ${{ inputs.repo }}\n')
+        self.assertEqual("echo ${{ inputs.repo }}", wf.split("\n")[12].strip())
+        self.assertEqual([13], [x[2] for x in inputs_in_run_violations(wf)])
+        twice = _with_run('      - run: |\n          A="${{ inputs.a }}"\n          B="${{ inputs.a }}"\n')
+        self.assertEqual([11, 12], [x[2] for x in inputs_in_run_violations(twice)])
+        same_line = _with_run('      - run: |\n          echo ${{ inputs.a }} ${{ inputs.a }}\n')
+        self.assertEqual([11, 11], [x[2] for x in inputs_in_run_violations(same_line)])
 
     def test_positive_forms(self):
         for expr in ("inputs.x", "inputs['x']", "github.event.inputs.x",

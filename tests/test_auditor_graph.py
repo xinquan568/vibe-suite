@@ -432,13 +432,13 @@ class ExemplarTopology(unittest.TestCase):
                          "publish still sources or reads .exemplar-env")
 
     def test_upload_path_carries_no_dotfile_and_download_lands_at_the_publish_path(self):
-        up = re.search(r"upload-artifact@v4\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
+        up = re.search(r"upload-artifact@\S+(?:\s+#[^\n]*)?\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
                        r"\s*path: (\|\n((?:[ \t]+\S+\n)+)|(\S+)\n)", self.text)
         self.assertIsNotNone(up, "no exemplar-model-output upload")
         upload = ([l.strip() for l in up.group(2).splitlines() if l.strip()] if up.group(2) else [up.group(3)])
         dotfiles = [p for p in upload if p.rsplit("/", 1)[-1].startswith(".")]
         self.assertEqual(dotfiles, [], f"upload path lists hidden files, which v4 does not deliver: {dotfiles}")
-        dl = re.search(r"download-artifact@v4\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
+        dl = re.search(r"download-artifact@\S+(?:\s+#[^\n]*)?\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
                        r"\s*path: (.+)$", self.text, re.M)
         self.assertIsNotNone(dl, "no exemplar-model-output download")
         ws = "/ws"

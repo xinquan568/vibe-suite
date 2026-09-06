@@ -1907,11 +1907,11 @@ def declared_exemplar_transport():
     """(upload paths, download path, workspace-relative env bindings) read from auditor-exemplar.yml."""
     text = (WF_DIR / "auditor-exemplar.yml").read_text(encoding="utf-8")
     env = dict(re.findall(r"^  ([A-Z_]+): \$\{\{ github\.workspace \}\}(\S*)$", text, re.M))
-    up = re.search(r"upload-artifact@v4\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
+    up = re.search(r"upload-artifact@\S+(?:\s+#[^\n]*)?\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
                    r"\s*path: (\|\n((?:[ \t]+\S+\n)+)|(\S+)\n)", text)
     upload = ([l.strip() for l in up.group(2).splitlines() if l.strip()] if up.group(2)
               else [up.group(3)])
-    dl = re.search(r"download-artifact@v4\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
+    dl = re.search(r"download-artifact@\S+(?:\s+#[^\n]*)?\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
                    r"\s*path: (.+)$", text, re.M).group(1).strip()
     return upload, dl, env
 

@@ -52,11 +52,11 @@ jobs:
       target_repo: ${{ steps.resolve.outputs.target_repo }}
       issue_number: ${{ steps.resolve.outputs.issue_number }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           ref: main
           persist-credentials: false
-      -   uses: actions/checkout@v4
+      -   uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
           with:
             ref: auditor-data
             path: _data
@@ -194,7 +194,7 @@ jobs:
                 exit 0
                 # /stage-logic
       -         name: Publish the gate state
-                uses: actions/upload-artifact@v4
+                uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
                 with:
                   name: case-study-state
                   if-no-files-found: ignore
@@ -217,17 +217,17 @@ jobs:
     outputs:
       article_path: ${{ steps.cover.outputs.article_path }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           ref: main
           persist-credentials: false
-      -   uses: actions/checkout@v4
+      -   uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
           with:
             ref: auditor-data
             path: _data
             persist-credentials: false
       -     name: Collect the gate state
-            uses: actions/download-artifact@v4
+            uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
             continue-on-error: true
             with:
               name: case-study-state
@@ -247,7 +247,7 @@ jobs:
                 git clone --depth 1 "https://github.com/$TARGET_REPO" "$CODE_DIR/target" || mkdir -p "$CODE_DIR/target"
                 sudo apt-get install -y webp > /dev/null 2>&1 || echo "webp encoder unavailable; PNG fallback"
                 echo "EVIDENCE_DIR=$EVIDENCE" >> "$GITHUB_ENV"
-      -         uses: anthropics/claude-code-action@v1
+      -         uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636  # v1.0.217
                 continue-on-error: true
                 with:
                   claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -334,7 +334,7 @@ jobs:
                       --events-out "$DATA_DIR/ledgers/events.jsonl" \
                       --diff-report-out "$DATA_DIR/audits/$SLUG.re-audit.diff.md" \
                       --summary-out "$DATA_DIR/audits/$SLUG.re-audit.summary.json"
-      -             uses: anthropics/claude-code-action@v1
+      -             uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636  # v1.0.217
                     with:
                       claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
                       prompt: |
@@ -349,7 +349,7 @@ jobs:
                       claude_args: |
                         --allowedTools "Read,Grep,Glob,Write,Edit,Bash"
                         --disallowedTools "WebSearch,Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ncat:*),Bash(socat:*),Bash(telnet:*),Bash(ssh:*),Bash(scp:*),Bash(sftp:*),Bash(rsync:*),WebFetch"
-      -               uses: anthropics/claude-code-action@v1
+      -               uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636  # v1.0.217
                       with:
                         claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
                         prompt: |
@@ -361,7 +361,7 @@ jobs:
                         claude_args: |
                           --allowedTools "Read,Grep,Glob,Edit"
                           --disallowedTools "Bash,WebSearch,Bash(curl:*),Bash(wget:*),Bash(nc:*),Bash(ncat:*),Bash(socat:*),Bash(telnet:*),Bash(ssh:*),Bash(scp:*),Bash(sftp:*),Bash(rsync:*),WebFetch"
-      -                 uses: anthropics/claude-code-action@v1
+      -                 uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636  # v1.0.217
                         with:
                           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
                           prompt: |
@@ -429,7 +429,7 @@ jobs:
                               cat "$FAILS"
                             fi
                             echo "broken=$BROKEN" >> "$GITHUB_OUTPUT"
-      -                     uses: anthropics/claude-code-action@v1
+      -                     uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636  # v1.0.217
                             if: ${{ steps.links.outputs.broken == 'true' }}
                             with:
                               claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -528,7 +528,7 @@ jobs:
                                     cat "$FAILS"
                                   fi
                                   echo "invalid=$INVALID" >> "$GITHUB_OUTPUT"
-      -                           uses: anthropics/claude-code-action@v1
+      -                           uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636  # v1.0.217
                                   if: ${{ steps.mermaid.outputs.invalid == 'true' }}
                                   with:
                                     claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -557,7 +557,7 @@ jobs:
                                         exit 1
                                       fi
                                       echo "mermaid repair verified: every diagram passes the structural checks"
-      -                               uses: anthropics/claude-code-action@v1
+      -                               uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636  # v1.0.217
                                       with:
                                         claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
                                         prompt: |
@@ -619,7 +619,7 @@ jobs:
                                           echo "article_path=articles/$DATE-$SLUG.md" >> "$GITHUB_OUTPUT"
                                           # /cover-logic
       -                                   name: Publish the article
-                                          uses: actions/upload-artifact@v4
+                                          uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
                                           with:
                                             name: case-study-article
                                             if-no-files-found: ignore
@@ -641,24 +641,24 @@ jobs:
       VERDICT: ${{ needs.gate.outputs.verdict }}
       ARTICLE_PATH: ${{ needs.narrate.outputs.article_path }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           ref: main
           persist-credentials: false
-      -   uses: actions/checkout@v4
+      -   uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
           with:
             ref: auditor-data
             path: _data
             persist-credentials: false
       -     name: Collect the gate state
-            uses: actions/download-artifact@v4
+            uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
             continue-on-error: true
             with:
               name: case-study-state
               path: _data
       -       name: Collect the article
               if: ${{ needs.gate.outputs.verdict == 'pass' }}
-              uses: actions/download-artifact@v4
+              uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
               continue-on-error: true
               with:
                 name: case-study-article

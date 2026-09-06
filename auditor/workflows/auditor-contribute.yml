@@ -35,10 +35,10 @@ jobs:
       repo: ${{ steps.guard.outputs.repo }}
       issue: ${{ steps.guard.outputs.issue }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           ref: auditor-data
           path: _data
@@ -676,7 +676,7 @@ jobs:
       # E8.2b (vibe-164) W2.2/W4: the relay, actually wired. gates writes these into ITS
       # runner's workspace; every consumer runs on a fresh runner, so without an upload the
       # files simply do not exist downstream and every consumer refuses relay-missing.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: gate-context
@@ -691,19 +691,19 @@ jobs:
             ${{ github.workspace }}/context.json
             ${{ github.workspace }}/decision.json
           if-no-files-found: warn
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: proposal-manifest
           path: ${{ github.workspace }}/proposal-manifest.json
           if-no-files-found: warn
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: gate-disclosure
           path: ${{ github.workspace }}/disclosure.json
           if-no-files-found: warn
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: outcome-gates
@@ -725,11 +725,11 @@ jobs:
       reason: ${{ steps.cas.outputs.reason }}
       repo: ${{ steps.cas.outputs.repo }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: gate-context
           path: ${{ github.workspace }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           ref: auditor-data
           path: _data
@@ -866,7 +866,7 @@ jobs:
           DATA_DIR: _data
           OUTCOME_DIR: _outcomes
           REPO: ${{ needs.gates.outputs.repo }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: outcome-reserve
@@ -882,14 +882,14 @@ jobs:
     outputs:
       status: ${{ steps.classify.outputs.status }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: gate-context
           path: ${{ github.workspace }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           ref: auditor-data
           path: _data
@@ -927,7 +927,7 @@ jobs:
           fi
           echo "PINNED:$AUDITED_SHA"
           # /stage-logic
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636  # v1.0.217
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: >-
@@ -978,13 +978,13 @@ jobs:
         env:
           OUTCOME_DIR: _outcomes
           PATCH_DIR: _patches
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: proposed-patches
           path: _patches/
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: outcome-propose
@@ -1004,20 +1004,20 @@ jobs:
       # F4: submit READS proposal-manifest.json to validate patch fingerprints. Without
       # this download every real run reached REFUSE:manifest-missing; the tests concealed it
       # by pointing MANIFEST at a local file.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: proposal-manifest
           path: ${{ github.workspace }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: gate-context
           path: ${{ github.workspace }}
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           ref: auditor-data
           path: _data
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: proposed-patches
           path: _patches
@@ -1641,7 +1641,7 @@ jobs:
           OUTCOME_DIR: _outcomes
           PATCH_DIR: _patches
           TARGET_DIR: _target
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: outcome-submit
@@ -1651,7 +1651,7 @@ jobs:
       # push the row itself; finalize downloads every outcome-* artifact and persists it. A
       # fork left under the bot account with no record anywhere is the state a human cannot
       # clean up, so one unlucky push must not be the end of it.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: outcome-orphaned-fork
@@ -1669,7 +1669,7 @@ jobs:
       # F5: the disclosure set reaches finalize and nowhere else. It was uploaded and
       # never downloaded, so critical/high security findings could vanish while an ordinary
       # contribution proceeded.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         continue-on-error: true
         with:
           name: gate-disclosure
@@ -1678,23 +1678,23 @@ jobs:
       # finalize is the only job that can route that refusal — label the tracking issue, write
       # the ledger row. A required download meant the reporting job died exactly when there was
       # something to report, and the named refusal reached nobody.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         continue-on-error: true
         with:
           name: gate-context
           path: ${{ github.workspace }}
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           ref: auditor-data
           path: _data
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           path: _outcomes
           pattern: outcome-*
           merge-multiple: true
       # E8.2b (vibe-164) W6.3: the existing download matches only outcome-*, so the quota
       # facts the umbrella backstop needs never reached this job. The manifest carries them.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         continue-on-error: true
         with:
           name: proposal-manifest
@@ -2056,7 +2056,7 @@ jobs:
           jq -n '{schema_version: 1, job: "finalize", status: "routed", reason: "", ids: {}}' \
             > _outcomes/outcome-finalize.json
           echo "OUTCOME:finalize:routed"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: outcome-finalize

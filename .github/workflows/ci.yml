@@ -42,9 +42,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.x'
 
@@ -84,13 +84,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.x'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: 'lts/*'
 
@@ -157,13 +157,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.x'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: 'lts/*'
 
@@ -188,16 +188,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.x'
 
       # Restore keyed on the PINS in tools/coverage-check.py (the single source). The key is
       # immutable, so a poisoned (incomplete) entry would persist — this job is the ONLY writer and
       # saves ONLY a proven-complete tree set (below), so racing shards can never save a partial one.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         id: cache
         with:
           path: ${{ runner.temp }}/pinned-trees
@@ -251,7 +251,7 @@ jobs:
 
       # Save only on a cold miss AND a complete tree set — so the immutable key never holds a
       # partial tree, and an unreachable upstream just means "no cache this run", not a poison.
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         if: steps.cache.outputs.cache-hit != 'true' && steps.fetch.outputs.complete == 'true'
         with:
           path: ${{ runner.temp }}/pinned-trees
@@ -280,20 +280,20 @@ jobs:
           - { shard: '2', node: '18' }
           - { shard: '3', node: '18' }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: ${{ matrix.python }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: ${{ matrix.node }}
 
       # Read-only restore of the trees the pinned-trees job cached. A miss (an incomplete fetch that
       # was not cached) leaves the trees absent, and the manifest-reproducibility tests report it —
       # the deliberate soft-fail path.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: ${{ runner.temp }}/pinned-trees
           key: pinned-trees-${{ hashFiles('tools/coverage-check.py') }}
@@ -347,7 +347,7 @@ jobs:
       - name: Upload Python coverage (advisory)
         if: ${{ always() && matrix.python == '3.x' && matrix.node == 'lts/*' }}
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: py-coverage-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/cov/coverage-shard-${{ matrix.shard }}.xml
@@ -379,7 +379,7 @@ jobs:
       - name: Upload Node coverage (advisory)
         if: ${{ always() && matrix.shard == '0' && matrix.python == '3.x' && matrix.node == 'lts/*' }}
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: node-coverage
           path: ${{ runner.temp }}/cov/node-coverage.txt
@@ -408,9 +408,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.x'
 
@@ -428,7 +428,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       # No retired command namespace in any shipped runtime-reachable string. The sweep's
       # scope is a total SWEPT/EXEMPT partition; an unclassified top-level entry fails the
       # job rather than passing silently.

@@ -4196,20 +4196,21 @@ def _simple_commands(text, depth=0):
             w = "".join(word)
             if discard_next is None:
                 argv.append(w)
+                bare = _heredoc_tag_raw[0] == w         # unquoted, unescaped: `esac`/`in` as KEYWORDS, not 'esac'
                 if pattern_mode:
-                    if w == "esac" and pattern_tokens == 0 and not pattern_paren:
+                    if bare and w == "esac" and pattern_tokens == 0 and not pattern_paren:
                         case_depth -= 1                 # `;;` (or `in`) then `esac`: the case is over
                         pattern_mode = False
                         argv.clear()
                     else:
                         pattern_tokens += 1             # a pattern word — `esac` included, after `(` or `|`
-                elif w == "in" and _after_prefixes(argv)[:1] == ["case"] \
+                elif bare and w == "in" and _after_prefixes(argv)[:1] == ["case"] \
                         and len(_after_prefixes(argv)) == 3:
                     case_depth += 1                     # `case WORD in` (after any prefixes, or on the next line)
                     pattern_mode = True
                     pattern_tokens, pattern_paren = 0, False
                     argv.clear()
-                elif w == "esac" and case_depth > 0 and _after_prefixes(argv) == ["esac"]:
+                elif bare and w == "esac" and case_depth > 0 and _after_prefixes(argv) == ["esac"]:
                     case_depth -= 1                     # an arm whose body ended without `;;`
                     argv.clear()
             elif discard_next == "redirect":
@@ -4679,7 +4680,11 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
                          'case x  # header\nin (x) source x ;; esac',
                          'time -p case x in (x) source x ;; esac',
                          'function f { case x in (x) source x ;; esac; }; f',
-                         'f() { case x in (x) source x ;; esac; }; f'):
+                         'f() { case x in (x) source x ;; esac; }; f',
+                         # round 2, Step 9: a QUOTED or escaped `esac` is a pattern word, never the terminator
+                         "(case esac in 'esac') source x ;; esac)",
+                         '(case esac in "esac") source x ;; esac)',
+                         '(case esac in \\esac) source x ;; esac)'):
             with self.subTest(spelling=spelling):
                 self.assertTrue(self._flags(spelling), spelling)
 
@@ -4723,6 +4728,8 @@ class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
         # round 2, Step 8: `esac` is a terminator only where a pattern could not begin
         self.assertEqual(self._flags('case x in (source | esac) echo p ;; (source | a) echo p ;; esac'), [])
         self.assertEqual(self._flags('case x in\n  (esac|source) echo p ;;\nesac'), [])
+        self.assertEqual(self._flags("case x in 'esac' | source) echo p ;; (source | a) echo p ;; esac"), [])
+        self.assertEqual(self._flags('case x in "esac") echo p ;; esac'), [])
 
     def test_case_state_transitions(self):
         # a nested case after a prefix enters pattern mode too

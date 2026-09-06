@@ -3936,3 +3936,831 @@ class TestExpressionGrammar(unittest.TestCase):
                 if not _expr_ok(m.group(1).strip()):
                     bad.append(f"{path.name}: {m.group(1).strip()[:80]}")
         self.assertEqual(bad, [], f"the new grammar over-rejects: {bad}")
+
+
+# ---------------------------------------------------------------------------------------------
+# vibe-211 (grill S16): no PRIVILEGED job may `source` / `.` artifact content.
+#
+# The defect this guards: auditor-exemplar.yml's publish job (contents: write, issues: write,
+# GH_TOKEN) sourced `.exemplar-env`, a file uploaded from the job that ran Claude with Bash. Sourcing
+# turns a data channel into a code channel. The check is written at the level of the CLASS the
+# acceptance names — "artifact paths" in "privileged jobs" — over ALL 26 workflows (auditor/ and
+# .github/), not the one instance:
+#
+#   * privileged  — effective write authority (job-level `permissions:` REPLACES the workflow-level
+#                   block; `id-token` excluded by test_auditor_graph's documented decision) OR
+#                   `secrets.PAT_TOKEN` / `secrets['PAT_TOKEN']` (dot or bracket, whitespace allowed,
+#                   exact identifier) anywhere in the job's subtree or the workflow-level `env:`.
+#                   Resolved from the PARSED document (Psych), so flow permissions, quoted job keys
+#                   and bracket secret access are all seen. A document that does not parse is an
+#                   error, never a silent pass.
+#   * sourcing    — `.` or `source` in command position, found by a single-pass shell tokeniser that
+#                   keeps quote / escape / `$(…)` / backtick / `${…}` / heredoc state across newlines,
+#                   recurses into every substitution (including inside double quotes, unquoted
+#                   heredoc bodies and `bash -c` strings), treats `(`, `{`, `f()` and `case`
+#                   patterns as command boundaries, drops redirect targets, and removes
+#                   backslash-newline without inserting a space. Unterminated syntax is a violation
+#                   (fail closed); an operand containing a substitution renders with __SUBST__ and is a
+#                   violation by an explicit check — the name class would otherwise accept it.
+#   * allowed     — ONLY an operand that is exactly `<code-checkout root>/auditor/scripts/<name>.sh`
+#                   (fullmatch), where the root is one of eight recognised spellings (a `:-` default
+#                   may name only another recognised root; `$PWD` only as the innermost fallback).
+# ---------------------------------------------------------------------------------------------
+
+_CODE_ROOT = (r"(?:\$CODE_DIR|\$\{CODE_DIR\}"
+              r"|\$\{CODE_DIR:-(?:\$GITHUB_WORKSPACE|\$\{GITHUB_WORKSPACE\}|\$\{GITHUB_WORKSPACE:-\$PWD\})\}"
+              r"|\$GITHUB_WORKSPACE|\$\{GITHUB_WORKSPACE\}|\$\{GITHUB_WORKSPACE:-\$PWD\})")
+CODE_CHECKOUT_HELPER = re.compile(_CODE_ROOT + r"/auditor/scripts/[A-Za-z0-9_-]+\.sh")   # used with fullmatch()
+PAT_REF = re.compile(r"secrets\s*(?:\.\s*PAT_TOKEN\b|\[\s*['\"]PAT_TOKEN['\"]\s*\])")
+_SOURCE_PREFIXES = {"{", "(", "!", "if", "then", "else", "elif", "do", "while", "until", "time",
+                    "command", "builtin", "env", "--"}
+_OPTION_TAKERS = {"command", "builtin", "env", "time"}
+_SHELLS = {"bash", "sh", "zsh", "dash"}
+_SUBST = "__SUBST__"
+
+#: The privileged jobs of the 26-workflow corpus at 1fe3bf5, measured (auditor/ AND .github/) — a
+#: change detector like the census: a job added, removed or re-scoped surfaces here.
+EXPECTED_PRIVILEGED = {
+    ("auditor/workflows/auditor-audit.yml", "publish"),
+    ("auditor/workflows/auditor-batch-processor.yml", "process"),
+    ("auditor/workflows/auditor-case-study.yml", "gate"),
+    ("auditor/workflows/auditor-case-study.yml", "publish"),
+    ("auditor/workflows/auditor-cite-exemplars.yml", "cite"),
+    ("auditor/workflows/auditor-classify.yml", "record"),
+    ("auditor/workflows/auditor-contribute.yml", "reserve"),
+    ("auditor/workflows/auditor-contribute.yml", "submit"),
+    ("auditor/workflows/auditor-contribute.yml", "finalize"),
+    ("auditor/workflows/auditor-daily-report.yml", "report"),
+    ("auditor/workflows/auditor-discover.yml", "discover"),
+    ("auditor/workflows/auditor-docs-diff.yml", "diff"),
+    ("auditor/workflows/auditor-exemplar.yml", "publish"),
+    ("auditor/workflows/auditor-refine-rules.yml", "publish"),
+    ("auditor/workflows/auditor-render-dashboard.yml", "render"),
+    ("auditor/workflows/auditor-repo-report.yml", "backfill"),
+    ("auditor/workflows/auditor-rule-review.yml", "review"),
+    ("auditor/workflows/auditor-suppressions.yml", "scan"),
+    ("auditor/workflows/auditor-track.yml", "track"),
+    ("auditor/workflows/auditor-vocab-drift.yml", "record"),
+    (".github/workflows/deploy-site.yml", "deploy"),
+    (".github/workflows/site-preview-cleanup.yml", "cleanup"),
+}
+
+
+def corpus_workflow_texts():
+    """{repo-relative path: text} for every workflow in BOTH directories — the 26-file corpus."""
+    paths = sorted(WF_DIR.glob("*.yml")) + sorted(set(LIVE_WF_DIR.glob("*.yml"))
+                                                  | set(LIVE_WF_DIR.glob("*.yaml")))
+    return {str(p.relative_to(REPO)): p.read_text(encoding="utf-8") for p in paths}
+
+
+def _perm_dict(node):
+    """A permissions node → {scope: value}, {"__inline__": scalar}, or None when absent."""
+    if node is None:
+        return None
+    if node.get("t") == "m":
+        return {_scalar(k): _scalar(v) for k, v in node.get("c", [])}
+    if node.get("t") == "s":
+        return {"__inline__": node.get("v")}
+    return {"__unparsed__": str(node.get("t"))}
+
+
+def _scalars(node):
+    """Every scalar value in a subtree, as strings."""
+    if not isinstance(node, dict):
+        return
+    if node.get("t") == "s" and node.get("v") is not None:
+        yield str(node["v"])
+    elif node.get("t") == "m":
+        for k, v in node.get("c", []):
+            yield from _scalars(k)
+            yield from _scalars(v)
+    elif node.get("t") == "q":
+        for child in node.get("c", []):
+            yield from _scalars(child)
+
+
+def privileged_jobs(text):
+    """job name → reason, for every job with effective write authority or PAT_TOKEN in reach.
+
+    Resolved from the PARSED document. Raises RuntimeError when the document cannot be parsed —
+    ruby absent or malformed YAML — so a classification never silently narrows to nothing.
+    """
+    import sys
+    tests_dir = str(Path(__file__).resolve().parent)
+    if tests_dir not in sys.path:
+        sys.path.insert(0, tests_dir)
+    from test_auditor_graph import has_write   # stdlib-only module; no cycle
+    root, _census, err = parsed_workflow(text)
+    if root is None or err is not None:
+        raise RuntimeError(f"workflow did not parse: {err or 'ruby unavailable'}")
+    resolved, _ = resolve_aliases(root)
+    if resolved is None or resolved.get("t") != "m":
+        raise RuntimeError("workflow root is not a mapping")
+    top_perm = _perm_dict(_map_get(resolved, "permissions")) or {}
+    top_env = _map_get(resolved, "env")
+    top_pat = any(PAT_REF.search(s) for s in _scalars(top_env))
+    out = {}
+    jobs = _map_get(resolved, "jobs")
+    if jobs is None or jobs.get("t") != "m":
+        return out
+    for jk, jv in jobs.get("c", []):
+        name = _scalar(jk)
+        if jv.get("t") != "m":
+            continue
+        own = _perm_dict(_map_get(jv, "permissions"))
+        eff = own if own is not None else top_perm
+        reasons = []
+        if has_write(eff):
+            reasons.append("write")
+        if top_pat or any(PAT_REF.search(s) for s in _scalars(jv)):
+            reasons.append("PAT_TOKEN")
+        if reasons:
+            out[name] = "+".join(reasons)
+    return out
+
+
+class _ShellSyntax(Exception):
+    """Unterminated quote / substitution / backtick — the caller fails closed."""
+
+
+def _command_position(argv):
+    """Index of the command word: past prefixes (`if then else elif do while until time command builtin
+    env ! { ( --` and `VAR=`), options after an option-taking prefix, and function-definition tokens
+    (`function NAME [()]`, `NAME ( )`), repeated until nothing more can be skipped. Shared by the
+    tokeniser's `case` entry and the classifier, so a construct recognised in one place is recognised
+    in the other."""
+    k = 0
+    while True:
+        moved = False
+        while k < len(argv) and (argv[k] in _SOURCE_PREFIXES
+                                 or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[k])
+                                 or (k > 0 and argv[k - 1] in _OPTION_TAKERS
+                                     and argv[k].startswith("-") and argv[k] != "--")):
+            k += 1
+            moved = True
+        if k + 1 < len(argv) and argv[k] == "function":
+            k += 2
+            moved = True
+            if k + 1 < len(argv) and argv[k] == "(" and argv[k + 1] == ")":
+                k += 2
+        elif (k + 2 < len(argv) and argv[k + 1] == "(" and argv[k + 2] == ")"
+              and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", argv[k])):
+            k += 3
+            moved = True
+        if not moved:
+            return k
+
+
+def _read_balanced(text, i, open_, close_):
+    """Index just past the `close_` that balances an already-consumed `open_` at position i,
+    skipping quoted spans and escapes. Raises _ShellSyntax when unterminated."""
+    depth, n, q = 1, len(text), None
+    while i < n and depth:
+        c = text[i]
+        if q:
+            if c == "\\" and q == '"':
+                i += 2
+                continue
+            if c == q:
+                q = None
+        elif c == "\\":
+            i += 2
+            continue
+        elif c in "'\"":
+            q = c
+        elif c == open_:
+            depth += 1
+        elif c == close_:
+            depth -= 1
+        i += 1
+    if depth:
+        raise _ShellSyntax(f"unterminated {open_}")
+    return i
+
+
+def _read_backtick(text, i):
+    """Index just past the closing backtick for a span opened at i-1."""
+    n = len(text)
+    while i < n:
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == "`":
+            return i + 1
+        i += 1
+    raise _ShellSyntax("unterminated backtick")
+
+
+def _substitutions_in(text, depth):
+    """Yield argv lists for every $(…) / `…` inside text that is NOT quote-parsed (unquoted heredoc
+    bodies, ${…} contents). `\\$` and `\\`` are literal."""
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+        elif text.startswith("$(", i):
+            j = _read_balanced(text, i + 2, "(", ")")
+            yield from _simple_commands(text[i + 2:j - 1], depth + 1)
+            i = j
+        elif c == "`":
+            j = _read_backtick(text, i + 1)
+            yield from _simple_commands(text[i + 1:j - 1], depth + 1)
+            i = j
+        else:
+            i += 1
+
+
+def _simple_commands(text, depth=0):
+    """Yield argv lists (quotes removed, escapes resolved, substitutions → __SUBST__ and recursed)
+    for every simple command in a shell text. Raises _ShellSyntax on unterminated syntax."""
+    if depth > 12:
+        raise _ShellSyntax("substitution nesting too deep")
+    i, n = 0, len(text)
+    argv, word, have_word = [], [], False
+    discard_next = None          # None | "redirect" | ("heredoc", strip_tabs)
+    pending_heredocs = []        # (tag, quoted, strip_tabs)
+    open_parens = 0
+    q = None                     # None | "'" | '"'
+    case_depth = 0               # nesting of `case … esac`
+    pattern_mode = False         # between `in`/`;;` and the `)` that ends an arm's pattern
+    pattern_tokens = 0           # words read in the current pattern (esac is a terminator only at 0)
+    pattern_paren = False        # the arm's optional `(` has been read (esac after it is a pattern word)
+
+    def _after_prefixes(tokens):
+        return tokens[_command_position(tokens):]
+
+    def end_word():
+        nonlocal word, have_word, discard_next, case_depth, pattern_mode, pattern_tokens, pattern_paren
+        if have_word:
+            w = "".join(word)
+            if discard_next is None:
+                argv.append(w)
+                # a KEYWORD is the bare word: no quotes, no escapes — but a backslash-newline inside it is a
+                # continuation (`i\⏎n` is `in`), so those are removed from the raw text before comparing
+                raw = _heredoc_tag_raw[0]
+                bare = raw is not None and raw.replace("\\\n", "") == w
+                if pattern_mode:
+                    if bare and w == "esac" and pattern_tokens == 0 and not pattern_paren:
+                        case_depth -= 1                 # `;;` (or `in`) then `esac`: the case is over
+                        pattern_mode = False
+                        argv.clear()
+                    else:
+                        pattern_tokens += 1             # a pattern word — `esac` included, after `(` or `|`
+                elif bare and w == "in" and _after_prefixes(argv)[:1] == ["case"] \
+                        and len(_after_prefixes(argv)) == 3:
+                    case_depth += 1                     # `case WORD in` (after any prefixes, or on the next line)
+                    pattern_mode = True
+                    pattern_tokens, pattern_paren = 0, False
+                    argv.clear()
+                elif bare and w == "esac" and case_depth > 0 and _after_prefixes(argv) == ["esac"]:
+                    case_depth -= 1                     # an arm whose body ended without `;;`
+                    argv.clear()
+            elif discard_next == "redirect":
+                pass
+            else:
+                strip = discard_next[1]
+                raw = _heredoc_tag_raw[0]
+                quoted = raw is not None and raw != w      # `'EOS'`, `"EOS"`, `\EOS` ≠ EOS → quoted
+                pending_heredocs.append((w, quoted, strip))
+            discard_next = None
+        word, have_word = [], False
+
+    _heredoc_tag_raw = [None]    # raw (unprocessed) text of the word being read, for quoted-ness
+
+    def end_command():
+        nonlocal argv, open_parens
+        end_word()
+        rest = _after_prefixes(argv)
+        if len(rest) == 2 and rest[0] == "case":
+            return                                       # `case WORD` — `in` may follow on the next line
+        if argv:
+            yield_list.append(list(argv))
+        argv = []
+
+    yield_list = []
+    word_raw_start = None
+
+    while i < n:
+        c = text[i]
+        if q == "'":
+            if c == "'":
+                q = None
+            else:
+                word.append(c)
+            i += 1
+            continue
+        if q == '"':
+            if c == "\\" and i + 1 < n:
+                nxt = text[i + 1]
+                if nxt == "\n":
+                    i += 2
+                    continue
+                if nxt in '$`"\\':
+                    word.append(nxt)
+                else:
+                    word.append(c)
+                    word.append(nxt)
+                i += 2
+                continue
+            if c == '"':
+                q = None
+                i += 1
+                continue
+            if text.startswith("$(", i):
+                j = _read_balanced(text, i + 2, "(", ")")
+                yield_list.extend(_simple_commands(text[i + 2:j - 1], depth + 1))
+                word.append(_SUBST)
+                i = j
+                continue
+            if text.startswith("${", i):
+                j = _read_balanced(text, i + 2, "{", "}")
+                yield_list.extend(_substitutions_in(text[i + 2:j - 1], depth))
+                word.append(text[i:j])
+                i = j
+                continue
+            if c == "`":
+                j = _read_backtick(text, i + 1)
+                yield_list.extend(_simple_commands(text[i + 1:j - 1], depth + 1))
+                word.append(_SUBST)
+                i = j
+                continue
+            word.append(c)
+            i += 1
+            continue
+        # ---- normal state ----
+        if c == "\\":
+            if i + 1 >= n:
+                raise _ShellSyntax("trailing backslash")
+            if text[i + 1] != "\n":
+                word.append(text[i + 1])
+                have_word = True
+                if word_raw_start is None:
+                    word_raw_start = i
+            i += 2
+            continue
+        if c in "'\"":
+            q = c
+            have_word = True
+            if word_raw_start is None:
+                word_raw_start = i
+            i += 1
+            continue
+        if c == "#" and not have_word:
+            j = text.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        if text.startswith("$(", i) or text.startswith("<(", i) or text.startswith(">(", i):
+            if text[i] != "$":
+                end_word()
+            j = _read_balanced(text, i + 2, "(", ")")
+            yield_list.extend(_simple_commands(text[i + 2:j - 1], depth + 1))
+            if text[i] == "$":
+                word.append(_SUBST)
+                have_word = True
+                if word_raw_start is None:
+                    word_raw_start = i
+            i = j
+            continue
+        if text.startswith("${", i):
+            j = _read_balanced(text, i + 2, "{", "}")
+            yield_list.extend(_substitutions_in(text[i + 2:j - 1], depth))
+            word.append(text[i:j])
+            have_word = True
+            if word_raw_start is None:
+                word_raw_start = i
+            i = j
+            continue
+        if c == "`":
+            j = _read_backtick(text, i + 1)
+            yield_list.extend(_simple_commands(text[i + 1:j - 1], depth + 1))
+            word.append(_SUBST)
+            have_word = True
+            if word_raw_start is None:
+                word_raw_start = i
+            i = j
+            continue
+        if c in " \t":
+            if have_word:
+                _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
+            end_word()
+            word_raw_start = None
+            i += 1
+            continue
+        if c == "\n":
+            if have_word:
+                _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
+            end_command()
+            word_raw_start = None
+            i += 1
+            for tag, quoted, strip in pending_heredocs:
+                body = []
+                while i < n:
+                    j = text.find("\n", i)
+                    line = text[i:] if j == -1 else text[i:j]
+                    i = n if j == -1 else j + 1
+                    cmp = line.lstrip("\t") if strip else line
+                    if cmp == tag:
+                        break
+                    body.append(line)
+                if not quoted:
+                    yield_list.extend(_substitutions_in("\n".join(body), depth))
+            pending_heredocs.clear()
+            continue
+        if c == "|" and pattern_mode:            # alternation inside a case pattern
+            word.append(c)
+            have_word = True
+            if word_raw_start is None:
+                word_raw_start = i
+            i += 1
+            continue
+        if c in ";&|":
+            if c == "&" and i + 1 < n and text[i + 1] in ">":
+                # &> / &>> redirect
+                end_word()
+                i += 2
+                while i < n and text[i] == ">":
+                    i += 1
+                while i < n and text[i] in " \t":
+                    i += 1
+                discard_next = "redirect"
+                continue
+            if have_word:
+                _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
+            end_command()
+            word_raw_start = None
+            if text.startswith(";;&", i) or text.startswith(";;", i) or text.startswith(";&", i):
+                i += 3 if text.startswith(";;&", i) else 2
+                if case_depth > 0:                       # the next arm's pattern follows
+                    pattern_mode = True
+                    pattern_tokens, pattern_paren = 0, False
+                continue
+            i += 2 if text[i:i + 2] in ("&&", "||") else 1
+            continue
+        if c in "<>":
+            fd_word = have_word and "".join(word).isdigit() and word_raw_start is not None \
+                and text[word_raw_start:i].isdigit()
+            if fd_word:
+                word, have_word = [], False
+            else:
+                if have_word:
+                    _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
+                end_word()
+            word_raw_start = None
+            if text.startswith("<<<", i):
+                i += 3
+                discard_next = "redirect"
+            elif text.startswith("<<", i):
+                i += 2
+                strip = False
+                if i < n and text[i] == "-":
+                    strip = True
+                    i += 1
+                discard_next = ("heredoc", strip)
+            else:
+                i += 1
+                while i < n and text[i] in ">&":
+                    i += 1
+                discard_next = "redirect"
+            while i < n and text[i] in " \t":
+                i += 1
+            continue
+        if c in "()":
+            if have_word:
+                _heredoc_tag_raw[0] = text[word_raw_start:i] if word_raw_start is not None else None
+            end_word()
+            word_raw_start = None
+            if pattern_mode:
+                if c == ")":                             # the pattern ends; its words are not commands
+                    argv.clear()
+                    pattern_mode = False
+                else:
+                    pattern_paren = True                 # a leading `(` is optional; `esac` after it is a word
+                i += 1
+                continue
+            if c == "(":
+                open_parens += 1
+                argv.append("(")
+            else:
+                if open_parens > 0:
+                    open_parens -= 1
+                    argv.append(")")
+                else:
+                    # a `case` pattern terminator: the pattern is not a command; what follows is
+                    argv = []
+            i += 1
+            continue
+        if c in "{}" and not have_word and (i + 1 >= n or text[i + 1] in " \t\n;"):
+            argv.append(c)
+            i += 1
+            continue
+        word.append(c)
+        have_word = True
+        if word_raw_start is None:
+            word_raw_start = i
+        i += 1
+    if q is not None:
+        raise _ShellSyntax(f"unterminated {q} quote")
+    if have_word:
+        _heredoc_tag_raw[0] = text[word_raw_start:n] if word_raw_start is not None else None
+    end_command()
+    for tag, quoted, strip in pending_heredocs:
+        pass   # heredoc opened on the last line with no body: nothing to scan
+    return yield_list
+
+
+def _argv_sourcings(argv, depth=0):
+    """('source', operand) for a simple command whose command word is `.`/`source`; recurses into
+    `bash -c` strings."""
+    k = _command_position(argv)                                     # prefixes, options, `function f`, `f()`
+    if k >= len(argv):
+        return
+    cmd = argv[k]
+    if cmd in (".", "source"):
+        yield ("source", argv[k + 1] if k + 1 < len(argv) else "<missing operand>")
+    elif cmd in _SHELLS:
+        for idx in range(k + 1, len(argv) - 1):
+            if re.match(r"^-[A-Za-z]*c[A-Za-z]*$", argv[idx]):          # -c, -ec, -ce, -xec …
+                try:
+                    for inner in _simple_commands(argv[idx + 1], depth + 1):
+                        yield from _argv_sourcings(inner, depth + 1)
+                except _ShellSyntax as exc:
+                    yield ("unparseable", f"bash -c string: {exc}")
+                break
+
+
+def sourcing_sites(run_text):
+    """Every sourcing (or unparseable construct) in a run block."""
+    try:
+        commands = _simple_commands(run_text)
+    except _ShellSyntax as exc:
+        yield ("unparseable", str(exc))
+        return
+    for argv in commands:
+        yield from _argv_sourcings(argv)
+
+
+def artifact_source_violations(workflow_texts):
+    """[messages] — every `.`/`source` of a non-code-checkout operand in a privileged job, plus every
+    construct in such a job that could not be tokenised. Empty means clean."""
+    out = []
+    for wf_name, text in sorted(workflow_texts.items()):
+        priv = privileged_jobs(text)
+        if not priv:
+            continue
+        entries = parsed_run_steps(text)
+        if entries is None:
+            raise RuntimeError(f"{wf_name}: run steps could not be enumerated")
+        for job, idx, run_text, _line in entries:
+            if job not in priv:
+                continue
+            for kind, what in sourcing_sites(run_text):
+                if kind == "unparseable":
+                    out.append(f"{wf_name}:{job} step {idx}: unparseable command in a privileged "
+                               f"job — {what}")
+                elif _SUBST in what or not CODE_CHECKOUT_HELPER.fullmatch(what):
+                    # `_SUBST in what` is load-bearing: the name class [A-Za-z0-9_-]+ ACCEPTS __SUBST__, so
+                    # `…/auditor/scripts/$(…).sh` would otherwise pass the grammar (round-2 finding)
+                    out.append(f"{wf_name}:{job} step {idx}: sources {what} — not a code-checkout "
+                               f"helper")
+    return out
+
+
+class TestNoArtifactSourcingInPrivilegedJobs(unittest.TestCase):
+    """vibe-211 (S16). The corpus test is the acceptance; the anchors prove the detector, not the corpus."""
+
+    @staticmethod
+    def _synthetic(run, job_perm="contents: write", top_perm="contents: read", job_key="a",
+                   top_env=None, job_env=None, name="wf.yml"):
+        text = "name: t\non:\n  workflow_dispatch:\n"
+        if top_perm is not None:
+            text += ("permissions: " + top_perm + "\n") if top_perm.startswith("{") else \
+                    ("permissions:\n  " + top_perm + "\n")
+        if top_env:
+            text += "env:\n  " + top_env + "\n"
+        text += "jobs:\n  " + job_key + ":\n    runs-on: ubuntu-latest\n"
+        if job_perm is not None:
+            text += ("    permissions: " + job_perm + "\n") if job_perm.startswith("{") else \
+                    ("    permissions:\n      " + job_perm + "\n")
+        if job_env:
+            text += "    env:\n      " + job_env + "\n"
+        text += "    steps:\n      - run: |\n"
+        for ln in run.split("\n"):
+            text += "          " + ln + "\n"
+        return {name: text}
+
+    def _flags(self, run, **kw):
+        return artifact_source_violations(self._synthetic(run, **kw))
+
+    ENV_FILE = '. "$CODE_DIR/.exemplar-env"'
+
+    # --- the acceptance ---------------------------------------------------------------------
+    def test_the_corpus_has_no_privileged_job_sourcing_artifact_content(self):
+        texts = corpus_workflow_texts()
+        self.assertEqual(len(texts), 26, sorted(texts))
+        self.assertEqual(artifact_source_violations(texts), [])
+
+    def test_the_privileged_roster_is_exactly_the_measured_twenty_two(self):
+        got = set()
+        for rel, text in corpus_workflow_texts().items():
+            for job in privileged_jobs(text):
+                got.add((rel, job))
+        self.assertEqual(got, EXPECTED_PRIVILEGED,
+                         f"privileged roster drifted: +{sorted(got - EXPECTED_PRIVILEGED)} "
+                         f"-{sorted(EXPECTED_PRIVILEGED - got)}")
+
+    def test_live_workflows_are_inside_the_gate(self):
+        self.assertIn((".github/workflows/deploy-site.yml", "deploy"), EXPECTED_PRIVILEGED)
+        self.assertTrue(self._flags(self.ENV_FILE, name=".github/workflows/x.yml"))
+
+    # --- privilege predicate ---------------------------------------------------------------
+    def test_a_job_level_write_scope_is_privileged_and_flagged(self):
+        self.assertTrue(any("sources $CODE_DIR/.exemplar-env" in v for v in self._flags(self.ENV_FILE)))
+
+    def test_no_write_scope_and_no_pat_is_not_privileged(self):
+        self.assertEqual(self._flags(self.ENV_FILE, job_perm="contents: read"), [])
+
+    def test_flow_style_permissions_are_privileged(self):
+        self.assertTrue(self._flags(self.ENV_FILE, job_perm="{contents: write}"))
+
+    def test_a_quoted_job_key_is_still_seen(self):
+        v = self._flags(self.ENV_FILE, job_key='"publish"')
+        self.assertTrue(any(":publish " in s for s in v), v)
+
+    def test_bracket_secret_access_is_pat_bearing_including_spaced(self):
+        for spelling in ("${{ secrets['PAT_TOKEN'] }}", '${{ secrets["PAT_TOKEN"] }}',
+                         "${{ secrets[ 'PAT_TOKEN' ] }}", "${{ secrets . PAT_TOKEN }}"):
+            with self.subTest(spelling=spelling):
+                self.assertTrue(self._flags(self.ENV_FILE, job_perm="contents: read",
+                                            job_env="TOK: " + spelling))
+
+    def test_a_similarly_prefixed_secret_is_not_the_pat(self):
+        for spelling in ("${{ secrets.PAT_TOKEN_BACKUP }}", "${{ secrets['PAT_TOKEN_OLD'] }}"):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(self._flags(self.ENV_FILE, job_perm="contents: read",
+                                             job_env="TOK: " + spelling), [])
+
+    def test_a_workflow_level_pat_env_makes_every_job_privileged(self):
+        self.assertTrue(self._flags(self.ENV_FILE, job_perm="contents: read",
+                                    top_env="PAT: ${{ secrets.PAT_TOKEN }}"))
+
+    def test_a_job_block_replaces_the_workflow_block(self):
+        self.assertEqual(self._flags(self.ENV_FILE, job_perm="contents: read",
+                                     top_perm="contents: write"), [])
+
+    def test_a_job_with_no_block_inherits_the_workflow_writes(self):
+        self.assertTrue(self._flags(self.ENV_FILE, job_perm=None, top_perm="contents: write"))
+
+    def test_id_token_write_alone_is_not_privileged(self):
+        self.assertEqual(self._flags(self.ENV_FILE, job_perm="id-token: write"), [])
+
+    def test_an_unparseable_document_is_an_error_not_a_pass(self):
+        with self.assertRaises(RuntimeError):
+            artifact_source_violations({"wf.yml": "jobs: [unclosed\n"})
+
+    # --- the exception ---------------------------------------------------------------------
+    def test_code_checkout_helpers_are_allowed_in_every_recognised_root_spelling(self):
+        for operand in ("$CODE_DIR/auditor/scripts/log-event.sh",
+                        "${CODE_DIR}/auditor/scripts/x.sh",
+                        "${CODE_DIR:-$GITHUB_WORKSPACE}/auditor/scripts/x.sh",
+                        "${CODE_DIR:-${GITHUB_WORKSPACE}}/auditor/scripts/x.sh",
+                        "${CODE_DIR:-${GITHUB_WORKSPACE:-$PWD}}/auditor/scripts/compute-fingerprint.sh",
+                        "$GITHUB_WORKSPACE/auditor/scripts/x.sh",
+                        "${GITHUB_WORKSPACE}/auditor/scripts/x.sh",
+                        "${GITHUB_WORKSPACE:-$PWD}/auditor/scripts/x.sh"):
+            with self.subTest(operand=operand):
+                self.assertEqual(self._flags(f'. "{operand}"'), [])
+
+    def test_the_five_corpus_sourcing_sites_are_all_code_checkout_helpers(self):
+        found = []
+        for rel, text in corpus_workflow_texts().items():
+            for _job, _idx, run_text, _line in parsed_run_steps(text):
+                for kind, what in sourcing_sites(run_text):
+                    if kind == "source" and CODE_CHECKOUT_HELPER.fullmatch(what):
+                        found.append((rel, what))
+        self.assertEqual(len(found), 5, found)
+
+    def test_operands_outside_the_grammar_are_violations(self):
+        for operand in ("$CODE_DIR/_patches/auditor/scripts/log-event.sh",
+                        "$CODE_DIR/auditor/scripts/../../.exemplar-env",
+                        "$OTHER/auditor/scripts/x.sh", "auditor/scripts/x.sh", "./auditor/scripts/x.sh",
+                        "${CODE_DIR:-$OTHER}/auditor/scripts/x.sh", "${CODE_DIR:-..}/auditor/scripts/x.sh",
+                        "${CODE_DIR:-/tmp}/auditor/scripts/x.sh", "$PWD/auditor/scripts/x.sh",
+                        "${GITHUB_WORKSPACE:-$OTHER}/auditor/scripts/x.sh",
+                        "${CODE_DIR:-${GITHUB_WORKSPACE:-$OTHER}}/auditor/scripts/x.sh",
+                        "$CODE_DIR/auditor/scripts/x.py", "$CODE_DIR/auditor/scripts/sub/x.sh",
+                        "_patches/x.sh", "$CODE_DIR/auditor/scripts/x.sh\n"):
+            with self.subTest(operand=repr(operand)):
+                self.assertTrue(self._flags(f'. "{operand}"'), repr(operand))
+
+    def test_a_substitution_as_operand_is_unresolved_and_flagged(self):
+        self.assertTrue(self._flags('. "$(printf %s "$CODE_DIR")/auditor/scripts/x.sh"'))
+
+    # --- sourcing spellings ----------------------------------------------------------------
+    def test_every_sourcing_spelling_is_seen(self):
+        for spelling in ('{ . x; }', '( . x )', '(source x)', 'command -- . x', 'command -p . x',
+                         'builtin source x', "bash -c 'source x'", 'sh -c ". x"', '`. x`', 'v=$(. x)',
+                         'if [ -f x ]; then . x; fi', 'time . x', '! . x', 'A=1 B=2 . x',
+                         'source _patches/x.sh', 'f() { source x; }; f', 'sou\\\nrce x',
+                         'v="$(\n. x\n)"', 'v=`\n. x\n`', '. x > log 2>&1', '. x | cat',
+                         'case $v in\n  *) . x ;;\nesac', 'echo "it\'s fine" && `. x`',
+                         'echo "<<EOF"\n. x', 'cat <(. x)', 'v=${x:-$(. y)}',
+                         'echo "`. x`"',     # backticks substitute inside double quotes
+                         # round 2: the function keyword, parenthesised case arms, combined -c flags
+                         'function f { source x; }; f', 'function f() { source x; }; f',
+                         'function f () { source x; }; f',
+                         'case x in (x) source x ;; esac', 'case x in\n(x) source x ;;\nesac',
+                         'case x in (a|b) source x ;; esac',
+                         'case x in\n  a|b) source x ;;\nesac',     # guard: the unmatched-) reset already sees it
+                         "bash -ec 'source x'", "bash -ce 'source x'", "sh -xec 'source x'",
+                         # round 2, Step 8: esac as a pattern word; function after a prefix; a newline
+                         # before `in`; case after an option-taker or as a function body
+                         '(case esac in (esac) source x ;; esac)',
+                         'if true; then function f { source x; }; f; fi',
+                         '{ function f() { source x; }; f; }',
+                         'if true; then function f () { source x; }; fi; f',
+                         'case x\nin (x) source x ;; esac',
+                         'case x  # header\nin (x) source x ;; esac',
+                         'time -p case x in (x) source x ;; esac',
+                         'function f { case x in (x) source x ;; esac; }; f',
+                         'f() { case x in (x) source x ;; esac; }; f',
+                         # round 2, Step 9: a QUOTED or escaped `esac` is a pattern word, never the terminator
+                         "(case esac in 'esac') source x ;; esac)",
+                         '(case esac in "esac") source x ;; esac)',
+                         '(case esac in \\esac) source x ;; esac)',
+                         # round 2, Step 9 iter 3: a backslash-newline INSIDE a keyword is a continuation, not quoting
+                         '(case x i\\\nn (x) source x ;; esac)',
+                         'case x in (x) : ;; e\\\nsac\n: | source x'):
+            with self.subTest(spelling=spelling):
+                self.assertTrue(self._flags(spelling), spelling)
+
+    def test_a_continuation_line_is_joined_without_a_space(self):
+        self.assertTrue(self._flags('. \\\n  "$CODE_DIR/.env"'))
+        self.assertEqual(self._flags('echo sou\\\nrce'), [])     # `sou\<nl>rce` as an ARGUMENT is text
+
+    def test_quoted_and_escaped_text_is_not_a_command(self):
+        for run in ('echo "source of truth: . here"', "echo '. x'", 'echo "\\$(. x)"',
+                    "echo '$(. x)'", 'echo "\\`. x\\`"'):
+            with self.subTest(run=run):
+                self.assertEqual(self._flags(run), [], run)
+
+    def test_a_quoted_heredoc_body_is_prose(self):
+        self.assertEqual(self._flags("cat > f <<'EOS'\n. foo\nsource bar\n$(. x)\nEOS\necho ok"), [])
+
+    def test_an_unquoted_heredoc_substitution_executes_and_is_seen(self):
+        self.assertTrue(self._flags("cat > f <<EOS\nvalue: $(. x)\nEOS"))
+        self.assertTrue(self._flags("cat > f <<EOS\nvalue: $(\n. x\n)\nEOS"))
+        self.assertTrue(self._flags("cat > f <<-EOS\n\tvalue: `. x`\n\tEOS"))
+
+    def test_unquoted_heredoc_prose_is_not_a_command(self):
+        self.assertEqual(self._flags("cat > f <<EOS\n. foo is prose here\n\\$(. x) is escaped\nEOS"), [])
+
+    def test_a_multi_line_quoted_program_is_one_token(self):
+        self.assertEqual(self._flags("jq -r '\n  .foo\n  | . as $x\n' f.json\necho ok"), [])
+
+    def test_unterminated_syntax_fails_closed(self):
+        for run in ('echo "$(. x"', "echo 'oops", 'echo `oops', 'echo "unterminated'):
+            with self.subTest(run=run):
+                v = self._flags(run)
+                self.assertTrue(any("unparseable" in s for s in v), (run, v))
+
+    def test_a_case_pattern_is_not_a_command_but_its_body_is(self):
+        self.assertEqual(self._flags('case $v in\n  source) echo pattern ;;\nesac'), [])
+        self.assertTrue(self._flags('case $v in\n  a) . x ;;\nesac'))
+        # round 2: parenthesised patterns, on the header line (guard) and on their own line (RED)
+        self.assertEqual(self._flags('case x in (source) echo p ;; esac'), [])
+        self.assertEqual(self._flags('case x in\n  (a|source) echo p ;;\nesac'), [])
+        self.assertEqual(self._flags('case x in\n  (source|a) echo p ;;\nesac'), [])   # anchors the pipe mutation
+        # round 2, Step 8: `esac` is a terminator only where a pattern could not begin
+        self.assertEqual(self._flags('case x in (source | esac) echo p ;; (source | a) echo p ;; esac'), [])
+        self.assertEqual(self._flags('case x in\n  (esac|source) echo p ;;\nesac'), [])
+        self.assertEqual(self._flags("case x in 'esac' | source) echo p ;; (source | a) echo p ;; esac"), [])
+        self.assertEqual(self._flags('case x in "esac") echo p ;; esac'), [])
+
+    def test_case_state_transitions(self):
+        # a nested case after a prefix enters pattern mode too
+        self.assertTrue(self._flags('case x in (x) if true; then case y in (y) source x ;; esac; fi ;; esac'))
+        # sourcing after an inner esac (still inside the outer arm) and after the outer esac
+        v = self._flags('case x in\n  a) case y in\n       b) echo b ;;\n     esac\n     . x ;;\nesac')
+        self.assertEqual(len(v), 1, v)
+        v = self._flags('case x in\n  a) echo a ;;\nesac\n. x')
+        self.assertEqual(len(v), 1, v)
+        # three arms; pattern words are not commands; bodies with if and $(…); exactly one arm sources
+        v = self._flags('case $v in\n  (source|.) echo pattern ;;\n  (b) if true; then v=$(echo hi); fi ;;\n  (c) . x ;;\nesac')
+        self.assertEqual(len(v), 1, v)
+        self.assertIn("sources x", v[0])
+        # the corpus\'s numeric-validation pattern does not swallow the command after esac
+        v = self._flags('case "$SCORE" in \'\'|*[!0-9]*) SCORE=0 ;; esac\n. x')
+        self.assertEqual(len(v), 1, v)
+        # esac reached without a preceding ;;
+        v = self._flags('case x in\n  a) echo a\nesac\n. x')
+        self.assertEqual(len(v), 1, v)
+        # `for … in` never enters pattern mode
+        self.assertTrue(self._flags('for x in a b; do . x; done'))
+        # after esac, `|` is a PIPE again: if pattern mode were stuck, `echo y | . x` would read as one word
+        v = self._flags('case x in\n  a) echo a ;;\nesac\necho y | . x')
+        self.assertEqual(len(v), 1, v)
+
+    def test_a_substitution_in_the_operand_basename_is_flagged(self):
+        self.assertTrue(self._flags('. "$CODE_DIR/auditor/scripts/$(printf %s payload).sh"'))   # RED: __SUBST__ matches the name class
+        self.assertTrue(self._flags('. "$CODE_DIR/auditor/scripts/${NAME}.sh"'))                # guard: $ and { are outside it

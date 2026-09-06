@@ -220,6 +220,16 @@ def _write_vocab_sidecar(sb):
         json.dumps(VOCAB_SIDECAR) + "\n")
 
 
+
+def _write_model_exemplar(sb):
+    """vibe-211: the exemplar publisher REFUSES when the model wrote nothing (exemplar-not-written), so
+    the emitter row must supply a valid model output or it appends no record and proves nothing."""
+    (sb.data / "exemplars" / f"{TARGET_REPO.replace('/', '-')}.md").write_text(
+        f"---\nslug: {TARGET_REPO.replace('/', '-')}\nrepo: {TARGET_REPO}\naudited: 2026-08-06\n"
+        "commit_sha: cafebabe\nscore: 92\nexemplifies:\n  - R07\n---\n\nEvidence body.\n",
+        encoding="utf-8")
+
+
 BASE_ENV = {"SCORE": "92", "SECURITY": "CLEAR", "RUN_ID": "4242", "GITHUB_RUN_ID": "4242",
             "GITHUB_RUN_NUMBER": "7", "TARGET_SHA": "cafebabe"}
 
@@ -242,7 +252,7 @@ EMITTERS = [
     ("repo-report", "logic", {}, "registry.json", None),
     ("suppressions", "logic", {}, "registry.json", None),
     ("vocab-drift", "logic", {}, "registry.json", _write_vocab_sidecar),
-    ("exemplar", "logic", {}, "registry.json", None),
+    ("exemplar", "logic", {"TARGET_REPO": TARGET_REPO}, "registry.json", _write_model_exemplar),
     ("cite-exemplars", "logic", {}, "registry.json", None),
     ("refine-rules", "logic", {}, "registry.json", None),
     ("docs-diff", "logic", {}, "registry.json", None),
@@ -353,6 +363,29 @@ class TestFindingRecordFields(BlockBase):
                     "audit_run_id", payload,
                     f"finding payload keys {sorted(payload)} carry no 'audit_run_id' (§2)")
                 self.assertEqual(payload["audit_run_id"], "4242")
+        finally:
+            sb.cleanup()
+
+
+
+class TestExemplarEmitter(BlockBase):
+    """vibe-211: the exemplar row of EMITTERS must actually publish, or TestEventEnvelope is vacuous for it.
+
+    Measured before this test existed: with no prep hook the block refused `exemplar-not-written`, exit 1,
+    zero records — and the envelope loop, which only requires a positive total across ALL emitters, passed.
+    """
+
+    def test_exemplar_emitter_publishes_one_enveloped_record(self):
+        row = [e for e in EMITTERS if e[0] == "exemplar"]
+        self.assertEqual(len(row), 1)
+        name, marker, extra, registry, prep = row[0]
+        sb, r = self.run_emitter(name, marker, extra, registry, prep)
+        try:
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("PASS", r.stdout)
+            recs = [rec for _f, rec in sb.all_ledger_records()]
+            self.assertEqual([rec.get("event") for rec in recs], ["exemplar_published"])
+            self.assertIsNone(envelope_violation(recs[0]), envelope_violation(recs[0]))
         finally:
             sb.cleanup()
 

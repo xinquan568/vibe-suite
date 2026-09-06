@@ -372,5 +372,89 @@ class SuiteAuthority(unittest.TestCase):
                                  "posture is that the cheap tiers run without any secret")
 
 
+# ---------------------------------------------------------------------------------------------
+# vibe-211 (grill S16): auditor-exemplar.yml — the target reaches publish as a JOB OUTPUT, never as
+# artifact content. Four separately named tests, so a writer alone, a mis-declared output alone, or a
+# missing consumer binding each fail their own test (github_outputs() unions written and declared
+# names, which is why it is NOT used here).
+# ---------------------------------------------------------------------------------------------
+
+EXEMPLAR = WF_DIR / "auditor-exemplar.yml"
+DERIVE_WRITER = re.compile(r'echo "target_repo=\$TARGET" >> "\$GITHUB_OUTPUT"')
+OUTPUT_DECL = re.compile(r"^    outputs:\n(?:      .*\n)*?      target_repo: \$\{\{ steps\.derive\.outputs\.target_repo \}\}\s*$", re.M)
+CONSUMER_BINDING = "TARGET_REPO: ${{ needs.exemplar.outputs.target_repo }}"
+
+
+def steps(body):
+    """A job body → list of step texts (each step begins at a six-space dash, any spacing after it)."""
+    out, cur = [], None
+    for ln in body:
+        if re.match(r"^      - ", ln):
+            if cur is not None:
+                out.append("\n".join(cur))
+            cur = [ln]
+        elif cur is not None:
+            cur.append(ln)
+    if cur is not None:
+        out.append("\n".join(cur))
+    return out
+
+
+class ExemplarTopology(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = EXEMPLAR.read_text()
+        cls.jobs = jobs(cls.text)
+
+    def _steps(self, job):
+        self.assertIn(job, self.jobs, f"auditor-exemplar.yml has no '{job}' job; jobs are {sorted(self.jobs)}")
+        return steps(self.jobs[job])
+
+    def test_derive_step_writes_target_repo_to_github_output_before_the_model_step(self):
+        st = self._steps("exemplar")
+        derive = [i for i, s in enumerate(st) if re.search(r"^\s+(?:- )?id: derive\s*$", s, re.M)]
+        self.assertEqual(len(derive), 1, "exactly one step in 'exemplar' must carry `id: derive`")
+        model = [i for i, s in enumerate(st) if MODEL_ACTION.search(s)]
+        self.assertEqual(len(model), 1, "exactly one model step expected in 'exemplar'")
+        self.assertTrue(DERIVE_WRITER.search(st[derive[0]]),
+                        "the derive step does not write target_repo to $GITHUB_OUTPUT")
+        self.assertLess(derive[0], model[0], "the derive step must run BEFORE the model step — an output "
+                                             "written after Claude ran would be Claude's to influence")
+
+    def test_exemplar_job_exports_target_repo_from_exactly_the_derive_step(self):
+        self.assertRegex(body_text(self.jobs["exemplar"]), OUTPUT_DECL)
+
+    def test_publish_step_binds_target_repo_from_the_exemplar_output(self):
+        publish = [s for s in self._steps("publish") if "name: Validate and publish the exemplar" in s]
+        self.assertEqual(len(publish), 1, "the publish step is not where the plan put it")
+        self.assertIn(CONSUMER_BINDING, publish[0])
+        self.assertNotIn(".exemplar-env\"\n", publish[0].replace("REFUSE:artifact-env-present", ""),
+                         "publish still sources or reads .exemplar-env")
+
+    def test_upload_path_carries_no_dotfile_and_download_lands_at_the_publish_path(self):
+        up = re.search(r"upload-artifact@v4\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
+                       r"\s*path: (\|\n((?:[ \t]+\S+\n)+)|(\S+)\n)", self.text)
+        self.assertIsNotNone(up, "no exemplar-model-output upload")
+        upload = ([l.strip() for l in up.group(2).splitlines() if l.strip()] if up.group(2) else [up.group(3)])
+        dotfiles = [p for p in upload if p.rsplit("/", 1)[-1].startswith(".")]
+        self.assertEqual(dotfiles, [], f"upload path lists hidden files, which v4 does not deliver: {dotfiles}")
+        dl = re.search(r"download-artifact@v4\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
+                       r"\s*path: (.+)$", self.text, re.M)
+        self.assertIsNotNone(dl, "no exemplar-model-output download")
+        ws = "/ws"
+        subst = lambda s: s.replace("${{ github.workspace }}", ws)
+        full = [f"{ws}/{p}" for p in upload]
+        parts = [f.split("/") for f in full]
+        i = 0
+        while all(len(x) > i and x[i] == parts[0][i] for x in parts):
+            i += 1
+        root = "/".join(parts[0][:i]) if len(full) > 1 else full[0]          # search.ts:128-158
+        member = f"{ws}/_data/exemplars/slug.md"
+        self.assertTrue(member.startswith(root + "/"), f"the exemplar is not under the archive root {root}")
+        landed = subst(dl.group(1).strip()).rstrip("/") + "/" + member[len(root) + 1:]
+        self.assertEqual(landed, f"{ws}/_data/exemplars/slug.md",
+                         "the downloaded exemplar does not land where publish reads it")
+
+
 if __name__ == "__main__":
     unittest.main()

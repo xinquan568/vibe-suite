@@ -406,6 +406,10 @@ class TestNonStageDataWriters(TempDirMixin, unittest.TestCase):
                 if name == "exemplar":
                     # vibe-59 round 6: exemplar REFUSES rather than publishing a fabricated stub
                     # when the model wrote nothing, so the happy path must supply model output.
+                    # vibe-211: the target reaches publish as a job output bound to TARGET_REPO;
+                    # supplying it here models that declared `env:` binding (as the derivations
+                    # scan treats REPO / ISSUE_NUMBER), not an answer the block should derive.
+                    extra_env = {**extra_env, "TARGET_REPO": "acme/claude-toolkit"}
                     (sb.data / "exemplars").mkdir(exist_ok=True)
                     (sb.data / "exemplars" / "acme-claude-toolkit.md").write_text(
                         "---\nslug: acme-claude-toolkit\nrepo: acme/claude-toolkit\n"
@@ -1524,3 +1528,194 @@ class TestRenderDashboardWiring(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("the real docs build", (docs / "index.html").read_text(),
                       "a docs build that is not ours was overwritten")
+
+
+# ---------------------------------------------------------------------------------------------
+# vibe-211 (grill S16): the publish job must never execute artifact content.
+# ---------------------------------------------------------------------------------------------
+
+_VALID_EXEMPLAR = ("---\nslug: acme-claude-toolkit\nrepo: acme/claude-toolkit\naudited: 2026-08-06\n"
+                   "commit_sha: cafebabe\nscore: 92\nexemplifies:\n  - R07\n---\n\n{body}\n")
+_INVALID_EXEMPLAR = _VALID_EXEMPLAR.replace("exemplifies:\n  - R07", "exemplifies: R07")   # bare string → refused
+
+
+def _exemplar_block():
+    return extract(WF_DIR / "auditor-exemplar.yml", "logic", "exemplar")
+
+
+class TestExemplarArtifactEnvInert(TempDirMixin, unittest.TestCase):
+    """A `.exemplar-env` carrying `$(…)` must be REJECTED, never executed; the live value is validated whole.
+
+    Two distinct properties, named separately: (1) the obsolete carrier is refused unread — a
+    tripwire on its presence; (2) the value publish actually uses (TARGET_REPO, bound from the
+    exemplar job's output) is validated as a whole `owner/name`, so a `$(…)`-shaped or multi-line
+    value is refused too. Supplying TARGET_REPO in env models the step's declared `env:` binding, the
+    way the derivations scan treats REPO / ISSUE_NUMBER.
+    """
+
+    def _run(self, env, with_fixture=False, write_exemplar=True):
+        sb = Sandbox()
+        self.addCleanup(sb.cleanup)
+        if write_exemplar:
+            (sb.data / "exemplars" / "acme-claude-toolkit.md").write_text(
+                _VALID_EXEMPLAR.format(body="Evidence body."), encoding="utf-8")
+        if with_fixture:
+            shutil.copy(FIX / "exemplar-env-injected", sb.code / ".exemplar-env")
+        base = {"SCORE": "92", "SECURITY": "CLEAR"}
+        base.update(env)
+        r = sb.run(_exemplar_block(), env=base)
+        return sb, r
+
+    def _marker(self, sb):
+        return (sb.code / "PAYLOAD-RAN").exists()
+
+    def test_a_present_env_file_is_refused_without_being_read(self):
+        sb, r = self._run({"TARGET_REPO": "acme/claude-toolkit"}, with_fixture=True)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("REFUSE:artifact-env-present", r.stdout)
+        self.assertFalse(self._marker(sb), "the $(…) payload in .exemplar-env EXECUTED")
+        self.assertEqual(sb.events(), [])
+        self.assertNotIn("exemplar_published", json.dumps(sb.registry()))
+
+    def test_without_the_env_file_the_bound_value_publishes(self):
+        sb, r = self._run({"TARGET_REPO": "acme/claude-toolkit"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("PASS", r.stdout)
+        self.assertEqual([e["event"] for e in sb.events()], ["exemplar_published"])
+        self.assertFalse(self._marker(sb))
+
+    def test_a_substitution_shaped_value_is_refused(self):
+        sb, r = self._run({"TARGET_REPO": '$(touch "$CODE_DIR/PAYLOAD-RAN")'})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:target-repo-invalid", r.stdout)
+        self.assertFalse(self._marker(sb))
+        self.assertEqual(sb.events(), [])
+
+    def test_a_missing_value_is_refused_not_derived_from_an_artifact(self):
+        sb, r = self._run({})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:target-repo-missing", r.stdout)
+        self.assertEqual(sb.events(), [])
+
+    def test_the_value_is_validated_as_a_whole(self):
+        for bad in ("acme/claude-toolkit\n$(id)", "acme/claude-toolkit/x", "acme/claude toolkit",
+                    "acme", "/acme", "/acme/x", "acme/"):
+            with self.subTest(value=bad):
+                sb, r = self._run({"TARGET_REPO": bad})
+                before = json.loads((FIX / "registry.json").read_text())
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertIn("REFUSE:target-repo-invalid", r.stdout)
+                self.assertEqual(sb.events(), [])
+                self.assertEqual(sb.registry(), before, "the registry changed on a refused value")
+
+
+def _lca(paths):
+    parts = [str(p).split("/") for p in paths]
+    i = 0
+    while all(len(x) > i and x[i] == parts[0][i] for x in parts):
+        i += 1
+    return "/".join(parts[0][:i])
+
+
+def declared_exemplar_transport():
+    """(upload paths, download path, workspace-relative env bindings) read from auditor-exemplar.yml."""
+    text = (WF_DIR / "auditor-exemplar.yml").read_text(encoding="utf-8")
+    env = dict(re.findall(r"^  ([A-Z_]+): \$\{\{ github\.workspace \}\}(\S*)$", text, re.M))
+    up = re.search(r"upload-artifact@v4\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
+                   r"\s*path: (\|\n((?:[ \t]+\S+\n)+)|(\S+)\n)", text)
+    upload = ([l.strip() for l in up.group(2).splitlines() if l.strip()] if up.group(2)
+              else [up.group(3)])
+    dl = re.search(r"download-artifact@v4\s*\n\s*with:\s*\n\s*name: exemplar-model-output\s*\n"
+                   r"\s*path: (.+)$", text, re.M).group(1).strip()
+    return upload, dl, env
+
+
+def artifact_root(workspace, upload_paths):
+    """actions/upload-artifact@v4's root rule (src/shared/search.ts:128-158 at ea165f8): several
+    search paths → their least common ancestor; one directory → that directory."""
+    full = [str(workspace / p) for p in upload_paths]
+    return Path(_lca(full)) if len(full) > 1 else Path(full[0])
+
+
+class TestExemplarDelivery(TempDirMixin, unittest.TestCase):
+    """The newly generated exemplar must reach the file publish validates — in bytes, not path algebra.
+
+    The declared upload paths, download destination and env bindings are all read from the workflow and
+    resolved with ONE substitution (`${{ github.workspace }}` → the sandbox root, which Sandbox.run exports
+    as GITHUB_WORKSPACE). The invariant is: download destination + the member's archive-relative path ==
+    `<DATA_DIR>/exemplars/<slug>.md`. A checkout-era OLD copy is invalid and a NEW artifact copy valid,
+    so the block's verdict is decided by which bytes it reads.
+    """
+
+    SLUG = "acme-claude-toolkit"
+
+    def _deliver(self, old_valid, new_valid):
+        upload, download, env = declared_exemplar_transport()
+        sb = Sandbox()
+        self.addCleanup(sb.cleanup)
+        ws = sb.root
+        subst = lambda s: s.replace("${{ github.workspace }}", str(ws))
+        for name in ("DATA_DIR", "REGISTRY", "EVENT_LOG"):
+            self.assertIn(name, env, f"{name} is no longer a workspace-relative workflow env binding")
+        resolved = {name: Path(subst("${{ github.workspace }}" + env[name]))
+                    for name in ("DATA_DIR", "REGISTRY", "EVENT_LOG")}
+        for name, value in resolved.items():
+            self.assertTrue(value.is_absolute(), f"{name} resolved relative: {value}")
+            self.assertNotIn("${{", str(value), f"{name}: an expression survived substitution")
+        data, registry, events = resolved["DATA_DIR"], resolved["REGISTRY"], resolved["EVENT_LOG"]
+        (data / "exemplars").mkdir(parents=True, exist_ok=True)
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        events.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(FIX / "registry.json", registry)          # seeded at the DECLARED registry path
+        old = (_VALID_EXEMPLAR if old_valid else _INVALID_EXEMPLAR).format(body="OLD checkout copy")
+        new = (_VALID_EXEMPLAR if new_valid else _INVALID_EXEMPLAR).format(body="NEW artifact bytes")
+        (data / "exemplars" / f"{self.SLUG}.md").write_text(old, encoding="utf-8")
+        # producer side: the model's output under the declared upload paths, packed relative to the
+        # v4 archive root; hidden files are excluded as the action's default does
+        producer = sb.root / "producer"
+        (producer / "_data" / "exemplars").mkdir(parents=True)
+        (producer / "_data" / "exemplars" / f"{self.SLUG}.md").write_text(new, encoding="utf-8")
+        root = artifact_root(producer, upload)
+        archive = {}
+        for p in upload:
+            full = producer / p
+            files = [full] if full.is_file() else [f for f in full.rglob("*") if f.is_file()]
+            for f in files:
+                if f.name.startswith("."):
+                    continue
+                archive[str(f.relative_to(root))] = f.read_bytes()
+        self.assertTrue(archive, "the producer uploaded nothing")
+        # consumer side: unpack under the declared download destination
+        dest = Path(subst(download))
+        self.assertTrue(dest.is_absolute(), f"download destination resolved relative: {dest}")
+        self.assertNotIn("${{", str(dest), "an expression survived substitution")
+        for rel, b in archive.items():
+            target = dest / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b)
+        read_path = data / "exemplars" / f"{self.SLUG}.md"
+        landed = {dest / rel for rel in archive}
+        self.assertIn(read_path, landed,
+                      f"the exemplar landed at {sorted(str(p) for p in landed)}, publish reads {read_path}")
+        bytes_at_read_path = read_path.read_text(encoding="utf-8")   # before the block: a refusal deletes the file
+        r = sb.run(_exemplar_block(), env={
+            "DATA_DIR": str(data), "REGISTRY": str(registry), "EVENT_LOG": str(events),
+            "TARGET_REPO": "acme/claude-toolkit", "SCORE": "92", "SECURITY": "CLEAR"})
+        published = json.loads(registry.read_text()).get("repos", {}).get("acme/claude-toolkit", {}).get("exemplar_published")
+        return r, bytes_at_read_path, (len(events.read_text().splitlines()) if events.exists() else 0), published
+
+    def test_the_new_artifact_bytes_reach_publish_and_are_published(self):
+        r, bytes_read, events, published = self._deliver(old_valid=False, new_valid=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("PASS", r.stdout)
+        self.assertIn("NEW artifact bytes", bytes_read)
+        self.assertEqual(events, 1)
+        self.assertTrue(published, "the DECLARED registry path was not updated — publish wrote elsewhere")
+
+    def test_the_verdict_follows_the_delivered_bytes_not_the_checkout_copy(self):
+        r, bytes_read, events, published = self._deliver(old_valid=True, new_valid=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REFUSE:exemplifies-not-a-list", r.stdout)
+        self.assertIn("NEW artifact bytes", bytes_read)
+        self.assertEqual(events, 0)
+        self.assertIsNone(published)

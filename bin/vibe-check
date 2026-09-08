@@ -36,10 +36,11 @@ import os
 import posixpath
 import re
 import sys
+import runpy
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent / "scripts"))
+runpy.run_path(str(_HERE.parent / "scripts" / "_bootstrap.py"))
 
 import validate_audit_output as _vao   # noqa: E402  (the one statement of the subset)
 

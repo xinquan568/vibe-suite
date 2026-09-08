@@ -19,10 +19,12 @@ never inside it — so a toggle write and a job write cannot contend for the sam
 
 import json
 import sys
+import runpy
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+runpy.run_path(str(Path(__file__).resolve().parents[1] / "_bootstrap.py"))
 import bridge  # noqa: E402
+import config  # noqa: E402
 
 STATE_DIRNAME = ".vibe-suite-state"
 STATE_FILENAME = "state.json"
@@ -145,13 +147,8 @@ def effective_config(workspace):
     The store never writes `.vibe-suite.md`; the merge happens here, in memory, so a live toggle
     leaves the project file byte-identical.
     """
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "vibe_config", Path(__file__).resolve().parent / "config.py")
-    config = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(config)
-
+    # P4 / vibe-215: `config` is the module imported once at the top of this file — the same object
+    # `config_cli` and every other program hold — never a second load of the same source.
     # vibe-183 / grill H5: the runtime store is read FIRST — it is the authority for the three
     # `gate.*` keys and must be consulted whatever the project file looks like. A damaged store still
     # raises (StoreFormatError → exit 1 in `_cli`): that contract is unchanged. Only then is the

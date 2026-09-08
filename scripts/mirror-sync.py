@@ -21,10 +21,11 @@ import hashlib
 import json
 import re
 import sys
+import runpy
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE / "lib"))
+runpy.run_path(str(_HERE / "_bootstrap.py"))
 
 import bridge  # noqa: E402  (the audited write primitive — vibe-94/vibe-103 discipline)
 

@@ -845,6 +845,9 @@ class ConflictsStampHasOneDefinition(unittest.TestCase):
         (root / "scripts").mkdir()
         shutil.copytree(REPO_ROOT / "scripts" / "migrate", root / "scripts" / "migrate")
         shutil.copytree(REPO_ROOT / "scripts" / "lib", root / "scripts" / "lib")
+        # P4 / vibe-215: the heredocs reach the library through scripts/_bootstrap.py, so the stub
+        # tree carries it too (the real one — it only sets sys.path relative to its own location).
+        shutil.copy(REPO_ROOT / "scripts" / "_bootstrap.py", root / "scripts" / "_bootstrap.py")
         log = root / "calls.log"
         real = REPO_ROOT / "scripts" / "lib" / "bridge.py"
         (root / "scripts" / "lib" / "bridge.py").write_text(

@@ -324,7 +324,7 @@ class SimulatedPluginUpdate(unittest.TestCase):
         self.plugin = self.root / "plugin-2.0.0"
         (self.plugin / "scripts" / "lib").mkdir(parents=True)
         (self.plugin / "skills").mkdir(parents=True)
-        for rel in ("scripts/update.py", "scripts/bridge_cli.py"):
+        for rel in ("scripts/update.py", "scripts/bridge_cli.py", "scripts/_bootstrap.py"):  # vibe-215: the programs bootstrap
             (self.plugin / rel).write_bytes((REPO_ROOT / rel).read_bytes())
         for item in (REPO_ROOT / "scripts" / "lib").iterdir():
             if item.is_file():

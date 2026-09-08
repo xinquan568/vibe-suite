@@ -20,9 +20,10 @@ import argparse
 import json
 import os
 import sys
+import runpy
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+runpy.run_path(str(Path(__file__).resolve().parent / "_bootstrap.py"))
 
 import advisors  # noqa: E402
 import bridge  # noqa: E402

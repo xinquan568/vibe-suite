@@ -25,11 +25,11 @@ import argparse
 import json
 import re
 import sys
+import runpy
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE / "lib"))
+runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import bridge  # noqa: E402
 import profile_lint  # noqa: E402

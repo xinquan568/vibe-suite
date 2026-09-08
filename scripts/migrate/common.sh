@@ -109,7 +109,7 @@ import json, sys
 from pathlib import Path
 
 path, step, lib = sys.argv[1], sys.argv[2], sys.argv[3]
-sys.path.insert(0, lib)
+import runpy, pathlib; runpy.run_path(str(pathlib.Path(lib).resolve().parent / "_bootstrap.py"))
 import bridge  # noqa: E402
 
 with open(path, encoding="utf-8") as handle:

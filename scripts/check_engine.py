@@ -47,11 +47,11 @@ import fnmatch
 import json
 import re
 import sys
+import runpy
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(SCRIPTS_DIR))
-sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+runpy.run_path(str(SCRIPTS_DIR / "_bootstrap.py"))
 
 import config   # noqa: E402  (scripts/lib — the one fail-closed .vibe-suite.md reader)
 

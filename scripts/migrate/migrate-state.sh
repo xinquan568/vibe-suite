@@ -35,7 +35,7 @@ lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 set +e
 python3 - "$workspace" "$lib" "$report" "${legacy_dirs[@]}" <<'PY'
 import importlib.util, json, os, sys
-sys.path.insert(0, sys.argv[2])
+import runpy, pathlib; runpy.run_path(str(pathlib.Path(sys.argv[2]).resolve().parent / "_bootstrap.py"))
 import bridge  # noqa: E402
 from pathlib import Path
 

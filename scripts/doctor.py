@@ -323,6 +323,14 @@ def check_advisors(ws, out):
                 continue
             if row["state"] == "consistent":
                 continue
+            if row["state"] == "backend-unavailable":
+                # S13 (vibe-214): no boot-verified install of the pinned backend — repair only
+                # reconciles and cannot install, so the remedy is update, and it is not auto-fixable.
+                out.append(finding("[MEDIUM]", "advisor-state",
+                                   f"advisor '{row['name']}' is held: {row.get('detail')}; run "
+                                   "/vibe-suite:update to install and boot-verify the pinned backend",
+                                   False))
+                continue
             if row["state"] == "invalid-registration":
                 out.append(finding("[HIGH]", "advisor-state",
                                    f"advisor '{row['name']}' is invalid-registration "

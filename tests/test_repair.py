@@ -27,6 +27,18 @@ INIT = REPO_ROOT / "scripts" / "init.sh"
 import sys  # noqa: E402
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import bridge  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from octopus_fixture import start_module_seams, stop_module_seams  # noqa: E402
+
+
+def setUpModule():
+    # S13 (vibe-214): `advisor_cli add` renders a registration, which needs an installed, verified
+    # backend at the shipped pin; the seam keeps this module hermetic (no npm/npx/network).
+    start_module_seams("repair")
+
+
+def tearDownModule():
+    stop_module_seams("repair")
 
 
 def snapshot(root):
@@ -487,5 +499,7 @@ class TestAdvisorReconcile(RepairCase):
         self.assertIn("half-registered->registered", outcome)
         doc = json.loads((self.ws / ".mcp.json").read_text())
         args = doc["mcpServers"]["probe_advisor"]["args"]
-        self.assertRegex(args[-1], r"^claude-octopus@\d+\.\d+\.\d+")
+        # S13 (vibe-214): the launch is the lockfile-verified install by node; the path carries the version
+        self.assertEqual(doc["mcpServers"]["probe_advisor"]["command"], "node")
+        self.assertRegex(args[-1], r"/versions/\d+\.\d+\.\d+/[^/]+/node_modules/claude-octopus/dist/index\.js$")
         self.assertIn("probe_advisor", toml.read_text())

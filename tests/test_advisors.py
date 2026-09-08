@@ -30,10 +30,33 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import advisors  # noqa: E402
 import bridge  # noqa: E402
+import mcp_pin  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tmpdirs import TempDirMixin, scratch_dir  # noqa: E402
+from octopus_fixture import (  # noqa: E402
+    add_generation, bin_path, fixture_install, generation_of, legacy_body, legacy_entry, lockfile_text,
+    module_install, shipped_pin, start_module_seams, stop_module_seams, write_fake_npm, write_fake_server,
+    seam_env)
 
 PIN = "9.9.9"
+SHIPPED = shipped_pin()
+LAUNCH_RE = re.compile(r"/versions/([^/]+)/[^/]+/node_modules/claude-octopus/dist/index\.js$")
+
+
+def setUpModule():
+    # S13 (vibe-214): every render needs an installed, verified backend at the version it renders.
+    # One fixture install for the module: PIN, the shipped pin, and the three off-PIN versions the
+    # existing tests register with (1.0.0, 2.0.0, 8.0.0). Nothing here reaches npm/npx/network.
+    start_module_seams("advisors", versions=(PIN, SHIPPED, "1.0.0", "2.0.0", "8.0.0"), lock_version=SHIPPED)
+
+
+def tearDownModule():
+    stop_module_seams("advisors")
+
+
+def launch_of(version):
+    inst = module_install("advisors")
+    return bin_path(inst, version, generation_of(inst, version))
 
 
 def make_ws(mcp=None, toml=None):
@@ -141,8 +164,9 @@ class TestRegistrationContent(unittest.TestCase):
 
     def test_json_entry_exact(self):
         entry = advisors.json_entry(self.defn, f"claude-octopus@{PIN}")
-        self.assertEqual(entry["command"], "npx")
-        self.assertEqual(entry["args"], ["-y", f"claude-octopus@{PIN}"])
+        # S13: the registration executes the lockfile-verified install by node; no npx anywhere.
+        self.assertEqual(entry["command"], "node")
+        self.assertEqual(entry["args"], [launch_of(PIN)])
         self.assertEqual(entry["_vibe-suite_owned"], {"kind": "advisor", "schema": 1})
         env = entry["env"]
         self.assertEqual(env["CLAUDE_SERVER_NAME"], "probe_advisor")
@@ -165,8 +189,9 @@ class TestRegistrationContent(unittest.TestCase):
     def test_toml_block_exact(self):
         body = advisors.toml_body(self.defn, f"claude-octopus@{PIN}")
         self.assertIn('[mcp_servers.probe_advisor]', body)
-        self.assertIn('command = "npx"', body)
-        self.assertIn(f'args = ["-y", "claude-octopus@{PIN}"]', body)
+        self.assertIn('command = "node"', body)
+        self.assertIn(f'args = ["{launch_of(PIN)}"]', body)
+        self.assertNotIn("npx", body)
         self.assertIn("startup_timeout_sec = 60", body)
         self.assertIn("tool_timeout_sec = 900", body)
         self.assertIn('[mcp_servers.probe_advisor.env]', body)
@@ -356,10 +381,10 @@ class TestReconcile(unittest.TestCase):
                                         pending_file=Path(td) / "absent.pending")
         self.assertEqual(report["veteran"], "stale-registered->registered")
         doc = json.loads((ws / ".mcp.json").read_text())
-        self.assertIn("claude-octopus@2.0.0", json.dumps(doc["mcpServers"]["veteran"]))
+        self.assertIn("/versions/2.0.0/", json.dumps(doc["mcpServers"]["veteran"]))
         toml = (ws / ".codex" / "config.toml").read_text()
-        self.assertIn("claude-octopus@2.0.0", toml)
-        self.assertNotIn("claude-octopus@1.0.0", toml)
+        self.assertIn("/versions/2.0.0/", toml)
+        self.assertNotIn("/versions/1.0.0/", toml)
 
     def test_add_and_remove_route_through_reconcile(self):
         ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
@@ -1426,6 +1451,358 @@ class TestRegistrationStamp(TempDirMixin, unittest.TestCase):
         self.assertIn("unregistered", out)
 
 
+
+# ---------------------------------------------------------------------------------------------
+# S13 (vibe-214): readers of both launch shapes, the backend-unavailable state, verification marks,
+# and the one-selection-per-name rule.
+# ---------------------------------------------------------------------------------------------
+
+def _oi():
+    import octopus_install  # noqa: E402
+    return octopus_install
+
+
+class TestLaunchReaders(unittest.TestCase):
+    def test_entry_target_reads_both_shapes(self):
+        node = {"command": "node", "args": [launch_of(PIN)], "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}
+        legacy = {"command": "npx", "args": ["-y", f"claude-octopus@{PIN}"], "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}
+        self.assertEqual(advisors._entry_target(node), f"claude-octopus@{PIN}")
+        self.assertEqual(advisors._entry_target(legacy), f"claude-octopus@{PIN}")
+        foreign = {"command": "node", "args": ["/elsewhere/dist/index.js"]}
+        self.assertIsNone(advisors._entry_target(foreign))
+        self.assertIsNone(advisors._entry_target({"command": "npx", "args": ["-y", "evil-package@1.2.3"]}))
+
+    def test_toml_block_target_reads_both_shapes(self):
+        defn = advisors.parse_definition(defn_text(), "probe_advisor.md")
+        node_text = bridge.toml_server_upsert("", "probe_advisor", advisors.toml_body(defn, f"claude-octopus@{PIN}"))
+        self.assertEqual(advisors._toml_block_target(node_text, "probe_advisor"), f"claude-octopus@{PIN}")
+        legacy_text = bridge.toml_server_upsert("", "probe_advisor", legacy_body("probe_advisor", advisors._advisor_env(defn), PIN))
+        self.assertEqual(advisors._toml_block_target(legacy_text, "probe_advisor"), f"claude-octopus@{PIN}")
+        odd = bridge.toml_server_upsert("", "probe_advisor", '[mcp_servers.probe_advisor]\ncommand = "node"\nargs = ["/elsewhere/index.js"]')
+        self.assertEqual(advisors._toml_block_target(odd, "probe_advisor"), "<unparseable>")
+        self.assertIsNone(advisors._toml_block_target("", "probe_advisor"))
+
+    def test_launch_target_parses_the_version_from_the_path(self):
+        self.assertEqual(mcp_pin.launch_target([launch_of("2.0.0")]), "claude-octopus@2.0.0")
+        self.assertEqual(mcp_pin.launch_target(["-y", "claude-octopus@2.0.0"]), "claude-octopus@2.0.0")
+        self.assertIsNone(mcp_pin.launch_target(["/x/versions/2.0.0/node_modules/claude-octopus/dist/index.js"]))  # no generation segment
+        self.assertIsNone(mcp_pin.launch_target(["-y", "evil@1.0.0"]))
+
+    def _legacy_ws(self, pin):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        defn = advisors.parse_definition(defn_text(), "probe_advisor.md")
+        doc = json.loads((ws / ".mcp.json").read_text())
+        doc["mcpServers"]["probe_advisor"] = legacy_entry(advisors._advisor_env(defn), pin)
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        toml_path = ws / ".codex" / "config.toml"
+        toml_path.write_text(bridge.toml_server_upsert(toml_path.read_text(), "probe_advisor",
+                                                       legacy_body("probe_advisor", advisors._advisor_env(defn), pin)))
+        return ws
+
+    def test_pending_pin_with_a_legacy_registration_at_an_installed_version_is_stale(self):
+        ws = self._legacy_ws(PIN)   # PIN is installed and verified in the module fixture
+        with tempfile.TemporaryDirectory() as td:
+            pending = Path(td) / "p.pending"
+            pending.write_text("pending\n")
+            rows = {r["name"]: r for r in advisors.list_advisors(ws, pin_file=Path(td) / "p.txt", pending_file=pending)}
+        # the fallback readers recover the agreed legacy target; the node render differs → stale
+        self.assertEqual(rows["probe_advisor"]["state"], "stale-registered")
+
+    def test_pending_pin_with_a_legacy_registration_at_an_uninstalled_version_is_backend_unavailable(self):
+        ws = self._legacy_ws("3.3.3")
+        with tempfile.TemporaryDirectory() as td:
+            pending = Path(td) / "p.pending"
+            pending.write_text("pending\n")
+            rows = {r["name"]: r for r in advisors.list_advisors(ws, pin_file=Path(td) / "p.txt", pending_file=pending)}
+        self.assertEqual(rows["probe_advisor"]["state"], "backend-unavailable")
+        self.assertIn("/vibe-suite:update", rows["probe_advisor"]["detail"])
+
+
+class TestBackendUnavailable(TempDirMixin, unittest.TestCase):
+    """No verified generation → held, never written; removals and reports unaffected."""
+
+    def _registered(self, names=("probe_advisor",)):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        for n in names:
+            add_definition(ws, name=n)
+            advisors.add(ws, n, pin=PIN)
+        return ws
+
+    def _empty_install(self):
+        inst = fixture_install(Path(self.mkdtemp(prefix="empty-inst-")) / "inst", versions=(), lock_version=SHIPPED)
+        return {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(inst)}
+
+    def test_missing_install_holds_and_leaves_both_stores_byte_identical(self):
+        ws = self._registered()
+        before = ((ws / ".mcp.json").read_bytes(), (ws / ".codex" / "config.toml").read_bytes())
+        with mock.patch.dict(os.environ, self._empty_install()):
+            report = advisors.reconcile(ws, pin=PIN)
+        self.assertTrue(report["probe_advisor"].startswith("backend-unavailable"), report)
+        self.assertEqual(((ws / ".mcp.json").read_bytes(), (ws / ".codex" / "config.toml").read_bytes()), before)
+
+    def test_mismatched_installed_version_is_backend_unavailable(self):
+        ws = self._registered()
+        inst = fixture_install(Path(self.mkdtemp(prefix="mm-inst-")) / "inst", versions=(), lock_version=SHIPPED)
+        add_generation(inst, PIN, metadata_version="9.9.8", verified=True)
+        with mock.patch.dict(os.environ, {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(inst)}):
+            rows = {r["name"]: r for r in advisors.list_advisors(ws, pin=PIN)}
+        self.assertEqual(rows["probe_advisor"]["state"], "backend-unavailable")
+
+    def test_an_orphan_is_still_removed_beside_a_held_advisor(self):
+        ws = self._registered()
+        doc = json.loads((ws / ".mcp.json").read_text())
+        held_entry = dict(doc["mcpServers"]["probe_advisor"])
+        doc["mcpServers"]["orphan_advisor"] = {"command": "npx", "args": ["-y", "claude-octopus@1.0.0"], "env": {},
+                                               "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        toml_path = ws / ".codex" / "config.toml"
+        held_block = bridge._block_re("server:probe_advisor", "#", "").search(toml_path.read_text()).group(0)
+        with mock.patch.dict(os.environ, self._empty_install()):
+            report = advisors.reconcile(ws, pin=PIN)
+        self.assertEqual(report["orphan_advisor"], "registered-undeclared->removed")
+        self.assertTrue(report["probe_advisor"].startswith("backend-unavailable"))
+        after = json.loads((ws / ".mcp.json").read_text())["mcpServers"]
+        self.assertNotIn("orphan_advisor", after)
+        self.assertEqual(after["probe_advisor"], held_entry)
+        self.assertEqual(bridge._block_re("server:probe_advisor", "#", "").search(toml_path.read_text()).group(0), held_block)
+
+    def test_list_rows_carry_the_state_and_remedy(self):
+        ws = self._registered()
+        with mock.patch.dict(os.environ, self._empty_install()):
+            rows = {r["name"]: r for r in advisors.list_advisors(ws, pin=PIN)}
+        self.assertEqual(rows["probe_advisor"]["state"], "backend-unavailable")
+        self.assertIn("/vibe-suite:update", rows["probe_advisor"]["detail"])
+
+    def test_an_explicit_pin_for_an_uninstalled_version_is_refused(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws)
+        with self.assertRaises(advisors.AdvisorError) as ctx:
+            advisors.add(ws, "probe_advisor", pin="3.0.0")
+        self.assertIn("update", str(ctx.exception))
+        self.assertNotIn("probe_advisor", json.loads((ws / ".mcp.json").read_text()).get("mcpServers", {}))
+
+    def test_remove_completes_beside_an_unavailable_sibling(self):
+        ws = self._registered(("probe_advisor", "sibling_one"))
+        doc = json.loads((ws / ".mcp.json").read_text())
+        sib_entry = dict(doc["mcpServers"]["sibling_one"])
+        with mock.patch.dict(os.environ, self._empty_install()):
+            report = advisors.remove(ws, "probe_advisor", pin=PIN)
+        self.assertEqual(report["probe_advisor"], "removed")
+        self.assertTrue(report["sibling_one"].startswith("backend-unavailable") or "consistent" in report["sibling_one"], report)
+        after = json.loads((ws / ".mcp.json").read_text())["mcpServers"]
+        self.assertNotIn("probe_advisor", after)
+        self.assertEqual(after["sibling_one"], sib_entry)
+
+
+class TestUnverifiedGeneration(TempDirMixin, unittest.TestCase):
+    """Finding 17: a valid-but-unprobed generation is never adopted by a standalone path."""
+
+    def setUp(self):
+        self.inst = fixture_install(Path(self.mkdtemp(prefix="unv-inst-")) / "inst", versions=(), lock_version=SHIPPED)
+        self.h1 = add_generation(self.inst, SHIPPED, payload="H1", verified=True)
+        self.patch = mock.patch.dict(os.environ, {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(self.inst)})
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(self.ws, name="steady")
+        advisors.add(self.ws, "steady")                       # shipped pin → H1
+        self.assertIn(f"/{self.h1}/", self._entry()["args"][-1])
+        # the lockfile changes: H1 is no longer described by it; H2 is built but never probed
+        (self.inst / "package-lock.json").write_text(lockfile_text(SHIPPED, integrity="sha512-" + "E" * 86 + "=="), encoding="utf-8")
+        self.h2 = add_generation(self.inst, SHIPPED, payload="H2", verified=False)
+        self.before = ((self.ws / ".mcp.json").read_bytes(), (self.ws / ".codex" / "config.toml").read_bytes())
+
+    def _entry(self):
+        return json.loads((self.ws / ".mcp.json").read_text())["mcpServers"]["steady"]
+
+    def test_standalone_reconcile_holds_on_h1(self):
+        report = advisors.reconcile(self.ws)
+        self.assertTrue(report["steady"].startswith("backend-unavailable"), report)
+        self.assertEqual(((self.ws / ".mcp.json").read_bytes(), (self.ws / ".codex" / "config.toml").read_bytes()), self.before)
+
+    def test_repair_holds_on_h1(self):
+        r = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "repair.py"), "--workspace", str(self.ws), "--json"],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, env=dict(os.environ))
+        self.assertIn(r.returncode, (0, 1), r.stderr)
+        self.assertIn(f"/{self.h1}/", self._entry()["args"][-1])
+        self.assertEqual(((self.ws / ".mcp.json").read_bytes(), (self.ws / ".codex" / "config.toml").read_bytes()), self.before)
+
+    def test_list_and_doctor_name_the_update_remedy(self):
+        rows = {r["name"]: r for r in advisors.list_advisors(self.ws)}
+        self.assertEqual(rows["steady"]["state"], "backend-unavailable")
+        self.assertIn("/vibe-suite:update", rows["steady"]["detail"])
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import doctor as doctor_mod
+        out = []
+        doctor_mod.check_advisors(self.ws, out)
+        rows = [f for f in out if f["check"] == "advisor-state"]
+        self.assertEqual(len(rows), 1, out)
+        self.assertFalse(rows[0]["auto_fixable"])
+        self.assertIn("/vibe-suite:update", rows[0]["finding"])
+
+    def test_an_orphan_is_still_removed(self):
+        doc = json.loads((self.ws / ".mcp.json").read_text())
+        doc["mcpServers"]["orphan_advisor"] = {"command": "npx", "args": ["-y", "claude-octopus@1.0.0"], "env": {},
+                                               "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}
+        (self.ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        report = advisors.reconcile(self.ws)
+        self.assertEqual(report["orphan_advisor"], "registered-undeclared->removed")
+        self.assertIn(f"/{self.h1}/", self._entry()["args"][-1])
+
+    def test_converges_once_h2_is_verified(self):
+        from octopus_fixture import mark_verified
+        mark_verified(self.inst, SHIPPED, self.h2)            # the fixture stands in for update's probe here
+        report = advisors.reconcile(self.ws)
+        self.assertEqual(report["steady"], "stale-registered->registered")
+        self.assertIn(f"/{self.h2}/", self._entry()["args"][-1])
+
+
+class TestSelectionSpy(TempDirMixin, unittest.TestCase):
+    """Finding 16: one verified selection per name, per render site; both stores agree."""
+
+    def setUp(self):
+        self.oi = _oi()
+        self.inst = fixture_install(Path(self.mkdtemp(prefix="spy-inst-")) / "inst", versions=(), lock_version=SHIPPED)
+        self.g1 = add_generation(self.inst, SHIPPED, name="g1-aaaa", payload="one", verified=True)
+        self.g2 = add_generation(self.inst, SHIPPED, name="g2-bbbb", payload="two", verified=True)
+        self.patch = mock.patch.dict(os.environ, {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(self.inst)})
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    def _ws(self, *names):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        for n in names:
+            add_definition(ws, name=n)
+            advisors.add(ws, n)
+        return ws
+
+    def _absent_from_both_stores(self, ws, name):
+        doc = json.loads((ws / ".mcp.json").read_text())
+        del doc["mcpServers"][name]
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        toml_path = ws / ".codex" / "config.toml"
+        toml_path.write_text(bridge.toml_server_remove(toml_path.read_text(), name))
+
+    def _paths(self, ws, name):
+        entry = json.loads((ws / ".mcp.json").read_text())["mcpServers"][name]["args"][-1]
+        block = bridge._block_re(f"server:{name}", "#", "").search((ws / ".codex" / "config.toml").read_text()).group(0)
+        return entry, re.search(r'args = \["([^"]+)"\]', block).group(1)
+
+    def _spy(self):
+        import inspect
+        calls = []
+        real = self.oi.current_verified_generation
+        state = {"i": 0}
+
+        def wrapped(*a, **k):
+            site = next((f.function for f in inspect.stack()[1:] if f.function in ("_classify", "reconcile", "remove")), "?")
+            calls.append(site)
+            state["i"] += 1
+            return (self.g1, self.g2)[state["i"] % 2]
+        return calls, mock.patch.object(self.oi, "current_verified_generation", side_effect=wrapped)
+
+    def test_no_selector_call_when_a_generation_is_passed(self):
+        ws = self._ws("moves")
+        calls, patcher = self._spy()
+        with patcher:
+            advisors.reconcile(ws, generation=self.g2)
+        self.assertEqual(calls, [])
+        a, b = self._paths(ws, "moves")
+        self.assertEqual(a, b)
+        self.assertIn(f"/{self.g2}/", a)
+
+    def test_classify_pair_selects_once_per_name(self):
+        ws = self._ws("moves")
+        calls, patcher = self._spy()
+        with patcher:
+            advisors.reconcile(ws)
+        self.assertEqual(calls.count("_classify"), 1, calls)
+        a, b = self._paths(ws, "moves")
+        self.assertEqual(a, b, "the two renderers disagree — a per-renderer selection")
+
+    def test_reconcile_presence_only_pair_selects_once_per_name(self):
+        ws = self._ws("presence")
+        self._absent_from_both_stores(ws, "presence")
+        calls, patcher = self._spy()
+        with patcher:
+            report = advisors.reconcile(ws)
+        self.assertEqual(report["presence"], "declared-unregistered->registered")
+        self.assertEqual(calls.count("reconcile"), 1, calls)
+        a, b = self._paths(ws, "presence")
+        self.assertEqual(a, b)
+
+    def test_remove_sibling_pair_selects_once_per_name_in_the_first_transaction(self):
+        ws = self._ws("victim", "sibling")
+        self._absent_from_both_stores(ws, "sibling")
+        first_txn = {}
+        real_transact = advisors._transact
+
+        def capture(ws_, doc, toml_before, toml_text, *a, **k):
+            entry = doc["mcpServers"]["sibling"]["args"][-1]
+            block = bridge._block_re("server:sibling", "#", "").search(toml_text).group(0)
+            first_txn["paths"] = (entry, re.search(r'args = \["([^"]+)"\]', block).group(1))
+            return real_transact(ws_, doc, toml_before, toml_text, *a, **k)
+        calls, patcher = self._spy()
+        with patcher, mock.patch.object(advisors, "_transact", side_effect=capture):
+            report = advisors.remove(ws, "victim")
+        self.assertEqual(report["victim"], "removed")
+        self.assertEqual(first_txn["paths"][0], first_txn["paths"][1], "the sibling's two renders disagree in the first transaction")
+        self.assertEqual(calls.count("remove"), 1, calls)            # the sibling pair inside remove
+        # the trailing reconcile is _classify's behaviour — counted separately, still one per name
+        self.assertLessEqual(calls.count("_classify"), 1, calls)
+
+
+class TestRendererRefusalAfterSelection(TempDirMixin, unittest.TestCase):
+    """Step-8 R2: a selection invalidated before rendering is held (or refused for an explicit add),
+    never a crash — on both direct renderer pairs."""
+
+    def setUp(self):
+        self.inst = fixture_install(Path(self.mkdtemp(prefix="refuse-inst-")) / "inst", versions=(SHIPPED,), lock_version=SHIPPED)
+        self.patch = mock.patch.dict(os.environ, {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(self.inst)})
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    def _ws(self, *names):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        for n in names:
+            add_definition(ws, name=n)
+            advisors.add(ws, n)
+        return ws
+
+    def _absent(self, ws, name):
+        doc = json.loads((ws / ".mcp.json").read_text())
+        del doc["mcpServers"][name]
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        toml_path = ws / ".codex" / "config.toml"
+        toml_path.write_text(bridge.toml_server_remove(toml_path.read_text(), name))
+
+    def test_reconcile_presence_only_pair_holds_when_the_selection_is_invalid(self):
+        ws = self._ws("presence")
+        self._absent(ws, "presence")
+        with mock.patch.object(advisors, "_select_generation", return_value="stale-gen-gone"):
+            report = advisors.reconcile(ws)
+        self.assertTrue(report["presence"].startswith("backend-unavailable"), report)
+        self.assertNotIn("presence", json.loads((ws / ".mcp.json").read_text())["mcpServers"])
+
+    def test_explicit_add_refuses_with_the_update_remedy_when_the_selection_is_invalid(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws, name="fresh")
+        with mock.patch.object(advisors, "_select_generation", return_value="stale-gen-gone"):
+            with self.assertRaises(advisors.AdvisorError) as ctx:
+                advisors.add(ws, "fresh")
+        self.assertIn("update", str(ctx.exception))
+        self.assertNotIn("fresh", json.loads((ws / ".mcp.json").read_text()).get("mcpServers", {}))
+
+    def test_remove_completes_and_holds_the_sibling_when_the_selection_is_invalid(self):
+        ws = self._ws("victim", "sibling")
+        self._absent(ws, "sibling")
+        with mock.patch.object(advisors, "_select_generation", return_value="stale-gen-gone"):
+            report = advisors.remove(ws, "victim")
+        self.assertEqual(report["victim"], "removed")
+        self.assertTrue(report["sibling"].startswith("backend-unavailable"), report)
+        self.assertNotIn("victim", json.loads((ws / ".mcp.json").read_text())["mcpServers"])
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1614,8 +1991,7 @@ class TestTargetAndClassification(unittest.TestCase):
         ws = self._ws()
         advisors.add(ws, "probe_advisor", pin="8.0.0")
         doc = json.loads((ws / ".mcp.json").read_text())
-        self.assertEqual(doc["mcpServers"]["probe_advisor"]["args"],
-                         ["-y", "claude-octopus@8.0.0"])
+        self.assertEqual(doc["mcpServers"]["probe_advisor"]["args"], [launch_of("8.0.0")])
 
     def test_floating_registered_target_refused(self):
         ws = self._ws()
@@ -1656,8 +2032,9 @@ class TestTargetAndClassification(unittest.TestCase):
     def test_disagreeing_targets_invalid(self):
         ws = self._ws()
         toml_path = ws / ".codex" / "config.toml"
-        toml_path.write_text(toml_path.read_text().replace(
-            f'claude-octopus@{PIN}', 'claude-octopus@7.7.7'))
+        text = toml_path.read_text()
+        self.assertIn(f"/versions/{PIN}/", text)            # precondition: the mutation is not a no-op
+        toml_path.write_text(text.replace(f"/versions/{PIN}/", "/versions/7.7.7/"))
         with tempfile.TemporaryDirectory() as td:
             pending = Path(td) / "p.pending"
             pending.write_text("pending\n")
@@ -1837,8 +2214,9 @@ class TestRemoveSafety(unittest.TestCase):
         toml_path = ws / ".codex" / "config.toml"
         block = bridge._block_re("server:other_advisor", "#", "").search(
             toml_path.read_text()).group(0)
+        self.assertIn('args = ["', block)                    # precondition: the mutation is not a no-op
         toml_path.write_text(toml_path.read_text().replace(
-            block, block.replace(f'claude-octopus@{PIN}', 'evil-package@1.2.3')))
+            block, re.sub(r'args = \[[^\]]*\]', 'args = ["-y", "evil-package@1.2.3"]', block)))
         with tempfile.TemporaryDirectory() as td:
             pending = Path(td) / "p.pending"
             pending.write_text("pending\n")
@@ -1868,8 +2246,9 @@ class TestRootAndTargetSafety(TempDirMixin, unittest.TestCase):
         del doc["mcpServers"]["probe_advisor"]
         (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
         toml_path = ws / ".codex" / "config.toml"
-        toml_path.write_text(toml_path.read_text().replace(
-            f'claude-octopus@{PIN}', 'evil-package@1.2.3'))
+        text = toml_path.read_text()
+        self.assertIn('args = ["', text)                     # precondition: the mutation is not a no-op
+        toml_path.write_text(re.sub(r'args = \[[^\]]*\]', 'args = ["-y", "evil-package@1.2.3"]', text))
         with tempfile.TemporaryDirectory() as td:
             pending = Path(td) / "p.pending"
             pending.write_text("pending\n")

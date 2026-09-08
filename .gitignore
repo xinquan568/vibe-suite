@@ -5,6 +5,9 @@ __pycache__/
 
 # Node
 node_modules/
+# S13 (vibe-214): the lockfile-verified claude-octopus install lives beside its lockfile; only the
+# shipped package.json + package-lock.json are tracked, never an installed generation.
+scripts/lib/claude-octopus/versions/
 
 # OS
 .DS_Store

@@ -1,0 +1,9 @@
+{
+  "name": "vibe-suite-claude-octopus-install",
+  "private": true,
+  "description": "vibe-suite's lockfile-pinned install of the claude-octopus reverse-MCP server (E7.1 / vibe-214). Regenerate with `npm install --package-lock-only --ignore-scripts` after bumping claude-octopus-pin.txt.",
+  "license": "ISC",
+  "dependencies": {
+    "claude-octopus": "1.2.0"
+  }
+}

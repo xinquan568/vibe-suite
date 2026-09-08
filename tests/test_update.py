@@ -15,6 +15,7 @@ proven load-bearing by pointing it at a path that does not exist and requiring f
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,25 @@ import mcp_pin         # noqa: E402
 import retired_names   # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tmpdirs import TempDirMixin  # noqa: E402
+import shutil  # noqa: E402
+from unittest import mock  # noqa: E402
+from octopus_fixture import (  # noqa: E402
+    add_generation, bin_path, fixture_install, generation_of, legacy_body, legacy_entry,
+    legacy_server_body, lockfile_sha256, lockfile_text, manifest_text, mark_verified, module_install,
+    seam_env, shipped_pin, start_module_seams, stop_module_seams, write_fake_npm, write_fake_server)
+
+SHIPPED = shipped_pin()
+LAUNCH_RE = re.compile(r"/versions/([^/]+)/[^/]+/node_modules/claude-octopus/dist/index\.js$")
+
+
+def setUpModule():
+    # S13 (vibe-214): every renderer needs an installed, verified backend; nothing here may reach
+    # `npm`, `npx` or the network. One fixture install for the module, in the process environment.
+    start_module_seams("update", versions=("1.0.0", "2.0.0", "1.2.3", SHIPPED), lock_version=SHIPPED)
+
+
+def tearDownModule():
+    stop_module_seams("update")
 
 UNRELATED_TOML = textwrap.dedent("""\
     # a comment the user wrote
@@ -42,58 +62,6 @@ UNRELATED_TOML = textwrap.dedent("""\
     [tui]
     theme = "dark"
     """)
-
-
-def write_fake_server(path, behaviour="respond"):
-    """A stand-in for `npx`. It speaks newline-delimited JSON-RPC, so the probe has something real
-    to hand-shake with. `hang` additionally spawns a descendant, so reaping the *group* is what the
-    timeout test actually measures — killing the direct child alone would leave it running."""
-    path.write_text(textwrap.dedent(f"""\
-        #!/usr/bin/env python3
-        import json, os, subprocess, sys, time
-        behaviour = {behaviour!r}
-        # Recorded to a sidecar rather than stderr: the probe deliberately does not echo third-party
-        # output on success, so stderr is not observable there.
-        record = os.environ.get("FAKE_ARGV_LOG")
-        if record:
-            with open(record, "a") as fh:
-                fh.write(json.dumps(sys.argv[1:]) + "\\n")
-        if "--version" in sys.argv:
-            print("1.0.0"); sys.exit(0)
-        if behaviour == "exit":
-            sys.exit(3)
-        if behaviour == "hang":
-            subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
-            time.sleep(300); sys.exit(0)
-        line = sys.stdin.readline()
-        req = json.loads(line)
-        # The requested target rides in argv as ["-y", "<package>@<version>"]. Reporting it back
-        # is the honest-server default (E7.1's mismatch contract compares self-report to the
-        # request); the mismatch behaviours below are the liars the probe must now catch.
-        target = sys.argv[-1]
-        pkg, _, ver = target.rpartition("@")
-        info = {{"name": pkg, "version": ver}}
-        if behaviour == "wrong-name":
-            info["name"] = "impostor-octopus"
-        if behaviour == "wrong-version":
-            info["version"] = "9.9.9"
-        if behaviour == "no-version":
-            del info["version"]
-        if behaviour == "bad-version":
-            info["version"] = {{"major": 9}}
-        if behaviour == "no-name":
-            del info["name"]
-        if behaviour == "bad-name":
-            info["name"] = 7
-        if behaviour == "error":
-            out = {{"jsonrpc": "2.0", "id": req["id"], "error": {{"code": -1, "message": "nope"}}}}
-        else:
-            out = {{"jsonrpc": "2.0", "id": req["id"], "result": {{"serverInfo": info}}}}
-        print(json.dumps(out), flush=True)
-        time.sleep(30)
-        """), encoding="utf-8")
-    path.chmod(0o755)
-    return path
 
 
 class PinStates(unittest.TestCase):
@@ -152,8 +120,10 @@ class Registration(unittest.TestCase):
 
         action, moved = mcp_pin.plan(text, "2.0.0")
         self.assertEqual(action, "refreshed")
-        self.assertIn("claude-octopus@2.0.0", moved)
-        self.assertNotIn("claude-octopus@1.0.0", moved)
+        # S13: the path is the version-bearing token; a pin bump changes the body.
+        self.assertIn("/versions/2.0.0/", moved)
+        self.assertNotIn("/versions/1.0.0/", moved)
+        self.assertNotIn('"npx"', moved)
         self.assertEqual(moved.count(f"[mcp_servers.{mcp_pin.SERVER_NAME}]"), 1)
 
     def test_unrelated_toml_is_preserved(self):
@@ -162,11 +132,44 @@ class Registration(unittest.TestCase):
             self.assertIn(line, text)
 
     def test_body_fields_are_a_contract(self):
+        # S13: the registration executes the lockfile-verified install by `node <bin>`; the path
+        # carries the version and the generation.
         body = mcp_pin.render_body("1.0.0")
-        self.assertIn('command = "npx"', body)
-        self.assertIn('args = ["-y", "claude-octopus@1.0.0"]', body)
+        inst = module_install("update")
+        expected = bin_path(inst, "1.0.0", generation_of(inst, "1.0.0"))
+        self.assertIn('command = "node"', body)
+        self.assertIn(f'args = ["{expected}"]', body)
+        self.assertNotIn("npx", body)
         self.assertIn("startup_timeout_sec = 60", body)
         self.assertIn("tool_timeout_sec = 900", body)
+
+    def test_launch_refuses_an_uninstalled_or_mismatched_version(self):
+        with tempfile.TemporaryDirectory() as td:
+            inst = fixture_install(Path(td) / "inst", versions=("1.0.0",), lock_version="1.0.0")
+            env = dict(os.environ, VIBE_SUITE_OCTOPUS_INSTALL_DIR=str(inst))
+            # a version with no generation at all
+            with self.assertRaises(mcp_pin.PinError):
+                mcp_pin.launch("claude-octopus@3.0.0", env=env)
+            gen = generation_of(inst, "1.0.0")
+            command, args = mcp_pin.launch("claude-octopus@1.0.0", env=env)
+            self.assertEqual((command, args), ("node", [bin_path(inst, "1.0.0", gen)]))
+            # an explicit generation that is not a valid generation of that version
+            with self.assertRaises(mcp_pin.PinError):
+                mcp_pin.launch("claude-octopus@1.0.0", env=env, generation="nope")
+            # a valid but UNVERIFIED generation with no verified sibling → no current generation
+            inst2 = fixture_install(Path(td) / "inst2", versions=(), lock_version="1.0.0")
+            add_generation(inst2, "1.0.0", verified=False)
+            with self.assertRaises(mcp_pin.PinError):
+                mcp_pin.launch("claude-octopus@1.0.0", env=dict(env, VIBE_SUITE_OCTOPUS_INSTALL_DIR=str(inst2)))
+            # metadata version ≠ directory version
+            inst3 = fixture_install(Path(td) / "inst3", versions=(), lock_version="1.0.0")
+            add_generation(inst3, "1.0.0", metadata_version="1.0.1", verified=True)
+            with self.assertRaises(mcp_pin.PinError):
+                mcp_pin.launch("claude-octopus@1.0.0", env=dict(env, VIBE_SUITE_OCTOPUS_INSTALL_DIR=str(inst3)))
+            # the bin deleted
+            Path(bin_path(inst, "1.0.0", gen)).unlink()
+            with self.assertRaises(mcp_pin.PinError):
+                mcp_pin.launch("claude-octopus@1.0.0", env=env)
 
     def test_unsentinelled_reserved_name_is_a_collision(self):
         hostile = f"[mcp_servers.{mcp_pin.SERVER_NAME}]\ncommand = \"theirs\"\n"
@@ -193,8 +196,11 @@ class Probe(unittest.TestCase):
         env = dict(os.environ, VIBE_SUITE_MCP_BIN=str(fake),
                    FAKE_ARGV_LOG=str(self.argv_log),
                    VIBE_SUITE_PROBE_TIMEOUT_MS=str(timeout_ms))
+        inst = module_install("update")
+        launch_bin = bin_path(inst, "1.2.3", generation_of(inst, "1.2.3"))
+        # S13: `<target> <command> [args…]` — the probe spawns exactly what the registration will.
         return subprocess.run([  # noqa: S603
-            "node", str(PROBE), "claude-octopus@1.2.3"],
+            "node", str(PROBE), "claude-octopus@1.2.3", str(fake), launch_bin],
             capture_output=True, text=True, timeout=90, env=env)
 
     def test_handshake_succeeds_against_a_responding_server(self):
@@ -240,10 +246,12 @@ class Probe(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("mismatch", proc.stderr)
 
-    def test_spawn_argv_is_the_pinned_target(self):
+    def test_probe_spawns_the_launch_not_npx(self):
         self.run_probe("respond")
-        self.assertEqual(json.loads(self.argv_log.read_text().splitlines()[0]),
-                         ["-y", "claude-octopus@1.2.3"])
+        inst = module_install("update")
+        argv = json.loads(self.argv_log.read_text().splitlines()[0])
+        self.assertEqual(argv, [bin_path(inst, "1.2.3", generation_of(inst, "1.2.3"))])
+        self.assertNotIn("-y", argv)
 
     def test_mcp_error_is_a_failure(self):
         self.assertEqual(self.run_probe("error").returncode, 1)
@@ -351,22 +359,64 @@ class SimulatedPluginUpdate(unittest.TestCase):
             "                         'auditing_partials': ()})\n"
             "print('fixture driver: generated via the API seam')\n", encoding="utf-8")
 
+    @property
+    def install_dir(self):
+        return self.plugin / "scripts" / "lib" / "claude-octopus"
+
     def seed_stale_registration(self, pin="1.0.0"):
+        # The pre-S13 shape, seeded literally: `render_body` now renders the node launch.
         stale = bridge.toml_server_upsert(UNRELATED_TOML, mcp_pin.SERVER_NAME,
-                                          mcp_pin.render_body(pin))
+                                          legacy_server_body(pin))
         (self.ws / ".codex" / "config.toml").write_text(stale)
 
     def ship_pin(self, version="2.0.0"):
         (self.plugin / "scripts" / "lib" / "claude-octopus-pin.txt").write_text(version + "\n")
+        # The shipped file pair for that pin; nothing installed — the (fake) npm installs.
+        fixture_install(self.install_dir, versions=(), lock_version=version)
 
-    def run_update(self, extra_env=None):
-        fake = write_fake_server(self.root / "fake-npx", "respond")
-        env = dict(os.environ, VIBE_SUITE_MCP_BIN=str(fake),
-                   VIBE_SUITE_PROBE_TIMEOUT_MS="5000", **(extra_env or {}))
+    def run_update(self, extra_env=None, npm="ok", server="respond", timeout_ms="5000"):
+        fake = write_fake_server(self.root / f"fake-server-{server}", server)
+        fake_npm = write_fake_npm(self.root / f"fake-npm-{npm}", npm)
+        self.argv_log = self.root / "server-argv.log"
+        self.npm_log = self.root / "npm.log"
+        env = dict(os.environ, VIBE_SUITE_MCP_BIN=str(fake), VIBE_SUITE_NPM_BIN=str(fake_npm),
+                   VIBE_SUITE_OCTOPUS_INSTALL_DIR=str(self.install_dir),
+                   FAKE_ARGV_LOG=str(self.argv_log), FAKE_NPM_LOG=str(self.npm_log),
+                   FAKE_NPM_PAYLOAD="run-" + npm,
+                   VIBE_SUITE_PROBE_TIMEOUT_MS=timeout_ms, **(extra_env or {}))
         return subprocess.run(
             [sys.executable, str(self.plugin / "scripts" / "update.py"),
              "--workspace", str(self.ws), "--plugin-root", str(self.plugin), "--json"],
             capture_output=True, text=True, timeout=180, env=env)
+
+    def stages(self, proc):
+        return {s["stage"]: s for s in json.loads(proc.stdout)["stages"]}
+
+    def stores(self):
+        toml = (self.ws / ".codex" / "config.toml")
+        mcp = self.ws / ".mcp.json"
+        return (toml.read_bytes() if toml.exists() else None, mcp.read_bytes() if mcp.exists() else None)
+
+    def pin_dependent_stores(self):
+        """Both stores minus the bridge stage's own `mcp-mirror` block. Bridges and mirrors run in
+        every pin state by design (they are pin-independent); the acceptance's "unchanged" is about
+        the pin-dependent content — the reverse-server block and every advisor registration."""
+        toml, mcp = self.stores()
+        if toml is not None:
+            toml = bridge.text_block_remove(toml.decode("utf-8"), "mcp-mirror").encode("utf-8")
+        return toml, mcp
+
+    def register_advisor(self, name, pin, install_dir=None):
+        """A stamped, registered advisor in `self.ws`, rendered against `install_dir` (which must hold
+        a valid, verified generation of `pin`)."""
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / f"{name}.md").write_text(
+            "---\ndescription: |\n  Judges things.\nmodel: sonnet\n---\n\nValue truth.\n", encoding="utf-8")
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import advisors as advisors_mod
+        with mock.patch.dict(os.environ, {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(install_dir or self.install_dir)}):
+            advisors_mod.add(self.ws, name, pin=pin)
 
     def test_stale_pin_transitions_to_the_new_one(self):
         self.seed_stale_registration("1.0.0")
@@ -374,26 +424,40 @@ class SimulatedPluginUpdate(unittest.TestCase):
         proc = self.run_update()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         toml = (self.ws / ".codex" / "config.toml").read_text()
-        self.assertIn("claude-octopus@2.0.0", toml)
-        self.assertNotIn("claude-octopus@1.0.0", toml)
+        # S13: the new block launches the installed generation by node; the legacy line is gone.
+        self.assertIn("/versions/2.0.0/", toml)
+        self.assertNotIn('args = ["-y", "claude-octopus@1.0.0"]', toml)
+        self.assertNotIn("npx", toml.split("[mcp_servers.vibe-claude-mcp]")[1].split("[")[0])
         self.assertEqual(toml.count(f"[mcp_servers.{mcp_pin.SERVER_NAME}]"), 1)
         # The user's own content survives the refresh untouched.
         self.assertIn("[mcp_servers.something-of-theirs]", toml)
         self.assertIn('theme = "dark"', toml)
         stages = {s["stage"]: s for s in json.loads(proc.stdout)["stages"]}
-        self.assertEqual(stages["registration"]["status"], "ok")
+        self.assertEqual(stages["install"]["status"], "ok")
         self.assertEqual(stages["probe"]["status"], "ok")
+        self.assertEqual(stages["registration"]["status"], "ok")
+        self.assertNotIn("prewarm", stages)
+        # the stage order is the contract: install and probe precede advisors and registration
+        order = [s["stage"] for s in json.loads(proc.stdout)["stages"]]
+        self.assertLess(order.index("install"), order.index("probe"))
+        self.assertLess(order.index("probe"), order.index("advisors"))
+        self.assertLess(order.index("advisors"), order.index("registration"))
 
     def test_second_run_is_a_clean_no_op(self):
         self.seed_stale_registration("1.0.0")
         self.ship_pin("2.0.0")
         self.run_update()
         first = (self.ws / ".codex" / "config.toml").read_text()
+        npm_calls = len(self.npm_log.read_text().splitlines())
+        self.assertEqual(npm_calls, 1)
         proc = self.run_update()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual((self.ws / ".codex" / "config.toml").read_text(), first)
         stages = {s["stage"]: s for s in json.loads(proc.stdout)["stages"]}
         self.assertIn("current", stages["registration"]["detail"])
+        # the valid, verified generation is reused: npm is not invoked again
+        self.assertEqual(len(self.npm_log.read_text().splitlines()), npm_calls)
+        self.assertIn("already installed", stages["install"]["detail"])
 
     def test_pending_state_still_refreshes_bridges(self):
         """The regression this ordering exists to prevent: S2 ships pending, so an early exit would
@@ -404,7 +468,174 @@ class SimulatedPluginUpdate(unittest.TestCase):
         stages = {s["stage"]: s for s in json.loads(proc.stdout)["stages"]}
         self.assertIn("bridges", stages)
         self.assertNotIn("probe", stages)
+        self.assertNotIn("install", stages)
         self.assertIn("E7.1", stages["pin"]["detail"])
+        self.assertFalse(self.argv_log.exists(), "no server spawned in the pending state")
+        self.assertFalse(self.npm_log.exists(), "npm not invoked in the pending state")
+
+    def test_pending_state_removes_orphans_without_spawning(self):
+        (self.plugin / "scripts" / "lib" / "claude-octopus-pin.pending").write_text("owner: E7.1")
+        orphan = {"command": "npx", "args": ["-y", "claude-octopus@9.9.9"], "env": {},
+                  "_vibe-suite_owned": {"kind": "advisor", "schema": 1}}
+        (self.ws / ".mcp.json").write_text(json.dumps({"mcpServers": {"orphan_advisor": orphan}}, indent=2) + "\n")
+        proc = self.run_update()
+        stages = self.stages(proc)
+        self.assertEqual(stages["advisors"]["status"], "ok", stages["advisors"])
+        self.assertIn("registered-undeclared->removed", stages["advisors"]["detail"])
+        self.assertNotIn("orphan_advisor", json.loads((self.ws / ".mcp.json").read_text()).get("mcpServers", {}))
+        self.assertFalse(self.argv_log.exists())
+        self.assertFalse(self.npm_log.exists())
+
+    SKIPPED_TEXT = "not boot-verified this run"
+
+    def _seed_stale_and_advisor(self):
+        """A legacy stale reverse-server block plus a registered advisor on 1.0.0 — the two things a
+        failing run must leave byte-identical."""
+        self.seed_stale_registration("1.0.0")
+        self.ship_pin("2.0.0")
+        add_generation(self.install_dir, "1.0.0", verified=True)
+        (self.ws / ".mcp.json").write_text('{"mcpServers": {}}\n')
+        self.register_advisor("held_one", "1.0.0")
+        return self.pin_dependent_stores()
+
+    def test_a_tampered_lockfile_is_refused_before_any_server_starts(self):
+        before = self._seed_stale_and_advisor()
+        proc = self.run_update(npm="eintegrity")
+        stages = self.stages(proc)
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(stages["install"]["status"], "fail", stages["install"])
+        self.assertIn("EINTEGRITY", stages["install"]["detail"])
+        self.assertEqual(stages["advisors"]["status"], "warn")
+        self.assertIn(self.SKIPPED_TEXT, stages["advisors"]["detail"])
+        self.assertNotIn("probe", stages)
+        self.assertNotIn("registration", stages)
+        self.assertEqual(self.pin_dependent_stores(), before)
+        self.assertFalse(self.argv_log.exists(), "no server was started")
+        self.assertEqual([p.name for p in (self.install_dir / "versions" / "2.0.0").iterdir()] if (self.install_dir / "versions" / "2.0.0").exists() else [], [])
+
+    def test_probe_failure_leaves_both_stores_unchanged(self):
+        before = self._seed_stale_and_advisor()
+        proc = self.run_update(server="wrong-version")
+        stages = self.stages(proc)
+        self.assertEqual(stages["install"]["status"], "ok", stages["install"])
+        self.assertEqual(stages["probe"]["status"], "fail")
+        self.assertEqual(stages["advisors"]["status"], "warn")
+        self.assertIn(self.SKIPPED_TEXT, stages["advisors"]["detail"])
+        self.assertNotIn("registration", stages)
+        self.assertEqual(self.pin_dependent_stores(), before)
+        # the new generation exists but is NOT verified
+        gens = [p for p in (self.install_dir / "versions" / "2.0.0").iterdir() if p.is_dir()]
+        self.assertEqual(len(gens), 1)
+        self.assertEqual(list((self.install_dir / "versions" / "2.0.0").glob("*.verified")), [])
+
+    def test_probe_timeout_is_the_same_skipped_contract(self):
+        before = self._seed_stale_and_advisor()
+        proc = self.run_update(server="hang", timeout_ms="1500")
+        stages = self.stages(proc)
+        self.assertEqual(stages["probe"]["status"], "fail")
+        self.assertEqual(stages["advisors"]["status"], "warn")
+        self.assertIn(self.SKIPPED_TEXT, stages["advisors"]["detail"])
+        self.assertNotIn("registration", stages)
+        self.assertEqual(self.pin_dependent_stores(), before)
+        self.assertEqual(list((self.install_dir / "versions" / "2.0.0").glob("*.verified")), [])
+
+    def test_an_older_install_is_retained_after_a_pin_bump(self):
+        self._seed_stale_and_advisor()
+        old_gen = generation_of(self.install_dir, "1.0.0")
+        old_bin = Path(bin_path(self.install_dir, "1.0.0", old_gen))
+        old_bytes = old_bin.read_bytes()
+        held_before = json.loads((self.ws / ".mcp.json").read_text())["mcpServers"]["held_one"]
+        # make the advisor HELD (edited after registration) so update leaves it on 1.0.0
+        defn = self.ws / ".vibe-suite" / "agents" / "held_one.md"
+        defn.write_text(defn.read_text().replace("Value truth.", "Value truth, edited."), encoding="utf-8")
+        proc = self.run_update()
+        stages = self.stages(proc)
+        self.assertEqual(stages["registration"]["status"], "ok", stages)
+        self.assertTrue(old_bin.is_file(), "the older generation is retained")
+        self.assertEqual(old_bin.read_bytes(), old_bytes)
+        self.assertEqual(json.loads((self.ws / ".mcp.json").read_text())["mcpServers"]["held_one"], held_before)
+        self.assertIn("1.0.0", stages["install"]["detail"])
+        self.assertNotIn("prune", stages)
+
+    def test_a_same_version_lockfile_change_with_a_failed_probe_keeps_the_old_generation_launchable(self):
+        self.ship_pin("2.0.0")
+        h1 = add_generation(self.install_dir, "2.0.0", verified=True, payload="H1")
+        h1_bin = Path(bin_path(self.install_dir, "2.0.0", h1))
+        (self.ws / ".mcp.json").write_text('{"mcpServers": {}}\n')
+        self.register_advisor("held_one", "2.0.0")
+        # reverse-server block on H1 too
+        with mock.patch.dict(os.environ, {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(self.install_dir)}):
+            _, text = mcp_pin.plan(UNRELATED_TOML, "2.0.0")
+        (self.ws / ".codex" / "config.toml").write_text(text)
+        before = self.pin_dependent_stores()
+        # the shipped lockfile changes (H2) → a new generation is built; the probe fails
+        (self.install_dir / "package-lock.json").write_text(
+            lockfile_text("2.0.0", integrity="sha512-" + "B" * 86 + "=="), encoding="utf-8")
+        proc = self.run_update(server="wrong-version")
+        stages = self.stages(proc)
+        self.assertEqual(stages["install"]["status"], "ok")
+        self.assertEqual(stages["probe"]["status"], "fail")
+        self.assertNotIn("registration", stages)
+        self.assertEqual(self.pin_dependent_stores(), before)
+        self.assertTrue(h1_bin.is_file())
+        self.assertIn("payload: H1", h1_bin.read_text())
+        gens = sorted(p.name for p in (self.install_dir / "versions" / "2.0.0").iterdir() if p.is_dir())
+        self.assertEqual(len(gens), 2, gens)
+        self.assertEqual(list((self.install_dir / "versions" / "2.0.0").glob("*.verified")),
+                         [self.install_dir / "versions" / "2.0.0" / f"{h1}.verified"])
+
+    def _crash_advisor_cli(self, *args, fail_after):
+        return subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "advisor_cli.py"),
+                               "--workspace", str(self.ws), *args], capture_output=True, text=True,
+                              env=dict(os.environ, VIBE_ADVISOR_FAIL_AFTER=fail_after,
+                                       VIBE_SUITE_OCTOPUS_INSTALL_DIR=str(self.install_dir)))
+
+    def _declare(self, name):
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / f"{name}.md").write_text(
+            "---\ndescription: |\n  Judges things.\nmodel: sonnet\n---\n\nValue truth.\n", encoding="utf-8")
+
+    def test_a_pending_apply_journal_is_recovered_before_the_registration_is_written(self):
+        self.seed_stale_registration("1.0.0")           # the legacy block is in the pre-image
+        self.ship_pin("2.0.0")
+        (self.ws / ".mcp.json").write_text('{"mcpServers": {}}\n')
+        self._declare("journaled")
+        crashed = self._crash_advisor_cli("add", "journaled", "--pin", "2.0.0", fail_after="json")
+        # `add` rendered against an install that has no 2.0.0 yet: either it refused (no journal) or
+        # it crashed with a journal — the recovery-before-registration property needs the journal.
+        if not (self.ws / ".vibe-suite-state" / "advisor-txn.json").is_file():
+            add_generation(self.install_dir, "2.0.0", verified=True)
+            crashed = self._crash_advisor_cli("add", "journaled", "--pin", "2.0.0", fail_after="json")
+        self.assertEqual(crashed.returncode, 9, crashed.stderr)
+        self.assertTrue((self.ws / ".vibe-suite-state" / "advisor-txn.json").is_file())
+        proc = self.run_update()
+        stages = self.stages(proc)
+        self.assertEqual(stages["registration"]["status"], "ok", stages)
+        self.assertFalse((self.ws / ".vibe-suite-state" / "advisor-txn.json").exists(), "journal recovered")
+        toml = (self.ws / ".codex" / "config.toml").read_text()
+        block = toml.split("[mcp_servers.vibe-claude-mcp]")[1].split("# <<<")[0]
+        self.assertIn("/versions/2.0.0/", block)
+        self.assertNotIn("npx", block)
+
+    def test_a_pending_remove_journal_is_rolled_forward_before_the_registration_is_written(self):
+        self.seed_stale_registration("1.0.0")
+        self.ship_pin("2.0.0")
+        add_generation(self.install_dir, "2.0.0", verified=True)
+        (self.ws / ".mcp.json").write_text('{"mcpServers": {}}\n')
+        self.register_advisor("doomed", "2.0.0")
+        crashed = self._crash_advisor_cli("remove", "doomed", fail_after="json")
+        self.assertEqual(crashed.returncode, 9, crashed.stderr)
+        self.assertTrue((self.ws / ".vibe-suite-state" / "advisor-txn.json").is_file())
+        proc = self.run_update()
+        stages = self.stages(proc)
+        self.assertEqual(stages["registration"]["status"], "ok", stages)
+        self.assertFalse((self.ws / ".vibe-suite-state" / "advisor-txn.json").exists())
+        toml = (self.ws / ".codex" / "config.toml").read_text()
+        block = toml.split("[mcp_servers.vibe-claude-mcp]")[1].split("# <<<")[0]
+        self.assertIn("/versions/2.0.0/", block)
+        self.assertNotIn("npx", block)
+        self.assertNotIn("doomed", json.loads((self.ws / ".mcp.json").read_text()).get("mcpServers", {}))
 
     def test_collision_refuses_before_anything_is_written(self):
         (self.ws / ".codex" / "config.toml").write_text(
@@ -442,6 +673,645 @@ class Manifest(unittest.TestCase):
         on_disk = {f"./commands/{p.name}" for p in (REPO_ROOT / "commands").glob("*.md")}
         self.assertEqual(set(manifest["commands"]), on_disk)
 
+
+
+# ---------------------------------------------------------------------------------------------
+# S13 (vibe-214): the lockfile-verified install
+# ---------------------------------------------------------------------------------------------
+
+def _octopus_install():
+    import octopus_install  # noqa: E402  (absent at the RED baseline — that is the point)
+    return octopus_install
+
+
+class Lockfile(unittest.TestCase):
+    """The shipped manifest/lockfile pair is the recorded integrity; it must agree with the pin."""
+
+    def test_shipped_lockfile_matches_the_pin(self):
+        d = REPO_ROOT / "scripts" / "lib" / "claude-octopus"
+        self.assertTrue((d / "package.json").is_file(), "shipped package.json absent")
+        self.assertTrue((d / "package-lock.json").is_file(), "shipped package-lock.json absent")
+        manifest = json.loads((d / "package.json").read_text())
+        lock = json.loads((d / "package-lock.json").read_text())
+        self.assertEqual(manifest["dependencies"], {"claude-octopus": SHIPPED})
+        self.assertTrue(manifest.get("private") is True)
+        self.assertEqual(lock["lockfileVersion"], 3)
+        pk = lock["packages"]
+        self.assertEqual(pk[""]["dependencies"]["claude-octopus"], SHIPPED)
+        entry = pk["node_modules/claude-octopus"]
+        self.assertEqual(entry["version"], SHIPPED)
+        self.assertTrue(entry["integrity"].startswith("sha512-"), entry.get("integrity"))
+        self.assertEqual(entry.get("bin"), {"claude-octopus": "dist/index.js"})
+        missing = [k for k, v in pk.items() if k and "integrity" not in v]
+        self.assertEqual(missing, [], "non-root entries without integrity")
+        self.assertGreater(len(pk) - 1, 1, "a real resolved tree has more than one package")
+
+
+class Install(unittest.TestCase):
+    """`octopus_install.ensure_installed` — the install stage, against a fake npm."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = Path(self.tmp.name)
+        self.pin = "2.0.0"
+        self.inst = fixture_install(self.d / "inst", versions=(), lock_version=self.pin)
+        self.log = self.d / "npm.log"
+        self.oi = _octopus_install()
+
+    def env(self, npm="ok", payload="P", **extra):
+        fake = write_fake_npm(self.d / f"npm-{npm}", npm)
+        e = dict(os.environ, VIBE_SUITE_OCTOPUS_INSTALL_DIR=str(self.inst), VIBE_SUITE_NPM_BIN=str(fake),
+                 FAKE_NPM_LOG=str(self.log), FAKE_NPM_PAYLOAD=payload, **extra)
+        return e
+
+    def gens(self, version=None):
+        v = self.inst / "versions" / (version or self.pin)
+        return sorted(p.name for p in v.iterdir() if p.is_dir()) if v.exists() else []
+
+    def staging(self):
+        v = self.inst / "versions"
+        return sorted(p.name for p in v.iterdir() if p.name.startswith(".staging-")) if v.exists() else []
+
+    def npm_calls(self):
+        return [json.loads(l) for l in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def snapshot(self, version, gen):
+        root = self.inst / "versions" / version / gen
+        return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+    # 1
+    def test_ok_installs_and_publishes_the_version_dir(self):
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        self.assertEqual(self.gens(), [gen])
+        self.assertTrue(Path(bin_path(self.inst, self.pin, gen)).is_file())
+        marker = json.loads((self.inst / "versions" / self.pin / gen / ".vibe-suite-install.json").read_text())
+        self.assertEqual(marker["version"], self.pin)
+        self.assertEqual(marker["lockfile_sha256"], lockfile_sha256(self.inst))
+        self.assertEqual(marker["generation"], gen)
+        self.assertEqual(self.staging(), [])
+
+    # 2
+    def test_npm_is_invoked_as_ci_ignore_scripts_in_the_staging_dir(self):
+        self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        calls = self.npm_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["argv"], ["ci", "--ignore-scripts", "--no-audit", "--no-fund"])
+        self.assertIn("/versions/.staging-", calls[0]["cwd"])
+        self.assertTrue(Path(calls[0]["cwd"]).resolve().is_relative_to(self.inst.resolve()))
+
+    # 3
+    def test_eintegrity_exit_status_alone_is_a_failure(self):
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env("eintegrity"), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("EINTEGRITY", detail)
+        self.assertIsNone(gen)
+        self.assertEqual(self.gens(), [])
+        self.assertEqual(self.staging(), [])
+
+    # 4
+    def test_partial_tree_is_removed_on_failure(self):
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env("partial"), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertEqual(self.staging(), [])
+        self.assertEqual(self.gens(), [])
+
+    # 5
+    def test_wrong_installed_version_is_a_failure(self):
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env("wrong-version"), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("9.9.9", detail)
+        self.assertEqual(self.gens(), [])
+        self.assertEqual(self.staging(), [])
+
+    # 6
+    def test_missing_bin_is_a_failure(self):
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(FAKE_NPM_NO_BIN="1"), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("dist/index.js", detail)
+        self.assertEqual(self.gens(), [])
+
+    # 7
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory modes")
+    def test_unwritable_install_dir_fails_closed(self):
+        (self.inst / "versions").mkdir()
+        os.chmod(self.inst / "versions", 0o500)
+        self.addCleanup(os.chmod, self.inst / "versions", 0o700)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertEqual(self.npm_calls(), [], "nothing was installed")
+
+    # 8
+    def test_matching_marker_skips_npm(self):
+        g = add_generation(self.inst, self.pin, verified=False)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual((status, gen), (self.oi.OK, g))
+        self.assertIn("already installed", detail)
+        self.assertEqual(self.npm_calls(), [])
+
+    # 9
+    def test_a_corrupted_generation_is_left_alone_and_a_new_one_is_built(self):
+        g1 = add_generation(self.inst, self.pin, payload="old", verified=True)
+        Path(bin_path(self.inst, self.pin, g1)).unlink()
+        before = self.snapshot(self.pin, g1)
+        status, detail, g2 = self.oi.ensure_installed(self.pin, env=self.env(payload="new"), timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        self.assertNotEqual(g2, g1)
+        self.assertEqual(sorted(self.gens()), sorted([g1, g2]))
+        self.assertEqual(self.snapshot(self.pin, g1), before, "the corrupted generation is untouched")
+        self.assertIn("payload: new", Path(bin_path(self.inst, self.pin, g2)).read_text())
+        self.assertEqual(self.oi.current_valid_generation(self.pin, env=self.env()), g2)
+
+    # 10
+    def test_a_metadata_mismatched_generation_is_not_current(self):
+        g1 = add_generation(self.inst, self.pin, metadata_version="2.0.1", verified=True)
+        before = self.snapshot(self.pin, g1)
+        self.assertIsNone(self.oi.current_valid_generation(self.pin, env=self.env()))
+        status, detail, g2 = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        self.assertNotEqual(g2, g1)
+        self.assertEqual(self.snapshot(self.pin, g1), before)
+
+    # 11
+    def test_a_changed_lockfile_builds_a_new_generation_and_keeps_the_old(self):
+        h1 = add_generation(self.inst, self.pin, payload="H1", verified=True)
+        h1_bytes = Path(bin_path(self.inst, self.pin, h1)).read_bytes()
+        (self.inst / "package-lock.json").write_text(
+            lockfile_text(self.pin, integrity="sha512-" + "B" * 86 + "=="), encoding="utf-8")
+        status, detail, h2 = self.oi.ensure_installed(self.pin, env=self.env(payload="H2"), timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        self.assertNotEqual(h2, h1)
+        marker = json.loads((self.inst / "versions" / self.pin / h2 / ".vibe-suite-install.json").read_text())
+        self.assertEqual(marker["lockfile_sha256"], lockfile_sha256(self.inst))
+        h2_bin = Path(bin_path(self.inst, self.pin, h2))
+        self.assertIn("payload: H2", h2_bin.read_text())
+        self.assertEqual(Path(bin_path(self.inst, self.pin, h1)).read_bytes(), h1_bytes)
+        self.assertEqual(self.oi.current_valid_generation(self.pin, env=self.env()), h2)
+
+    # 12
+    def test_a_marker_less_directory_is_not_a_generation(self):
+        stray = add_generation(self.inst, self.pin, name="x-stray", with_marker=False)
+        before = self.snapshot(self.pin, stray)
+        self.assertIsNone(self.oi.current_valid_generation(self.pin, env=self.env()))
+        status, detail, g = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        self.assertNotEqual(g, stray)
+        self.assertEqual(self.snapshot(self.pin, stray), before, "never stamped")
+
+    # 13
+    def test_lockfile_pin_mismatch_is_refused_before_npm_runs(self):
+        good_lock = lockfile_text(self.pin)
+        cases = {
+            "entry version": ("package-lock.json", lockfile_text(self.pin, entry_version="1.0.0")),
+            "lockfileVersion 2": ("package-lock.json", lockfile_text(self.pin, lockfile_version=2)),
+            "entry without integrity": ("package-lock.json", lockfile_text(self.pin, drop_integrity=True)),
+            "root dependency": ("package-lock.json", lockfile_text(self.pin, root_dependency="1.0.0")),
+            "manifest dependency": ("package.json", manifest_text("1.0.0")),
+        }
+        for label, (fname, text) in cases.items():
+            with self.subTest(case=label):
+                (self.inst / "package-lock.json").write_text(good_lock, encoding="utf-8")
+                (self.inst / "package.json").write_text(manifest_text(self.pin), encoding="utf-8")
+                (self.inst / fname).write_text(text, encoding="utf-8")
+                status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+                self.assertEqual(status, self.oi.FAIL, label)
+                self.assertIn("lockfile refused", detail)
+                self.assertIsNone(gen)
+                self.assertEqual(self.npm_calls(), [], "npm must not run on a refused lockfile")
+
+    # 14
+    def test_a_previous_generation_survives_a_failed_install(self):
+        old = add_generation(self.inst, "1.0.0", payload="old", verified=True)
+        before = self.snapshot("1.0.0", old)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env("fail"), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertEqual(self.snapshot("1.0.0", old), before)
+        self.assertEqual(self.gens("1.0.0"), [old])
+        self.assertEqual(self.staging(), [])
+
+    # 15
+    def test_a_failed_publish_rename_removes_only_the_staging(self):
+        import errno
+        old = add_generation(self.inst, "1.0.0", verified=True)
+        before = self.snapshot("1.0.0", old)
+        for label, exc in (("BridgeError", bridge.BridgeError("x")), ("OSError", OSError(errno.EXDEV, "x"))):
+            with self.subTest(case=label):
+                with mock.patch.object(bridge, "rename_at", side_effect=exc):
+                    status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+                self.assertEqual(status, self.oi.FAIL, detail)
+                self.assertIsNone(gen)
+                self.assertEqual(self.gens(), [])
+                self.assertEqual(self.staging(), [])
+                self.assertEqual(self.snapshot("1.0.0", old), before)
+
+    # 16
+    def test_two_concurrent_installs_publish_two_generations(self):
+        status, detail, ours = self.oi.ensure_installed(self.pin, env=self.env("ok-and-plant-winner"), timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        gens = self.gens()
+        self.assertEqual(len(gens), 2, gens)
+        self.assertIn(ours, gens)
+        winner = [g for g in gens if g != ours][0]
+        for g in gens:
+            self.assertTrue((self.inst / "versions" / self.pin / g / ".vibe-suite-install.json").is_file())
+        self.assertTrue((self.inst / "versions" / self.pin / f"{winner}.verified").is_file(), "winner's mark untouched")
+        self.assertEqual(self.oi.current_valid_generation(self.pin, env=self.env()), max(gens))
+        self.assertEqual(self.staging(), [])
+
+    # 17
+    def test_only_our_own_staging_is_removed(self):
+        foreign = self.inst / "versions" / ".staging-99999-x"
+        foreign.mkdir(parents=True)
+        (foreign / "keep").write_text("x")
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        self.assertTrue((foreign / "keep").is_file(), "a foreign staging directory is never removed")
+        self.assertIn(".staging-99999-x", detail)
+        self.assertEqual(self.staging(), [".staging-99999-x"])
+
+    # 18
+    def test_a_symlinked_install_dir_is_refused(self):
+        real = self.d / "elsewhere"
+        real.mkdir()
+        link = self.d / "link"
+        link.symlink_to(real, target_is_directory=True)
+        env = self.env()
+        env["VIBE_SUITE_OCTOPUS_INSTALL_DIR"] = str(link)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=env, timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("symlink", detail)
+        self.assertEqual(sorted(p.name for p in real.iterdir()), [], "nothing created behind the link")
+        self.assertEqual(self.npm_calls(), [])
+
+    # 19
+    def test_a_symlinked_versions_dir_is_refused(self):
+        elsewhere = self.d / "elsewhere-versions"
+        elsewhere.mkdir()
+        (self.inst / "versions").symlink_to(elsewhere, target_is_directory=True)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertEqual(sorted(p.name for p in elsewhere.iterdir()), [], "no staging created through the link")
+        self.assertEqual(self.npm_calls(), [])
+
+    # 20
+    def test_cleanup_error_is_reported_and_the_status_stays_fail(self):
+        with mock.patch.object(bridge, "remove_tree_at", side_effect=bridge.BridgeError("cleanup boom")):
+            status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env("partial"), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("EINTEGRITY", detail)
+        self.assertIn("cleanup boom", detail)
+
+    # 21
+    def test_retained_generations_are_listed_in_the_detail(self):
+        old = add_generation(self.inst, "1.0.0", verified=True)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        self.assertIn(f"1.0.0/{old}", detail)
+        retained = self.oi.retained_generations(self.pin, env=self.env())
+        self.assertIn(("1.0.0", old), [(r["version"], r["generation"]) for r in retained])
+
+    # 22
+    def test_the_marker_is_inside_the_staged_tree_before_the_rename(self):
+        seen = {}
+        real = bridge.rename_at
+
+        def spy(root, src_rel, dst_rel):
+            seen["marker_in_source"] = (Path(root) / src_rel / ".vibe-suite-install.json").is_file()
+            return real(root, src_rel, dst_rel)
+        with mock.patch.object(bridge, "rename_at", side_effect=spy):
+            status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        self.assertTrue(seen.get("marker_in_source"), "the marker must be written into the staged tree first")
+
+    # 23
+    def test_a_fresh_generation_is_valid_but_not_verified(self):
+        older = add_generation(self.inst, self.pin, name="a-older", verified=True)
+        (self.inst / "package-lock.json").write_text(
+            lockfile_text(self.pin, integrity="sha512-" + "C" * 86 + "=="), encoding="utf-8")
+        env = self.env()
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=env, timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        self.assertEqual(self.oi.current_valid_generation(self.pin, env=env), gen)
+        self.assertIsNone(self.oi.current_verified_generation(self.pin, env=env),
+                          "the older generation's lockfile sha no longer matches; the new one is unverified")
+        self.oi.mark_verified(self.pin, gen, env=env)
+        self.assertEqual(self.oi.current_verified_generation(self.pin, env=env), gen)
+        mark = self.inst / "versions" / self.pin / f"{gen}.verified"
+        first = mark.read_bytes()
+        self.oi.mark_verified(self.pin, gen, env=env)          # idempotent: publish_new reports, never overwrites
+        self.assertEqual(mark.read_bytes(), first)
+
+    # 25 (Step-8 R1)
+    def test_corrupt_metadata_is_an_invalid_generation_not_a_crash(self):
+        g = add_generation(self.inst, self.pin, verified=True)
+        meta = self.inst / "versions" / self.pin / g / "node_modules" / "claude-octopus" / "package.json"
+        for junk in ("[]", "null", "not json", '"str"'):
+            with self.subTest(junk=junk):
+                meta.write_text(junk, encoding="utf-8")
+                env = self.env()
+                self.assertIsNone(self.oi.current_valid_generation(self.pin, env=env))
+                self.assertIsNone(self.oi.current_verified_generation(self.pin, env=env))
+                self.assertFalse(self.oi.is_valid_generation(self.pin, g, env))
+        status, detail, g2 = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        self.assertNotEqual(g2, g)
+
+    # 26 (Step-8 R1)
+    def test_a_missing_lockfile_is_a_pin_error_not_a_file_not_found(self):
+        g = add_generation(self.inst, self.pin, verified=True)
+        (self.inst / "package-lock.json").unlink()
+        env = self.env()
+        self.assertIsNone(self.oi.current_verified_generation(self.pin, env=env))
+        self.assertIsNone(self.oi.current_valid_generation(self.pin, env=env))
+        with self.assertRaises(mcp_pin.PinError):
+            mcp_pin.launch(f"claude-octopus@{self.pin}", env=env, generation=g)
+        with self.assertRaises(mcp_pin.PinError):
+            mcp_pin.launch(f"claude-octopus@{self.pin}", env=env)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=env, timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertEqual(self.npm_calls(), [])
+
+    # 27 (Step-8 R1)
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory modes")
+    def test_an_unreadable_versions_dir_is_no_generation_and_a_failed_install(self):
+        add_generation(self.inst, self.pin, verified=True)
+        os.chmod(self.inst / "versions", 0o000)
+        self.addCleanup(os.chmod, self.inst / "versions", 0o700)
+        env = self.env()
+        self.assertIsNone(self.oi.current_verified_generation(self.pin, env=env))
+        with self.assertRaises(mcp_pin.PinError):
+            mcp_pin.launch(f"claude-octopus@{self.pin}", env=env)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=env, timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertEqual(self.npm_calls(), [])
+
+    # 28 (Step-8 R3)
+    def test_a_symlinked_versions_dir_with_a_valid_generation_is_refused(self):
+        real = fixture_install(self.d / "real", versions=(self.pin,), lock_version=self.pin)
+        # the linked target holds a complete, valid, verified generation whose marker names OUR lockfile sha
+        (self.inst / "versions").symlink_to(real / "versions", target_is_directory=True)
+        env = self.env()
+        self.assertIsNone(self.oi.current_valid_generation(self.pin, env=env))
+        self.assertIsNone(self.oi.current_verified_generation(self.pin, env=env))
+        with self.assertRaises(mcp_pin.PinError):
+            mcp_pin.launch(f"claude-octopus@{self.pin}", env=env)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=env, timeout=60)
+        self.assertEqual(status, self.oi.FAIL, detail)
+        self.assertIn("not a real directory", detail)
+        self.assertEqual(self.npm_calls(), [], "nothing reused or built through the link")
+
+    # 29 (Step-8 R4)
+    def test_a_second_dependency_without_integrity_is_refused(self):
+        (self.inst / "package-lock.json").write_text(lockfile_text(
+            self.pin, extra_packages={"leftpad": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/leftpad/-/leftpad-1.0.0.tgz"}}),
+            encoding="utf-8")
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("leftpad", detail)
+        self.assertEqual(self.npm_calls(), [])
+
+    # 30 (Step-8 R4)
+    def test_npm_timeout_is_a_failure_with_staging_removed(self):
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env("hang"), timeout=1)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("did not finish", detail)
+        self.assertEqual(self.staging(), [])
+        self.assertEqual(self.gens(), [])
+
+    # 31 (Step-8 R4)
+    def test_a_missing_npm_executable_is_a_failure_with_staging_removed(self):
+        env = self.env()
+        env["VIBE_SUITE_NPM_BIN"] = str(self.d / "no-such-npm")
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=env, timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("could not run", detail)
+        self.assertEqual(self.staging(), [])
+
+    # 32 (Step-9 R1 residue)
+    def test_malformed_manifest_dependencies_are_refused_before_npm(self):
+        for junk in ('["bad"]', '"bad"', '1', 'null'):
+            with self.subTest(junk=junk):
+                (self.inst / "package.json").write_text(
+                    '{"name": "x", "private": true, "dependencies": ' + junk + '}', encoding="utf-8")
+                status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+                self.assertEqual(status, self.oi.FAIL)
+                self.assertIn("lockfile refused", detail)
+                self.assertEqual(self.npm_calls(), [])
+        (self.inst / "package.json").write_text('{"dependencies": ["bad"]}', encoding="utf-8")
+        self.assertIn("package.json pins", self.oi.lockfile_check(self.pin, env=self.env()) or "")
+
+    # 33 (Step-9 R1 residue)
+    def test_an_oserror_inspecting_the_staged_tree_is_a_failure_with_cleanup(self):
+        real = Path.is_file
+
+        def denied(self_):
+            if self_.name == "index.js" and "/versions/.staging-" in str(self_):
+                raise PermissionError("denied")
+            return real(self_)
+        with mock.patch.object(Path, "is_file", denied):
+            status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("denied", detail)
+        self.assertIsNone(gen)
+        self.assertEqual(self.staging(), [], "the run's staging is removed even when the gate itself failed")
+        self.assertEqual(self.gens(), [])
+
+    # 24
+    def test_the_verification_mark_lives_beside_the_generation_not_inside_it(self):
+        env = self.env()
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=env, timeout=60)
+        before = self.snapshot(self.pin, gen)
+        self.oi.mark_verified(self.pin, gen, env=env)
+        self.assertEqual(self.snapshot(self.pin, gen), before, "the generation tree is immutable")
+        self.assertTrue((self.inst / "versions" / self.pin / f"{gen}.verified").is_file())
+
+
+class _InProcessBase(TempDirMixin, unittest.TestCase):
+    """Shared harness: `update.run` in-process with the seams pointed at a per-test install."""
+
+    def setUp(self):
+        self.d = Path(self.mkdtemp(prefix="vibe-inproc-"))
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        import update as update_mod
+        import advisors as advisors_mod
+        self.update_mod, self.advisors = update_mod, advisors_mod
+        self.oi = _octopus_install()
+
+    def workspace(self, name):
+        ws = self.d / name
+        (ws / ".codex").mkdir(parents=True)
+        (ws / ".claude").mkdir(parents=True)
+        (ws / ".mcp.json").write_text('{"mcpServers": {}}\n')
+        return ws
+
+    def declare(self, ws, name):
+        agents = ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / f"{name}.md").write_text(
+            "---\ndescription: |\n  Judges things.\nmodel: sonnet\n---\n\nValue truth.\n", encoding="utf-8")
+
+    def seams(self, inst, npm="ok", server="respond"):
+        fake_npm = write_fake_npm(self.d / f"npm-{npm}", npm)
+        fake_server = write_fake_server(self.d / f"server-{server}", server)
+        return dict(seam_env(inst, fake_npm, fake_server), FAKE_NPM_LOG=str(self.d / "npm.log"),
+                    FAKE_ARGV_LOG=str(self.d / "argv.log"), VIBE_SUITE_PROBE_TIMEOUT_MS="1500")
+
+    def launch_paths(self, ws):
+        doc = json.loads((ws / ".mcp.json").read_text())
+        toml = (ws / ".codex" / "config.toml").read_text()
+        json_paths = {n: e["args"][-1] for n, e in doc["mcpServers"].items() if self.advisors.is_owned_entry(e)}
+        toml_paths = re.findall(r'args = \["([^"]+)"\]', toml)
+        return json_paths, toml_paths
+
+
+
+class InProcessUpdate(_InProcessBase):
+    """The selection freeze and the production mark write."""
+
+    def test_a_generation_published_after_the_probe_is_not_registered_this_run(self):
+        inst = fixture_install(self.d / "inst", versions=(), lock_version=SHIPPED)
+        ws = self.workspace("ws")
+        # a stamped advisor registered against the module fixture's generation (stale here), and a
+        # stamped definition whose entries are then removed from both stores (the presence-only path)
+        for name in ("moves", "presence"):
+            self.declare(ws, name)
+            self.advisors.add(ws, name)
+        doc = json.loads((ws / ".mcp.json").read_text())
+        del doc["mcpServers"]["presence"]
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        toml_p = ws / ".codex" / "config.toml"
+        toml_p.write_text(bridge.toml_server_remove(toml_p.read_text(), "presence"))
+        env = self.seams(inst)
+        planted = {}
+
+        def probe_then_plant(target, launch, env_, timeout):
+            planted["gen"] = add_generation(inst, SHIPPED, name="zzzz-later-99999", verified=True, payload="later")
+            return self.update_mod.OK, "ok (planted a later generation)"
+        with mock.patch.dict(os.environ, env), mock.patch.object(self.update_mod, "_probe", side_effect=probe_then_plant):
+            report = self.update_mod.run(ws, REPO_ROOT, env=dict(os.environ, **env), probe_timeout=1)
+        stages = {s["stage"]: s for s in report.stages}
+        self.assertEqual(stages["install"]["status"], "ok", stages)
+        self.assertEqual(stages["registration"]["status"], "ok", stages)
+        probed = [g for g in (p.name for p in (inst / "versions" / SHIPPED).iterdir() if p.is_dir()) if g != planted["gen"]]
+        self.assertEqual(len(probed), 1, probed)
+        probed = probed[0]
+        json_paths, toml_paths = self.launch_paths(ws)
+        self.assertEqual(set(json_paths), {"moves", "presence"})
+        for path in list(json_paths.values()) + toml_paths:
+            self.assertIn(f"/{probed}/", path, f"a launch names an unprobed generation: {path}")
+            self.assertNotIn(planted["gen"], path)
+        self.assertEqual(len(toml_paths), 3, toml_paths)   # two advisors + the reverse server
+
+    def test_update_marks_the_probed_generation_and_a_second_workspace_converges_to_it(self):
+        inst = fixture_install(self.d / "inst", versions=(), lock_version=SHIPPED)
+        h1 = add_generation(inst, SHIPPED, payload="H1", verified=True)
+        ws2, ws3 = self.workspace("ws2"), self.workspace("ws3")
+        with mock.patch.dict(os.environ, {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(inst)}):
+            for ws in (ws2, ws3):
+                self.declare(ws, "steady")
+                self.advisors.add(ws, "steady")
+        for ws in (ws2, ws3):
+            self.assertIn(f"/{h1}/", self.launch_paths(ws)[0]["steady"])
+        # the shipped lockfile changes → H1 no longer valid; H2 is built but UNVERIFIED
+        (inst / "package-lock.json").write_text(lockfile_text(SHIPPED, integrity="sha512-" + "D" * 86 + "=="), encoding="utf-8")
+        h2 = add_generation(inst, SHIPPED, payload="H2", verified=False)
+        env = self.seams(inst)
+        with mock.patch.dict(os.environ, env):
+            self.assertIsNone(self.oi.current_verified_generation(SHIPPED, env=dict(os.environ)))
+            self.assertTrue(self.advisors.reconcile(ws2)["steady"].startswith("backend-unavailable"))
+            self.assertIn(f"/{h1}/", self.launch_paths(ws2)[0]["steady"], "held on H1 while H2 is unverified")
+            # a real update in another workspace verifies H2 — PRODUCTION writes the mark
+            ws1 = self.workspace("ws1")
+            report = self.update_mod.run(ws1, REPO_ROOT, env=dict(os.environ, **env), probe_timeout=1)
+            stages = {s["stage"]: s for s in report.stages}
+            self.assertEqual(stages["probe"]["status"], "ok", stages)
+            self.assertTrue((inst / "versions" / SHIPPED / f"{h2}.verified").is_file(), "production created the mark")
+            self.assertEqual(self.oi.current_verified_generation(SHIPPED, env=dict(os.environ)), h2)
+            # the second workspace converges through STANDALONE reconcile, no hand-written mark
+            rep = self.advisors.reconcile(ws2)
+            self.assertEqual(rep["steady"], "stale-registered->registered")
+            self.assertIn(f"/{h2}/", self.launch_paths(ws2)[0]["steady"])
+            # and a third through repair
+            r = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "repair.py"), "--workspace", str(ws3), "--json"],
+                               capture_output=True, text=True, env=dict(os.environ, **env))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn(f"/{h2}/", self.launch_paths(ws3)[0]["steady"])
+
+    def test_failed_and_timed_out_probes_leave_the_generation_unmarked(self):
+        for server in ("wrong-version", "hang"):
+            with self.subTest(server=server):
+                inst = fixture_install(self.d / f"inst-{server}", versions=(), lock_version=SHIPPED)
+                h2 = add_generation(inst, SHIPPED, verified=False)
+                ws = self.workspace(f"ws-{server}")
+                env = self.seams(inst, server=server)
+                with mock.patch.dict(os.environ, env):
+                    report = self.update_mod.run(ws, REPO_ROOT, env=dict(os.environ, **env), probe_timeout=1)
+                stages = {s["stage"]: s for s in report.stages}
+                self.assertEqual(stages["probe"]["status"], "fail", stages)
+                self.assertFalse((inst / "versions" / SHIPPED / f"{h2}.verified").exists())
+                self.assertNotIn("registration", stages)
+
+
+class InProcessUpdateContracts(_InProcessBase):
+    """Step-8 R4: the install timeout is forwarded; a failed mark publication skips the writes."""
+
+    def test_install_timeout_is_forwarded_from_run_and_from_the_cli(self):
+        inst = fixture_install(self.d / "inst", versions=(SHIPPED,), lock_version=SHIPPED)
+        ws = self.workspace("ws")
+        env = self.seams(inst)
+        seen = []
+        real = self.update_mod.octopus_install.ensure_installed
+
+        def spy(pin, env=None, timeout=600):
+            seen.append(timeout)
+            return real(pin, env=env, timeout=timeout)
+        with mock.patch.dict(os.environ, env), mock.patch.object(self.update_mod.octopus_install, "ensure_installed", side_effect=spy):
+            self.update_mod.run(ws, REPO_ROOT, env=dict(os.environ, **env), probe_timeout=1, install_timeout=7)
+            with mock.patch("sys.stdout"):
+                self.update_mod.main(["--workspace", str(ws), "--plugin-root", str(REPO_ROOT), "--probe-timeout", "1",
+                                      "--install-timeout", "9", "--json"])
+        self.assertEqual(seen, [7, 9])
+
+    def test_a_failed_mark_publication_skips_advisors_and_registration(self):
+        inst = fixture_install(self.d / "inst", versions=(), lock_version=SHIPPED)
+        h = add_generation(inst, SHIPPED, verified=False)
+        ws = self.workspace("ws")
+        self.declare(ws, "steady")
+        with mock.patch.dict(os.environ, {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(module_install("update"))}):
+            self.advisors.add(ws, "steady")
+        before = ((ws / ".mcp.json").read_bytes(), bridge.text_block_remove((ws / ".codex" / "config.toml").read_text(), "mcp-mirror"))
+        env = self.seams(inst)
+        with mock.patch.dict(os.environ, env), mock.patch.object(self.update_mod.octopus_install, "mark_verified",
+                                                                    side_effect=bridge.BridgeError("disk says no")):
+            report = self.update_mod.run(ws, REPO_ROOT, env=dict(os.environ, **env), probe_timeout=1)
+        stages = {s["stage"]: s for s in report.stages}
+        self.assertEqual(stages["probe"]["status"], "fail", stages)
+        self.assertIn("could not record the verification", stages["probe"]["detail"])
+        self.assertEqual(stages["advisors"]["status"], "warn")
+        self.assertNotIn("registration", stages)
+        self.assertEqual(((ws / ".mcp.json").read_bytes(), bridge.text_block_remove((ws / ".codex" / "config.toml").read_text(), "mcp-mirror")), before)
+        self.assertFalse((inst / "versions" / SHIPPED / f"{h}.verified").exists())
+
+
+class NetworkOptIn(unittest.TestCase):
+    """Evidence, not a gate: the real npm's integrity check. Opt in with VIBE_SUITE_NETWORK_TESTS=1."""
+
+    @unittest.skipUnless(os.environ.get("VIBE_SUITE_NETWORK_TESTS") == "1", "network test — opt in")
+    def test_real_npm_ci_refuses_a_tampered_lockfile(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            src = REPO_ROOT / "scripts" / "lib" / "claude-octopus"
+            (d / "package.json").write_bytes((src / "package.json").read_bytes())
+            lock = json.loads((src / "package-lock.json").read_text())
+            lock["packages"]["node_modules/claude-octopus"]["integrity"] = "sha512-" + "A" * 86 + "=="
+            (d / "package-lock.json").write_text(json.dumps(lock, indent=2) + "\n")
+            proc = subprocess.run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=d,
+                                  capture_output=True, text=True, timeout=600)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("EINTEGRITY", proc.stderr)
 
 if __name__ == "__main__":
     unittest.main()

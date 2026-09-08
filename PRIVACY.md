@@ -26,13 +26,18 @@ explicitly offline path — no network, vendored assets.
 - **Preflight probes.** `/vibe-suite:preflight` contacts the configured engines to test
   connectivity and discover models.
 - **Knowledge refresh.** `/vibe-suite:refresh-knowledge` fetches documentation via Context7.
-- **Update path.** `/vibe-suite:update` runs `npx -y claude-octopus@<pinned version>` (an npm
-  registry fetch on cold cache) and boot-verifies that reverse-MCP server with a local
-  handshake; the pin is exact (`scripts/lib/claude-octopus-pin.txt`) and the handshake
-  rejects a server whose self-report disagrees with it.
-- **Advisors.** Registered advisors execute the same pinned `claude-octopus` package, which
-  spawns Claude Code sessions on your machine; prompts you send an advisor go to the model
-  behind your Claude Code authentication.
+- **Update path.** `/vibe-suite:update` installs the pinned `claude-octopus` reverse-MCP server
+  with `npm ci --ignore-scripts` from the lockfile the plugin ships
+  (`scripts/lib/claude-octopus/package-lock.json`, every package with a recorded `integrity`) into
+  the plugin's own directory — an npm registry fetch, no lifecycle scripts — and boot-verifies that
+  install with a local handshake before any registration launches it. The pin is exact
+  (`scripts/lib/claude-octopus-pin.txt`), a package whose bytes do not match the lockfile is refused
+  by `npm` before any server starts, and the handshake rejects a server whose self-report disagrees
+  with the pin. Registrations then launch the installed files directly (`node …/dist/index.js`);
+  the local install is trusted after that verification, like the plugin's own files.
+- **Advisors.** Registered advisors execute the same verified install, which spawns Claude Code
+  sessions on your machine; prompts you send an advisor go to the model behind your Claude Code
+  authentication.
 
 ## Secrets
 

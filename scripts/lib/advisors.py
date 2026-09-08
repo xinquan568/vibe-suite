@@ -300,11 +300,9 @@ def resolve_backend(explicit_pin, pin_file=None, pending_file=None):
 
 
 def _entry_target(entry):
+    """S13: both launch shapes — the node path (version in the path) and the legacy `npx -y`."""
     args = entry.get("args") if isinstance(entry, dict) else None
-    if isinstance(args, list) and args and isinstance(args[-1], str) \
-            and args[-1].startswith(mcp_pin.PACKAGE + "@"):
-        return args[-1]
-    return None
+    return mcp_pin.launch_target(args)
 
 
 def _toml_block_target(toml_text, name):
@@ -314,10 +312,31 @@ def _toml_block_target(toml_text, name):
     match = bridge._block_re(f"server:{name}", "#", "").search(toml_text)
     if not match:
         return None
-    m = re.search(r'args = \["-y", "([^"]+)"\]', match.group(0))
-    if not m or not m.group(1).startswith(mcp_pin.PACKAGE + "@"):
+    m = re.search(r"^args = (\[.*\])\s*$", match.group(0), re.M)
+    if not m:
         return "<unparseable>"
-    return m.group(1)
+    try:
+        args = json.loads(m.group(1))
+    except ValueError:
+        return "<unparseable>"
+    target = mcp_pin.launch_target(args)
+    return target if target else "<unparseable>"
+
+
+def _select_generation(target):
+    """The one verified selection for a name. Callers select ONCE and hand the result to both
+    renderers, so `.mcp.json` and `.codex/config.toml` always carry the same generation even when
+    another verified generation appears mid-call. `update` passes its frozen generation instead."""
+    import octopus_install
+    return octopus_install.current_verified_generation(_target_version(target))
+
+
+def _unavailable_detail(target):
+    return f"{target} is not installed and boot-verified here; run /vibe-suite:update"
+
+
+def _unavailable_report(target):
+    return f"backend-unavailable (held; existing store content left unchanged; {_unavailable_detail(target)})"
 
 
 def _registered_targets(name, servers, toml_text):
@@ -371,10 +390,14 @@ def _advisor_env(defn):
     return env
 
 
-def json_entry(defn, target):
+def json_entry(defn, target, generation=None):
+    """S13: the launch executes the lockfile-verified install by node (`mcp_pin.launch`); with no
+    `generation` the current verified one is selected — callers that render both stores select
+    once (`_select_generation`) and pass it here."""
+    command, args = mcp_pin.launch(target, generation=generation)
     return {
-        "command": "npx",
-        "args": ["-y", target],
+        "command": command,
+        "args": args,
         "env": _advisor_env(defn),
         bridge.ADVISOR_MARKER_KEY: dict(bridge.ADVISOR_MARKER),
     }
@@ -386,12 +409,13 @@ def _toml_key(name):
     return json.dumps(name)
 
 
-def toml_body(defn, target):
+def toml_body(defn, target, generation=None):
     key = _toml_key(defn["name"])
+    command, args = mcp_pin.launch(target, generation=generation)
     lines = [
         f"[mcp_servers.{key}]",
-        'command = "npx"',
-        f'args = ["-y", "{target}"]',
+        f'command = "{command}"',
+        f"args = [{', '.join(json.dumps(a) for a in args)}]",
         "startup_timeout_sec = 60",
         "tool_timeout_sec = 900",
         f"[mcp_servers.{key}.env]",
@@ -732,7 +756,7 @@ def recover(ws):
 # Classification — the one function list, doctor and reconcile share
 # --------------------------------------------------------------------------------------------
 
-def _classify(ws, defs, doc, toml_text, pin=None, pin_file=None, pending_file=None):
+def _classify(ws, defs, doc, toml_text, pin=None, pin_file=None, pending_file=None, generation=None):
     """`{name: (state, desired_entry, desired_body, detail)}`; desired_* are None when the state
     needs no content (presence-only) or cannot be computed (invalid-registration)."""
     servers = doc.get("mcpServers", {}) if isinstance(doc, dict) else {}
@@ -777,8 +801,17 @@ def _classify(ws, defs, doc, toml_text, pin=None, pin_file=None, pending_file=No
                              f"registrations disagree: {sorted(registered)} "
                              f"({sorted(v for v in versions if v)})")
                 continue
-        desired_entry = json_entry(defn, target)
-        desired_body = toml_body(defn, target)
+        # S13: one verified selection per name, handed to BOTH renderers; none → held.
+        gen = generation if generation is not None else _select_generation(target)
+        if gen is None:
+            out[name] = ("backend-unavailable", None, None, _unavailable_detail(target))
+            continue
+        try:
+            desired_entry = json_entry(defn, target, generation=gen)
+            desired_body = toml_body(defn, target, generation=gen)
+        except mcp_pin.PinError as exc:
+            out[name] = ("backend-unavailable", None, None, str(exc))
+            continue
         json_ok = in_json and servers.get(name) == desired_entry
         toml_ok = in_toml and bridge.text_block_upsert(
             toml_text, f"server:{name}", desired_body) == toml_text
@@ -977,7 +1010,7 @@ def _collision_check(defs, doc, toml_text):
 
 
 def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False,
-              register=None, now=None):
+              register=None, now=None, generation=None):
     """Converge both stores to the definitions the operator REGISTERED. Returns `{name: transition}`.
 
     vibe-185: `register` names the definitions this call stamps and registers (`add <name>` passes
@@ -1023,7 +1056,7 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=Fal
     # acceptances ride the same transaction as the registrations they authorise.
     acceptances = danger_gate(ws, defs, confirm_danger=confirm_danger, now=now, names=sorted(acting))
 
-    classified = _classify(ws, defs, doc, toml_before, pin, pin_file, pending_file)
+    classified = _classify(ws, defs, doc, toml_before, pin, pin_file, pending_file, generation=generation)
     invalid = {n: d for n, (s_, _, _, d) in classified.items()
                if s_ == "invalid-registration" and n in acting}
     if invalid:
@@ -1035,7 +1068,7 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=Fal
     servers = doc.setdefault("mcpServers", {})
     toml_text = toml_before
     report = {}
-    for name, (state, desired_entry, desired_body, _) in classified.items():
+    for name, (state, desired_entry, desired_body, detail) in classified.items():
         if name in unreadable:
             # vibe-185 (round 3): a declared definition this targeted add could not read — its
             # stores, stamp and acceptance are left exactly as they are.
@@ -1057,15 +1090,36 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=Fal
                 report[name] = "registered (not converged by an explicit add; init/repair/update converge it)"
             else:
                 report[name] = _hold_report(ws, name, defs[name], state, ledger)
+        elif state == "backend-unavailable":
+            # S13: no boot-verified install of the target — never written, never moved to an
+            # unverified backend. An explicit add is a refusal, not a silent hold.
+            if explicit:
+                raise AdvisorError(f"advisor {name!r}: {detail}; an explicit --pin must name the "
+                                   "installed, boot-verified version — nothing has been written")
+            report[name] = f"backend-unavailable (held; existing store content left unchanged; {detail})"
         elif state == "consistent":
             report[name] = "consistent"
         else:
             if desired_entry is None:
                 # Presence-only classification carries no content; a write needs it, so the
-                # target resolves here — and a pending pin with no --pin refuses (D-c).
+                # target resolves here — and a pending pin with no --pin refuses (D-c). S13: the
+                # generation is the run's frozen one, else selected ONCE for both renderers.
                 target = resolve_backend(pin, pin_file=pin_file, pending_file=pending_file)
-                desired_entry = json_entry(defs[name], target)
-                desired_body = toml_body(defs[name], target)
+                gen = generation if generation is not None else _select_generation(target)
+                try:
+                    if gen is None:
+                        raise mcp_pin.PinError(_unavailable_detail(target))
+                    desired_entry = json_entry(defs[name], target, generation=gen)
+                    desired_body = toml_body(defs[name], target, generation=gen)
+                except mcp_pin.PinError as exc:
+                    # The selection can be invalidated between selecting and rendering; either way
+                    # this name is held (or, for an explicit add, refused) — never a crash.
+                    if explicit:
+                        raise AdvisorError(f"advisor {name!r}: {exc}; an explicit --pin must name the "
+                                           "installed, boot-verified version — nothing has been written; "
+                                           "run /vibe-suite:update") from exc
+                    report[name] = f"backend-unavailable (held; existing store content left unchanged; {exc})"
+                    continue
             servers[name] = desired_entry
             toml_text = bridge.toml_server_upsert(toml_text, name, desired_body)
             report[name] = f"{state}->registered"
@@ -1402,11 +1456,14 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
     servers = doc.setdefault("mcpServers", {})
     toml_text = toml_before
     report = {}
-    for other, (state, desired_entry, desired_body, _) in classified.items():
+    for other, (state, desired_entry, desired_body, detail) in classified.items():
         if other in held:
             report[other] = _hold_report(ws, other, defs_after[other], state, ledger)
             continue
         if state == "consistent":
+            continue
+        if state == "backend-unavailable":
+            report[other] = f"backend-unavailable (held; existing store content left unchanged; {detail})"
             continue
         if state == "registered-undeclared":
             if is_owned_entry(servers.get(other)):
@@ -1417,8 +1474,15 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
             continue
         if desired_entry is None:
             target = resolve_backend(pin, pin_file=pin_file, pending_file=pending_file)
-            desired_entry = json_entry(defs_after[other], target)
-            desired_body = toml_body(defs_after[other], target)
+            gen = _select_generation(target)          # S13: once, for both renderers
+            try:
+                if gen is None:
+                    raise mcp_pin.PinError(_unavailable_detail(target))
+                desired_entry = json_entry(defs_after[other], target, generation=gen)
+                desired_body = toml_body(defs_after[other], target, generation=gen)
+            except mcp_pin.PinError as exc:
+                report[other] = f"backend-unavailable (held; existing store content left unchanged; {exc})"
+                continue
         servers[other] = desired_entry
         toml_text = bridge.toml_server_upsert(toml_text, other, desired_body)
         report[other] = f"{state}->registered"

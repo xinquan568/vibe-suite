@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCTOR = REPO_ROOT / "scripts" / "doctor.py"
@@ -30,6 +31,18 @@ INIT = REPO_ROOT / "scripts" / "init.sh"
 import sys  # noqa: E402
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import bridge  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from octopus_fixture import start_module_seams, stop_module_seams  # noqa: E402
+
+
+def setUpModule():
+    # S13 (vibe-214): `advisor_cli add` renders a registration, which needs an installed, verified
+    # backend at the shipped pin; the seam keeps this module hermetic (no npm/npx/network).
+    start_module_seams("doctor")
+
+
+def tearDownModule():
+    stop_module_seams("doctor")
 
 
 def tree(root):
@@ -487,6 +500,27 @@ class TestAdvisorState(DoctorCase):
         self.assertEqual(rows[0]["severity"], "[MEDIUM]")
         self.assertIn("changed since it was registered", rows[0]["finding"])
         self.assertIn("/vibe-suite:advisor add probe_advisor", rows[0]["finding"])
+
+    def test_a_backend_unavailable_advisor_is_a_medium_finding_that_names_update_and_is_not_fixable(self):
+        # S13 (vibe-214): a stamped, registered advisor whose backend has no verified generation is
+        # held; the remedy is /vibe-suite:update (repair only reconciles, it cannot install).
+        self.install()
+        agents = self.ws / ".vibe-suite" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "probe_advisor.md").write_text(ADVISOR_DEFN, encoding="utf-8")
+        self._add()                                            # stamped + registered, install present
+        self.assertEqual([f for f in self.report()["findings"] if f["check"] == "advisor-state"], [])
+        empty = Path(tempfile.mkdtemp(prefix="vibe-empty-inst-"))
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        from octopus_fixture import fixture_install, shipped_pin
+        fixture_install(empty / "inst", versions=(), lock_version=shipped_pin())
+        with mock.patch.dict(os.environ, {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(empty / "inst")}):
+            rows = [f for f in self.report()["findings"] if f["check"] == "advisor-state"]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertFalse(rows[0]["auto_fixable"])
+        self.assertEqual(rows[0]["severity"], "[MEDIUM]")
+        self.assertIn("/vibe-suite:update", rows[0]["finding"])
+        self.assertNotIn("/vibe-suite:repair", rows[0]["finding"])
 
     def test_a_registration_without_a_stamp_is_a_medium_finding_that_names_add_and_is_not_fixable(self):
         self.install()

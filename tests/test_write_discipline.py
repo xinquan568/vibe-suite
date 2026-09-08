@@ -11,13 +11,16 @@ untouched. A guard a caller can forget will be forgotten, so the rule is enforce
 comments, and misses mutators reached through an alias. Matching call *shapes* on the parsed tree
 avoids both, which is what keeps a lint like this switched on rather than disabled as noisy.
 
-Scope: Python under `scripts/`, including the Python embedded in `scripts/migrate/*.sh` heredocs.
-The Node surface (`lib/jobs.mjs`'s hard-link CAS, the hooks, the runners) has different primitives
+Scope: Python under `scripts/` (including the Python embedded in `scripts/**/*.sh` heredocs), the
+extension-less Python programs directly under `bin/` (detected by their shebang), and any
+`skills/*/scripts/**/*.py` (M17 / vibe-217 — none ship today, so that tree is covered by construction and
+proved on a fixture). The Node surface (`lib/jobs.mjs`'s hard-link CAS, the hooks, the runners) has different primitives
 and is re-homed to a follow-up rather than silently covered — see `EXEMPT` below.
 """
 
 import ast
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -70,16 +73,35 @@ EXEMPT = {
 KNOWN = set()
 
 
-def _python_sources():
-    """Every Python file under `scripts/`, plus the Python embedded in migrate heredocs."""
-    for path in sorted(SCRIPTS.rglob("*.py")):
-        yield str(path.relative_to(REPO_ROOT)), path.read_text(encoding="utf-8")
-    for path in sorted(SCRIPTS.rglob("*.sh")):
+def _is_python_program(path):
+    """An extension-less executable is Python when its first line is a shebang naming python."""
+    try:
+        first = path.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        return False
+    return first.startswith("#!") and "python" in first
+
+
+def _python_sources(root=REPO_ROOT):
+    """The corpus: every Python file under `scripts/`, the Python embedded in `scripts/**/*.sh`
+    heredocs, every shebang-detected Python program directly under `bin/`, and every
+    `skills/*/scripts/**/*.py`. `root` exists so a fixture tree can exercise the selector."""
+    scripts = root / "scripts"
+    for path in sorted(scripts.rglob("*.py")):
+        yield str(path.relative_to(root)), path.read_text(encoding="utf-8")
+    for path in sorted(scripts.rglob("*.sh")):
         text = path.read_text(encoding="utf-8")
         # `python3 - ... <<'PY' ... PY` — the quoted delimiter means no shell expansion, so the
         # body is literal Python and parses as-is.
         for index, block in enumerate(re.findall(r"<<'PY'\n(.*?)\nPY\n", text, re.S)):
-            yield f"{path.relative_to(REPO_ROOT)}#heredoc{index}", block
+            yield f"{path.relative_to(root)}#heredoc{index}", block
+    bin_dir = root / "bin"
+    if bin_dir.is_dir():
+        for path in sorted(bin_dir.iterdir()):
+            if path.is_file() and _is_python_program(path):
+                yield str(path.relative_to(root)), path.read_text(encoding="utf-8")
+    for path in sorted((root / "skills").glob("*/scripts/**/*.py")):
+        yield str(path.relative_to(root)), path.read_text(encoding="utf-8")
 
 
 def _mutations(tree):
@@ -183,11 +205,39 @@ class NoDirectFilesystemMutation(unittest.TestCase):
 
     def test_the_sweep_actually_sees_the_scripts(self):
         """A lint that scans nothing passes trivially. Two earlier tests in this repo could not
-        fail; this asserts the corpus is non-empty and includes the heredocs."""
+        fail; this asserts the corpus is non-empty and includes the heredocs — and, since M17
+        (vibe-217), the extension-less Python programs under `bin/` but not `bin/README.md`."""
         names = [name for name, _ in _python_sources()]
         self.assertGreater(len(names), 10, f"the sweep found only {names}")
         self.assertTrue(any("#heredoc" in name for name in names),
                         "no embedded Python was extracted from scripts/migrate/*.sh")
+        self.assertIn("bin/vibe-report", names)
+        self.assertIn("bin/vibe-build-docs", names)
+        self.assertNotIn("bin/README.md", names)
+
+    def test_the_selector_reaches_skill_scripts(self):
+        """The live tree ships no `skills/*/scripts/` today, so coverage of that tree is proved on a
+        fixture: nested Python is selected, the skill's SKILL.md is not, and under `bin/` a Python
+        shebang selects while a `#!/bin/sh` one does not."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "scripts").mkdir()
+            (root / "skills" / "x" / "scripts" / "sub").mkdir(parents=True)
+            (root / "skills" / "x" / "scripts" / "a.py").write_text("X = 1\n")
+            (root / "skills" / "x" / "scripts" / "sub" / "b.py").write_text("Y = 2\n")
+            (root / "skills" / "x" / "SKILL.md").write_text("# not python\n")
+            (root / "bin").mkdir()
+            (root / "bin" / "tool-sh").write_text("#!/bin/sh\necho hi\n")
+            (root / "bin" / "tool-py").write_text("#!/usr/bin/env python3\nprint(1)\n")
+            (root / "bin" / "README.md").write_text("docs\n")
+            names = sorted(name for name, _ in _python_sources(root=root))
+        self.assertEqual(names, ["bin/tool-py", "skills/x/scripts/a.py", "skills/x/scripts/sub/b.py"])
+
+    def test_the_exemption_lists_are_empty(self):
+        """`KNOWN` and `SHELL_KNOWN` "stay empty" by their comments; `test_the_baseline_only_shrinks`
+        only removes stale entries, so this is the assertion that makes emptiness mechanical (M17)."""
+        self.assertEqual(KNOWN, set())
+        self.assertEqual(SHELL_KNOWN, set())
 
     def test_the_detector_recognises_a_mutation(self):
         """And that it does not fire on a string method or a stdout write."""

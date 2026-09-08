@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: ISC
 """bin/vibe-report — render the quality-report blob into self-contained HTML (F8.2, vibe-49).
 
-Stdlib-only; no Claude Code required. Usage:
+Python standard library plus the repository's audited write primitive (`scripts/lib/bridge.py`);
+no Claude Code required. Usage:
 
     bin/vibe-report --data <blob.json> --out-dir <dir> [--template <path>]
 
@@ -14,13 +15,22 @@ over `file://` with no network (`templates/report/vendor/VENDORED.md` records th
 provenance and digests).
 
 Concurrency discipline (the E6.3 acceptance): the caller allocates the blob via `mktemp` in its
-own scratch space (never a fixed path — the nlpm S12 defect); this renderer stages `index.html`
-through a per-process unique temp file and `os.replace`, and creates each archive
-(`report-<UTC>-<pid>-<6hex>.html`) with `O_EXCL`, retrying with a fresh suffix on collision.
-Concurrent runs therefore each land a complete archive, and `index.html` is always exactly one
-run's whole output.
+own scratch space (never a fixed path — the nlpm S12 defect); this renderer writes through the
+audited primitive (M17 / vibe-217): each archive (`report-<UTC>-<pid>-<6hex>.html`) is published
+with `bridge.publish_below` — `O_EXCL` semantics from a fully written scratch inode, retrying with a
+fresh suffix when a regular file already holds the name — and `index.html` is replaced with
+`bridge.write_below` (an unpredictable scratch in the same directory, then `os.replace`). Concurrent
+runs therefore each land a complete archive, and `index.html` is always exactly one run's whole
+output. The containment anchor is the nearest existing directory *above* `--out-dir`, so an absent
+out-dir is created through the symlink-refusing descent and a symlinked (or regular-file) out-dir is
+refused; symlinks at or above that anchor are followed (they are the user's existing directories).
 
-Exit codes: 0 rendered; 2 contract refusal (unreadable blob, schema violation — nothing written).
+Exit codes: 0 rendered; 2 refused. Two kinds of refusal share the code: a *contract* refusal
+(unreadable blob, schema violation) fires before any write, so nothing is written; an *output*
+refusal from the primitive (a symlinked or non-directory out-dir, a symlinked `index.html`, a
+symlink sitting at an archive name) can leave completed output behind — with a symlinked out-dir the
+first write (the archive) refuses and nothing lands, but a pre-existing symlink at `index.html` is
+refused only after the archive has been published. Refusal is not rollback.
 """
 
 import argparse
@@ -30,12 +40,15 @@ import datetime
 import html
 import json
 import os
+import runpy
 import sys
-import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
+runpy.run_path(str(REPO / "scripts" / "_bootstrap.py"))
+
+import bridge  # noqa: E402  (scripts/lib — the audited write primitive)
 DEFAULT_TEMPLATE = REPO / "templates" / "report" / "single.html"
 VENDOR_BUNDLE = REPO / "templates" / "report" / "vendor" / "g6.min.js"
 
@@ -394,42 +407,24 @@ def render_html(blob, template_text, bundle_text):
 
 
 # --------------------------------------------------------------------------------------------
-# Writing — unique archives (O_EXCL + retry), atomic index via unique staging
+# Writing — unique archives (publish_below: O_EXCL semantics + retry), atomic index (write_below)
 # --------------------------------------------------------------------------------------------
 
-def _write_archive(out_dir, content):
+def _write_archive(anchor, out_dir, content):
+    """Publish one archive under a fresh name; `publish_below` answers False when a regular file
+    already holds the name (retry with a new suffix) and raises for anything the primitive refuses."""
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     data = content.encode("utf-8")
     for _ in range(16):
         suffix = binascii.hexlify(os.urandom(3)).decode("ascii")
         name = f"report-{stamp}-{os.getpid()}-{suffix}.html"
-        try:
-            fd = os.open(os.path.join(out_dir, name),
-                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            continue
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        return name
+        if bridge.publish_below(anchor, Path(out_dir) / name, data):
+            return name
     raise OSError("could not create a unique archive name after 16 attempts")
 
 
-def _write_index(out_dir, content):
-    fd, staging = tempfile.mkstemp(prefix=".index-", suffix=".tmp", dir=out_dir)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(content.encode("utf-8"))
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(staging, os.path.join(out_dir, "index.html"))
-    except BaseException:
-        try:
-            os.unlink(staging)
-        except OSError:
-            pass
-        raise
+def _write_index(anchor, out_dir, content):
+    bridge.write_below(anchor, Path(out_dir) / "index.html", content)
 
 
 def main(argv=None):
@@ -458,9 +453,15 @@ def main(argv=None):
     content = render_html(blob, template_text, bundle_text)
 
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    archive = _write_archive(str(out_dir), content)
-    _write_index(str(out_dir), content)
+    # The anchor is the nearest existing directory ABOVE out_dir, so out_dir itself is always below
+    # it: created through the audited descent when absent, refused when it is a symlink or a file.
+    anchor = bridge.existing_anchor(out_dir.absolute().parent)
+    try:
+        archive = _write_archive(anchor, out_dir, content)
+        _write_index(anchor, out_dir, content)
+    except bridge.BridgeError as exc:
+        print(f"vibe-report: {exc}", file=sys.stderr)
+        return 2
     print(f"vibe-report: wrote {out_dir / 'index.html'} (archive {archive})")
     return 0
 

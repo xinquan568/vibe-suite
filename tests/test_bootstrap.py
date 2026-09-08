@@ -37,11 +37,11 @@ TOP = sorted([
 ])
 BIN_PROGRAMS = sorted([
     "vibe-badge", "vibe-build-case-studies-index", "vibe-build-docs", "vibe-build-reference-md",
-    "vibe-build-site-report-pages", "vibe-build-vocab-data", "vibe-check",
+    "vibe-build-site-report-pages", "vibe-build-vocab-data", "vibe-check", "vibe-report",
 ])
 HEREDOCS = sorted(["common.sh", "migrate-config.sh", "migrate-history.sh", "migrate-sentinels.sh", "migrate-state.sh"])
 LIB_PROGRAMS = sorted(["store.py", "init_bridge.py", "unbridge.py"])
-STDLIB_ONLY_PROGRAMS = sorted(["scripts/lib/bridge.py", "scripts/lib/config.py", "scripts/lib/scope_tag.py", "bin/vibe-report"])
+STDLIB_ONLY_PROGRAMS = sorted(["scripts/lib/bridge.py", "scripts/lib/config.py", "scripts/lib/scope_tag.py"])
 
 
 def local_names(root=REPO_ROOT):

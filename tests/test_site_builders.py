@@ -509,3 +509,27 @@ class RenderedSite(BuilderBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SymlinkedOut(BuilderBase):
+    """M17 / vibe-217: writes go through the audited primitive, anchored above --out — a symlinked
+    --out is refused with exit 2 and nothing lands in its target; an absent nested --out is created."""
+
+    def test_each_builder_refuses_a_symlinked_out(self):
+        for name, _, _ in BUILDERS:
+            with self.subTest(builder=name):
+                target = self.tmp / f"{name}-target"; target.mkdir()
+                link = self.tmp / f"{name}-out-link"; link.symlink_to(target)
+                result = run_builder(name, CORPUS, link)
+                self.assertEqual(result.returncode, 2, f"{name}: {result.stdout}{result.stderr}")
+                self.assertIn(link.name, result.stderr)
+                self.assertEqual(list(target.iterdir()), [], f"{name} wrote into the symlink's target")
+
+    def test_each_builder_creates_a_nested_absent_out(self):
+        for name, slug, page in BUILDERS:
+            with self.subTest(builder=name):
+                out = self.tmp / name / "deep" / "er"
+                result = run_builder(name, CORPUS, out)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((out / "data" / f"{slug}.json").is_file())
+                self.assertTrue((out / page).is_file())

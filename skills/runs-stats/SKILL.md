@@ -8,7 +8,7 @@ description: "Generate time-bucketed static HTML statistics dashboards over the 
 Produces a set of **static HTML dashboards** over everything under `runs/`, bucketed by
 **day / week / month / all-time**, so the latest activity and its history are visible by just
 opening files. Every generated page **inlines the vendored Chart.js**
-(`vendor/chart.umd.min.js`, see `vendor/VENDORED.md`) — no CDN, no network; charts render from
+(`templates/runs-stats/vendor/chart.umd.min.js`, see its `VENDORED.md`) — no CDN, no network; charts render from
 `file://`. Pages follow the OS light/dark setting automatically. Read-only over `runs/`; no
 MCP, no git; **Python standard library only** (uses `zoneinfo`, no pip/venv).
 
@@ -28,7 +28,7 @@ profile's `id_pattern`** into the generator — resolve the profile per the issu
 (`.vibe-suite.md` `issue2pr_profile:` → `profiles/<name>.md`) and read its `id_pattern` field:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/runs-stats/scripts/generate_runs_stats.py" \
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/runs_stats/main.py" \
   --id-pattern '<the profile id_pattern, e.g. ^vibe-(\d+)$>'
 ```
 
@@ -113,19 +113,23 @@ data-quality footer. **Reviewer token panels label each run from its recorded me
 the run's model field when present, else its backend, else `(unrecorded)` — never a
 hardcoded model name.
 
-## Correctness guarantees (verified by tests/test_runs_stats.py)
+## Correctness guarantees (verified by tests/test_runs_stats.py and tests/test_runs_stats_parsers.py)
 
 Tz-aware bucketing (a 17:30 UTC run buckets to the next day in Asia/Shanghai) · accurate
 reviewer tokens from backend event streams · timing de-duplicated across summary/iter/per-repo
-logs · `</` escaped so a `</script>` in any timeline can't break the page · a single malformed
-file becomes a warning, never aborts · immutability: past files frozen, only
+logs · `</` escaped so a `</script>` in any timeline can't break the page · a single malformed file — unparseable, **or** parseable with the wrong shape (a `rounds`
+that is not a list, a numeric `status`, a non-object `state.json`) — becomes a warning, never
+aborts · an existing `history.json` that cannot be read is **refused** (exit 2), never silently
+rebuilt; `--reset-history` rebuilds it deliberately · every write goes through the audited
+primitive (`scripts/lib/bridge.py`): atomic replacement, missing report directories created through
+the symlink-refusing descent, a symlinked reports directory or history file refused (exit 2) · immutability: past files frozen, only
 `--force-regenerate`/`--period` overwrite them · ad-hoc isolation leaves `history.json`
 byte-identical · generated pages carry no external resource references.
 
 ## Quick checks
 
 ```bash
-GEN="${CLAUDE_PLUGIN_ROOT}/skills/runs-stats/scripts/generate_runs_stats.py"
+GEN="${CLAUDE_PLUGIN_ROOT}/scripts/runs_stats/main.py"
 PATTERN='^vibe-(\d+)$'                     # example — read the real one from the profile
 python3 "$GEN" --id-pattern "$PATTERN"                                    # live buckets + index
 python3 "$GEN" --id-pattern "$PATTERN" --force-regenerate --period 2026-07  # fix one month

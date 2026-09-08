@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>__TITLE__</title>
+<script>__CHART_BUNDLE__</script>
+<script>try{var _t=localStorage.getItem('runs-stats-theme');if(_t==='light'||_t==='dark')document.documentElement.setAttribute('data-theme',_t);}catch(e){}</script>
+<style>
+:root{--bg:#0f1419;--card:#1a2029;--ink:#e6edf3;--mut:#8b97a6;--line:#2a323d;--green:#3fb950;--amber:#d29922;--red:#f85149;--blue:#58a6ff}
+@media (prefers-color-scheme: light){:root:not([data-theme]){--bg:#f6f8fa;--card:#ffffff;--ink:#1f2328;--mut:#656d76;--line:#d0d7de;--green:#1a7f37;--amber:#9a6700;--red:#cf222e;--blue:#0969da}}
+:root[data-theme="light"]{--bg:#f6f8fa;--card:#ffffff;--ink:#1f2328;--mut:#656d76;--line:#d0d7de;--green:#1a7f37;--amber:#9a6700;--red:#cf222e;--blue:#0969da}
+.theme-btn{position:fixed;top:12px;right:14px;z-index:60;display:inline-flex;align-items:center;gap:6px;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:18px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.theme-btn:hover{border-color:var(--blue)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}
+header{padding:22px 26px;border-bottom:1px solid var(--line)}h1{margin:0 0 4px;font-size:20px}.sub{color:var(--mut);font-size:12px}
+.wrap{padding:18px 26px;max-width:1300px;margin:0 auto}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0}
+section h2{margin:0 0 12px;font-size:15px}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line)}
+th{color:var(--mut);font-weight:600}.right{text-align:right}.mut{color:var(--mut)}.mono{font-family:ui-monospace,Menlo,monospace}
+.chartbox{position:relative;height:240px}.frozen{color:var(--amber)}.cur{color:var(--green)}
+</style></head>
+<body>
+<button id="theme-btn" class="theme-btn" title="Theme — click to cycle Auto / Light / Dark"></button>
+<header><h1>__TITLE__</h1><div class="sub" id="sub"></div></header>
+<div class="wrap" id="app"></div>
+<script id="hist" type="application/json">__DATA__</script>
+<script>
+const H=JSON.parse(document.getElementById('hist').textContent);
+const cssVar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function applyChartTheme(){Chart.defaults.color=cssVar('--mut');Chart.defaults.borderColor=cssVar('--line');}
+applyChartTheme();
+// Manual theme override (top-right button), persisted; 'auto' follows the OS.
+const THEME_KEY='runs-stats-theme', THEME_SEQ=['auto','light','dark'], THEME_LABEL={auto:'🖥 Auto',light:'☀ Light',dark:'🌙 Dark'};
+function storedTheme(){try{const v=localStorage.getItem(THEME_KEY);return (v==='light'||v==='dark')?v:'auto';}catch(e){return 'auto';}}
+function setTheme(mode){
+  try{ mode==='auto'?localStorage.removeItem(THEME_KEY):localStorage.setItem(THEME_KEY,mode); }catch(e){}
+  const root=document.documentElement;
+  if(mode==='auto') root.removeAttribute('data-theme'); else root.setAttribute('data-theme',mode);
+  const btn=document.getElementById('theme-btn'); if(btn) btn.textContent=THEME_LABEL[mode];
+  applyChartTheme(); if(typeof trendChart!=='undefined'){try{trendChart.update()}catch(e){}}
+}
+const esc=s=>(s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtK=n=>n==null?'—':(n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n));
+const fmtDur=s=>{if(s==null)return '—';s=Math.round(s);const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?`${h}h ${m}m`:(m?`${m}m`:`${s}s`);};
+const ck=H.config_key||{};
+document.getElementById('sub').innerHTML=`tz <b>${esc(ck.tz||'UTC')}</b> · archived:${ck.include_archived} · legacy:${ck.include_legacy} · buckets: ${Object.keys(H.buckets||{}).length}`;
+const B=H.buckets||{};
+function rows(kind){return Object.entries(B).filter(([id,v])=>v.kind===kind).sort((a,b)=>a[0]<b[0]?1:-1);}
+function path(id,kind){return kind==='all-time'?'all-time.html':`${kind}/${id}.html`;}
+function tbl(title,kind){
+  const rs=rows(kind);if(!rs.length)return '';
+  let h=`<section><h2>${esc(title)} (${rs.length})</h2><table><thead><tr>
+   <th>Period</th><th>State</th><th class="right">Tasks</th><th class="right">Runs</th>
+   <th class="right">✓/⏸/✗</th><th class="right">Rev tok</th><th class="right">Wkr tok≈</th>
+   <th class="right">Active</th><th class="right">PRs</th><th class="right">Find.</th><th>as_of</th></tr></thead><tbody>`;
+  rs.forEach(([id,v])=>{const k=v.kpis||{};
+    h+=`<tr><td><a href="${esc(path(id,kind))}">${esc(id)}</a></td>
+     <td class="${v.frozen?'frozen':'cur'}">${v.frozen?'❄ archived':'live'}</td>
+     <td class="right">${k.tasks??'—'}</td><td class="right">${k.runs??'—'}</td>
+     <td class="right">${k.success||0}/${k.stopped||0}/${k.failed||0}</td>
+     <td class="right">${fmtK(k.reviewer_tokens)}</td><td class="right mut">≈${fmtK(k.worker_tokens_est)}</td>
+     <td class="right">${fmtDur(k.active_seconds)}</td><td class="right">${k.prs||0}</td><td class="right">${k.findings||0}</td>
+     <td class="mut" style="font-size:11px">${esc(v.as_of||'')}</td></tr>`;});
+  return h+'</tbody></table></section>';
+}
+let app=document.getElementById('app'),h='';
+if(B['all-time']){const k=B['all-time'].kpis||{};
+  h+=`<section><h2>All-time</h2><p><a href="all-time.html">Open the full all-time dashboard →</a></p>
+   <div class="mut">${k.tasks} tasks · ${k.runs} runs · ${fmtK(k.reviewer_tokens)} reviewer tokens · ${fmtDur(k.active_seconds)} active · ${k.prs} PRs</div></section>`;}
+h+=`<section><h2>Monthly trend</h2><div class="chartbox"><canvas id="trend"></canvas></div></section>`;
+h+=tbl('Months','month')+tbl('Weeks','week')+tbl('Days','day');
+app.innerHTML=h;
+const mr=rows('month').slice().reverse();
+const trendChart=new Chart(document.getElementById('trend'),{data:{labels:mr.map(x=>x[0]),datasets:[
+  {type:'bar',label:'runs',data:mr.map(x=>(x[1].kpis||{}).runs||0),backgroundColor:'#3fb950',yAxisID:'y'},
+  {type:'line',label:'reviewer tokens',data:mr.map(x=>(x[1].kpis||{}).reviewer_tokens||0),borderColor:'#d29922',yAxisID:'y1',tension:.25}]},
+ options:{scales:{y:{position:'left',beginAtZero:true},y1:{position:'right',beginAtZero:true,grid:{drawOnChartArea:false}}}}});
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{applyChartTheme();try{trendChart.update()}catch(e){}});
+(function(){ const btn=document.getElementById('theme-btn'); setTheme(storedTheme());
+  if(btn) btn.onclick=()=>setTheme(THEME_SEQ[(THEME_SEQ.indexOf(storedTheme())+1)%THEME_SEQ.length]); })();
+</script></body></html>

@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>__TITLE__</title>
+<script>__CHART_BUNDLE__</script>
+<script>try{var _t=localStorage.getItem('runs-stats-theme');if(_t==='light'||_t==='dark')document.documentElement.setAttribute('data-theme',_t);}catch(e){}</script>
+<style>
+/* Dark is the default (also used when the OS expresses no preference). */
+:root{
+ --bg:#0f1419;--card:#1a2029;--ink:#e6edf3;--mut:#8b97a6;--line:#2a323d;
+ --hover:#20262f;--input:#0d1117;--pre:#0b0e12;--drill:#11161d;--badge-ink:#0b0e12;--on-ink:#08111f;
+ --green:#3fb950;--teal:#39c5cf;--amber:#d29922;--red:#f85149;--blue:#58a6ff;--grey:#6e7681;--slate:#7d8590;
+ --frozen-bg:#3a2d12;--frozen-ink:#f0c674;}
+/* Light theme — auto when the OS is light AND no manual override is active. */
+@media (prefers-color-scheme: light){:root:not([data-theme]){
+ --bg:#f6f8fa;--card:#ffffff;--ink:#1f2328;--mut:#656d76;--line:#d0d7de;
+ --hover:#eef1f4;--input:#ffffff;--pre:#f6f8fa;--drill:#f7f9fb;--badge-ink:#ffffff;--on-ink:#ffffff;
+ --green:#1a7f37;--teal:#0a7c86;--amber:#9a6700;--red:#cf222e;--blue:#0969da;--grey:#6e7781;--slate:#57606a;
+ --frozen-bg:#fff8e6;--frozen-ink:#7a5c00;}}
+/* Manual override via the toggle button — wins over the OS setting. (data-theme="dark" falls back to the :root dark defaults.) */
+:root[data-theme="light"]{
+ --bg:#f6f8fa;--card:#ffffff;--ink:#1f2328;--mut:#656d76;--line:#d0d7de;
+ --hover:#eef1f4;--input:#ffffff;--pre:#f6f8fa;--drill:#f7f9fb;--badge-ink:#ffffff;--on-ink:#ffffff;
+ --green:#1a7f37;--teal:#0a7c86;--amber:#9a6700;--red:#cf222e;--blue:#0969da;--grey:#6e7781;--slate:#57606a;
+ --frozen-bg:#fff8e6;--frozen-ink:#7a5c00;}
+.theme-btn{position:fixed;top:12px;right:14px;z-index:60;display:inline-flex;align-items:center;gap:6px;
+ background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:18px;padding:5px 12px;
+ font:inherit;font-size:12px;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.theme-btn:hover{border-color:var(--blue)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
+ font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}
+header{padding:22px 26px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,var(--card),var(--bg))}
+h1{margin:0 0 4px;font-size:20px}.sub{color:var(--mut);font-size:12px}
+.wrap{padding:18px 26px;max-width:1500px;margin:0 auto}
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin:6px 0 18px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.kpi .n{font-size:22px;font-weight:700}.kpi .l{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.kpi .x{color:var(--mut);font-size:11px;margin-top:2px}
+.frozen-banner{background:var(--frozen-bg);border:1px solid var(--amber);border-radius:10px;padding:8px 12px;margin:8px 0;color:var(--frozen-ink)}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0}
+section h2{margin:0 0 12px;font-size:15px}
+.grid{display:grid;gap:16px}.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(4,1fr)}
+@media(max-width:1000px){.g2,.g3,.g4{grid-template-columns:1fr}}
+.chartbox{position:relative;min-height:230px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mut);font-weight:600;cursor:pointer;user-select:none;position:sticky;top:0;background:var(--card)}
+tbody tr:hover{background:var(--hover)}
+.badge{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;font-weight:600;color:var(--badge-ink)}
+.b-success{background:var(--green)}.b-stopped{background:var(--amber)}.b-failed{background:var(--red)}
+.b-in_progress{background:var(--blue)}.b-pending{background:var(--grey);color:#fff}.b-unknown{background:var(--slate);color:#fff}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.right{text-align:right}.mut{color:var(--mut)}.small{font-size:12px}
+.drill{background:var(--drill);border:1px dashed var(--line);border-radius:8px;padding:10px;margin:6px 0}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+input[type=search]{background:var(--input);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:7px 10px;min-width:230px}
+.chip{border:1px solid var(--line);background:var(--input);color:var(--mut);border-radius:16px;padding:3px 10px;font-size:12px;cursor:pointer}
+.chip.on{background:var(--blue);color:var(--on-ink);border-color:var(--blue)}
+pre.tl{white-space:pre-wrap;background:var(--pre);border:1px solid var(--line);border-radius:6px;padding:10px;max-height:380px;overflow:auto;font-size:12px}
+.warn{color:var(--amber)}.expander{cursor:pointer;color:var(--blue)}
+.flag{font-size:10px;padding:1px 6px;border:1px solid var(--line);border-radius:10px;color:var(--mut);margin-left:6px}
+</style></head>
+<body>
+<button id="theme-btn" class="theme-btn" title="Theme — click to cycle Auto / Light / Dark"></button>
+<header><h1>__TITLE__</h1><div class="sub" id="freshness"></div></header>
+<div class="wrap" id="app"></div>
+<script id="report-data" type="application/json">__DATA__</script>
+<script>
+const R = JSON.parse(document.getElementById('report-data').textContent);
+const esc = s => (s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const PAL = {success:'#3fb950',stopped:'#d29922',failed:'#f85149',in_progress:'#58a6ff',pending:'#6e7681',unknown:'#7d8590'};
+const fmtDur = s => { if(s==null) return '—'; s=Math.round(s); const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
+  return h?`${h}h ${m}m`:(m?`${m}m ${x}s`:`${x}s`); };
+const fmtK = n => n==null?'—':(n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n));
+const sum = a => a.reduce((x,y)=>x+y,0);
+// Charts read their text/grid colors from the active CSS theme (light or dark) so they match the page.
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function applyChartTheme(){ Chart.defaults.color = cssVar('--mut'); Chart.defaults.borderColor = cssVar('--line'); }
+applyChartTheme();
+// Manual theme override (top-right button), persisted; 'auto' follows the OS.
+const THEME_KEY='runs-stats-theme', THEME_SEQ=['auto','light','dark'], THEME_LABEL={auto:'🖥 Auto',light:'☀ Light',dark:'🌙 Dark'};
+function storedTheme(){try{const v=localStorage.getItem(THEME_KEY);return (v==='light'||v==='dark')?v:'auto';}catch(e){return 'auto';}}
+function setTheme(mode){
+  try{ mode==='auto'?localStorage.removeItem(THEME_KEY):localStorage.setItem(THEME_KEY,mode); }catch(e){}
+  const root=document.documentElement;
+  if(mode==='auto') root.removeAttribute('data-theme'); else root.setAttribute('data-theme',mode);
+  const btn=document.getElementById('theme-btn'); if(btn) btn.textContent=THEME_LABEL[mode];
+  applyChartTheme(); charts.forEach(c=>{try{c.update()}catch(e){}});
+}
+
+function kpi(n,l,x){return `<div class="kpi"><div class="n">${n}</div><div class="l">${esc(l)}</div>${x?`<div class="x">${esc(x)}</div>`:''}</div>`;}
+
+function statusBadge(cat,sub){return `<span class="badge b-${cat}">${esc(cat)}</span>${sub&&sub!=cat?` <span class="mut small">${esc(sub)}</span>`:''}`;}
+
+let charts=[];
+function donut(id,obj){const ctx=document.getElementById(id);if(!ctx)return;
+  const labels=Object.keys(obj),vals=labels.map(k=>obj[k]);
+  charts.push(new Chart(ctx,{type:'doughnut',data:{labels,datasets:[{data:vals,
+   backgroundColor:labels.map(l=>PAL[l]||'#58a6ff')}]},options:{plugins:{legend:{position:'right'}}}}));}
+function bar(id,obj,color){const ctx=document.getElementById(id);if(!ctx)return;
+  const labels=Object.keys(obj),vals=labels.map(k=>obj[k]);
+  charts.push(new Chart(ctx,{type:'bar',data:{labels,datasets:[{data:vals,backgroundColor:color||'#58a6ff'}]},
+   options:{plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}}));}
+
+function render(){
+  const a=R.aggregates, runs=R.runs, tickets=R.tickets;
+  const b=R.bucket||{};
+  const scope = b.label ? `<b>${esc(b.label)}</b>${b.window?` (${esc(b.window)}, ${esc(R.tz||'UTC')})`:''} · ` : '';
+  document.getElementById('freshness').innerHTML =
+    scope + `generated ${esc(R.generated_at)}${R.as_of&&R.as_of!=R.generated_at?` · as_of ${esc(R.as_of)}`:''} · `+
+    `runs root <span class="mono">${esc(R.runs_root)}</span> · filters: ${esc(R.filters)} · `+
+    `<span class="${R.warnings.length?'warn':''}">${R.warnings.length} parse warning(s)</span>`;
+  const app=document.getElementById('app');
+  if(b.frozen){const fb=document.createElement('div');fb.className='frozen-banner';
+    fb.innerHTML=`❄ <b>Archived snapshot</b> for ${esc(b.label)} — frozen as of ${esc(R.as_of||R.generated_at)}. `+
+      `The source may have changed since; run <span class="mono">--force-regenerate --period ${esc(b.id)}</span> to refresh.`;
+    app.appendChild(fb);}
+  const nTickets=tickets.length, nRuns=runs.length;
+  const rt=a.reviewer_tokens, wt=a.worker_tokens_est;
+  let h='';
+  h+=`<div class="kpis">
+    ${kpi(nTickets,'Tasks (tickets)',`${nRuns} runs · ${(nRuns/Math.max(nTickets,1)).toFixed(1)}/ticket`)}
+    ${kpi(a.status_dist.success||0,'Success')}
+    ${kpi((a.status_dist.stopped||0),'Stopped')}
+    ${kpi((a.status_dist.failed||0),'Failed')}
+    ${kpi(fmtK(rt.input_total+rt.output),'Reviewer tokens',`accurate · ${(100*rt.input_cached/Math.max(rt.input_total,1)).toFixed(0)}% cached`)}
+    ${kpi('≈'+fmtK(wt.input_total+wt.output),'Worker tokens','estimate')}
+    ${kpi(fmtDur(a.active_total),'Active time',`median ${fmtDur(a.active_median)}`)}
+    ${kpi(a.prs.length,'PRs opened')}
+    ${kpi(a.commits,'Commits')}
+    ${kpi(a.findings,'Findings caught')}
+    ${kpi(a.tool_calls,'Reviewer tool calls')}
+  </div>`;
+
+  h+=`<section><h2>Status &amp; composition</h2><div class="grid g4">
+    <div><div class="mut small">Status</div><div class="chartbox"><canvas id="c_status"></canvas></div></div>
+    <div><div class="mut small">Scenario</div><div class="chartbox"><canvas id="c_scn"></canvas></div></div>
+    <div><div class="mut small">Repo</div><div class="chartbox"><canvas id="c_repo"></canvas></div></div>
+    <div><div class="mut small">Reviewer backend</div><div class="chartbox"><canvas id="c_bk"></canvas></div></div>
+  </div></section>`;
+
+  h+=`<section><h2>Throughput over time</h2><div class="chartbox"><canvas id="c_day"></canvas></div></section>`;
+
+  // ticket table
+  h+=`<section><h2>Tasks (${nTickets})</h2>
+   <div class="toolbar"><input type="search" id="q" placeholder="filter tickets…"/>
+     <span id="chips"></span></div>
+   <div style="overflow:auto;max-height:640px"><table id="ttab"><thead><tr>
+     <th data-k="key">Ticket</th><th data-k="title">Title</th><th data-k="scenario">Scenario</th>
+     <th data-k="status">Status</th><th data-k="attempts" class="right">Att.</th>
+     <th data-k="active" class="right">Active</th><th data-k="elapsed" class="right">Elapsed</th>
+     <th data-k="revtok" class="right">Rev tok</th><th data-k="wtok" class="right">Wkr tok≈</th>
+     <th data-k="findings" class="right">Find.</th><th data-k="tests">Tests</th>
+     <th data-k="commits" class="right">Cmts</th><th>PR(s)</th></tr></thead><tbody id="tbody"></tbody></table></div>
+   </section>`;
+
+  // tokens & cost
+  h+=`<section><h2>Tokens &amp; cost</h2>
+    <div class="grid g2">
+     <div><div class="mut small">Reviewer tokens per run (stacked)</div><div class="chartbox"><canvas id="c_tok"></canvas></div></div>
+     <div><div class="mut small">Cost</div><div id="cost" class="small"></div></div>
+    </div></section>`;
+
+  // review quality
+  h+=`<section><h2>Review quality</h2><div class="grid g2">
+     <div><div class="mut small">Verdict distribution</div><div class="chartbox"><canvas id="c_verdict"></canvas></div></div>
+     <div class="small">
+      <p><b>Approved without rework:</b> ${a.approved_no_rework} round(s) — reviewer required no changes.</p>
+      <p><b>Rework converged in one iteration:</b> ${a.rework_one_iter} round(s).</p>
+      <p><b>Multi-round runs:</b> ${a.multi_round}.</p>
+      <p class="mut">Findings caught total: ${a.findings}. Reviewer tokens / finding:
+         ${a.findings?fmtK(Math.round((rt.input_total+rt.output)/a.findings)):'—'}.</p>
+     </div></div></section>`;
+
+  // reliability
+  h+=`<section><h2>Reliability</h2><div class="grid g2">
+     <div><div class="mut small">Stop reasons</div><div class="chartbox"><canvas id="c_stop"></canvas></div></div>
+     <div class="small">
+       <p><b>Tests</b> (coverage: ${a.tests_coverage_runs}/${nRuns} runs recorded test data):
+        ${a.tests.run} run · ${a.tests.failed} failed · ${a.tests.errors} errors · ${a.tests.skipped} skipped.</p>
+       <p class="mut">Metrics show data-coverage because many logs omit these fields; absent ≠ zero.</p>
+     </div></div></section>`;
+
+  // containers
+  if(R.containers.length){
+    h+=`<section><h2>Containers (batch / epic) — not counted as tasks</h2>
+      <table><thead><tr><th>Container</th><th>Type</th><th>Status</th><th>Children</th><th>Tickets</th></tr></thead><tbody>`;
+    R.containers.forEach(c=>{h+=`<tr><td class="mono small">${esc(c.id)}</td><td>${esc(c.type)}</td>
+      <td>${esc(c.status||'—')}</td><td class="right">${c.child_run_ids.length}</td>
+      <td class="small mut">${esc((c.ticket_keys||[]).join(', '))}</td></tr>`;});
+    h+=`</tbody></table></section>`;
+  }
+
+  // data quality
+  h+=`<section><h2>Data quality</h2><div class="small">
+     <p>${R.warnings.length} parse warning(s). Manifest-only runs and legacy attempts are parsed via fallbacks.</p>
+     ${R.warnings.length?`<details><summary class="expander">show warnings</summary><pre class="tl">${esc(R.warnings.join('\n'))}</pre></details>`:''}
+     <p class="mut">Token provenance: reviewer = accurate (codex-reported event streams); worker = ≈ estimate (file-size). Active time de-duplicated across step/iter/per-repo so repeated durations are not multiplied.</p>
+   </div></section>`;
+
+  app.innerHTML=h;
+
+  // charts
+  donut('c_status',a.status_dist);
+  bar('c_scn',a.scenario_dist,'#39c5cf');
+  bar('c_repo',a.repo_dist,'#a371f7');
+  bar('c_bk',a.backend_dist,'#58a6ff');
+  // throughput
+  const days=Object.keys(a.per_day).sort();
+  const dctx=document.getElementById('c_day');
+  charts.push(new Chart(dctx,{data:{labels:days,datasets:[
+    {type:'bar',label:'runs',data:days.map(d=>a.per_day[d].runs),backgroundColor:'#3fb950',yAxisID:'y'},
+    {type:'line',label:'reviewer tokens',data:days.map(d=>a.per_day[d].reviewer_tokens),borderColor:'#d29922',yAxisID:'y1',tension:.25}
+  ]},options:{scales:{
+    y:{position:'left',beginAtZero:true},
+    y1:{position:'right',grid:{drawOnChartArea:false},beginAtZero:true}}}}));
+  // tokens per run stacked
+  const rr=runs.slice().sort((x,y)=>(y.reviewer_tokens.input_total+y.reviewer_tokens.output)-(x.reviewer_tokens.input_total+x.reviewer_tokens.output)).slice(0,18);
+  charts.push(new Chart(document.getElementById('c_tok'),{type:'bar',data:{labels:rr.map(r=>r.source_id||r.id),datasets:[
+    {label:'input (uncached)',data:rr.map(r=>r.reviewer_tokens.input_total-r.reviewer_tokens.input_cached),backgroundColor:'#1f6feb'},
+    {label:'cached',data:rr.map(r=>r.reviewer_tokens.input_cached),backgroundColor:'#388bfd55'},
+    {label:'output',data:rr.map(r=>r.reviewer_tokens.output),backgroundColor:'#3fb950'},
+    {label:'reasoning',data:rr.map(r=>r.reviewer_tokens.reasoning_output),backgroundColor:'#d29922'}]},
+   options:{scales:{x:{stacked:true},y:{stacked:true}}}}));
+  bar('c_verdict',a.verdict_dist,'#39c5cf');
+  bar('c_stop',a.stop_reasons,'#f85149');
+
+  // cost
+  const cost=document.getElementById('cost');
+  if(R.reviewer_rate){const rate=R.reviewer_rate;
+    const c=(rt.input_uncached||rt.input_total-rt.input_cached)/1e6*(rate.input||0)
+      + rt.input_cached/1e6*(rate.cached_input!=null?rate.cached_input:(rate.input||0))
+      + rt.output/1e6*(rate.output||0) + rt.reasoning_output/1e6*(rate.reasoning!=null?rate.reasoning:(rate.output||0));
+    cost.innerHTML=`<div class="kpi"><div class="n">$${c.toFixed(2)}</div><div class="l">estimated reviewer cost</div>
+      <div class="x">rate $/1M: in ${rate.input}, cached ${rate.cached_input??'~in'}, out ${rate.output}, reason ${rate.reasoning??'~out'}</div></div>`;
+  } else {
+    cost.innerHTML=`<p class="mut">Cost estimation is off. Pass <span class="mono">--reviewer-rate input=&lt;n&gt;,output=&lt;n&gt;[,cached_input=&lt;n&gt;,reasoning=&lt;n&gt;]</span> to enable a $ estimate. Reviewer tokens total: in ${fmtK(rt.input_total)} (${fmtK(rt.input_cached)} cached), out ${fmtK(rt.output)}, reasoning ${fmtK(rt.reasoning_output)}.</p>`;
+  }
+
+  // ticket table
+  const runById={};runs.forEach(r=>runById[r.id]=r);
+  const rows=tickets.map(t=>{
+    const hr=runById[t.headline_run_id]||{};
+    const tk=t.run_ids.map(id=>runById[id]).filter(Boolean);
+    const revtok=sum(tk.map(r=>r.reviewer_tokens.input_total+r.reviewer_tokens.output));
+    const wtok=sum(tk.map(r=>r.worker_tokens_est.input_total+r.worker_tokens_est.output));
+    const active=sum(tk.map(r=>r.timing.active_seconds||0));
+    const elapsed=sum(tk.map(r=>r.timing.elapsed_seconds||0));
+    const findings=sum(tk.map(r=>r.findings_caught));
+    const commits=sum(tk.map(r=>r.commits.length));
+    const tests=tk.find(r=>r.tests)?tk.filter(r=>r.tests).reduce((o,r)=>({run:o.run+(r.tests.run||0),failed:o.failed+(r.tests.failed||0)}),{run:0,failed:0}):null;
+    const rounds=sum(tk.map(r=>r.n_rounds));
+    return {t,hr,tk,revtok,wtok,active,elapsed,findings,commits,tests,rounds};
+  });
+
+  let sortK='revtok',sortDir=-1,activeCats=new Set();
+  const cats=[...new Set(tickets.map(t=>t.headline_status_cat))];
+  document.getElementById('chips').innerHTML=cats.map(c=>`<span class="chip on" data-c="${c}">${c}</span>`).join('');
+  cats.forEach(c=>activeCats.add(c));
+  document.querySelectorAll('#chips .chip').forEach(ch=>ch.onclick=()=>{const c=ch.dataset.c;
+    if(activeCats.has(c)){activeCats.delete(c);ch.classList.remove('on');}else{activeCats.add(c);ch.classList.add('on');}draw();});
+
+  function val(row,k){switch(k){case 'key':return row.t.key;case 'title':return row.t.title;
+    case 'scenario':return row.t.scenario;case 'status':return row.t.headline_status_cat;
+    case 'attempts':return row.t.attempt_count;case 'active':return row.active;case 'elapsed':return row.elapsed;
+    case 'revtok':return row.revtok;case 'wtok':return row.wtok;case 'findings':return row.findings;
+    case 'tests':return row.tests?row.tests.run:-1;case 'commits':return row.commits;default:return '';}}
+
+  function draw(){
+    const q=(document.getElementById('q').value||'').toLowerCase();
+    let rs=rows.filter(r=>activeCats.has(r.t.headline_status_cat) &&
+      (!q || (r.t.key+' '+r.t.title+' '+r.t.scenario).toLowerCase().includes(q)));
+    rs.sort((x,y)=>{const a=val(x,sortK),b=val(y,sortK);return (a>b?1:a<b?-1:0)*sortDir;});
+    const tb=document.getElementById('tbody');
+    tb.innerHTML=rs.map((r,i)=>{
+      const t=r.t;
+      const prs=t.pr_urls.map(u=>`<a href="${esc(u)}" target="_blank">#${esc((u.match(/\/pull\/(\d+)/)||[])[1]||'PR')}</a>`).join(' ');
+      return `<tr class="trow" data-i="${i}">
+        <td><a href="${esc(t.source_url||'#')}" target="_blank">${esc(t.key)}</a></td>
+        <td class="small">${esc(t.title)}</td><td class="small">${esc(t.scenario)}</td>
+        <td>${statusBadge(t.headline_status_cat,t.headline_status_sub)}</td>
+        <td class="right">${t.attempt_count}</td>
+        <td class="right small">${fmtDur(r.active)}</td><td class="right small">${fmtDur(r.elapsed)}</td>
+        <td class="right">${fmtK(r.revtok)}</td><td class="right mut">≈${fmtK(r.wtok)}</td>
+        <td class="right">${r.findings}</td>
+        <td class="small">${r.tests?`${r.tests.run}/${r.tests.failed}f`:'<span class="mut">n/a</span>'}</td>
+        <td class="right">${r.commits}</td><td class="small">${prs||'<span class="mut">—</span>'}</td></tr>
+       <tr class="drillrow" data-i="${i}" style="display:none"><td colspan="13"><div class="drill" id="d${i}"></div></td></tr>`;
+    }).join('');
+    document.querySelectorAll('.trow').forEach(tr=>tr.onclick=()=>{
+      const i=tr.dataset.i;const dr=document.querySelector(`.drillrow[data-i="${i}"]`);
+      if(dr.style.display==='none'){dr.style.display='';buildDrill(rs[i],document.getElementById('d'+i));}
+      else dr.style.display='none';});
+  }
+  document.getElementById('q').oninput=draw;
+  document.querySelectorAll('#ttab th[data-k]').forEach(th=>th.onclick=()=>{
+    const k=th.dataset.k;if(sortK===k)sortDir*=-1;else{sortK=k;sortDir=(k==='key'||k==='title'||k==='scenario'||k==='status')?1:-1;}draw();});
+  draw();
+
+  function buildDrill(row,el){
+    let h=`<div class="small mut">${row.tk.length} run(s) for ${esc(row.t.key)}:</div>`;
+    row.tk.forEach(r=>{
+      h+=`<div style="margin:8px 0;padding:8px;border:1px solid var(--line);border-radius:6px">
+        <b class="mono">${esc(r.id)}</b> ${statusBadge(r.status_cat,r.status_sub)}
+        <span class="flag">${esc(r.type)}</span>${r.archived?'<span class="flag">archived</span>':''}${r.legacy?'<span class="flag">legacy</span>':''}
+        <div class="small mut" style="margin-top:4px">
+          rounds ${r.n_rounds} · active ${fmtDur(r.timing.active_seconds)} (${esc(r.timing.time_method)}/${esc(r.timing.time_confidence)}) ·
+          elapsed ${fmtDur(r.timing.elapsed_seconds)} · reviewer ${fmtK(r.reviewer_tokens.input_total+r.reviewer_tokens.output)} tok ·
+          worker ≈${fmtK(r.worker_tokens_est.input_total+r.worker_tokens_est.output)} · tool calls ${r.tool_calls} ·
+          reviewer ${esc(r.reviewer_label)} · mode ${esc(r.review_mode)} ·
+          findings ${r.findings_caught}${r.stop_reason?' · stop: '+esc(r.stop_reason):''}</div>
+        ${r.verdicts.length?`<div class="small">verdicts: ${r.verdicts.map(esc).join(', ')}</div>`:''}
+        ${(r.jira&&r.jira.priority)?`<div class="small mut">priority ${esc(r.jira.priority)} · fixVersions ${esc((r.jira.fixVersions||[]).join(', '))}</div>`:''}
+        ${r.timeline?`<details><summary class="expander small">timeline</summary><pre class="tl">${esc(r.timeline)}</pre></details>`:'<div class="small mut">timeline unavailable</div>'}
+      </div>`;
+    });
+    el.innerHTML=h;
+  }
+}
+render();
+// Follow live OS light/dark switches (only matters in Auto): CSS re-themes the page; re-tint charts too.
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{
+  applyChartTheme(); charts.forEach(c=>{ try{ c.update() }catch(e){} });});
+// Wire the top-right toggle: apply the saved mode, then cycle Auto → Light → Dark on click.
+(function(){ const btn=document.getElementById('theme-btn'); setTheme(storedTheme());
+  if(btn) btn.onclick=()=>setTheme(THEME_SEQ[(THEME_SEQ.indexOf(storedTheme())+1)%THEME_SEQ.length]); })();
+</script>
+</body></html>

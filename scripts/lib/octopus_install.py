@@ -68,8 +68,10 @@ def lockfile_check(pin, env=None):
     manifest, lock = _json_object(manifest_p), _json_object(lock_p)
     if manifest is None or lock is None:
         return "shipped lockfile pair unreadable or not JSON objects"
-    if not isinstance(manifest.get("dependencies"), dict) or manifest["dependencies"].get(PACKAGE) != pin:
-        return f"package.json pins {PACKAGE}@{(manifest.get('dependencies') or {}).get(PACKAGE)!r}, the pin file says {pin}"
+    deps = manifest.get("dependencies")
+    if not isinstance(deps, dict) or deps.get(PACKAGE) != pin:
+        found = deps.get(PACKAGE) if isinstance(deps, dict) else None
+        return f"package.json pins {PACKAGE}@{found!r}, the pin file says {pin}"
     if lock.get("lockfileVersion") != 3:
         return f"package-lock.json lockfileVersion is {lock.get('lockfileVersion')!r}, expected 3"
     packages = lock.get("packages")
@@ -284,9 +286,21 @@ def ensure_installed(pin, env=None, timeout=600):
     Order: root refusal → offline lockfile↔pin check → reuse → stage (`npm ci --ignore-scripts` in a
     fresh staging dir) → gate (rc 0, metadata == pin, bin present) → bind the marker into the staged
     tree → one atomic rename to a unique generation name. A failure removes only this run's staging.
+
+    Every filesystem failure anywhere in that sequence is a `FAIL` row, never an exception: the outer
+    boundary below catches `OSError` and still removes this run's staging directory if one was made.
     """
     env = _env(env)
     root = install_dir(env)
+    staging = [None]
+    try:
+        return _install(pin, env, timeout, root, staging)
+    except OSError as exc:
+        cleanup = _cleanup(root, staging[0]) if staging[0] is not None else ""
+        return FAIL, f"install failed: {exc}" + cleanup, None
+
+
+def _install(pin, env, timeout, root, staging):
     try:
         bridge.assert_root(root)
     except bridge.BridgeError as exc:
@@ -315,6 +329,7 @@ def ensure_installed(pin, env=None, timeout=600):
                     + _retained_summary(pin, current, env)), current
 
     staging_rel = Path("versions") / f"{STAGING_PREFIX}{os.getpid()}-{secrets.token_hex(4)}"
+    staging[0] = staging_rel
     try:
         bridge.ensure_dir_at(root, staging_rel)
         bridge.write_atomic(root, root / staging_rel / "package.json", (root / "package.json").read_bytes())

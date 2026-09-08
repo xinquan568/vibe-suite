@@ -1088,6 +1088,35 @@ class Install(unittest.TestCase):
         self.assertIn("could not run", detail)
         self.assertEqual(self.staging(), [])
 
+    # 32 (Step-9 R1 residue)
+    def test_malformed_manifest_dependencies_are_refused_before_npm(self):
+        for junk in ('["bad"]', '"bad"', '1', 'null'):
+            with self.subTest(junk=junk):
+                (self.inst / "package.json").write_text(
+                    '{"name": "x", "private": true, "dependencies": ' + junk + '}', encoding="utf-8")
+                status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+                self.assertEqual(status, self.oi.FAIL)
+                self.assertIn("lockfile refused", detail)
+                self.assertEqual(self.npm_calls(), [])
+        (self.inst / "package.json").write_text('{"dependencies": ["bad"]}', encoding="utf-8")
+        self.assertIn("package.json pins", self.oi.lockfile_check(self.pin, env=self.env()) or "")
+
+    # 33 (Step-9 R1 residue)
+    def test_an_oserror_inspecting_the_staged_tree_is_a_failure_with_cleanup(self):
+        real = Path.is_file
+
+        def denied(self_):
+            if self_.name == "index.js" and "/versions/.staging-" in str(self_):
+                raise PermissionError("denied")
+            return real(self_)
+        with mock.patch.object(Path, "is_file", denied):
+            status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("denied", detail)
+        self.assertIsNone(gen)
+        self.assertEqual(self.staging(), [], "the run's staging is removed even when the gate itself failed")
+        self.assertEqual(self.gens(), [])
+
     # 24
     def test_the_verification_mark_lives_beside_the_generation_not_inside_it(self):
         env = self.env()

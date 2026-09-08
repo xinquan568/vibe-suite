@@ -950,7 +950,8 @@ def load_json(path, *, strict=True):
             if not p.is_file():
                 raise FileNotFoundError(f"{p} is not a regular file")
             return json.loads(p.read_text(encoding="utf-8"))   # empty or whitespace-only raises JSONDecodeError itself
-        except (OSError, ValueError) as exc:          # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        except (OSError, ValueError, RecursionError) as exc:   # JSONDecodeError and UnicodeDecodeError are ValueErrors;
+            # json.loads raises RecursionError on a deeply nested document — a parser failure like any other (Step 9 R1)
             raise JsonUnreadable(p, exc) from exc
     if not p.is_file():
         return {}

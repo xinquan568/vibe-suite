@@ -128,4 +128,14 @@ test("pollGroupGone (deadline): elapsed time governs — a delayed first wake-up
   assert.deepEqual(sleeps, [50, 50, 50], "wake-ups at 1000, 1050, 1100: the probe after 1100 > 1075 ends it — not a fixed count of 21 rounds");
 });
 
+test("pollGroupGone (deadline): a wake-up exactly AT the deadline still sleeps and probes once more (`<=`, not `<`)", async () => {
+  // Step 9 R4: the previous clock (1050 → 1100 around 1075) never landed on the deadline, so `<` passed too.
+  const clock = [0, 1000, 1075, 1100]; let i = 0; const now = () => clock[Math.min(i, clock.length - 1)];
+  const g = fakeGroup(Infinity); const sleeps = [];
+  const result = await pollGroupGone(42, { deadlineMs: 1075, pollMs: 50, now, signal: g.signal, sleep: async (ms) => { sleeps.push(ms); i += 1; } });
+  assert.equal(result, false);
+  assert.deepEqual(sleeps, [50, 50, 50], "now() === deadline (1075) is NOT past it: one more sleep before the 1100 reading ends the loop");
+  assert.equal(g.probes(), 5, "initial probe + one per wake-up (3) + the final probe");
+});
+
 test("ARGV_PROMPT_CAP is the one 96,000-byte cap", () => { assert.equal(ARGV_PROMPT_CAP, 96_000); });

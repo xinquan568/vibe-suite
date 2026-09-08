@@ -58,6 +58,15 @@ test("the quota/auth vocabularies are defined once, in lib/events.mjs, and no co
   assert.ok(!/\bconst QUOTA_/.test(text["codex-runner.mjs"]), "codex-runner still defines a QUOTA_ table");
 });
 
+test("the last-stdout-line JSON parser is defined once, in lib/cli.mjs, and the Stop hook calls it", () => {
+  // Step 9 R2: the hook imported parseLastJsonLine and kept its own copy of the parser beside it.
+  const files = sources();
+  assert.deepEqual(homes(/\.trim\(\)\.split\("\\n"\)\.filter\(Boolean\)\.at\(-1\)/, files), ["lib/cli.mjs"]);
+  const hook = Object.fromEntries(files)["stop-review-gate-hook.mjs"];
+  assert.match(hook, /^import \{ parseLastJsonLine \} from "\.\/lib\/cli\.mjs";$/m);
+  assert.match(hook, /const result = parseLastJsonLine\(dispatched\.stdout\);/);
+});
+
 test("the 96,000-byte cap and DEFAULT_TIMEOUT_MS are defined once, in lib/process.mjs", () => {
   assert.deepEqual(homes(/\b96_000\b|\b96000\b/, sources()), ["lib/process.mjs"]);
   assert.deepEqual(homes(/^\s*(export\s+)?const DEFAULT_TIMEOUT_MS\s*=/m, sources()), ["lib/process.mjs"]);

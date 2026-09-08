@@ -395,13 +395,7 @@ async function main() {
   if (dispatched.error) {
     return applyFailPolicy(gate, `the review job could not run (${dispatched.error.message})`);
   }
-  const line = (dispatched.stdout || "").trim().split("\n").filter(Boolean).at(-1);
-  let result = null;
-  try {
-    result = line ? JSON.parse(line) : null;
-  } catch {
-    result = null;
-  }
+  const result = parseLastJsonLine(dispatched.stdout);                 // the one last-line parser (M6 / vibe-218)
   // vibe-207: captured BEFORE the completion guard. A review that failed still names the job that
   // failed, and that is the case an operator is most likely to be tracing — the verify caught this
   // assignment sitting after the guard, where only a successful review kept its id.

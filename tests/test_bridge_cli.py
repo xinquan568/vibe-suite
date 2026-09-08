@@ -912,6 +912,26 @@ class TestLoadJson(unittest.TestCase):
             p.chmod(0o644)
         self.assertEqual(bridge.load_json(self.write("ok.json", b'{"a": 1}')), {"a": 1})
 
+    def test_a_parser_recursion_error_is_unreadable_too(self):
+        """Step 9 R1: `json.loads` raises RecursionError (not a ValueError) on a deeply nested document.
+        Injected, because the depth that trips it is version-dependent (3.12/3.13 fail at 100,000 levels,
+        3.14 parses them); the real document below is accepted either way but may never escape as anything
+        other than a value or a JsonUnreadable."""
+        p = self.write("deep.json", b"[" * 100_000 + b"]" * 100_000)
+        with mock.patch.object(bridge.json, "loads", side_effect=RecursionError("maximum recursion depth exceeded")):
+            with self.assertRaises(bridge.JsonUnreadable) as ctx:
+                bridge.load_json(p)
+        self.assertIsInstance(ctx.exception.cause, RecursionError)
+        self.assertEqual(str(ctx.exception.cause), "maximum recursion depth exceeded")
+        try:
+            json.loads(p.read_text(encoding="utf-8"))
+        except RecursionError:
+            with self.assertRaises(bridge.JsonUnreadable) as ctx:
+                bridge.load_json(p)
+            self.assertIsInstance(ctx.exception.cause, RecursionError)
+        else:
+            self.assertIsInstance(bridge.load_json(p), list)   # not assertEqual: comparing 100,000-deep lists recurses too
+
     def test_explicit_lenient_mode_is_the_pre_m6_contract(self):
         self.assertEqual(bridge.load_json(self.ws / "missing.json", strict=False), {})
         (self.ws / "adir").mkdir()

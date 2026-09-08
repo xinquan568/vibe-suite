@@ -27,6 +27,19 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+import sys  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from octopus_fixture import start_module_seams, stop_module_seams  # noqa: E402
+
+
+def setUpModule():
+    # S13 (vibe-214): `advisor_cli add` renders a registration, which needs an installed, verified
+    # backend at the shipped pin; the seam keeps this module hermetic (no npm/npx/network).
+    start_module_seams("init")
+
+
+def tearDownModule():
+    stop_module_seams("init")
 INIT = REPO_ROOT / "scripts" / "init.sh"
 import sys
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))

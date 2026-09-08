@@ -72,10 +72,12 @@ removing a definition itself — dangerous or not, accepted or not — needs no 
 
 ## The backend pin
 
-A registration executes the pinned `claude-octopus` package. Until **E7.1** ships the default pin,
-a plain `add` refuses with the remedy text; pass `--pin <exact-version>` (e.g. `--pin 1.2.3`) to
-register now — exact versions only, the same grammar the suite's pin machinery enforces. Never
-suggest `latest` or a range.
+A registration executes the lockfile-verified install of the pinned `claude-octopus` package
+(`node …/dist/index.js`), which `/vibe-suite:update` installs and boot-verifies. Until **E7.1** ships
+the default pin, a plain `add` refuses with the remedy text; pass `--pin <exact-version>` (e.g.
+`--pin 1.2.3`) to register now — exact versions only, the same grammar the suite's pin machinery
+enforces, and only a version that is installed and verified here (otherwise `add` refuses and names
+`/vibe-suite:update`). Never suggest `latest` or a range.
 
 ## `remove <name>`
 

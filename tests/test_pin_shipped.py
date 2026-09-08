@@ -74,6 +74,17 @@ class ShippedPinState(unittest.TestCase):
         pin = mcp_pin.PIN_FILE.read_text(encoding="utf-8").strip()
         self.assertEqual(advisors.resolve_backend(None), f"claude-octopus@{pin}")
 
+    def test_shipped_lockfile_pins_the_shipped_version(self):
+        # S13 (vibe-214): the lockfile is the recorded integrity; pin, manifest and lockfile agree.
+        import json
+        pin = mcp_pin.PIN_FILE.read_text(encoding="utf-8").strip()
+        d = REPO_ROOT / "scripts" / "lib" / "claude-octopus"
+        manifest = json.loads((d / "package.json").read_text(encoding="utf-8"))
+        lock = json.loads((d / "package-lock.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["dependencies"]["claude-octopus"], pin)
+        self.assertEqual(lock["packages"][""]["dependencies"]["claude-octopus"], pin)
+        self.assertEqual(lock["packages"]["node_modules/claude-octopus"]["version"], pin)
+
 
 class CodexSrcSourceSet(unittest.TestCase):
     """Mechanical shape of F9.6 source set (d)."""

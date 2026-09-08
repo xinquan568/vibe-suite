@@ -38,10 +38,11 @@ import json
 import os
 import subprocess
 import sys
+import runpy
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE / "lib"))
+runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import bridge            # noqa: E402
 import mcp_pin           # noqa: E402

@@ -25,7 +25,7 @@ the review model; unset means the backend's own default (never a pinned id — P
 a runtime-store write:
 
 ```bash
-python3 -c "import sys; sys.path.insert(0, 'scripts/lib'); import store; \
+python3 -c "import runpy; runpy.run_path('scripts/_bootstrap.py'); import store; \
   store.Store('.').set('gate.stop_review_gate', True)"
 ```
 

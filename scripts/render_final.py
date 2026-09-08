@@ -26,11 +26,12 @@ import os
 import shutil
 import subprocess
 import sys
+import runpy
 from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE / "lib"))
+runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import bridge  # noqa: E402
 

@@ -18,10 +18,11 @@ session end), and **no `gate.model` ships at all** (P9 forbids a pinned default,
 import argparse
 import json
 import sys
+import runpy
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE / "lib"))
+runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import config as config_mod  # noqa: E402
 import store as store_mod  # noqa: E402

@@ -23,10 +23,11 @@ import argparse
 import hashlib
 import json
 import sys
+import runpy
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+runpy.run_path(str(REPO_ROOT / "scripts" / "_bootstrap.py"))
 
 from trend_engine import LEGACY_RUN, entries_from_text, trajectory_from_entries  # noqa: E402,F401
 from score_engine import band  # noqa: E402

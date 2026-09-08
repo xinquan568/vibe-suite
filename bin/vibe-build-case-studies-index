@@ -19,10 +19,11 @@ import argparse
 import json
 import re
 import sys
+import runpy
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+runpy.run_path(str(REPO_ROOT / "scripts" / "_bootstrap.py"))
 
 from site_markdown import md_escape  # noqa: E402  (corpus strings render as text — vibe-196)
 

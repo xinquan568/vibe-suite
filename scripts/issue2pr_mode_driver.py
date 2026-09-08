@@ -27,10 +27,11 @@ import subprocess
 #: vibe-209 / grill P4 — the manifest validator is bounded.
 MANIFEST_VALIDATE_TIMEOUT_S = 60
 import sys
+import runpy
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE / "lib"))
+runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import bridge  # noqa: E402  — the audited write primitive; nothing here writes directly
 

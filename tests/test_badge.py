@@ -70,7 +70,7 @@ class TestArtifactPosture(unittest.TestCase):
         self.assertTrue(any("SPDX-License-Identifier: ISC" in line for line in head),
                         "ISC header within 3 lines")
         self.assertTrue(os.stat(BADGE).st_mode & stat.S_IXUSR, "executable bit")
-        allowed = {"argparse", "hashlib", "json", "sys", "pathlib",
+        allowed = {"argparse", "hashlib", "json", "sys", "pathlib", "runpy",   # runpy: the bootstrap (vibe-215)
                    "trend_engine", "score_engine"}
         for line in text.splitlines():
             stripped = line.strip()

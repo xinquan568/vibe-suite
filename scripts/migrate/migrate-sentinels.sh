@@ -39,7 +39,7 @@ set +e
 lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 VIBE_FAIL_AFTER="${VIBE_FAIL_AFTER:-}" python3 - "$workspace" "$confirm" "$lib" <<'PY'
 import json, os, re, sys
-sys.path.insert(0, sys.argv[3])
+import runpy, pathlib; runpy.run_path(str(pathlib.Path(sys.argv[3]).resolve().parent / "_bootstrap.py"))
 import bridge  # noqa: E402
 from pathlib import Path
 

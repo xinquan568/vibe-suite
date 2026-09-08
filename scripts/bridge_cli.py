@@ -27,10 +27,11 @@ import subprocess
 #: generator hangs `bridge --mirrors` with no way back.
 MIRROR_REGEN_TIMEOUT_S = 60
 import sys
+import runpy
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE / "lib"))
+runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import bridge  # noqa: E402
 

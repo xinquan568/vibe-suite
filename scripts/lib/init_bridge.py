@@ -17,10 +17,11 @@ import hashlib
 import json
 import os
 import sys
+import runpy
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+runpy.run_path(str(HERE.parent / "_bootstrap.py"))
 
 import bridge  # noqa: E402
 import store as store_mod  # noqa: E402

@@ -529,10 +529,21 @@ class ScopeGrammar(unittest.TestCase):
                          "the table's commit -1 row is not the commit -N row at N = 1")
         expected = {f: table[f] for f in ("(empty)", "staged", "commit -N", "path")}
         self.assertEqual(self.template_mapping(), expected)
-        # no git command in the template's Scope section beyond the grammar's
+        # Every occurrence of `git` in the template's Scope section is bound to a grammar sentence: the
+        # three parsed commands (each exactly once) and the verbatim "without git" of the path clause.
+        # Anything else — another subcommand, a repeated command in the path clause, a bare mention —
+        # fails, so a path resolution that involves git can never compare equal to NO_GIT (Step 8 F1).
         import re as _re
-        self.assertEqual(sorted(set(_re.findall(r"git diff [^)`]+", self.template_scope()))),
-                         sorted(set(v for v in expected.values() if v != self.NO_GIT)))
+        scope = self.template_scope()
+        commands = _re.findall(r"`(git [^`]+)`", scope)
+        self.assertEqual(sorted(commands), sorted(v for v in expected.values() if v != self.NO_GIT),
+                         "the Scope section carries a git command the grammar does not (or one twice)")
+        remaining = scope
+        for cmd in commands:
+            remaining = remaining.replace(f"(`{cmd}`)", "", 1)
+        remaining = remaining.replace("an explicit path is read from the filesystem without git.", "", 1)
+        self.assertNotRegex(remaining, r"(?i)\bgit\b",
+                            "a `git` mention in the Scope section is bound to no grammar sentence")
 
     def test_stop_message_equals_the_partial_with_the_declared_swap(self):
         import re as _re

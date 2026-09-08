@@ -1,8 +1,7 @@
 # `bin/` — Entry-point executables
 
 Deterministic tools invoked directly or by CI. These are programs, not prompts — they
-ship with tests. Every `bin/` executable imports a repository module (at least the audited write
-primitive, `scripts/lib/bridge.py`) and reaches it through `scripts/_bootstrap.py`
+ship with tests. Every `bin/` executable imports a repository module and reaches it through `scripts/_bootstrap.py`
 (`runpy.run_path(str(REPO_ROOT / "scripts" / "_bootstrap.py"))`, the one place the library path is
 set). Their writes go through the primitive, and `tests/test_write_discipline.py` scans `bin/` for any
 that do not.

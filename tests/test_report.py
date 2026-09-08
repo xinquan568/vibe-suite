@@ -205,9 +205,11 @@ class TestOutDirDiscipline(TempDirMixin, unittest.TestCase):
         self.assertEqual(len(seen), 2)
         self.assertNotEqual(seen[0], seen[1], "a collision draws a fresh candidate name")
         self.assertEqual(name, seen[1], "the published candidate is the one returned")
-        with mock.patch.object(mod.bridge, "publish_below", return_value=False):
-            with self.assertRaises(OSError):
+        with mock.patch.object(mod.bridge, "publish_below", return_value=False) as never:
+            with self.assertRaises(OSError) as ctx:
                 mod._write_archive(anchor, out, "<html/>")
+        self.assertEqual(never.call_count, 16, "sixteen candidates are tried before giving up")
+        self.assertEqual(str(ctx.exception), "could not create a unique archive name after 16 attempts")
         self.assertEqual(list(out.iterdir()), [], "exhaustion publishes nothing")
 
     def test_bridge_refusal_at_an_archive_name_is_not_retried(self):

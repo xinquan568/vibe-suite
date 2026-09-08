@@ -827,6 +827,11 @@ class TestAnchoredWrites(unittest.TestCase):
         link = self.ws / "link"; link.symlink_to(target)
         unresolved, real = bridge.existing_anchor(link / "deeper")
         self.assertEqual((unresolved, real), (link.absolute(), Path(os.path.realpath(target))))
+        # a regular FILE on the way up is not an anchor: the nearest existing DIRECTORY is
+        blocker = self.ws / "a-file"; blocker.write_text("x")
+        unresolved, real = bridge.existing_anchor(blocker / "sub" / "deep")
+        self.assertTrue(real.is_dir(), "the anchor must be a directory")
+        self.assertEqual((unresolved, real), (self.ws.absolute(), Path(os.path.realpath(self.ws))))
 
     def test_write_below_creates_descendants_and_refuses_symlinks(self):
         anchor = bridge.existing_anchor(self.ws / "out" / "sub")

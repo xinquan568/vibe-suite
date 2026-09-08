@@ -609,7 +609,7 @@ def existing_anchor(path):
     programs under `bin/` and `scripts/` share this instead of each carrying a copy.
     """
     p = Path(path).absolute()
-    while not p.exists():
+    while not p.is_dir():          # a regular file on the way up is not an anchor either
         p = p.parent
     return p, Path(os.path.realpath(p))
 

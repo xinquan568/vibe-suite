@@ -45,35 +45,14 @@ class HistoryUnreadable(Exception):
 # ----------------------------------------------------------------------------- audited writes (H12 / vibe-216)
 
 
-def _existing_ancestor(path):
-    """`(unresolved, realpath)` of the nearest existing directory at or above `path`.
-
-    The containment anchor for `bridge.write_atomic`: it must exist (the descent opens it directly
-    and creates only descendants) and must not be a symlink (`bridge.assert_root`), hence the realpath.
-    Symlinks at or above the anchor are therefore followed — they are the user's existing directories,
-    `/tmp` → `private/tmp` on macOS included — while every component *below* it goes through the
-    `O_NOFOLLOW` descent and is refused if it is a symlink."""
-    p = Path(path).absolute()
-    while not p.exists():
-        p = p.parent
-    return p, Path(os.path.realpath(p))
-
-
 def _write(anchor, dest, content):
-    """Replace `dest` atomically through the audited primitive, anchored at `anchor`.
-
-    `dest` is rebased lexically onto the anchor's realpath so `bridge`'s `relative_to` sees one
-    consistent spelling. A refusal (symlinked destination or component, unopenable parent) is reported
-    as `runs-stats: …` and ends the run with exit 2 before anything else is written."""
-    unresolved, real = anchor
-    target = real / Path(dest).absolute().relative_to(unresolved)
+    """`bridge.write_below`, with a refusal reported as `runs-stats: …` and exit 2 before anything
+    else is written in that step (the anchor rule itself lives in `bridge.existing_anchor`)."""
     try:
-        bridge.write_atomic(real, target, content)
+        bridge.write_below(anchor, dest, content)
     except bridge.BridgeError as exc:
         print(f"runs-stats: {exc}", file=sys.stderr)
         raise SystemExit(2)
-
-# ----------------------------------------------------------------------------- report builder
 
 
 def build_one_report(subset_runs, all_containers, bucket_meta, out_path, as_of, tz,
@@ -224,7 +203,7 @@ def main(argv=None):
         out = Path(args.out or "runs/_reports/runs-stats-adhoc.html")
         build_one_report(sub, containers, {"kind": "adhoc", "label": "Ad-hoc", "id": "adhoc",
                                            "filters": ", ".join(flab)}, out, as_of, tz, rate,
-                         runs_root, warnings, period_page=False, anchor=_existing_ancestor(out.absolute().parent))
+                         runs_root, warnings, period_page=False, anchor=bridge.existing_anchor(out.absolute().parent))
         print(f"runs-stats: ad-hoc report → {out}  ({len(sub)} runs)")
         print("  NOTE: ad-hoc filtered runs do NOT update the canonical history/index/buckets (G1).")
         return
@@ -234,7 +213,7 @@ def main(argv=None):
     # One containment anchor for every canonical write: the nearest existing directory at or above the
     # reports dir's PARENT, so the reports dir itself is always below the anchor — created through the
     # audited descent when absent, refused when it is a symlink.
-    anchor = _existing_ancestor(reports_dir.absolute().parent)
+    anchor = bridge.existing_anchor(reports_dir.absolute().parent)
     config_key = {"tz": tz, "include_archived": args.include_archived,
                   "include_legacy": args.include_legacy, "id_pattern": args.id_pattern}
     try:
@@ -287,7 +266,7 @@ def main(argv=None):
         # optional extra copy ONLY if --out is explicitly given (no default duplicate file)
         if args.out:
             compat = Path(args.out)
-            _write(_existing_ancestor(compat.absolute().parent), compat,
+            _write(bridge.existing_anchor(compat.absolute().parent), compat,
                    (reports_dir / "all-time.html").read_text(encoding="utf-8"))
 
     # period buckets

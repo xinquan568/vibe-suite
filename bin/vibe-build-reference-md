@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 runpy.run_path(str(REPO_ROOT / "scripts" / "_bootstrap.py"))
 
 from site_markdown import md_escape, v_pre  # noqa: E402  (corpus strings render as text — vibe-196)
+import bridge  # noqa: E402  (scripts/lib — the audited write primitive)
 
 BUILDER = "vibe-build-reference-md"
 SLUG = "reference"
@@ -109,9 +110,10 @@ def render_rule(entry):
     return f"# {md_escape(entry['id'])} — {md_escape(entry['title'])}\n\n{v_pre(entry['body'])}\n"
 
 
-def write(path, text):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+def write(anchor, path, text):
+    # Through the audited primitive (M17 / vibe-217): an absent parent is created by the descent, a
+    # symlinked one is refused; `anchor` is the nearest existing directory above --out.
+    bridge.write_below(anchor, path, text)
 
 
 def main(argv=None):
@@ -123,11 +125,16 @@ def main(argv=None):
     manifest = load_manifest(args.corpus)
     entries = [] if manifest is None else collect(args.corpus, manifest)
 
-    payload = {"builder": BUILDER, "count": len(entries), "entries": entries}
-    write(args.out / "data" / f"{SLUG}.json", json.dumps(payload, indent=2) + "\n")
-    write(args.out / PAGE, render_index(entries))
-    for entry in entries:
-        write(args.out / "reference" / f"{entry['slug']}.md", render_rule(entry))
+    anchor = bridge.existing_anchor(args.out.absolute().parent)
+    try:
+        payload = {"builder": BUILDER, "count": len(entries), "entries": entries}
+        write(anchor, args.out / "data" / f"{SLUG}.json", json.dumps(payload, indent=2) + "\n")
+        write(anchor, args.out / PAGE, render_index(entries))
+        for entry in entries:
+            write(anchor, args.out / "reference" / f"{entry['slug']}.md", render_rule(entry))
+    except bridge.BridgeError as exc:
+        print(f"{BUILDER}: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

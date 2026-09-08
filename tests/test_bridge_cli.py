@@ -809,3 +809,62 @@ class MirrorRegenTimeoutValueTest(unittest.TestCase):
                       % err.getvalue())
         self.assertNotIn("Command '[", err.getvalue(),
                          "and the raw exception must not be what they see")
+
+
+class TestAnchoredWrites(unittest.TestCase):
+    """M17 / vibe-217: the containment anchor for an arbitrary output path, shared by every program
+    that writes where the user points it (`bin/vibe-report`, the site builders, runs-stats)."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-anchor-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_existing_anchor_walks_up_and_resolves(self):
+        unresolved, real = bridge.existing_anchor(self.ws / "a" / "b" / "c")
+        self.assertEqual(unresolved, self.ws.absolute())
+        self.assertEqual(real, Path(os.path.realpath(self.ws)))
+        target = self.ws / "real"; target.mkdir()
+        link = self.ws / "link"; link.symlink_to(target)
+        unresolved, real = bridge.existing_anchor(link / "deeper")
+        self.assertEqual((unresolved, real), (link.absolute(), Path(os.path.realpath(target))))
+        # a regular FILE on the way up is not an anchor: the nearest existing DIRECTORY is
+        blocker = self.ws / "a-file"; blocker.write_text("x")
+        unresolved, real = bridge.existing_anchor(blocker / "sub" / "deep")
+        self.assertTrue(real.is_dir(), "the anchor must be a directory")
+        self.assertEqual((unresolved, real), (self.ws.absolute(), Path(os.path.realpath(self.ws))))
+
+    def test_write_below_creates_descendants_and_refuses_symlinks(self):
+        anchor = bridge.existing_anchor(self.ws / "out" / "sub")
+        bridge.write_below(anchor, self.ws / "out" / "sub" / "f.txt", "hello\n")
+        self.assertEqual((self.ws / "out" / "sub" / "f.txt").read_text(), "hello\n")
+        # a symlinked directory component below the anchor is refused
+        elsewhere = self.ws / "elsewhere"; elsewhere.mkdir()
+        (self.ws / "out" / "linkdir").symlink_to(elsewhere)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.write_below(anchor, self.ws / "out" / "linkdir" / "g.txt", "x")
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        # a symlinked destination file is refused and preserved
+        theirs = self.ws / "theirs.txt"; theirs.write_text("user")
+        (self.ws / "out" / "sub" / "h.txt").symlink_to(theirs)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.write_below(anchor, self.ws / "out" / "sub" / "h.txt", "ours")
+        self.assertTrue((self.ws / "out" / "sub" / "h.txt").is_symlink())
+        self.assertEqual(theirs.read_text(), "user")
+        # a symlinked ANCHOR (the user's existing directory) is followed via its realpath
+        real = self.ws / "realdir"; real.mkdir()
+        link = self.ws / "linkedparent"; link.symlink_to(real)
+        anchor2 = bridge.existing_anchor(link / "nested")
+        bridge.write_below(anchor2, link / "nested" / "i.txt", "via link")
+        self.assertEqual((real / "nested" / "i.txt").read_text(), "via link")
+
+    def test_publish_below_collision_and_symlink(self):
+        anchor = bridge.existing_anchor(self.ws / "out")
+        dest = self.ws / "out" / "a.html"
+        self.assertTrue(bridge.publish_below(anchor, dest, b"first"))
+        self.assertFalse(bridge.publish_below(anchor, dest, b"second"), "an existing regular file is a collision")
+        self.assertEqual(dest.read_bytes(), b"first")
+        theirs = self.ws / "theirs.html"; theirs.write_text("user")
+        link = self.ws / "out" / "b.html"; link.symlink_to(theirs)
+        with self.assertRaises(bridge.BridgeError):
+            bridge.publish_below(anchor, link, b"ours")
+        self.assertEqual(theirs.read_text(), "user")

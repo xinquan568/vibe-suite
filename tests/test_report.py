@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tmpdirs import TempDirMixin, scratch_dir  # noqa: E402
 
@@ -105,6 +106,121 @@ class TestRendererDiscipline(unittest.TestCase):
         self.assertTrue(os.stat(RENDERER).st_mode & stat.S_IXUSR, "executable bit")
         for banned in ("import requests", "import yaml", "import numpy"):
             self.assertNotIn(banned, text)
+
+    def test_bootstraps_before_importing_bridge(self):
+        """M17 / vibe-217: the renderer reaches `bridge` through `scripts/_bootstrap.py`, and the
+        bootstrap statement precedes the import (the bin/ idiom every other executable follows)."""
+        import ast
+        tree = ast.parse(RENDERER.read_text(encoding="utf-8"))
+        boot = imp = None
+        for i, node in enumerate(tree.body):
+            src = ast.unparse(node)
+            if boot is None and src.startswith("runpy.run_path(") and "_bootstrap.py" in src:
+                boot = i
+            if isinstance(node, ast.Import) and any(a.name == "bridge" for a in node.names):
+                imp = i
+        self.assertIsNotNone(boot, "no bootstrap statement"); self.assertIsNotNone(imp, "no `import bridge`")
+        self.assertLess(boot, imp)
+
+
+def load_renderer():
+    """Load bin/vibe-report as a module (it has no .py suffix) for in-process seams."""
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("vibe_report_under_test", str(RENDERER))
+    spec = importlib.util.spec_from_loader("vibe_report_under_test", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+class TestOutDirDiscipline(TempDirMixin, unittest.TestCase):
+    """M17 / vibe-217: every write goes through the audited primitive, anchored above --out-dir."""
+
+    def test_symlinked_out_dir_is_refused(self):
+        root = Path(self.mkdtemp(prefix="report-symlink-"))
+        target = root / "elsewhere"; target.mkdir()
+        link = root / "out-link"; link.symlink_to(target)
+        r = render(full_blob(), link)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("out-link", r.stderr)
+        self.assertEqual(list(target.iterdir()), [], "the first write refuses; nothing lands in the target")
+
+    def test_absent_nested_out_dir_is_created(self):
+        root = Path(self.mkdtemp(prefix="report-nested-"))
+        out = root / "deep" / "er"
+        r = render(full_blob(), out)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((out / "index.html").is_file())
+        self.assertEqual(len(list(out.glob("report-*.html"))), 1)
+
+    def test_out_dir_that_is_a_regular_file_is_refused(self):
+        root = Path(self.mkdtemp(prefix="report-file-"))
+        out = root / "not-a-dir"; out.write_text("keep me")
+        r = render(full_blob(), out)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("not-a-dir", r.stderr)
+        self.assertEqual(out.read_text(), "keep me")
+
+    def test_index_mode_follows_umask_and_is_preserved(self):
+        root = Path(self.mkdtemp(prefix="report-mode-"))
+        old = os.umask(0o022)
+        try:
+            out = root / "a"
+            self.assertEqual(render(full_blob(), out).returncode, 0)
+            self.assertEqual(stat.S_IMODE(os.stat(out / "index.html").st_mode), 0o644)
+            os.umask(0o077)
+            out2 = root / "b"
+            self.assertEqual(render(full_blob(), out2).returncode, 0)
+            self.assertEqual(stat.S_IMODE(os.stat(out2 / "index.html").st_mode), 0o600, "umask applies")
+            os.umask(0o022)
+            os.chmod(out / "index.html", 0o664)
+            self.assertEqual(render(full_blob(), out).returncode, 0)
+            self.assertEqual(stat.S_IMODE(os.stat(out / "index.html").st_mode), 0o664, "an existing index keeps its mode")
+        finally:
+            os.umask(old)
+
+    def test_symlinked_index_refuses_after_the_archive(self):
+        root = Path(self.mkdtemp(prefix="report-index-link-"))
+        out = root / "out"; out.mkdir()
+        theirs = root / "theirs.html"; theirs.write_text("user page")
+        (out / "index.html").symlink_to(theirs)
+        r = render(full_blob(), out)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("index.html", r.stderr)
+        self.assertEqual(len(list(out.glob("report-*.html"))), 1, "the archive was published before the index refusal")
+        self.assertTrue((out / "index.html").is_symlink(), "the user's link is preserved")
+        self.assertEqual(theirs.read_text(), "user page")
+
+    def test_archive_loop_retries_on_false_and_exhausts(self):
+        mod = load_renderer()
+        root = Path(self.mkdtemp(prefix="report-loop-"))
+        out = root / "out"; out.mkdir()
+        anchor = mod.bridge.existing_anchor(out.parent)
+        seen = []
+        def stub(anchor_, dest, data, mode=0o644):
+            seen.append(Path(dest).name)
+            return len(seen) > 1          # first candidate collides, second publishes
+        with mock.patch.object(mod.bridge, "publish_below", side_effect=stub):
+            name = mod._write_archive(anchor, out, "<html/>")
+        self.assertEqual(len(seen), 2)
+        self.assertNotEqual(seen[0], seen[1], "a collision draws a fresh candidate name")
+        self.assertEqual(name, seen[1], "the published candidate is the one returned")
+        with mock.patch.object(mod.bridge, "publish_below", return_value=False) as never:
+            with self.assertRaises(OSError) as ctx:
+                mod._write_archive(anchor, out, "<html/>")
+        self.assertEqual(never.call_count, 16, "sixteen candidates are tried before giving up")
+        self.assertEqual(str(ctx.exception), "could not create a unique archive name after 16 attempts")
+        self.assertEqual(list(out.iterdir()), [], "exhaustion publishes nothing")
+
+    def test_bridge_refusal_at_an_archive_name_is_not_retried(self):
+        mod = load_renderer()
+        root = Path(self.mkdtemp(prefix="report-archive-link-"))
+        out = root / "out"; out.mkdir()
+        anchor = mod.bridge.existing_anchor(out.parent)
+        with mock.patch.object(mod.bridge, "publish_below", side_effect=mod.bridge.BridgeError("symlink at name")) as pb:
+            with self.assertRaises(mod.bridge.BridgeError):
+                mod._write_archive(anchor, out, "<html/>")
+        self.assertEqual(pb.call_count, 1, "a refusal propagates; only a regular-file collision retries")
 
 
 class TestBlobValidation(TempDirMixin, unittest.TestCase):

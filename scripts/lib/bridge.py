@@ -593,6 +593,47 @@ def write_atomic(root, dest, content, mode=None):
 
 
 # --------------------------------------------------------------------------------------------
+# Anchored writes — a containment root for an arbitrary output path (vibe-216, vibe-217)
+# --------------------------------------------------------------------------------------------
+
+def existing_anchor(path):
+    """`(unresolved, realpath)` of the nearest existing directory at or above `path`.
+
+    `write_atomic` and `publish_new` need a root that exists (the descent opens it directly and
+    creates only descendants) and is not a symlink (`assert_root`), hence the realpath. A caller
+    writing under a user-chosen output directory anchors at that directory's *parent*, so the output
+    directory itself is always below the anchor: created through the `O_NOFOLLOW` descent when
+    absent, refused when it is a symlink or a regular file. Symlinks at or above the anchor are
+    therefore followed — they are the user's existing directories (`/tmp` → `private/tmp` on macOS)
+    — while every component below it is refused if it is a symlink. One rule, one place: the
+    programs under `bin/` and `scripts/` share this instead of each carrying a copy.
+    """
+    p = Path(path).absolute()
+    while not p.is_dir():          # a regular file on the way up is not an anchor either
+        p = p.parent
+    return p, Path(os.path.realpath(p))
+
+
+def _rebase(anchor, dest):
+    """Rebase `dest` lexically onto the anchor's realpath so `relative_to` sees one spelling."""
+    unresolved, real = anchor
+    return real, real / Path(dest).absolute().relative_to(unresolved)
+
+
+def write_below(anchor, dest, content, mode=None):
+    """`write_atomic` with `dest` rebased onto `anchor` (see `existing_anchor`)."""
+    root, target = _rebase(anchor, dest)
+    write_atomic(root, target, content, mode=mode)
+
+
+def publish_below(anchor, dest, content, mode=0o644):
+    """`publish_new` with `dest` rebased onto `anchor`: True when created, False when a regular
+    file already occupies the destination (the caller's retry signal); a symlink there raises."""
+    root, target = _rebase(anchor, dest)
+    return publish_new(root, target, content, mode=mode)
+
+
+# --------------------------------------------------------------------------------------------
 # Provenance
 # --------------------------------------------------------------------------------------------
 

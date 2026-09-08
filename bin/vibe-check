@@ -591,8 +591,19 @@ def check_mirrors(root, expected=None):
             except ValueError:
                 bad(r["source"], "source path resolves outside the plugin root (symlink)")
                 continue
+        inputs = r.get("inputs", [])
+        if not (isinstance(inputs, list) and all(
+                isinstance(i, dict) and isinstance(i.get("path"), str)
+                and isinstance(i.get("sha256"), str) for i in inputs)):
+            bad(r["mirror"], "record inputs malformed")
+            r = dict(r, inputs=[])
         well_formed.append(r)
     records = well_formed
+    # M13 (vibe-219): a record may name hashed INPUTS — files its rendering read that are not its
+    # source (the vibe-roast template). They are verified like sources but accounted separately:
+    # `inputs_recorded` satisfies only the codex-src completeness check below, never a knowledge,
+    # roast-agent, copied-dependency or generated-output requirement.
+    inputs_recorded = set()
     for r in records:
         if r["mirror"] in seen_mirror:
             bad(r["mirror"], "duplicate record for this mirror path")
@@ -619,6 +630,23 @@ def check_mirrors(root, expected=None):
             bad(r["mirror"], "recorded mirror file is missing")
         elif _sha256(mir) != r["mirror_sha256"]:
             bad(r["mirror"], "mirror bytes differ from the manifest — hand-edited?")
+        for entry in r.get("inputs", []):
+            path = entry["path"]
+            if ".." in path.split("/") or path.startswith("/"):
+                bad(path, "input path escapes the plugin root")
+                continue
+            ip = root / path
+            if ip.exists():
+                try:
+                    ip.resolve().relative_to(root.resolve())
+                except (ValueError, OSError, RuntimeError):
+                    bad(path, "input path resolves outside the plugin root (symlink)")
+                    continue
+            inputs_recorded.add(path)
+            if not ip.is_file():
+                bad(path, "recorded input is gone — mirror is orphaned")
+            elif _sha256(ip) != entry["sha256"]:
+                bad(path, "input changed since generation — mirror is stale")
 
     mirrored = {r["mirror"] for r in records}
     for f in sorted((root / "codex").rglob("*")):
@@ -670,14 +698,14 @@ def check_mirrors(root, expected=None):
     sources_recorded = {r["source"] for r in records if isinstance(r, dict)
                         and isinstance(r.get("source"), str)}
 
-    def require_files(src_dir, label):
+    def require_files(src_dir, label, also=frozenset()):
         if not (root / src_dir).is_dir():
             bad(src_dir, f"declared {label} member has no source directory")
             return
         for f in sorted((root / src_dir).rglob("*")):
             if f.is_file():
                 rel = f.relative_to(root).as_posix()
-                if rel not in sources_recorded:
+                if rel not in sources_recorded and rel not in also:
                     bad(rel, f"file of declared {label} member has no manifest record")
 
     for k in sets["knowledge"]:
@@ -702,7 +730,7 @@ def check_mirrors(root, expected=None):
             bad(gen_mirror, "mandatory generated output's mirror is missing")
     if (root / "codex-src").is_dir():
         for d in sorted(p for p in (root / "codex-src").iterdir() if p.is_dir()):
-            require_files(f"codex-src/{d.name}", "codex-src")
+            require_files(f"codex-src/{d.name}", "codex-src", also=inputs_recorded)
 
     for r in records:
         mir = root / r["mirror"]

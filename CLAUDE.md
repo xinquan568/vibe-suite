@@ -33,7 +33,8 @@ python3 -m ruff check --select F811 scripts tools bin/vibe-check bin/vibe-badge 
 
 - **`codex/` is generated.** `MIRROR-MANIFEST.json` binds every file to its source bytes;
   hand-edits fail `--mirrors`. Sources: the 21 knowledge skills, `commands/roast.md`, the
-  six roast agents, `codex-src/`, the copied dependencies
+  six roast agents, `codex-src/` (whose `vibe-roast/SKILL.md.tmpl` is the roast variant's
+  template, hashed as an `inputs` entry on that record rather than mirrored), the copied dependencies
   (`schemas/audit-output.schema.json`, `commands/shared/{classify,discover}.md`), and
   `.claude-plugin/plugin.json` (the version stamp + README record).
 - **The pin pair.** `scripts/lib/claude-octopus-pin.txt` (exact semver) is the shipped

@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import re
+import string
 import sys
 import runpy
 from pathlib import Path
@@ -180,11 +181,51 @@ def _transform_markdown(text, *, source_rel, target_name, version, name_map,
     return f"---\n{new_fm}\n---\n\n{banner}\n\n{body}", dropped, slash_counts
 
 
-def _roast_variant(version, roast_agents=ROAST_AGENTS, knowledge=KNOWLEDGE):
+#: The vibe-roast variant's body (M13 / vibe-219): a hand-authored template under codex-src/,
+#: hashed into the manifest as an INPUT of the variant record — never mirrored itself. Its six
+#: placeholders are plain `str.format` named fields; `{{`/`}}` escape a literal brace.
+_TEMPLATE_REL = "codex-src/vibe-roast/SKILL.md.tmpl"
+_TEMPLATE_FIELDS = frozenset({"version", "banner", "criteria", "specialists", "edge", "recon_line"})
+
+
+def _load_template(root):
+    path = Path(root) / _TEMPLATE_REL
+    if not path.is_file():
+        raise MirrorError(f"vibe-roast template missing on disk: {_TEMPLATE_REL}")
+    return path.read_text(encoding="utf-8")
+
+
+def _validate_template(template):
+    """The accepted syntax: every placeholder is a plain named field from _TEMPLATE_FIELDS — no
+    positional `{}`, no conversion (`!r`), no format spec (`:>3`, nested or otherwise) — and the
+    set of names is exactly the six. A parser error (an unmatched brace) is a generation error too."""
+    try:
+        parsed = list(string.Formatter().parse(template))
+    except ValueError as exc:
+        raise MirrorError(f"vibe-roast template is not a valid format string: {exc}") from exc
+    names = set()
+    for _literal, field, spec, conversion in parsed:
+        if field is None:
+            continue
+        if field == "" or spec or conversion is not None:
+            shown = "{" + field + (f"!{conversion}" if conversion else "") + (f":{spec}" if spec else "") + "}"
+            raise MirrorError(f"vibe-roast template placeholder {shown} is not a plain named field")
+        names.add(field)
+    if names != _TEMPLATE_FIELDS:
+        raise MirrorError(f"vibe-roast template placeholders {sorted(names)} differ from "
+                          f"{sorted(_TEMPLATE_FIELDS)}")
+
+
+def _roast_variant(version, roast_agents=ROAST_AGENTS, knowledge=KNOWLEDGE, template=None):
     """The `vibe-roast` sequential variant — the one semantic transform (plan D-f/A-3).
     Criteria live in the mirrored roasting skill; this variant owns flow, not definitions.
     The specialist roster and the criteria link render from the SETS so a fixture world
-    stays internally consistent — production renders the six-agent roster."""
+    stays internally consistent — production renders the six-agent roster. The prose is
+    `codex-src/vibe-roast/SKILL.md.tmpl` (`template=None` reads the repository's own copy;
+    `generate()` passes the tree's); only the computed fragments live here."""
+    if template is None:
+        template = _load_template(_HERE.parent)
+    _validate_template(template)
     specialists = ", ".join(f"$vibe-roast-{a}" for a in sorted(roast_agents)
                             if a not in ("recon", "edge-cases"))
     recon_line = ("1. Always run the $vibe-roast-recon survey first; its survey is injected "
@@ -201,80 +242,9 @@ def _roast_variant(version, roast_agents=ROAST_AGENTS, knowledge=KNOWLEDGE):
                 "this skill owns arguments, sequencing and the report only."
                 if "roasting" in knowledge else
                 "This skill owns arguments, sequencing and the report.")
-    return f"""---
-name: vibe-roast
-description: Interrogate a codebase sequentially — a recon survey, specialist passes by style, then synthesis, an executive summary and a phased fixing plan written to a report.
-metadata:
-  version: {version}
----
-
-{BANNER.format(source='commands/roast.md')}
-
-# vibe-roast — sequential code interrogation
-
-The Codex-native rendering of the roast flow: one lane, sequential skill passes, the same
-report contract. The source command's multi-lane machinery does not exist here — this
-runtime IS the single engine, so nothing needs selecting or cross-checking between lanes.
-
-{criteria}
-
-## Scope
-
-Resolve the target with the scope grammar: an empty scope means uncommitted changes
-(`git diff HEAD --name-only`); `staged` means staged changes (`git diff --cached
---name-only`); `commit -N` means the last N commits (`git diff HEAD~N --name-only`); an
-explicit path is read from the filesystem without git. An empty resolved list stops with
-"No changes detected in scope. Nothing to review."
-
-Skip patterns come from the suite's single config reader (`python3 scripts/lib/config.py
---json <root>`), never from parsing `.vibe-suite.md` directly. Filter the resolved list
-against every configured pattern as a glob; when ALL files are dropped, stop and say that
-everything in scope is excluded by the project's skip patterns, naming the config file.
-
-The trivial-change gate runs before any expensive pass. Trivial only when ALL hold: total
-code changes ≤ 5 lines excluding blanks and comments; purely mechanical (typos, formatting,
-whitespace, import reordering, comment edits, config version bumps); no logic, control-flow
-or data-handling change whatsoever. NEVER trivial, however small the diff: any logic,
-conditional, loop or data-flow change (a single character counts); security-sensitive paths
-(auth, crypto, permissions, payments, sessions); a dependency added or removed (a lockfile is
-never trivial); runtime-behaviour config; error handling or validation. A trivial verdict
-ASKS before skipping — "Skip" recommended against "Analyze anyway" — never skips silently.
-
-## Styles and depth
-
-`--style 1-6` (default 2), meanings per the roasting criteria:
-
-1. Architecture Review + Rewrite Plan — structure first; the plan proposes a target shape.
-2. Hard-Nosed Critique + Roadmap — severity-ordered, blunt, with a sequenced roadmap.
-3. Multi-Perspective Panel — the same findings argued from several stances, disagreements kept.
-4. ADR Style — findings recast as decisions with context, options and consequences.
-5. Paranoid Mode — adds the edge-cases pass; assumes hostile input and unlucky timing.
-6. Select All — every style's closing sections in one report.
-
-Styles 1–4 run the specialist roster ({specialists}){edge}.
-Style 6 on more than 500 files stops and asks before any pass,
-stating the file count and what Select All costs. Depth: `--mini` (five dimensions) or
-`--full` (nine, test files included) — per the roasting criteria.
-
-## Sequential passes
-
-{recon_line}
-2. Run each style-selected specialist skill in order, one at a time, feeding it the recon
-   survey. More than 20 files: batch in groups of 10, one sequential pass per group,
-   findings merged.
-3. A specialist pass that fails records the gap in the report's coverage section and the run
-   continues — a partial interrogation that says so beats a silent one.
-4. Add-ons run after the specialists, sequentially, any subset of the eight from the
-   roasting criteria — Scale stress, Hidden costs, Principle violations, Strangler fig,
-   Success metrics, Before/after diagram, Assumptions audit, Compact & optimize — each
-   appending one section, none replacing a dimension.
-
-## Synthesis and report
-
-Assign finding ids, synthesize across passes, write the executive summary and the phased
-fixing plan, then write ONE report file with frontmatter `target`, `engine: codex`,
-`style`, `generated`, `version`.
-"""
+    return template.format(
+        version=version, banner=BANNER.format(source="commands/roast.md"), criteria=criteria,
+        specialists=specialists, edge=edge, recon_line=recon_line)
 
 
 def _agent_to_skill(text, *, agent_name, version, name_map):
@@ -321,13 +291,17 @@ def generate(root, sets=None):
             raise MirrorError(f"mirror path collision: {dest_rel}")
         outputs[dest_rel] = data.encode("utf-8") if isinstance(data, str) else data
 
-    def record(source_rel, mirror_rel, transform, dropped=()):
-        records.append({
+    def record(source_rel, mirror_rel, transform, dropped=(), inputs=()):
+        entry = {
             "source": source_rel, "mirror": mirror_rel, "transform": transform,
             "source_sha256": sha256_file(root / source_rel),
             "mirror_sha256": hashlib.sha256(outputs[mirror_rel]).hexdigest(),
             "dropped_keys": sorted(dropped),
-        })
+        }
+        if inputs:   # hashed secondary inputs (M13): files the rendering READ that are not its source
+            entry["inputs"] = [{"path": rel, "sha256": sha256_file(root / rel)}
+                               for rel in sorted(inputs)]
+        records.append(entry)
 
     def transform(src_path, source_rel, target_name, in_auditing=False):
         text, dropped, counts = _transform_markdown(
@@ -382,8 +356,9 @@ def generate(root, sets=None):
     if (root / "commands" / "roast.md").is_file():
         render("codex/skills/vibe-roast/SKILL.md",
                _roast_variant(version, tuple(s["roast_agents"]),
-                              tuple(s["knowledge"])))
-        record("commands/roast.md", "codex/skills/vibe-roast/SKILL.md", "variant")
+                              tuple(s["knowledge"]), template=_load_template(root)))
+        record("commands/roast.md", "codex/skills/vibe-roast/SKILL.md", "variant",
+               inputs=(_TEMPLATE_REL,))
         for part in ("scope-parse", "model-selection", "fallback"):
             exclusions.append({
                 "source": f"commands/shared/{part}.md", "set": "b",
@@ -409,6 +384,10 @@ def generate(root, sets=None):
         for d in sorted(p for p in codex_src.iterdir() if p.is_dir()):
             for f in sorted(d.rglob("*")):
                 if not f.is_file():
+                    continue
+                if f.suffix == ".tmpl":
+                    # templates are consumed by the generator (the vibe-roast variant), never
+                    # mirrored; the checker requires each to be recorded as a record input
                     continue
                 rel = f.relative_to(d).as_posix()
                 src_rel = f"codex-src/{d.name}/{rel}"

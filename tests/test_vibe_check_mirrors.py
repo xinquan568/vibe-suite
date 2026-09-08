@@ -153,6 +153,71 @@ class MirrorsClass(unittest.TestCase):
              "--mirrors"], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
 
+    # ---- M13 / vibe-219: the variant's template is a hashed INPUT of its record
+    TEMPLATE_REL = "codex-src/vibe-roast/SKILL.md.tmpl"
+
+    def variant_record(self, doc):
+        recs = [r for r in doc["records"] if r["mirror"] == "codex/skills/vibe-roast/SKILL.md"]
+        self.assertEqual(len(recs), 1)
+        return recs[0]
+
+    def test_edited_template_input_fails(self):
+        p = self.root / self.TEMPLATE_REL
+        p.write_text(p.read_text() + "\ntampered\n")
+        self.assert_fail(f"{self.TEMPLATE_REL}: input changed since generation — mirror is stale")
+
+    def test_missing_template_input_fails(self):
+        (self.root / self.TEMPLATE_REL).unlink()
+        self.assert_fail(f"{self.TEMPLATE_REL}: recorded input is gone — mirror is orphaned")
+
+    def test_unrecorded_template_fails(self):
+        doc = self.manifest()
+        self.variant_record(doc).pop("inputs", None)
+        self.write_manifest(doc)
+        self.assert_fail(f"{self.TEMPLATE_REL}: file of declared codex-src member has no manifest record")
+
+    def test_malformed_inputs_yield_findings_not_tracebacks(self):
+        for bad in ("not-a-list", [1], [{"path": "x"}], [{"sha256": "y"}]):
+            with self.subTest(inputs=bad):
+                mirror_sync.generate(self.root, sets=FIXTURE_SETS)
+                doc = self.manifest()
+                self.variant_record(doc)["inputs"] = bad
+                self.write_manifest(doc)
+                self.assert_fail("record inputs malformed")
+
+    def test_an_input_cannot_stand_in_for_a_missing_primary_record(self):
+        # Step-5 F2: listing a knowledge skill's source as an input must not "account" for its deleted record
+        (self.root / "codex" / "skills" / "vibe-alpha" / "SKILL.md").unlink()
+        doc = self.manifest()
+        doc["records"] = [r for r in doc["records"] if r["source"] != "skills/alpha/SKILL.md"]
+        self.variant_record(doc).setdefault("inputs", []).append({
+            "path": "skills/alpha/SKILL.md",
+            "sha256": mirror_sync.sha256_file(self.root / "skills" / "alpha" / "SKILL.md")})
+        self.write_manifest(doc)
+        self.assert_fail("skills/alpha/SKILL.md: file of declared knowledge member has no manifest record")
+
+    def test_input_paths_are_contained(self):
+        outside_dir = Path(tempfile.mkdtemp(prefix="vc-outside-"))   # OUTSIDE the fixture root (self.tmp IS the root)
+        self.addCleanup(shutil.rmtree, outside_dir, True)
+        outside = outside_dir / "outside.tmpl"
+        outside.write_text("outside\n")
+        link = self.root / "codex-src" / "vibe-roast" / "escape.tmpl"
+        link.symlink_to(outside)
+        cases = {
+            "traversal": ("../outside.tmpl", "../outside.tmpl: input path escapes the plugin root"),
+            "absolute": (str(outside), f"{outside}: input path escapes the plugin root"),
+            "symlink": ("codex-src/vibe-roast/escape.tmpl",
+                        "codex-src/vibe-roast/escape.tmpl: input path resolves outside the plugin root (symlink)"),
+        }
+        for name, (path, needle) in cases.items():
+            with self.subTest(case=name):
+                mirror_sync.generate(self.root, sets=FIXTURE_SETS)
+                doc = self.manifest()
+                self.variant_record(doc).setdefault("inputs", []).append(
+                    {"path": path, "sha256": mirror_sync.sha256_file(outside)})
+                self.write_manifest(doc)
+                self.assert_fail(needle)
+
     def test_deleting_a_mandatory_generated_output_fails(self):
         # Round-4 F1: the variant, the partial copies and the README are anchored outputs —
         # removing any pair (record + mirror) is a finding, not a silent shrink.

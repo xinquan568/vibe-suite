@@ -264,6 +264,12 @@
     },
     {
       "dropped_keys": [],
+      "inputs": [
+        {
+          "path": "codex-src/vibe-roast/SKILL.md.tmpl",
+          "sha256": "b806f547d977ffe2c30c9f46fbcb7546a0fef5c57571d19e2789fd6092eabe8a"
+        }
+      ],
       "mirror": "codex/skills/vibe-roast/SKILL.md",
       "mirror_sha256": "14cf552edbde9ab3f19ac6a5b9e7d93677efa74699a5c97dd063bdb0c18f251f",
       "source": "commands/roast.md",

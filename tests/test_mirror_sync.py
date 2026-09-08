@@ -103,6 +103,11 @@ def make_source_tree(tmp):
     (cs / "SKILL.md").write_text(
         "---\nname: delta\ndescription: Delta reverse skill.\n---\n\n# delta\n\n"
         "Fixture at tests/fixtures/claude-octopus-tools-1.2.0.json.\n")
+    # the vibe-roast variant's template (M13 / vibe-219): the production template, copied — its six
+    # placeholders are what the generator substitutes; the fixture roster renders through them
+    tmpl = root / "codex-src" / "vibe-roast"
+    tmpl.mkdir(parents=True)
+    shutil.copy(REPO_ROOT / "codex-src" / "vibe-roast" / "SKILL.md.tmpl", tmpl / "SKILL.md.tmpl")
     (root / "schemas").mkdir()
     (root / "schemas" / "audit-output.schema.json").write_text("{\"fixture\": true}\n")
     (root / "commands" / "shared").mkdir()
@@ -223,6 +228,58 @@ class GeneratorFixture(unittest.TestCase):
         first = tree_digest(self.root / "codex")
         mirror_sync.generate(self.root, sets=FIXTURE_SETS)
         self.assertEqual(tree_digest(self.root / "codex"), first)
+
+    # ---- M13 / vibe-219: the variant body lives in codex-src/vibe-roast/SKILL.md.tmpl
+    TEMPLATE_REL = "codex-src/vibe-roast/SKILL.md.tmpl"
+
+    def _variant_record(self, manifest=None):
+        recs = [r for r in (manifest or self.manifest)["records"]
+                if r["mirror"] == "codex/skills/vibe-roast/SKILL.md"]
+        self.assertEqual(len(recs), 1, recs)
+        return recs[0]
+
+    def test_template_is_consumed_not_mirrored(self):
+        # T1: the template is an INPUT of the variant record, hashed there — never a mirror file
+        self.assertFalse((self.root / "codex/skills/vibe-roast/SKILL.md.tmpl").exists(),
+                         "the template shipped as a verbatim mirror file")
+        rec = self._variant_record()
+        self.assertEqual(rec["source"], "commands/roast.md")
+        self.assertEqual(rec.get("inputs"), [{
+            "path": self.TEMPLATE_REL,
+            "sha256": mirror_sync.sha256_file(self.root / self.TEMPLATE_REL)}])
+        for r in self.manifest["records"]:
+            if r is not rec and r["mirror"] != "codex/skills/vibe-roast/SKILL.md":
+                self.assertNotIn("inputs", r, r["mirror"])
+
+    def test_missing_template_is_a_render_phase_error(self):
+        # T2: no embedded fallback — a missing template fails before any write; the tree is untouched
+        before = tree_digest(self.root / "codex")
+        (self.root / self.TEMPLATE_REL).unlink()
+        with self.assertRaises(mirror_sync.MirrorError) as ctx:
+            mirror_sync.generate(self.root, sets=FIXTURE_SETS)
+        self.assertIn(self.TEMPLATE_REL, str(ctx.exception))
+        self.assertEqual(tree_digest(self.root / "codex"), before)
+
+    def test_template_format_syntax_is_validated(self):
+        # T3: the accepted syntax is plain named fields from the six; everything else is a MirrorError
+        good = (self.root / self.TEMPLATE_REL).read_text()
+        cases = {
+            "extra field": (good.replace("{version}", "{version}{bogus}"), "bogus"),
+            "missing field": (good.replace("{version}", "VERSION"), "version"),
+            "empty field": (good.replace("{version}", "{}"), "{}"),
+            "conversion": (good.replace("{version}", "{version!r}"), "{version!r}"),
+            "format spec": (good.replace("{version}", "{version:>3}"), "{version:>3}"),
+            "nested spec": (good.replace("{version}", "{version:{bogus}}"), "{version:{bogus}}"),
+            "unmatched brace": (good + "{\n", "not a valid format string"),
+        }
+        for name, (text, needle) in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(mirror_sync.MirrorError) as ctx:
+                    mirror_sync._roast_variant("0", ("gamma",), ("alpha",), template=text)
+                self.assertIn(needle, str(ctx.exception))
+        rendered = mirror_sync._roast_variant("0", ("gamma",), ("alpha",),
+                                              template=good.replace("{version}", "{version} {{kept}}"))
+        self.assertIn("0 {kept}", rendered, "escaped braces render as literal braces")
 
     def test_roast_variant_contract(self):
         text = self.read("codex/skills/vibe-roast/SKILL.md")
@@ -386,6 +443,22 @@ class ProductionBinding(unittest.TestCase):
         self.assertEqual(_re.sub(r"\s+", " ", live).strip(),
                          _re.sub(r"\s+", " ", golden).strip())
 
+    def test_roast_variant_renders_an_injected_template(self):
+        # T4: the template is injectable; the default (None) is the repository's own template
+        text = mirror_sync._roast_variant(
+            "v", ("recon", "gamma"), ("roasting",),
+            template="---\n{version}|{banner}|{criteria}|{specialists}|{edge}|{recon_line}\n")
+        parts = text.split("|")
+        self.assertEqual(parts[0], "---\nv")
+        self.assertEqual(parts[1], mirror_sync.BANNER.format(source="commands/roast.md"))
+        self.assertIn("$vibe-roasting", parts[2])
+        self.assertEqual(parts[3], "$vibe-roast-gamma")
+        self.assertEqual(parts[4], "")
+        self.assertIn("$vibe-roast-recon", parts[5])
+        self.assertEqual(mirror_sync._roast_variant("v"),
+                         mirror_sync._roast_variant(
+                             "v", template=(REPO_ROOT / "codex-src/vibe-roast/SKILL.md.tmpl").read_text()))
+
     def test_production_tables_cover_the_roster(self):
         sys.path.insert(0, str(REPO_ROOT / "tests"))
         import test_skill_library
@@ -396,6 +469,91 @@ class ProductionBinding(unittest.TestCase):
         self.assertEqual(set(mirror_sync.ROAST_AGENTS),
                          {"architecture", "edge-cases", "error-handling",
                           "recon", "security", "testing"})
+
+
+class ScopeGrammar(unittest.TestCase):
+    """M13 / vibe-219: the template's scope grammar equals commands/shared/scope-parse.md's — compared as
+    canonical form → resolution mappings (not sentence text), with the one declared lexical difference
+    (the partial says "audit", the Codex-native skill says "review") asserted literally before the
+    normalised equality. The trivial-change gate is not part of the grammar and is not compared."""
+
+    PARTIAL = REPO_ROOT / "commands" / "shared" / "scope-parse.md"
+    TEMPLATE = REPO_ROOT / "codex-src" / "vibe-roast" / "SKILL.md.tmpl"
+    NO_GIT = "NO_GIT"
+    FORMS = ("(empty)", "staged", "commit -1", "commit -N", "path")
+
+    @staticmethod
+    def squash(text):
+        import re as _re
+        return _re.sub(r"\s+", " ", text).strip()
+
+    def table_mapping(self):
+        import re as _re
+        text = self.PARTIAL.read_text(encoding="utf-8")
+        section = text.split("## Scope grammar", 1)[1].split("\n## ", 1)[0]
+        rows = _re.findall(r"^\| `([^`]+)` \| (.+?) \|$", section, _re.M)
+        self.assertEqual(tuple(f for f, _ in rows), self.FORMS, "the grammar table moved or changed shape")
+        mapping = {}
+        for form, resolution in rows:
+            m = _re.search(r"`(git diff [^`]+)`", resolution)
+            if m:
+                mapping[form] = m.group(1)
+            else:
+                self.assertIn("no git", resolution, form)
+                mapping[form] = self.NO_GIT
+        return mapping
+
+    def template_scope(self):
+        text = self.TEMPLATE.read_text(encoding="utf-8")
+        section = text.split("## Scope", 1)[1].split("\n## ", 1)[0]
+        return self.squash(section)
+
+    def template_mapping(self):
+        import re as _re
+        scope = self.template_scope()
+        mapping = {}
+        for form, shape in (("(empty)", r"an empty scope means [^(]*\(`(git diff [^`]+)`\)"),
+                            ("staged", r"`staged` means [^(]*\(`(git diff [^`]+)`\)"),
+                            ("commit -N", r"`commit -N` means [^(]*\(`(git diff [^`]+)`\)")):
+            m = _re.search(shape, scope)
+            self.assertIsNotNone(m, f"the template's Scope sentence for {form} is not where the grammar test expects it")
+            mapping[form] = m.group(1)
+        self.assertIn("an explicit path is read from the filesystem without git", scope,
+                      "the path clause must say, verbatim, that no git is involved")
+        mapping["path"] = self.NO_GIT
+        return mapping
+
+    def test_form_to_resolution_mappings_are_equal(self):
+        table = self.table_mapping()
+        self.assertEqual(table["commit -1"], table["commit -N"].replace("HEAD~N", "HEAD~1"),
+                         "the table's commit -1 row is not the commit -N row at N = 1")
+        expected = {f: table[f] for f in ("(empty)", "staged", "commit -N", "path")}
+        self.assertEqual(self.template_mapping(), expected)
+        # Every occurrence of `git` in the template's Scope section is bound to a grammar sentence: the
+        # three parsed commands (each exactly once) and the verbatim "without git" of the path clause.
+        # Anything else — another subcommand, a repeated command in the path clause, a bare mention —
+        # fails, so a path resolution that involves git can never compare equal to NO_GIT (Step 8 F1).
+        import re as _re
+        scope = self.template_scope()
+        commands = _re.findall(r"`(git [^`]+)`", scope)
+        self.assertEqual(sorted(commands), sorted(v for v in expected.values() if v != self.NO_GIT),
+                         "the Scope section carries a git command the grammar does not (or one twice)")
+        remaining = scope
+        for cmd in commands:
+            remaining = remaining.replace(f"(`{cmd}`)", "", 1)
+        remaining = remaining.replace("an explicit path is read from the filesystem without git.", "", 1)
+        self.assertNotRegex(remaining, r"(?i)\bgit\b",
+                            "a `git` mention in the Scope section is bound to no grammar sentence")
+
+    def test_stop_message_equals_the_partial_with_the_declared_swap(self):
+        import re as _re
+        partial = self.squash(self.PARTIAL.read_text(encoding="utf-8"))
+        pm = _re.search(r'"(No changes detected in scope\. [^"]+)"', partial)
+        tm = _re.search(r'"(No changes detected in scope\. [^"]+)"', self.template_scope())
+        self.assertIsNotNone(pm, "the partial's stop sentence moved"); self.assertIsNotNone(tm, "the template's stop sentence moved")
+        self.assertTrue(pm.group(1).endswith("Nothing to audit."), pm.group(1))
+        self.assertTrue(tm.group(1).endswith("Nothing to review."), tm.group(1))
+        self.assertEqual(pm.group(1).replace("Nothing to audit.", "Nothing to review."), tm.group(1))
 
 
 class RealTree(unittest.TestCase):

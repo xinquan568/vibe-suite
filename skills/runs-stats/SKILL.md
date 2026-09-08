@@ -121,8 +121,11 @@ logs · `</` escaped so a `</script>` in any timeline can't break the page · a 
 that is not a list, a numeric `status`, a non-object `state.json`) — becomes a warning, never
 aborts · an existing `history.json` that cannot be read is **refused** (exit 2), never silently
 rebuilt; `--reset-history` rebuilds it deliberately · every write goes through the audited
-primitive (`scripts/lib/bridge.py`): atomic replacement, missing report directories created through
-the symlink-refusing descent, a symlinked reports directory or history file refused (exit 2) · immutability: past files frozen, only
+primitive (`scripts/lib/bridge.py`): atomic replacement, anchored at the nearest **existing** directory
+above `--reports-dir` (canonical) or above the `--out` file (ad-hoc / copy) — symlinks **at or above** that
+anchor are followed (they are your existing directories; `/tmp` on macOS), while everything **below** it is
+created through the symlink-refusing descent, so a symlinked reports directory, bucket directory or
+history file is refused (exit 2) · immutability: past files frozen, only
 `--force-regenerate`/`--period` overwrite them · ad-hoc isolation leaves `history.json`
 byte-identical · generated pages carry no external resource references.
 

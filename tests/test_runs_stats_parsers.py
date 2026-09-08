@@ -211,6 +211,9 @@ class TestBucketSignature(unittest.TestCase):
         self.assertNotEqual(sig, aggregate.bucket_signature([run_record("a", tokens=1001), r2]))
         self.assertNotEqual(sig, aggregate.bucket_signature([run_record("a", n_rounds=2), r2]))
         self.assertNotEqual(sig, aggregate.bucket_signature([run_record("a", commits=("c1",)), r2]))
+        # generation time is not an input: records differing only in as_of/generated_at hash the same
+        stamped = [dict(r1, as_of="2026-08-04 22:00 UTC", generated_at="x"), dict(r2, as_of="2026-09-08 00:00 UTC")]
+        self.assertEqual(sig, aggregate.bucket_signature(stamped))
 
 
 class TestConfigure(unittest.TestCase):
@@ -256,6 +259,31 @@ class TestCoerceState(unittest.TestCase):                                   # T1
         self.assertEqual(statuses, {"vibe-95-clean": "success", "vibe-96-notjson": "unknown", "vibe-97-shapes": "unknown",
                                     "vibe-98-entries": "success", "vibe-99-list": "unknown"})
         self.assertEqual(len(w), 7, w)
+
+
+class TestStateAbsence(unittest.TestCase):                                  # T28, T29
+    def test_metadata_only_run_has_no_shape_warning(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = Path(td) / "runs" / "vibe-94-nostate"; run.mkdir(parents=True)
+            (run / "00-meta.json").write_text(json.dumps({"source_id": "vibe-94", "created_at": "2026-07-30T10:00:00+00:00"}))
+            discover.configure(Path(td) / "runs", r"^vibe-(\d+)$")
+            w = []
+            r = discover.build_execution_run(str(run), "direct", None, w)
+        self.assertEqual(w, [], "no state.json and no state.yaml is absence, not a shape defect")
+        self.assertEqual((r["source_id"], r["status_cat"]), ("vibe-94", "unknown"))
+
+    def test_unparseable_state_is_exactly_one_parse_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = Path(td) / "runs" / "vibe-96-notjson"; run.mkdir(parents=True)
+            (run / "00-meta.json").write_text(json.dumps({"source_id": "vibe-96", "created_at": "2026-07-30T10:00:00+00:00"}))
+            (run / "state.json").write_text("{not json")
+            discover.configure(Path(td) / "runs", r"^vibe-(\d+)$")
+            w = []
+            r = discover.build_execution_run(str(run), "direct", None, w)
+        self.assertEqual(len(w), 1, w)
+        self.assertTrue(w[0].startswith("parse-error:"), w)
+        self.assertFalse(any(x.startswith("shape-error:") for x in w), w)
+        self.assertEqual(r["status_cat"], "unknown")
 
 
 class TestReadText(unittest.TestCase):                                      # T25a

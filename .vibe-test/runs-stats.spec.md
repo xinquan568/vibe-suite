@@ -30,7 +30,7 @@ run metadata, vendored (inlined) chart library.
 - description names the profile-supplied id pattern (the generator refuses without one)
 
 ## Output Contains
-- an invocation of scripts/generate_runs_stats.py with --id-pattern threaded from the resolved issue2pr profile
+- an invocation of scripts/runs_stats/main.py with --id-pattern threaded from the resolved issue2pr profile
 - the freeze/refresh rules (past buckets frozen; --force-regenerate / --period for surgical rebuilds)
 
 ## Behavior

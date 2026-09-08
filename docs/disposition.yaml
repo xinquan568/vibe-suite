@@ -541,5 +541,5 @@ mappings:
     paths: [runs-stats/scripts/generate_runs_stats.py]
     disposition: K
     target: F8.5
-    note: generator; reviewer labels from run metadata (P9)
-    delivered: [skills/runs-stats/scripts/generate_runs_stats.py]
+    note: generator; reviewer labels from run metadata (P9); restructured under scripts/runs_stats/ with the shells in templates/runs-stats/ (H12, vibe-216)
+    delivered: [scripts/runs_stats/main.py, scripts/runs_stats/discover.py, scripts/runs_stats/aggregate.py, scripts/runs_stats/render.py, templates/runs-stats/dashboard.html, templates/runs-stats/index.html]

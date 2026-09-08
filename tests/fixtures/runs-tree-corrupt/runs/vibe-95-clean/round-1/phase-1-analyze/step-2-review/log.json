@@ -1,0 +1,12 @@
+{
+  "outcome": "success",
+  "verdict": "approve",
+  "started_at": "2026-07-30T10:05:00+00:00",
+  "ended_at": "2026-07-30T10:20:00+00:00",
+  "tokens": {
+    "input_total": 1000,
+    "input_cached": 400,
+    "output": 200,
+    "billable": 800
+  }
+}

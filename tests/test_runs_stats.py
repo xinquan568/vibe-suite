@@ -24,8 +24,10 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GENERATOR = REPO_ROOT / "skills" / "runs-stats" / "scripts" / "generate_runs_stats.py"
-VENDOR = REPO_ROOT / "skills" / "runs-stats" / "vendor"
+GENERATOR = REPO_ROOT / "scripts" / "runs_stats" / "main.py"
+PACKAGE = REPO_ROOT / "scripts" / "runs_stats"
+VENDOR = REPO_ROOT / "templates" / "runs-stats" / "vendor"
+CORRUPT = REPO_ROOT / "tests" / "fixtures" / "runs-tree-corrupt"
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "runs-tree"
 GOLDEN = REPO_ROOT / "tests" / "fixtures" / "runs-tree-golden.json"
 ID_PATTERN = r"^vibe-(\d+)$"
@@ -217,13 +219,18 @@ class TestReviewerLabels(RunsTreeCase):
 
 class TestArtifactPosture(unittest.TestCase):
     def test_isc_header_stdlib_generator(self):
-        text = GENERATOR.read_text(encoding="utf-8")
-        self.assertTrue(any("SPDX-License-Identifier: ISC" in line
-                            for line in text.splitlines()[:3]))
-        self.assertNotIn("cdn.jsdelivr.net", text, "no CDN reference survives the port")
-        self.assertNotIn("QTAC", text)
-        self.assertNotIn("QTDQ", text)
-        self.assertNotIn("TAC workspace", text)
+        modules = sorted(PACKAGE.glob("*.py"))
+        self.assertEqual([m.name for m in modules],
+                         ["__init__.py", "aggregate.py", "discover.py", "main.py", "render.py"])
+        for module in modules:
+            text = module.read_text(encoding="utf-8")
+            with self.subTest(module=module.name):
+                self.assertTrue(any("SPDX-License-Identifier: ISC" in line
+                                    for line in text.splitlines()[:3]))
+                self.assertNotIn("cdn.jsdelivr.net", text, "no CDN reference survives the port")
+                self.assertNotIn("QTAC", text)
+                self.assertNotIn("QTDQ", text)
+                self.assertNotIn("TAC workspace", text)
 
 
 if __name__ == "__main__":
@@ -262,3 +269,114 @@ class TestProfileIdentityEnforcement(RunsTreeCase):
                     "--include-legacy")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("QQ-1", (work2 / "runs" / "_reports" / "all-time.html").read_text())
+
+
+def page_runs(path):
+    """The runs the dashboard embeds, by label, read back from its JSON payload."""
+    text = Path(path).read_text(encoding="utf-8")
+    start = text.index('<script id="report-data" type="application/json">') + len('<script id="report-data" type="application/json">')
+    end = text.index("</script>", start)
+    blob = json.loads(text[start:end].replace("<\\/", "</"))
+    return {r["label"]: r for r in blob["runs"]}
+
+
+class TestCorruptTree(unittest.TestCase):
+    """H12 (vibe-216): a parseable-but-wrong state.json is a warning, never a crash. The malformed
+    payload ships as `state.json.malformed` (CI runs `jq empty` on every checked-in .json) and is
+    renamed inside the temporary copy."""
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp(prefix="runs-tree-corrupt-"))
+        self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
+        shutil.copytree(CORRUPT / "runs", self.work / "runs")
+        bad = self.work / "runs" / "vibe-96-notjson"
+        (bad / "state.json.malformed").rename(bad / "state.json")
+
+    def run_corrupt(self, *extra):
+        return run_gen(self.work, "--tz", "Asia/Shanghai", "--id-pattern", ID_PATTERN, *extra)
+
+    def test_seven_warnings_and_no_crash(self):
+        r = self.run_corrupt()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"parse warnings: 7",
+                         "expected 1 parse-error (vibe-96) + 2 shape-errors (vibe-97: status, rounds) "
+                         "+ 3 shape-errors (vibe-98: entry, commits, pr_url) + 1 shape-error (vibe-99: not an object)")
+        runs = page_runs(self.work / "runs" / "_reports" / "all-time.html")
+        self.assertEqual(sorted(runs), ["vibe-95-clean", "vibe-96-notjson", "vibe-97-shapes", "vibe-98-entries", "vibe-99-list"])
+        self.assertEqual({k: v["status_cat"] for k, v in runs.items()},
+                         {"vibe-95-clean": "success", "vibe-96-notjson": "unknown", "vibe-97-shapes": "unknown",
+                          "vibe-98-entries": "success", "vibe-99-list": "unknown"})
+        warnings = page_runs.__globals__["json"].loads(
+            (self.work / "runs" / "_reports" / "all-time.html").read_text(encoding="utf-8").split(
+                '<script id="report-data" type="application/json">')[1].split("</script>")[0].replace("<\\/", "</"))["warnings"]
+        self.assertEqual(sum(1 for w in warnings if w.startswith("parse-error:")), 1, warnings)
+        self.assertEqual(sum(1 for w in warnings if w.startswith("shape-error:")), 6, warnings)
+
+    def test_legacy_identity_survives_the_shape_layer(self):
+        r = self.run_corrupt("--include-legacy")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"parse warnings: 7")
+        self.assertIn("QQ-1", (self.work / "runs" / "_reports" / "all-time.html").read_text(encoding="utf-8"))
+
+
+class TestHistoryRefusal(RunsTreeCase):
+    """H12 (vibe-216): an existing history.json that cannot be read is never silently rebuilt."""
+
+    def test_unreadable_history_is_refused_and_untouched(self):
+        reports = self.work / "runs" / "_reports"
+        reports.mkdir(parents=True)
+        (reports / "history.json").write_text("{corrupt", encoding="utf-8")
+        r = self.canonical()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn(str(reports / "history.json"), r.stderr)
+        self.assertIn("--reset-history", r.stderr)
+        self.assertEqual((reports / "history.json").read_text(encoding="utf-8"), "{corrupt")
+        self.assertFalse((reports / "index.html").exists(), "nothing else is written after the refusal")
+
+    def test_reset_history_replaces_it_deliberately(self):
+        reports = self.work / "runs" / "_reports"
+        reports.mkdir(parents=True)
+        (reports / "history.json").write_text("{corrupt", encoding="utf-8")
+        r = self.canonical("--reset-history")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("reset-history: replacing unreadable history.json", r.stdout)
+        self.assertEqual(self.history()["schema_version"], 1)
+
+
+class TestAuditedWrites(RunsTreeCase):
+    """H12 (vibe-216): every write goes through bridge.write_atomic — symlinked destinations below the
+    anchor are refused, missing directories are created through the audited descent."""
+
+    def test_symlinked_reports_dir_is_refused_with_an_empty_target(self):
+        target = self.work / "elsewhere"
+        target.mkdir()
+        (self.work / "runs" / "_reports").symlink_to(target)
+        r = self.canonical()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("_reports", r.stderr)
+        self.assertEqual(list(target.iterdir()), [], "the very first write refuses; nothing lands in the target")
+
+    def test_symlinked_history_file_is_refused_and_preserved(self):
+        self.assertEqual(self.canonical().returncode, 0)
+        reports = self.work / "runs" / "_reports"
+        real = self.work / "h.json"
+        (reports / "history.json").rename(real)
+        before = real.read_bytes()
+        (reports / "history.json").symlink_to(real)
+        r = self.canonical()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("history.json", r.stderr)
+        self.assertTrue((reports / "history.json").is_symlink(), "the link is preserved, not replaced")
+        self.assertEqual(real.read_bytes(), before, "the target's bytes are untouched")
+
+    def test_out_copy_creates_nested_dirs_and_follows_a_symlinked_parent(self):
+        nested = self.work / "deep" / "er" / "copy.html"
+        r = self.canonical("--out", str(nested))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(nested.read_bytes(), (self.work / "runs" / "_reports" / "all-time.html").read_bytes())
+        real = self.work / "real"
+        real.mkdir()
+        (self.work / "link").symlink_to(real)
+        r = self.canonical("--out", str(self.work / "link" / "sub" / "t.html"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((real / "sub" / "t.html").is_file(), "a symlink at or above the anchor is followed")

@@ -21,6 +21,7 @@ python3 tools/model-pin-lint.py          # P9: no pinned model ids in shipped ar
 bash tools/legacy-string-sweep.sh        # AC-6: no retired namespace in shipped text
 bin/vibe-check .                         # structural checks
 bin/vibe-check . --mirrors               # codex/ staleness (both hash directions)
+python3 -m ruff check --select F811 scripts tools bin/vibe-check bin/vibe-badge bin/vibe-report bin/vibe-build-*   # dev-only: `pip install ruff`; CI's lint job runs it too
 ```
 
 > **Prerequisites for the full local run:** `node` (the Node suite) and `ruby` (the auditor

@@ -21,6 +21,7 @@
 // module mocking, and the unit tests must prove "no signal" by inspecting a recorder, not by hoping.
 
 import { signalGroup as realSignalGroup } from "./process.mjs";
+import { pollGroupGone } from "./process.mjs";
 import {
   finaliseRecord, isAbandoned, isValidJobId, listRecords, readRecord, transact, validateRecord,
   REJECT, TERMINAL_STATUSES,
@@ -123,12 +124,9 @@ export async function resolveCancelableJob(workspace, jobId = null) {
 }
 
 async function pollGone(signalGroup, sleep, pgid, deadlineMs, pollMs) {
-  const rounds = Math.max(1, Math.ceil(deadlineMs / pollMs));
-  for (let i = 0; i < rounds; i += 1) {
-    if (!signalGroup(pgid, 0)) return true;
-    await sleep(pollMs);
-  }
-  return !signalGroup(pgid, 0);
+  // The iteration-counted policy of the shared helper (M6 / vibe-218): ceil(deadline/poll) rounds with the
+  // injected sleep, then a final probe — the cancel budgets' tests never wait on the wall clock.
+  return pollGroupGone(pgid, { rounds: Math.max(1, Math.ceil(deadlineMs / pollMs)), pollMs, sleep, signal: signalGroup });
 }
 
 /**

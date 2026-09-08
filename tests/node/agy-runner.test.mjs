@@ -194,3 +194,17 @@ test("the engine's stderr is persisted on the record as stderrTail; a natural ex
   assert.equal(record.signal, null, "exit 0 — no signal");
   assert.equal(record.malformedLines, null, "agy has no event stream; the count stays null");
 });
+
+
+test("M6: quota classification is the shared table — agy's substrings still match, codex's phrases widen it, auth stays narrow", async () => {
+  const { classifyOutput } = await import("../../scripts/agy-runner.mjs");
+  const quota = (stdout) => classifyOutput({ stdout, groupReaped: true });
+  for (const text of ["quota_exceeded\n", "quotas exhausted\n", "resource exhausted\n", "rate limit\n"]) {
+    assert.deepEqual(quota(text), { status: "failed", reason: "quota" }, `compatibility: ${text.trim()}`);
+  }
+  for (const text of ["usage limit reached\n", "you have exceeded your allowance\n", "too many requests\n", "out of credits\n"]) {
+    assert.deepEqual(quota(text), { status: "failed", reason: "quota" }, `widening: ${text.trim()}`);
+  }
+  assert.equal(quota("the author of this file\n").status, "completed", "'auth' inside 'author' is not an authentication failure");
+  assert.deepEqual(quota("Authentication required\n"), { status: "failed", reason: "unauthenticated" });
+});

@@ -13,6 +13,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import bridge  # scripts/lib — the one JSON reader; main.py bootstraps the path before importing this module
+
 # The work-item id pattern is profile-supplied (--id-pattern; the issue2pr profile's
 # anchored `id_pattern`). ID_RE keeps the anchored form for whole-id matches; SEARCH_RE is
 # its unanchored core, used only for the run-folder-name fallback when a run's metadata
@@ -53,10 +55,9 @@ def load_json(path, warnings):
     if not os.path.isfile(path):  # missing is expected (e.g. manifest-only runs) — not a warning
         return None
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except Exception as exc:  # malformed / unreadable -> warning, never abort
-        warnings.append(f"parse-error: {os.path.relpath(path)} :: {exc.__class__.__name__}: {exc}")
+        return bridge.load_json(path)          # the one reader (M6 / vibe-218); strict, so every failure raises
+    except bridge.JsonUnreadable as exc:  # malformed / unreadable -> warning, never abort; the CAUSE is the public text
+        warnings.append(f"parse-error: {os.path.relpath(path)} :: {exc.cause.__class__.__name__}: {exc.cause}")
         return None
 
 

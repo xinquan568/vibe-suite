@@ -1742,3 +1742,25 @@ class ManifestValidatorTimeoutValueTest(unittest.TestCase):
                 driver.mode_manifest(decl, args)
         self.assertIn("did not finish within", str(caught.exception))
         self.assertIn("60", str(caught.exception), "the refusal names the bound it hit")
+
+
+class TestDriverLoadJsonRefusals(unittest.TestCase):
+    """M6 / vibe-218 (T13, pinned whole at Step 9 R3): the driver's `load_json` is `bridge.load_json`
+    (strict) in this driver's vocabulary — an unreadable file and an invalid one are two `Refusal`s
+    whose text carries the path and the underlying cause verbatim."""
+
+    def test_missing_and_invalid_files_are_refusals_naming_the_cause(self):
+        import tempfile as _tf
+        import issue2pr_mode_driver as driver
+        with _tf.TemporaryDirectory() as td:
+            missing = pathlib.Path(td) / "absent.json"
+            with self.assertRaises(driver.Refusal) as caught:
+                driver.load_json(missing)
+            self.assertEqual(str(caught.exception), f"cannot read {missing}: {missing} is not a regular file")
+            bad = pathlib.Path(td) / "bad.json"; bad.write_text("", encoding="utf-8")
+            with self.assertRaises(driver.Refusal) as caught:
+                driver.load_json(bad)
+            self.assertEqual(str(caught.exception),
+                             f"{bad} is not JSON: Expecting value: line 1 column 1 (char 0)")
+            good = pathlib.Path(td) / "good.json"; good.write_text('{"k": 1}', encoding="utf-8")
+            self.assertEqual(driver.load_json(good), {"k": 1})

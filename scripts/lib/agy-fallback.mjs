@@ -27,6 +27,7 @@
 // injects BEHAVIOUR, and `agy-gate.mjs` imports only node builtins and reads no record at
 // module init, so this stays acyclic and side-effect free.
 import { STAGED_NOTICE } from "./agy-gate.mjs";
+import { AUTH_SIGNATURE_MARKERS, mentionsAny, mentionsQuota } from "./events.mjs";
 export const EXIT = { ok: 0, refused: 2, manual: 3 };
 
 // `commands/shared/fallback.md` specifies the diagnostic header as a *structured* block — three
@@ -64,8 +65,8 @@ const RESTORATION = {
  */
 function authState(outcome) {
   const signature = String(outcome?.error ?? outcome?.status ?? "").toLowerCase();
-  if (signature.includes("unauthenticated") || signature.includes("auth")) return "expired";
-  if (signature.includes("quota")) return "ok (quota exhausted)";
+  if (mentionsAny(signature, AUTH_SIGNATURE_MARKERS)) return "expired";
+  if (mentionsQuota(signature)) return "ok (quota exhausted)";
   return "unknown";
 }
 

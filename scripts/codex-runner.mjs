@@ -61,11 +61,12 @@ import { fileURLToPath } from "node:url";
 
 import { claimFailureMessage, resolveClaimBudget } from "./lib/claim-budget.mjs";
 import { emit } from "./lib/eventlog.mjs";
-import { billableTokens, readEventStream } from "./lib/events.mjs";
+import { billableTokens, classifyFailure, readEventStream } from "./lib/events.mjs";
+import { UsageError, readValue, runMain } from "./lib/cli.mjs";
 import { boundRawOutput, noTerminalEvent, stderrTail } from "./lib/render.mjs";
 import { loadConfig, resolveDefaults } from "./lib/config-bridge.mjs";
 import {
-  DEFAULT_TIMEOUT_MS, heartbeatInterval, runWithDeadline, signalGroup,
+  DEFAULT_TIMEOUT_MS, heartbeatInterval, pollGroupGone, runWithDeadline, signalGroup,
 } from "./lib/process.mjs";
 import {
   claimWith, createRecord, finaliseRecord, hashToken, newClaimToken, newJobId, newRecord,
@@ -85,7 +86,6 @@ const HANDOFF_FD = 3;
 // One vocabulary, enforced at both doors; `tests/test_codex_runner.py` pins the two lists equal.
 const EFFORTS = new Set(["low", "medium", "high"]);
 
-class UsageError extends Error {}
 
 // --------------------------------------------------------------------------- test latches
 // File latches make race tests deterministic: a party signals by creating a file and waits by
@@ -133,12 +133,7 @@ function parseArgs(argv) {
   for (; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") { rest.push(...argv.slice(index + 1)); break; }
-    const next = () => {
-      const value = argv[index + 1];
-      if (value === undefined) throw new UsageError(`${arg} expects a value`);
-      index += 1;
-      return value;
-    };
+    const next = () => { const value = readValue(argv, index, arg); index += 1; return value; };
     switch (arg) {
       case "--kind": options.kind = next(); break;
       case "--model": options.model = next(); break;
@@ -269,31 +264,6 @@ function codexBinary(env = process.env) {
 
 // --------------------------------------------------------------------------- execution
 
-/** An exhausted allowance, or a substantive rejection?
- *
- * The contract calls this row "the one most easily collapsed into the others and the one that must
- * not be": a quota is retryable later, a rejection is a judgement, and a loop that confuses them
- * either retries a verdict or abandons a round it could have finished.
- *
- * **Structured fields first.** A `code` or `type` on the error is machine-set and stable; prose is
- * neither. Phrase matching is the fallback for backends that supply only a message, and it is a
- * table so a new variant is a data change.
- */
-const QUOTA_CODES = new Set([
-  "insufficient_quota", "quota_exceeded", "rate_limit_exceeded", "resource_exhausted",
-  "usage_limit_reached", "too_many_requests",
-]);
-const QUOTA_PHRASES = [
-  /\bquota\b/i, /\brate.?limit/i, /\busage (?:limit|cap)\b/i, /\bexceeded your\b/i,
-  /\btoo many requests\b/i, /\bresource exhausted\b/i, /\bout of credits?\b/i,
-];
-
-function classifyError(events) {
-  const code = String(events.errorCode ?? events.errorType ?? "").toLowerCase();
-  if (code && QUOTA_CODES.has(code)) return "quota";
-  const message = events.errorMessage ?? "";
-  return QUOTA_PHRASES.some((pattern) => pattern.test(message)) ? "quota" : "failure";
-}
 
 /** The verdict, from the event stream (vibe-137).
  *
@@ -358,7 +328,7 @@ async function execute(workspace, record, prompt) {
   // Quota signature: the contract calls this "the one most easily collapsed into the others and the
   // one that must not be." An exhausted allowance is retryable later; a rejection is a judgement.
   // Both arrive as `turn.failed`, so the message is normalised into a class rather than left as text.
-  const errorClass = status === "completed" ? null : classifyError(events);
+  const errorClass = status === "completed" ? null : classifyFailure(events);
 
   const finished = await finaliseRecord(workspace, record.jobId, {
     status,
@@ -575,13 +545,7 @@ async function runBackground(workspace, options, timeoutMs) {
     // Only the group actually disappearing counts as reaped. `child.on("exit")` fires when the
     // direct child dies, which says nothing about the Codex process it spawned into the same group —
     // and that grandchild is exactly what a group kill exists to catch.
-    const reaped = await new Promise((resolve) => {
-      const deadline = Date.now() + 15_000;
-      const poll = setInterval(() => {
-        if (!signalGroup(child.pid, 0)) { clearInterval(poll); resolve(true); }
-        else if (Date.now() > deadline) { clearInterval(poll); resolve(false); }
-      }, 50);
-    });
+    const reaped = await pollGroupGone(child.pid, { deadlineMs: 15_000, pollMs: 50 });
 
     // **Always** attempt the guarded finalisation. A worker killed immediately after claiming would
     // otherwise leave the record `running` forever with nobody alive to finish it. The guard means a
@@ -744,9 +708,4 @@ async function main() {
   }
 }
 
-main()
-  .then((code) => { process.exitCode = code; })
-  .catch((error) => {
-    process.stderr.write(`codex-runner: ${error?.stack ?? error}\n`);
-    process.exitCode = 1;
-  });
+runMain(main, "codex-runner");

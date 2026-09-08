@@ -108,6 +108,16 @@ jobs:
           printf 'checking %d Python file(s)\n' "${#files[@]}"
           python3 -m py_compile "${files[@]}"
 
+      # M6 / vibe-218: a name bound twice at module level is dead code that nothing else notices
+      # (bridge.py carried pin_root twice for weeks). ruff is the tool; installing it here is the
+      # dependency the gate needs, provisioned in the same change (the profile's rule). A failed
+      # install fails the step — a gate must not pass vacuously.
+      - name: Python redefinitions (ruff F811)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet ruff
+          python3 -m ruff check --select F811 --no-cache scripts tools bin/vibe-check bin/vibe-badge bin/vibe-report bin/vibe-build-*
+
       - name: Node syntax
         run: |
           set -euo pipefail

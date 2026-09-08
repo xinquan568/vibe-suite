@@ -877,7 +877,7 @@ def listing(ws, pin=None, pin_file=None, pending_file=None):
     ws = Path(ws)
     defs = load_definitions(ws)
     ledger = _load_json_file(ws / LEDGER_REL)
-    doc = bridge.load_json(ws / MCP_REL)
+    doc = bridge.load_json(ws / MCP_REL, strict=False)
     servers = doc.get("mcpServers", {}) if isinstance(doc, dict) else {}
     toml_text = bridge.read_text_verbatim(ws / TOML_REL)
     rows = []
@@ -1048,7 +1048,7 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=Fal
     acting = set(register) if explicit else {
         n for n in defs if registration_state(ledger, n, defs[n]) == "registered"}
     acting_defs = {n: defs[n] for n in acting}
-    doc = bridge.load_json(ws / MCP_REL)
+    doc = bridge.load_json(ws / MCP_REL, strict=False)
     toml_before = bridge.read_text_verbatim(ws / TOML_REL)
     _collision_check(acting_defs, doc, toml_before)
     # vibe-184: a dangerous definition this call would write is refused here — after the collision
@@ -1420,7 +1420,7 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
     if not NAME_RE.match(name or ""):
         raise AdvisorError(f"advisor name {name!r} is not a valid MCP server key")
     def_path = ws / AGENTS_REL / f"{name}.md"
-    doc = bridge.load_json(ws / MCP_REL)
+    doc = bridge.load_json(ws / MCP_REL, strict=False)
     owned = is_owned_entry((doc.get("mcpServers") or {}).get(name))
     timeline_residue = (ws / timeline_rel(name)).is_dir()
     if not def_path.is_file() and not owned and not timeline_residue:
@@ -1541,7 +1541,7 @@ def list_advisors(ws, pin=None, pin_file=None, pending_file=None):
     """Definitions ⋈ registrations with content-aware state classification (read-only)."""
     ws = Path(ws)
     defs = load_definitions(ws)
-    doc = bridge.load_json(ws / MCP_REL)
+    doc = bridge.load_json(ws / MCP_REL, strict=False)
     toml_text = bridge.read_text_verbatim(ws / TOML_REL)
     classified = _classify(ws, defs, doc, toml_text, pin, pin_file, pending_file)
     ledger = _load_json_file(ws / LEDGER_REL)

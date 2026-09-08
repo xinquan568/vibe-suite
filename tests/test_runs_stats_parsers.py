@@ -22,6 +22,7 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))   # discover imports the shared JSON reader (M6 / vibe-218)
 import runs_stats.discover as discover  # noqa: E402
 import runs_stats.aggregate as aggregate  # noqa: E402
 import runs_stats.render as render  # noqa: E402
@@ -284,6 +285,75 @@ class TestStateAbsence(unittest.TestCase):                                  # T2
         self.assertTrue(w[0].startswith("parse-error:"), w)
         self.assertFalse(any(x.startswith("shape-error:") for x in w), w)
         self.assertEqual(r["status_cat"], "unknown")
+
+
+class TestLoadJsonWarningText(unittest.TestCase):                          # M6 / vibe-218
+    """The `parse-error: <relpath> :: <cause class>: <cause message>` text is public: dashboards show it.
+    Whole strings, not prefixes (Step 9 R3): a warning that dropped the cause message would still start
+    with the class name, so only equality against the complete text pins the message."""
+
+    def _expect(self, p, cause):
+        return f"parse-error: {os.path.relpath(p)} :: {cause.__class__.__name__}: {cause}"
+
+    def test_each_parser_failure_is_one_warning_carrying_the_whole_cause(self):
+        import errno
+        with tempfile.TemporaryDirectory() as td:
+            cases = {"empty.json": b"", "blank.json": b"  \n", "bad.json": b"{not json",
+                     "utf8.json": b"\xff\xfe\x00"}
+            for name, data in cases.items():
+                with self.subTest(name=name):
+                    p = Path(td) / name; p.write_bytes(data)
+                    try:                                             # the oracle: what json/utf-8 themselves say
+                        json.loads(data.decode("utf-8"))
+                    except ValueError as exc:                        # UnicodeDecodeError is a ValueError
+                        cause = exc
+                    else:
+                        self.fail(f"{name} was expected to be unreadable")
+                    w = []
+                    self.assertIsNone(discover.load_json(str(p), w))
+                    self.assertEqual(w, [self._expect(p, cause)])
+            # A deeply nested document: 3.12/3.13's json raises RecursionError at this depth, 3.14 parses it.
+            # Either way the reader yields a value or ONE warning — never an escaping exception (Step 9 R1).
+            p = Path(td) / "deep.json"; p.write_bytes(b"[" * 100_000 + b"]" * 100_000)
+            w = []
+            try:
+                json.loads(p.read_text(encoding="utf-8"))
+            except RecursionError as exc:
+                self.assertIsNone(discover.load_json(str(p), w))
+                self.assertEqual(w, [self._expect(p, exc)])
+            else:
+                self.assertIsInstance(discover.load_json(str(p), w), list)   # not assertEqual: comparing 100,000-deep lists recurses too
+                self.assertEqual(w, [])
+            p = Path(td) / "locked.json"; p.write_bytes(b"{}"); p.chmod(0)
+            try:
+                w = []
+                self.assertIsNone(discover.load_json(str(p), w))
+                self.assertEqual(w, [f"parse-error: {os.path.relpath(p)} :: PermissionError: "
+                                     f"[Errno {errno.EACCES}] {os.strerror(errno.EACCES)}: '{p}'"])
+            finally:
+                p.chmod(0o644)
+            w = []
+            self.assertIsNone(discover.load_json(str(Path(td) / "absent.json"), w), "a missing file is expected, not a warning")
+            self.assertEqual(w, [])
+
+    def test_an_os_error_while_reading_is_the_same_warning_shape(self):
+        """Deterministic cause by injection: the read itself fails, not the parse."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "flaky.json"; p.write_bytes(b"{}")
+            w = []
+            with mock.patch.object(Path, "read_text", side_effect=OSError("injected read failure")):
+                self.assertIsNone(discover.load_json(str(p), w))
+            self.assertEqual(w, [f"parse-error: {os.path.relpath(p)} :: OSError: injected read failure"])
+
+    def test_a_parser_recursion_error_is_the_same_warning_shape(self):
+        """Step 9 R1, deterministic by injection: `json.loads`'s RecursionError is a parse failure — one
+        warning naming it, `None` returned, never an abort of the whole report."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "deep.json"; p.write_bytes(b"[[]]")
+            w = []
+            with mock.patch.object(json, "loads", side_effect=RecursionError("maximum recursion depth exceeded")):
+                self.assertIsNone(discover.load_json(str(p), w))
+            self.assertEqual(w, [f"parse-error: {os.path.relpath(p)} :: RecursionError: maximum recursion depth exceeded"])
 
 
 class TestReadText(unittest.TestCase):                                      # T25a

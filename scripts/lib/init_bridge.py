@@ -48,7 +48,7 @@ def dangling_registrations(ws):
     def loaded(rel):
         # an unreadable store is not a dangling registration — doctor reports it as its own finding
         try:
-            return bridge.load_json(ws / rel)
+            return bridge.load_json(ws / rel, strict=False)
         except Exception:
             return {}
     toml = bridge.read_text_verbatim(ws / ".codex" / "config.toml")
@@ -146,7 +146,7 @@ def provenance_open(ws):
         # the only record of what the workspace looked like before the suite touched it. An existing
         # record is still checked: a truncated or foreign file at this path would otherwise be
         # trusted as a restore source it cannot serve.
-        existing = bridge.load_json(out)
+        existing = bridge.load_json(out, strict=False)
         if (not isinstance(existing, dict) or existing.get("schema") != bridge.SCHEMA
                 or not isinstance(existing.get("targets"), list)
                 or not isinstance(existing.get("parents_created"), list)
@@ -160,7 +160,7 @@ def provenance_open(ws):
     # The plugin version at install time, so a later doctor can tell an upgrade from a fresh
     # install. Recorded here because provenance is the only artefact written once, before anything.
     manifest = bridge.load_json(Path(__file__).resolve().parent.parent.parent
-                                / ".claude-plugin" / "plugin.json")
+                                / ".claude-plugin" / "plugin.json", strict=False)
     record = {"schema": bridge.SCHEMA, "targets": [], "parents_created": [],
               "plugin_version": manifest.get("version")}
     parents = []
@@ -269,7 +269,7 @@ def _upsert_text(ws, rel, name, body, markdown=False):
 
 def _upsert_json(ws, rel, mutate):
     dest = Path(ws) / rel
-    doc = bridge.load_json(dest)
+    doc = bridge.load_json(dest, strict=False)
     before = json.dumps(doc, indent=2, sort_keys=True)
     doc = mutate(doc)
     after = json.dumps(doc, indent=2, sort_keys=True)
@@ -437,7 +437,7 @@ def _history_baseline(ws, threshold):
     # (`tests/test_migrate.py:214`) — not the mapping an earlier revision assumed. Both shapes are
     # live, so the baseline is appended into whichever one is there. `is None` rather than `or`,
     # because an existing empty list is a history, and `[] or {...}` would discard it.
-    history = bridge.load_json(dest) if dest.is_file() else None
+    history = bridge.load_json(dest, strict=False) if dest.is_file() else None
     if isinstance(history, list):
         snapshots, container = history, history
     elif isinstance(history, dict):

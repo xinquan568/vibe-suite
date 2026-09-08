@@ -11,7 +11,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { billableTokens, readEventStream } from "../../scripts/lib/events.mjs";
+import { AUTH_SIGNATURE_MARKERS, AUTH_TEXT_MARKERS, QUOTA_CODES, QUOTA_PHRASES, QUOTA_TEXT_MARKERS, billableTokens,
+  classifyFailure, mentionsAny, mentionsQuota, readEventStream } from "../../scripts/lib/events.mjs";
 
 const line = (value) => JSON.stringify(value) + "\n";
 const EMITTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "fake-codex", "emitter.mjs");
@@ -108,4 +109,30 @@ test("the canonical emitter fixture DRIVES verdict capture (real agent_message i
   assert.equal(parsed.malformedLines, 1, "the fixture still exercises one malformed line");
   assert.equal(parsed.agentMessage, "fixture output",
     "the canonical success fixture must emit the real agent_message item so it drives verdict capture");
+});
+
+
+// ---- M6 / vibe-218: the one quota/auth table and the predicates over it
+test("classifyFailure: an error code in QUOTA_CODES is quota; a phrase hit is quota; neither is failure", () => {
+  assert.equal(classifyFailure({ errorCode: "insufficient_quota", errorMessage: "" }), "quota");
+  assert.equal(classifyFailure({ errorCode: null, errorMessage: "You have exceeded your usage cap" }), "quota");
+  assert.equal(classifyFailure({ errorCode: "server_error", errorMessage: "boom" }), "failure");
+  assert.ok(QUOTA_CODES.has("rate_limit_exceeded")); assert.equal(QUOTA_PHRASES.length, 7);
+});
+
+test("mentionsQuota: agy's three substrings still match (quota_exceeded, quotas exhausted), and codex's phrases widen the net", () => {
+  for (const text of ["quota_exceeded", "quotas exhausted", "Resource exhausted", "rate limit hit", "usage limit reached",
+                      "you have exceeded your quota", "too many requests", "out of credits"]) {
+    assert.equal(mentionsQuota(text), true, text);
+  }
+  assert.equal(mentionsQuota("analysis complete"), false);
+  assert.deepEqual(QUOTA_TEXT_MARKERS, ["quota", "resource exhausted", "rate limit"]);
+});
+
+test("mentionsAny: the runner's narrow auth markers vs the fallback's signature markers", () => {
+  assert.equal(mentionsAny("Authentication required\n", AUTH_TEXT_MARKERS), true);
+  assert.equal(mentionsAny("please sign in", AUTH_TEXT_MARKERS), true);
+  assert.equal(mentionsAny("the author wrote", AUTH_TEXT_MARKERS), false, "agent stdout containing 'author' is not an auth failure");
+  assert.equal(mentionsAny("unauthorized", AUTH_SIGNATURE_MARKERS), true);
+  assert.equal(mentionsAny("quota", AUTH_SIGNATURE_MARKERS), false);
 });

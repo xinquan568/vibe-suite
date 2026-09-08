@@ -121,7 +121,7 @@ if conflicts:
             sys.stderr.write(f"error: rows 1-2: {report} is a symlink; refusing\n")
             raise SystemExit(1)
         if report.is_file():
-            prior = bridge.load_json(report)
+            prior = bridge.load_json(report, strict=False)
             if not (isinstance(prior, dict) and prior.get("vibe_suite_owned") is True):
                 sys.stderr.write(f"error: rows 1-2: {report} exists and is not ours; refusing\n")
                 raise SystemExit(1)

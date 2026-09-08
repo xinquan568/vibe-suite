@@ -331,3 +331,37 @@ class SetGoesThroughTheAuditedPrimitive(unittest.TestCase):
         os.chmod(self.path, 0o600)
         self.store().set("gate.stop_review_gate", True)
         self.assertEqual(stat.S_IMODE(self.path.lstat().st_mode), 0o600)
+
+
+class TestReadRefusesUnreadableState(unittest.TestCase):
+    """M6 / vibe-218: a state file the store cannot read is a StoreFormatError, never a raw crash — and
+    never a rewrite. Directory, invalid UTF-8 and an unreadable file all map the same way, bytes untouched."""
+
+    def setUp(self):
+        self.ws = Path(tempfile.mkdtemp(prefix="vibe-store-unreadable-"))
+        self.addCleanup(shutil.rmtree, self.ws, ignore_errors=True)
+
+    def test_directory_at_the_state_path(self):
+        (self.ws / "state.json").mkdir()
+        with self.assertRaises(store.StoreFormatError):
+            store._read(self.ws / "state.json")
+
+    def test_invalid_utf8_is_refused_and_preserved(self):
+        p = self.ws / "state.json"; p.write_bytes(b"\xff\xfe{}")
+        with self.assertRaises(store.StoreFormatError):
+            store._read(p)
+        self.assertEqual(p.read_bytes(), b"\xff\xfe{}")
+
+    def test_unreadable_file_is_refused_and_preserved(self):
+        p = self.ws / "state.json"; p.write_bytes(b'{"jobs": {}}'); p.chmod(0)
+        try:
+            with self.assertRaises(store.StoreFormatError):
+                store._read(p)
+        finally:
+            p.chmod(0o644)
+        self.assertEqual(p.read_bytes(), b'{"jobs": {}}')
+
+    def test_empty_file_is_refused(self):
+        p = self.ws / "state.json"; p.write_bytes(b"")
+        with self.assertRaises(store.StoreFormatError):
+            store._read(p)

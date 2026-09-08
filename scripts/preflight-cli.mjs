@@ -14,8 +14,8 @@
 
 import { buildMatrix, exitCodeFor, probeAgy, probeCodex, probeRuntimes } from "./lib/preflight.mjs";
 import { agyGate } from "./lib/agy-gate.mjs";
+import { UsageError, runMain } from "./lib/cli.mjs";
 
-class UsageError extends Error {}
 
 function parseArgs(argv) {
   const options = { json: false };
@@ -98,9 +98,4 @@ async function main() {
   return exitCodeFor([...rows, ...runtimes]);
 }
 
-main()
-  .then((code) => { process.exitCode = code; })
-  .catch((error) => {
-    process.stderr.write(`preflight: ${error?.stack ?? error}\n`);
-    process.exitCode = 1;
-  });
+runMain(main, "preflight");

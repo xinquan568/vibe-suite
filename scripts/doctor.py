@@ -61,7 +61,7 @@ def safe_json(path, out, check):
     """Parsed JSON, or a finding. A diagnosis that raises on a malformed file reports nothing about
     the rest of the project, which is the opposite of its job."""
     try:
-        return bridge.load_json(path), True
+        return bridge.load_json(path, strict=False), True
     except Exception as exc:
         out.append(finding("[HIGH]", check, f"{Path(path).name} is not readable JSON: {exc}", False))
         return {}, False
@@ -89,7 +89,7 @@ def detect_state(ws):
     if not provenance.is_file():
         return "partial"
     try:
-        record = bridge.load_json(provenance)
+        record = bridge.load_json(provenance, strict=False)
     except Exception:
         return "partial"
     # `all()` over an empty list is vacuously true, so the target *set* is checked as well as each
@@ -197,7 +197,7 @@ def check_pins(ws, out):
         # An install predating this field is not a defect in the project. Reported as a capability
         # by the caller, so a clean older workspace still reaches [GOOD].
         return "no-version-recorded"
-    manifest = bridge.load_json(HERE.parent / ".claude-plugin" / "plugin.json").get("version")
+    manifest = bridge.load_json(HERE.parent / ".claude-plugin" / "plugin.json", strict=False).get("version")
     if manifest and recorded != manifest:
         out.append(finding("[MEDIUM]", "pins",
                            f"installed under plugin {recorded}; this plugin is {manifest}", False))
@@ -482,7 +482,7 @@ def knowledge_capability(out):
     root = Path(os.environ.get("CLAUDE_PLUGIN_ROOT", HERE.parent))
     for candidate in (root / "skills").glob("*/refreshed.json"):
         try:
-            record = bridge.load_json(candidate)
+            record = bridge.load_json(candidate, strict=False)
         except Exception:
             record = None
         refreshed = record.get("refreshed") if isinstance(record, dict) else None

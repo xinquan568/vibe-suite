@@ -90,3 +90,52 @@ export function billableTokens(usage) {
   const output = usage.output_tokens ?? 0;
   return Math.max(0, input - cached) + output;
 }
+
+// ---- M6 / vibe-218: the ONE quota/auth vocabulary and the predicates over it. Three consumers used to carry
+// three tables of three kinds (codex error codes + regexes over an event stream; agy's plain-text substrings;
+// agy-fallback's status-signature substrings). They live here now; each consumer keeps its matching policy.
+
+/** An exhausted allowance, or a substantive rejection?
+ *
+ * The contract calls this row "the one most easily collapsed into the others and the one that must
+ * not be": a quota is retryable later, a rejection is a judgement, and a loop that confuses them
+ * either retries a verdict or abandons a round it could have finished.
+ *
+ * **Structured fields first.** A `code` or `type` on the error is machine-set and stable; prose is
+ * neither. Phrase matching is the fallback for backends that supply only a message, and it is a
+ * table so a new variant is a data change.
+ */
+export const QUOTA_CODES = new Set([
+  "insufficient_quota", "quota_exceeded", "rate_limit_exceeded", "resource_exhausted",
+  "usage_limit_reached", "too_many_requests",
+]);
+export const QUOTA_PHRASES = [
+  /\bquota\b/i, /\brate.?limit/i, /\busage (?:limit|cap)\b/i, /\bexceeded your\b/i,
+  /\btoo many requests\b/i, /\bresource exhausted\b/i, /\bout of credits?\b/i,
+];
+
+export function classifyFailure(events) {
+  const code = String(events.errorCode ?? events.errorType ?? "").toLowerCase();
+  if (code && QUOTA_CODES.has(code)) return "quota";
+  const message = events.errorMessage ?? "";
+  return QUOTA_PHRASES.some((pattern) => pattern.test(message)) ? "quota" : "failure";
+}
+
+/** agy's plain-text quota vocabulary, verbatim: `quota_exceeded` and `quotas exhausted` must keep matching. */
+export const QUOTA_TEXT_MARKERS = ["quota", "resource exhausted", "rate limit"];
+/** The runner's stdout auth markers — deliberately narrow: "auth" inside "author" is agent prose, not a failure. */
+export const AUTH_TEXT_MARKERS = ["authentication required", "please sign in"];
+/** agy-fallback's short status/error signature, where the bare substring is safe. */
+export const AUTH_SIGNATURE_MARKERS = ["unauthenticated", "auth"];
+
+/** True when the lower-cased text contains any marker. */
+export function mentionsAny(text, markers) {
+  const lowered = String(text ?? "").toLowerCase();
+  return markers.some((marker) => lowered.includes(marker));
+}
+
+/** True when text reads as a quota failure: agy's substrings OR codex's phrase regexes (the union preserves every pre-M6 match). */
+export function mentionsQuota(text) {
+  const value = String(text ?? "");
+  return mentionsAny(value, QUOTA_TEXT_MARKERS) || QUOTA_PHRASES.some((pattern) => pattern.test(value));
+}

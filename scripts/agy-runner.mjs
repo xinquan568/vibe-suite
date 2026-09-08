@@ -33,12 +33,12 @@ import {
   createRecord, finaliseRecord, newJobId, newRecord, readRecord, resultLine, updateRecord,
 } from "./lib/jobs.mjs";
 import { stderrTail } from "./lib/render.mjs";
+import { UsageError, readValue, runMain } from "./lib/cli.mjs";
+import { AUTH_TEXT_MARKERS, mentionsAny, mentionsQuota } from "./lib/events.mjs";
+import { ARGV_PROMPT_CAP, DEFAULT_TIMEOUT_MS } from "./lib/process.mjs";
 
-export const DEFAULT_TIMEOUT_MS = 600_000;
 // Below Linux MAX_ARG_STRLEN (128 KiB): agy takes the prompt as one argv string.
-export const PROMPT_ARGV_CAP = 96_000;
 
-class UsageError extends Error {}
 
 function parseArgs(argv) {
   const options = {
@@ -48,12 +48,7 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") { rest.push(...argv.slice(index + 1)); break; }
-    const next = () => {
-      const value = argv[index + 1];
-      if (value === undefined) throw new UsageError(`${arg} expects a value`);
-      index += 1;
-      return value;
-    };
+    const next = () => { const value = readValue(argv, index, arg); index += 1; return value; };
     switch (arg) {
       case "--kind": options.kind = next(); break;
       case "--model": options.model = next(); break;
@@ -101,12 +96,8 @@ export function classifyOutput(outcome) {
   if (groupReaped !== true) return { status: "failed", reason: "reap-failed" };
   if (timedOut) return { status: "timed_out", reason: "deadline exceeded" };
   const text = `${stdout}\n${stderr}`.toLowerCase();
-  if (text.includes("authentication required") || text.includes("please sign in")) {
-    return { status: "failed", reason: "unauthenticated" };
-  }
-  if (text.includes("quota") || text.includes("resource exhausted") || text.includes("rate limit")) {
-    return { status: "failed", reason: "quota" };
-  }
+  if (mentionsAny(text, AUTH_TEXT_MARKERS)) return { status: "failed", reason: "unauthenticated" };
+  if (mentionsQuota(text)) return { status: "failed", reason: "quota" };
   if (!stdout.trim()) return { status: "failed", reason: "empty output" };
   return { status: "completed", reason: null };
 }
@@ -126,10 +117,10 @@ async function main() {
     if (!options.kind) throw new UsageError("--kind is required");
     timeoutMs = resolveTimeout(options.timeoutMs);
     model = resolveModel(workspace, options);
-    if (Buffer.byteLength(options.prompt, "utf8") > PROMPT_ARGV_CAP) {
+    if (Buffer.byteLength(options.prompt, "utf8") > ARGV_PROMPT_CAP) {
       // Fail closed: a silently truncated audit prompt returns a plausible, incomplete answer.
       throw new UsageError(
-        `prompt exceeds ${PROMPT_ARGV_CAP} bytes; agy takes it as one argv string and truncating ` +
+        `prompt exceeds ${ARGV_PROMPT_CAP} bytes; agy takes it as one argv string and truncating ` +
         `it would silently change the scope of the analysis`);
     }
   } catch (error) {
@@ -195,10 +186,5 @@ async function main() {
 // Run ONLY as a script. The contract probe imports `classifyOutput` from here, and an import that
 // executes main() makes every importing test file fail on a usage error it never asked for.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main()
-    .then((code) => { process.exitCode = code; })
-    .catch((error) => {
-      process.stderr.write(`agy-runner: ${error?.stack ?? error}\n`);
-      process.exitCode = 1;
-    });
+  runMain(main, "agy-runner");
 }

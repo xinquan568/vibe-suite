@@ -83,12 +83,13 @@ def now_utc():
 
 
 def load_json(path):
+    """`bridge.load_json` (strict) in this driver's vocabulary: every failure is a Refusal (M6 / vibe-218)."""
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise Refusal(f"cannot read {path}: {exc}")
-    except ValueError as exc:
-        raise Refusal(f"{path} is not JSON: {exc}")
+        return bridge.load_json(path)
+    except bridge.JsonUnreadable as exc:
+        if isinstance(exc.cause, OSError):
+            raise Refusal(f"cannot read {path}: {exc.cause}")
+        raise Refusal(f"{path} is not JSON: {exc.cause}")
 
 
 def dump_json(path, data):

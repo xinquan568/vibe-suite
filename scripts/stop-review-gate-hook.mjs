@@ -36,7 +36,10 @@
 import { spawnSync } from "node:child_process";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 
+import { parseLastJsonLine } from "./lib/cli.mjs";
 import { emit } from "./lib/eventlog.mjs";
+import { readEventStream } from "./lib/events.mjs";
+import { ARGV_PROMPT_CAP } from "./lib/process.mjs";
 import { storedGateToggle } from "./lib/gate-toggle.mjs";
 import { frameExternal, sanitiseReason } from "./lib/reason-frame.mjs";
 import { makeOwnedTempDir, removeOwnedTree, writeAtomic, PRIVATE_FILE_MODE } from "./lib/write.mjs";
@@ -73,7 +76,7 @@ const TOTAL_UNTRACKED_CAP = 48_000;      // must fit inside PROMPT_CAP alongside
 // therefore died with E2BIG on Linux CI while passing on macOS — the platform-dependent break that
 // makes a locally-green gate fail in the place it matters. 96 KB leaves room for the runner's own
 // argv and the review preamble.
-const PROMPT_CAP = 96_000;
+const PROMPT_CAP = ARGV_PROMPT_CAP;                 // the one cap, from process.mjs (M6 / vibe-218)
 const OUTPUT_MAX_BUFFER = 8 * 1024 * 1024;
 const REASON_CAP = 500;                    // UTF-16 code units — `.slice`, not a byte cap
 // The sanitiser itself lives in `lib/reason-frame.mjs`, beside the fence: both exist to make
@@ -242,22 +245,11 @@ function collectDiff(cwd) {
 
 /** The last assistant message's first non-empty line, or null when there is no verdict to read. */
 function verdictFrom(rawOutput) {
-  let text = null;
-  for (const line of String(rawOutput ?? "").split("\n")) {
-    if (!line.trim()) continue;
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    // Only an assistant message can carry a verdict. Reasoning traces, tool events and the diff
-    // itself are all just text that might happen to contain the word BLOCK.
-    if (event?.type === "item.completed" && event.item?.type === "agent_message") {
-      text = event.item.text ?? text;                                  // last one wins
-    }
-  }
-  if (text === null) return null;
+  // Only an assistant message can carry a verdict. Reasoning traces, tool events and the diff itself are
+  // all just text that might happen to contain the word BLOCK. `readEventStream` applies exactly that rule
+  // (malformed lines skipped, the LAST agent_message wins) — one reader for the stream (M6 / vibe-218).
+  const text = readEventStream(rawOutput).agentMessage;
+  if (text === null || text === undefined) return null;
   const first = String(text).split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
   const match = /^(ALLOW|BLOCK):\s*(.*)$/.exec(first);
   return match ? { verdict: match[1], reason: match[2] } : null;
@@ -403,13 +395,7 @@ async function main() {
   if (dispatched.error) {
     return applyFailPolicy(gate, `the review job could not run (${dispatched.error.message})`);
   }
-  const line = (dispatched.stdout || "").trim().split("\n").filter(Boolean).at(-1);
-  let result = null;
-  try {
-    result = line ? JSON.parse(line) : null;
-  } catch {
-    result = null;
-  }
+  const result = parseLastJsonLine(dispatched.stdout);                 // the one last-line parser (M6 / vibe-218)
   // vibe-207: captured BEFORE the completion guard. A review that failed still names the job that
   // failed, and that is the case an operator is most likely to be tracing — the verify caught this
   // assignment sitting after the guard, where only a successful review kept its id.

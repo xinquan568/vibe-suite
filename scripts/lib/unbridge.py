@@ -185,7 +185,7 @@ def restore(ws, entry, report):
                 report.append(f"{rel}: kept — nothing identifies it as ours; remove it by hand")
                 return
         elif rel.endswith(".json"):
-            if not json_is_only_ours(rel, bridge.load_json(path)):
+            if not json_is_only_ours(rel, bridge.load_json(path, strict=False)):
                 report.append(f"{rel}: kept — it holds content that is not ours")
                 return
         elif not _is_recognisably_ours(rel, path):
@@ -204,7 +204,7 @@ def restore(ws, entry, report):
 def json_targets(ws, report, dry):
     """`.mcp.json` and `.codex/hooks.json`: structural ownership, so user entries survive."""
     for name in sorted(bridge.inventory_enumerate(ws)) + ["cc-suite-mcp", "cc-suite-claude-mcp"]:
-        doc = bridge.load_json(ws / ".mcp.json")
+        doc = bridge.load_json(ws / ".mcp.json", strict=False)
         if bridge.json_server_has(doc, name):
             report.append(f".mcp.json: {name}")
             if not dry:
@@ -221,7 +221,7 @@ def json_targets(ws, report, dry):
                     text = bridge.toml_server_remove(text, name)
         if not dry:
             bridge.write_atomic(ws, toml_path, text)
-    hooks = bridge.load_json(ws / ".codex" / "hooks.json")
+    hooks = bridge.load_json(ws / ".codex" / "hooks.json", strict=False)
     if bridge.json_hook_entry_has(hooks, "Stop"):
         report.append(".codex/hooks.json: owned Stop entry")
         if not dry:
@@ -279,7 +279,7 @@ def _advisor_record_is_ours(name, path):
     ws = Path(path).parent.parent          # <ws>/.vibe-suite-state/<name>
     if name == "advisor-txn.json":
         return advisors.journal_is_well_formed(path, ws)
-    return advisors.ledger_is_well_formed(bridge.load_json(path), ws)
+    return advisors.ledger_is_well_formed(bridge.load_json(path, strict=False), ws)
 #: `migrate-state.sh:32` writes `.txt`; the earlier entry said `.md` and matched nothing.
 #:
 #: The report carries `bridge.MIGRATION_CONFLICTS_STAMP` as its first line — the writer puts it
@@ -338,7 +338,7 @@ def _is_suite_state(relative, path=None):
         # vibe-265: listed, but not JSON. Below the symlink test and the advisor branch, above
         # `load_json` — which raised on this file's prose and aborted the walk mid-teardown.
         return _text_state_is_ours(parts[0], path)
-    doc = bridge.load_json(path)
+    doc = bridge.load_json(path, strict=False)
     # An explicit ownership stamp, not a generic `schema` key a user's own JSON may also carry.
     return isinstance(doc, dict) and doc.get("vibe_suite_owned") is True
 
@@ -360,7 +360,7 @@ def _is_recognisably_ours(rel, path):
         # proof possible — and F1.4's two clauses then both hold, instead of trading one for the
         # other. A user who deletes the marker keeps their file; that is the intended outcome.
         if rel.endswith(".json"):
-            doc = bridge.load_json(path)
+            doc = bridge.load_json(path, strict=False)
             return isinstance(doc, dict) and doc.get("vibe_suite_owned") is True
         # The exact well-formed block through the shared codec. `bridge.MARKER in text` was a
         # substring test for "vibe-suite", which a migrated `skip_patterns: [vibe-suite]` satisfies —
@@ -480,7 +480,7 @@ def main(argv):
             and not _owned_artefacts_present(ws)):
         print("nothing to remove: no vibe-suite artefacts are registered here")
         return 0
-    record = bridge.load_json(provenance)
+    record = bridge.load_json(provenance, strict=False)
     problems = validate_record(ws, record)
     if problems:
         print("error: the provenance record is not usable; unbridge is directed entirely by it and "

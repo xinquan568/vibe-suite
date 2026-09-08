@@ -10,7 +10,7 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { DEFAULT_HEARTBEAT_MS, heartbeatInterval, runWithDeadline } from "../../scripts/lib/process.mjs";
+import { ARGV_PROMPT_CAP, DEFAULT_HEARTBEAT_MS, heartbeatInterval, pollGroupGone, runWithDeadline } from "../../scripts/lib/process.mjs";
 
 test("defaults to the 30 s production interval", () => {
   assert.equal(heartbeatInterval({}), DEFAULT_HEARTBEAT_MS);
@@ -97,3 +97,35 @@ test("T3b: the beat's fsync cost and the sidecar alternative are documented at t
   assert.match(note, /NOT implemented/,
     "the sidecar note must stay marked as a considered alternative, not pending work");
 });
+
+
+// ---- M6 / vibe-218: pollGroupGone, one function with two explicit policies
+function fakeGroup(aliveProbes) {
+  let probes = 0; const calls = [];
+  const signal = (pgid, sig) => { calls.push([pgid, sig]); probes += 1; return probes <= aliveProbes; };
+  return { signal, calls, probes: () => probes };
+}
+
+test("pollGroupGone (rounds): gone at the first probe costs one probe and no sleep", async () => {
+  const g = fakeGroup(0); const sleeps = [];
+  assert.equal(await pollGroupGone(42, { rounds: 5, pollMs: 10, sleep: async (ms) => { sleeps.push(ms); }, signal: g.signal }), true);
+  assert.equal(g.probes(), 1); assert.deepEqual(sleeps, []);
+});
+
+test("pollGroupGone (rounds): exactly `rounds` sleeps then a final probe; never-gone is false", async () => {
+  const g = fakeGroup(Infinity); const sleeps = [];
+  assert.equal(await pollGroupGone(42, { rounds: 3, pollMs: 10, sleep: async (ms) => { sleeps.push(ms); }, signal: g.signal }), false);
+  assert.deepEqual(sleeps, [10, 10, 10]); assert.equal(g.probes(), 4, "three probes in the loop plus the final one");
+  const late = fakeGroup(3); const s2 = [];
+  assert.equal(await pollGroupGone(42, { rounds: 3, pollMs: 10, sleep: async (ms) => { s2.push(ms); }, signal: late.signal }), true, "the final probe finds it gone");
+});
+
+test("pollGroupGone (deadline): elapsed time governs — a delayed first wake-up ends at the first probe after the deadline", async () => {
+  const clock = [0, 1000, 1050, 1100, 1150]; let i = 0; const now = () => clock[Math.min(i, clock.length - 1)];
+  const g = fakeGroup(Infinity); const sleeps = [];
+  const result = await pollGroupGone(42, { deadlineMs: 1075, pollMs: 50, now, signal: g.signal, sleep: async (ms) => { sleeps.push(ms); i += 1; } });
+  assert.equal(result, false);
+  assert.deepEqual(sleeps, [50, 50, 50], "wake-ups at 1000, 1050, 1100: the probe after 1100 > 1075 ends it — not a fixed count of 21 rounds");
+});
+
+test("ARGV_PROMPT_CAP is the one 96,000-byte cap", () => { assert.equal(ARGV_PROMPT_CAP, 96_000); });

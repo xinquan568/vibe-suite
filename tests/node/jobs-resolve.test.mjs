@@ -260,3 +260,16 @@ test("parseOlderThan accepts <n>d|h|m|s and the bare 0, and refuses everything e
       `accepted: ${String(bad)}`);
   }
 });
+
+test("M6: the cancel budgets count ceil(deadline / poll) rounds — a non-divisible budget rounds UP, then probes once more", async () => {
+  // graceMs 100 / pollMs 30 → ceil = 4 rounds (floor would be 3). cancelJob probes once to confirm the group
+  // is alive, then each phase probes once per round plus a final probe: 1 + 2 × (4 + 1) = 11 probes for an
+  // immortal group (9 with floor).
+  const ws = workspace();
+  await createRecord(ws, record(ID_A, BG));
+  const calls = [];
+  const immortal = (pid, signal) => { calls.push([pid, signal]); return true; };
+  const outcome = await cancelJob(ws, ID_A, { signalGroup: immortal, sleep: instantSleep, graceMs: 100, reapDeadlineMs: 100, pollMs: 30 });
+  assert.equal(outcome.groupDead, false);
+  assert.equal(calls.filter(([, s]) => s === 0).length, 1 + 2 * (Math.ceil(100 / 30) + 1), "rounds are ceil(deadline / poll), never floor");
+});

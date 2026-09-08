@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 import { agyGate } from "./lib/agy-gate.mjs";
 import { EXIT, runWithFallback } from "./lib/agy-fallback.mjs";
+import { parseLastJsonLine, runMain } from "./lib/cli.mjs";
 
 const SELF_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,12 +45,7 @@ function probeBinary(engine) {
 function dispatch(runner, args, cwd) {
   const result = spawnSync(process.execPath, [path.join(SELF_DIR, runner), ...args],
     { cwd, encoding: "utf8", timeout: 900_000 });
-  const line = (result.stdout || "").trim().split("\n").filter(Boolean).at(-1);
-  try {
-    return line ? JSON.parse(line) : null;
-  } catch {
-    return null;
-  }
+  return parseLastJsonLine(result.stdout);
 }
 
 async function main() {
@@ -83,9 +79,4 @@ async function main() {
   return outcome.exitCode;
 }
 
-main()
-  .then((code) => { process.exitCode = code; })
-  .catch((error) => {
-    process.stderr.write(`agy-audit: ${error?.stack ?? error}\n`);
-    process.exitCode = 1;
-  });
+runMain(main, "agy-audit");

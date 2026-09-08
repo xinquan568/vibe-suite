@@ -27,6 +27,7 @@ import {
   emit, tailEventLog, EVENT_LOG_CLOCK_MARGIN_MS, EVENT_LOG_MAX_GENERATIONS, EVENT_LOG_RETAIN_MS,
 } from "./lib/eventlog.mjs";
 import { isAbandoned, pruneTerminalJobs, resultLine, TERMINAL_STATUSES } from "./lib/jobs.mjs";
+import { UsageError, runMain } from "./lib/cli.mjs";
 import {
   abandonedIds, cancelJob, parseOlderThan, resolveResultJob, resolveStatusJobs, settleAbandoned,
   OLDER_THAN_DEFAULT, ResolveError,
@@ -42,7 +43,6 @@ const SUBCOMMANDS = new Set(["status", "result", "cancel", "prune", "log"]);
 const DEFAULT_TAIL = 25;
 const FLAGS = new Set(["--all", "--json", "--settle-abandoned", "--older-than", "--tail"]);
 
-class UsageError extends Error {}
 
 function parseArgs(argv) {
   const options = {
@@ -235,9 +235,4 @@ async function main() {
   }
 }
 
-main()
-  .then((code) => { process.exitCode = code; })
-  .catch((error) => {
-    process.stderr.write(`jobs-cli: ${error?.stack ?? error}\n`);
-    process.exitCode = 1;
-  });
+runMain(main, "jobs-cli");

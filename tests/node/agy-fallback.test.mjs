@@ -104,3 +104,14 @@ test("any non-completion is unreachable — the result line cannot tell us why",
   assert.equal(isUnreachable({ status: "completed", rawOutput: "" }), false,
     "completion is the criterion: there is no separate usability judgement to make here");
 });
+
+
+test("M6: the restoration block's authentication line uses the shared quota/auth markers", async () => {
+  const { restorationBlock } = await import("../../scripts/lib/agy-fallback.mjs");
+  const line = (outcome) => [].concat(restorationBlock("agy", outcome, () => null)).join("\n").match(/- authentication: (.*)/)[1];
+  assert.equal(line({ status: "failed", error: "quota_exceeded" }), "ok (quota exhausted)", "compatibility: underscore form");
+  assert.equal(line({ status: "failed", error: "too many requests" }), "ok (quota exhausted)", "widening: codex's phrase families");
+  assert.equal(line({ status: "failed", error: "unauthorized" }), "expired");
+  assert.equal(line({ status: "failed", error: "unauthenticated" }), "expired");
+  assert.equal(line({ status: "failed", error: "spawn failed" }), "unknown");
+});

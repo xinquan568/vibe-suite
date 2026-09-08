@@ -65,9 +65,13 @@ def _read(path):
     if not path.exists():
         return {}
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise StoreFormatError(f"{path}: not valid JSON — refusing to overwrite") from error
+        raw = bridge.load_json(path)          # strict: one reader for every failure kind (M6 / vibe-218)
+    except bridge.JsonUnreadable as error:
+        # A directory, invalid UTF-8 or an unreadable file used to escape as a raw exception; each is
+        # a state file we cannot read, and the rule is the same as for invalid JSON: never overwrite it.
+        if isinstance(error.cause, json.JSONDecodeError):
+            raise StoreFormatError(f"{path}: not valid JSON — refusing to overwrite") from error   # the Stop gate pins this text
+        raise StoreFormatError(f"{path}: not readable ({error.cause.__class__.__name__}) — refusing to overwrite") from error
     if not isinstance(raw, dict):
         raise StoreFormatError(f"{path}: expected a JSON object at the top level")
     config = raw.get("config", {})

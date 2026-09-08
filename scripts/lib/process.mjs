@@ -54,6 +54,12 @@ export function heartbeatInterval(env = process.env) {
  * A negative pid targets the group. The worker is spawned `detached`, so it leads a group containing
  * the Codex process it spawned; signalling only the worker would leave that grandchild orphaned.
  */
+/**
+ * The one prompt-size cap (M6 / vibe-218): a prompt handed to an engine as a single argv string, and the
+ * Stop hook's prompt clamp, both bound at 96,000 bytes — one number, one home.
+ */
+export const ARGV_PROMPT_CAP = 96_000;
+
 export function signalGroup(pid, signal) {
   try {
     process.kill(-pid, signal);
@@ -71,6 +77,38 @@ export function signalGroup(pid, signal) {
 
 /** How long the detached mode polls for the process group to disappear after SIGKILL. */
 export const GROUP_REAP_DEADLINE_MS = 5000;
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Poll until the process group `pgid` is gone (M6 / vibe-218) — one function, two explicit policies:
+ *
+ *   { deadlineMs, pollMs, now }  elapsed-deadline: probe, then sleep `pollMs` and probe again while
+ *                                `now()` is before the deadline. A late timer wake-up shortens the
+ *                                remaining wait, exactly as the former `setInterval` loops behaved.
+ *   { rounds, pollMs }           iteration-counted: `rounds` probe-then-sleep iterations, then one final
+ *                                probe — `resolve.mjs`'s cancel budgets, whose tests inject an instant
+ *                                sleep and must never wait on the wall clock.
+ *
+ * `signal` and `sleep` are injectable for tests; `signal(pgid, 0)` returning false means gone.
+ */
+export async function pollGroupGone(pgid, { deadlineMs, rounds, pollMs = GROUP_REAP_POLL_MS, sleep = defaultSleep,
+                                            signal = signalGroup, now = Date.now } = {}) {
+  if (rounds !== undefined) {
+    for (let i = 0; i < Math.max(1, rounds); i += 1) {
+      if (!signal(pgid, 0)) return true;
+      await sleep(pollMs);
+    }
+    return !signal(pgid, 0);
+  }
+  if (!signal(pgid, 0)) return true;
+  const deadline = now() + deadlineMs;
+  while (now() <= deadline) {          // `<=`: the former loops stopped only when strictly PAST the deadline
+    await sleep(pollMs);
+    if (!signal(pgid, 0)) return true;
+  }
+  return !signal(pgid, 0);
+}
 const GROUP_REAP_POLL_MS = 50;
 
 /**
@@ -174,11 +212,7 @@ export function runWithDeadline({
       // `killedHard` claims a delivered SIGKILL — assert it only when signalGroup confirms
       // delivery, not merely because escalation was attempted.
       if (signalGroup(child.pid, "SIGKILL")) killedHard = true;
-      const reapDeadline = Date.now() + GROUP_REAP_DEADLINE_MS;
-      const poll = setInterval(() => {
-        if (!signalGroup(child.pid, 0)) { clearInterval(poll); done(true); }
-        else if (Date.now() > reapDeadline) { clearInterval(poll); done(false); }
-      }, GROUP_REAP_POLL_MS);
+      pollGroupGone(child.pid, { deadlineMs: GROUP_REAP_DEADLINE_MS, pollMs: GROUP_REAP_POLL_MS }).then(done);
     });
 
     const settle = (code, signal, pipesLeaked) => {

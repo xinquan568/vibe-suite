@@ -22,6 +22,7 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))   # discover imports the shared JSON reader (M6 / vibe-218)
 import runs_stats.discover as discover  # noqa: E402
 import runs_stats.aggregate as aggregate  # noqa: E402
 import runs_stats.render as render  # noqa: E402
@@ -284,6 +285,32 @@ class TestStateAbsence(unittest.TestCase):                                  # T2
         self.assertTrue(w[0].startswith("parse-error:"), w)
         self.assertFalse(any(x.startswith("shape-error:") for x in w), w)
         self.assertEqual(r["status_cat"], "unknown")
+
+
+class TestLoadJsonWarningText(unittest.TestCase):                          # M6 / vibe-218
+    """The `parse-error: <relpath> :: <cause class>: <cause message>` text is public: dashboards show it."""
+
+    def test_each_failure_kind_is_one_warning_naming_its_cause(self):
+        with tempfile.TemporaryDirectory() as td:
+            cases = {"empty.json": (b"", "JSONDecodeError"), "blank.json": (b"  \n", "JSONDecodeError"),
+                     "bad.json": (b"{not json", "JSONDecodeError"), "utf8.json": (b"\xff\xfe\x00", "UnicodeDecodeError")}
+            for name, (data, cause) in cases.items():
+                with self.subTest(name=name):
+                    p = Path(td) / name; p.write_bytes(data); w = []
+                    self.assertIsNone(discover.load_json(str(p), w))
+                    self.assertEqual(len(w), 1, w)
+                    self.assertTrue(w[0].startswith(f"parse-error: {os.path.relpath(p)} :: {cause}: "), w[0])
+            p = Path(td) / "locked.json"; p.write_bytes(b"{}"); p.chmod(0)
+            try:
+                w = []
+                self.assertIsNone(discover.load_json(str(p), w))
+                self.assertEqual(len(w), 1, w)
+                self.assertTrue(w[0].startswith(f"parse-error: {os.path.relpath(p)} :: PermissionError: "), w[0])
+            finally:
+                p.chmod(0o644)
+            w = []
+            self.assertIsNone(discover.load_json(str(Path(td) / "absent.json"), w), "a missing file is expected, not a warning")
+            self.assertEqual(w, [])
 
 
 class TestReadText(unittest.TestCase):                                      # T25a

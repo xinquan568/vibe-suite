@@ -97,6 +97,17 @@ class AbsentPath(BridgeError):
     """
 
 
+class JsonUnreadable(BridgeError):
+    """`load_json(strict=True)`'s one failure: the path is not a regular file, cannot be read or decoded,
+    is empty or whitespace-only (a `JSONDecodeError`), or is not valid JSON. `.cause` is the underlying exception so a caller can keep its own
+    vocabulary (`StoreFormatError`, `Refusal`, a `parse-error` warning) without re-reading the file."""
+
+    def __init__(self, path, cause):
+        super().__init__(f"{path}: {cause.__class__.__name__}: {cause}")
+        self.path = path
+        self.cause = cause
+
+
 # --------------------------------------------------------------------------------------------
 # Containment and atomicity
 # --------------------------------------------------------------------------------------------
@@ -348,12 +359,6 @@ def _remove_tree_fd(parent_fd, name):
     os.rmdir(name, dir_fd=parent_fd)
 
 
-#: Identity of each workspace root this process has opened, so a mid-run replacement is detected
-#: rather than silently followed. Keyed by the **caller-supplied** path — keying by the resolved path
-#: would mint a fresh pin for a swapped-in directory and never notice the swap.
-_ROOT_PIN = {}
-
-
 def rename_at(root, src_rel, dst_rel):
     """Atomically rename SRC to DST inside the root, both parents opened descriptor-relative
     (E7.2 / vibe-54 - the mirror swap's exchange step). DST must not exist; the caller owns
@@ -493,24 +498,6 @@ def lstat_at(root, rel):
         return None
     finally:
         os.close(fd)
-
-
-def pin_root(root):
-    """Establish the root's identity **before** anything reads or writes through it.
-
-    The pin used to be created lazily, on the first descriptor operation — which happens after
-    provenance validation and after path-based reads. A workspace swapped before that point simply
-    became the pinned one, and the record was then applied to it. A command that will delete calls
-    this at entry, so every later step is checked against the directory the decisions were made
-    about.
-    """
-    fd = os.open(os.path.realpath(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        st = os.fstat(fd)
-    finally:
-        os.close(fd)
-    _ROOT_PIN[str(root)] = (st.st_dev, st.st_ino)
-    return _ROOT_PIN[str(root)]
 
 
 def write_atomic(root, dest, content, mode=None):
@@ -905,7 +892,7 @@ def inventory_enumerate(root):
     is the cc-suite W4 defect itself.
     """
     root = Path(root)
-    names = set(owned_names(load_json(root / ".mcp.json")))
+    names = set(owned_names(load_json(root / ".mcp.json", strict=False)))
     toml = root / ".codex" / "config.toml"
     if toml.is_file():
         names |= set(toml_owned_names(toml.read_text(encoding="utf-8", errors="replace")))
@@ -948,8 +935,23 @@ def read_text_verbatim(path):
     return p.read_bytes().decode("utf-8", errors="surrogateescape")
 
 
-def load_json(path):
+def load_json(path, *, strict=True):
+    """The one JSON reader (M6 / vibe-218).
+
+    `strict=True` (default): the path must be a regular file holding valid, non-empty JSON; every other
+    outcome — missing, a directory, unreadable, undecodable, empty or whitespace-only, invalid — raises
+    `JsonUnreadable` carrying the cause. `strict=False` is the lenient contract the installer paths were
+    written against: not a regular file or zero bytes → `{}`, invalid JSON → `BridgeError` ("the install
+    refuses rather than overwrite a file it cannot read"). Callers that want the lenient reading say so.
+    """
     p = Path(path)
+    if strict:
+        try:
+            if not p.is_file():
+                raise FileNotFoundError(f"{p} is not a regular file")
+            return json.loads(p.read_text(encoding="utf-8"))   # empty or whitespace-only raises JSONDecodeError itself
+        except (OSError, ValueError) as exc:          # JSONDecodeError and UnicodeDecodeError are ValueErrors
+            raise JsonUnreadable(p, exc) from exc
     if not p.is_file():
         return {}
     try:

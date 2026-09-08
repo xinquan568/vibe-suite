@@ -130,7 +130,7 @@ def mirror_mcp(ws, report):
     server without it is mirrored in full; a server with it is named, and the user is told where the
     rest lives. The guarantee then holds without anyone having to identify a credential.
     """
-    doc = bridge.load_json(ws / ".mcp.json")
+    doc = bridge.load_json(ws / ".mcp.json", strict=False)
     servers = doc.get("mcpServers") or {}
     _refuse_unsafe_env_names(servers)   # before the first rendered line: a refusal writes nothing
     lines, reduced = [], 0
@@ -191,19 +191,19 @@ def _side_file_is_ours(side):
         return False
     if not side.exists():
         return True   # nothing there; we may create it
-    doc = bridge.load_json(side)
+    doc = bridge.load_json(side, strict=False)
     return isinstance(doc, dict) and doc.get("vibe_suite_owned") is True
 
 
 def mirror_hooks(ws, report):
     """The *project's* Claude hooks → `.codex/hooks.json`, preserving the owned entry."""
-    settings = bridge.load_json(ws / ".claude" / "settings.json")
+    settings = bridge.load_json(ws / ".claude" / "settings.json", strict=False)
     project = settings.get("hooks") or {}
     shared = {e: project[e] for e in SHARED_EVENTS if e in project}
     skipped = sorted(set(project) - set(SHARED_EVENTS))
 
     dest = ws / ".codex" / "hooks.json"
-    doc = bridge.load_json(dest)
+    doc = bridge.load_json(dest, strict=False)
     hooks = doc.get("hooks") or {}
     owned = [e for e in hooks.values() for e in (e or [])
              if isinstance(e, dict) and e.get(f"_{bridge.MARKER}_owned") is not None]

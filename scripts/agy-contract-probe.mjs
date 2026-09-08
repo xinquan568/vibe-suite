@@ -28,6 +28,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { gateRecordPath, MANDATORY_CHECKS } from "./lib/agy-gate.mjs";
 import { runWithDeadline } from "./lib/process.mjs";
 import { classifyOutput as defaultClassify } from "./agy-runner.mjs";
+import { runMain } from "./lib/cli.mjs";
 
 export const SENTINEL = "agy-contract-probe-should-not-exist.txt";
 
@@ -213,10 +214,5 @@ async function main() {
 // import that spawns the real CLI would turn `node --test` into an unbounded live probe — which is
 // exactly what happened the first time this file was written.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main()
-    .then((code) => { process.exitCode = code; })
-    .catch((error) => {
-      process.stderr.write(`agy-contract-probe: ${error?.stack ?? error}\n`);
-      process.exitCode = 1;
-    });
+  runMain(main, "agy-contract-probe");
 }

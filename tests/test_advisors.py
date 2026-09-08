@@ -1752,6 +1752,57 @@ class TestSelectionSpy(TempDirMixin, unittest.TestCase):
         # the trailing reconcile is _classify's behaviour — counted separately, still one per name
         self.assertLessEqual(calls.count("_classify"), 1, calls)
 
+
+class TestRendererRefusalAfterSelection(TempDirMixin, unittest.TestCase):
+    """Step-8 R2: a selection invalidated before rendering is held (or refused for an explicit add),
+    never a crash — on both direct renderer pairs."""
+
+    def setUp(self):
+        self.inst = fixture_install(Path(self.mkdtemp(prefix="refuse-inst-")) / "inst", versions=(SHIPPED,), lock_version=SHIPPED)
+        self.patch = mock.patch.dict(os.environ, {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(self.inst)})
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    def _ws(self, *names):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        for n in names:
+            add_definition(ws, name=n)
+            advisors.add(ws, n)
+        return ws
+
+    def _absent(self, ws, name):
+        doc = json.loads((ws / ".mcp.json").read_text())
+        del doc["mcpServers"][name]
+        (ws / ".mcp.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        toml_path = ws / ".codex" / "config.toml"
+        toml_path.write_text(bridge.toml_server_remove(toml_path.read_text(), name))
+
+    def test_reconcile_presence_only_pair_holds_when_the_selection_is_invalid(self):
+        ws = self._ws("presence")
+        self._absent(ws, "presence")
+        with mock.patch.object(advisors, "_select_generation", return_value="stale-gen-gone"):
+            report = advisors.reconcile(ws)
+        self.assertTrue(report["presence"].startswith("backend-unavailable"), report)
+        self.assertNotIn("presence", json.loads((ws / ".mcp.json").read_text())["mcpServers"])
+
+    def test_explicit_add_refuses_with_the_update_remedy_when_the_selection_is_invalid(self):
+        ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
+        add_definition(ws, name="fresh")
+        with mock.patch.object(advisors, "_select_generation", return_value="stale-gen-gone"):
+            with self.assertRaises(advisors.AdvisorError) as ctx:
+                advisors.add(ws, "fresh")
+        self.assertIn("update", str(ctx.exception))
+        self.assertNotIn("fresh", json.loads((ws / ".mcp.json").read_text()).get("mcpServers", {}))
+
+    def test_remove_completes_and_holds_the_sibling_when_the_selection_is_invalid(self):
+        ws = self._ws("victim", "sibling")
+        self._absent(ws, "sibling")
+        with mock.patch.object(advisors, "_select_generation", return_value="stale-gen-gone"):
+            report = advisors.remove(ws, "victim")
+        self.assertEqual(report["victim"], "removed")
+        self.assertTrue(report["sibling"].startswith("backend-unavailable"), report)
+        self.assertNotIn("victim", json.loads((ws / ".mcp.json").read_text())["mcpServers"])
+
 if __name__ == "__main__":
     unittest.main()
 

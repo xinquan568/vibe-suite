@@ -103,6 +103,8 @@ def launch(target_spec, env=None, generation=None):
     version = target_spec.split("@", 1)[1] if "@" in target_spec else ""
     if not _EXACT.match(version):
         raise PinError(f"{target_spec!r} is not an exact version; cannot launch")
+    # Filesystem failures are absorbed at the selector boundary (`octopus_install` returns None /
+    # False for an unreadable or symlinked install), so a render path sees only PinError.
     if generation is not None:
         if not octopus_install.is_valid_generation(version, generation, env):
             raise PinError(f"{generation!r} is not a valid installed generation of {target_spec}")

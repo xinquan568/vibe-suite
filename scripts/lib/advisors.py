@@ -1106,15 +1106,20 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=Fal
                 # generation is the run's frozen one, else selected ONCE for both renderers.
                 target = resolve_backend(pin, pin_file=pin_file, pending_file=pending_file)
                 gen = generation if generation is not None else _select_generation(target)
-                if gen is None:
+                try:
+                    if gen is None:
+                        raise mcp_pin.PinError(_unavailable_detail(target))
+                    desired_entry = json_entry(defs[name], target, generation=gen)
+                    desired_body = toml_body(defs[name], target, generation=gen)
+                except mcp_pin.PinError as exc:
+                    # The selection can be invalidated between selecting and rendering; either way
+                    # this name is held (or, for an explicit add, refused) — never a crash.
                     if explicit:
-                        raise AdvisorError(f"advisor {name!r}: {_unavailable_detail(target)}; an explicit "
-                                           "--pin must name the installed, boot-verified version — "
-                                           "nothing has been written")
-                    report[name] = _unavailable_report(target)
+                        raise AdvisorError(f"advisor {name!r}: {exc}; an explicit --pin must name the "
+                                           "installed, boot-verified version — nothing has been written; "
+                                           "run /vibe-suite:update") from exc
+                    report[name] = f"backend-unavailable (held; existing store content left unchanged; {exc})"
                     continue
-                desired_entry = json_entry(defs[name], target, generation=gen)
-                desired_body = toml_body(defs[name], target, generation=gen)
             servers[name] = desired_entry
             toml_text = bridge.toml_server_upsert(toml_text, name, desired_body)
             report[name] = f"{state}->registered"
@@ -1470,11 +1475,14 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
         if desired_entry is None:
             target = resolve_backend(pin, pin_file=pin_file, pending_file=pending_file)
             gen = _select_generation(target)          # S13: once, for both renderers
-            if gen is None:
-                report[other] = _unavailable_report(target)
+            try:
+                if gen is None:
+                    raise mcp_pin.PinError(_unavailable_detail(target))
+                desired_entry = json_entry(defs_after[other], target, generation=gen)
+                desired_body = toml_body(defs_after[other], target, generation=gen)
+            except mcp_pin.PinError as exc:
+                report[other] = f"backend-unavailable (held; existing store content left unchanged; {exc})"
                 continue
-            desired_entry = json_entry(defs_after[other], target, generation=gen)
-            desired_body = toml_body(defs_after[other], target, generation=gen)
         servers[other] = desired_entry
         toml_text = bridge.toml_server_upsert(toml_text, other, desired_body)
         report[other] = f"{state}->registered"

@@ -27,7 +27,7 @@ FIXTURE_INTEGRITY = "sha512-" + "A" * 86 + "=="
 
 
 def lockfile_text(version, integrity=FIXTURE_INTEGRITY, lockfile_version=3, drop_integrity=False,
-                  root_dependency=None, entry_version=None):
+                  root_dependency=None, entry_version=None, extra_packages=None):
     """A minimal lockfile v3 for one exact dependency. The knobs exist for the refusal tests."""
     entry = {"version": entry_version or version,
              "resolved": f"https://registry.npmjs.org/{PACKAGE}/-/{PACKAGE}-{version}.tgz",
@@ -39,6 +39,8 @@ def lockfile_text(version, integrity=FIXTURE_INTEGRITY, lockfile_version=3, drop
            "packages": {"": {"name": "vibe-suite-claude-octopus-install", "license": "ISC",
                              "dependencies": {PACKAGE: root_dependency or version}},
                         f"node_modules/{PACKAGE}": entry}}
+    for name, pkg in (extra_packages or {}).items():
+        doc["packages"][f"node_modules/{name}"] = pkg
     return json.dumps(doc, indent=2) + "\n"
 
 
@@ -151,6 +153,8 @@ def write_fake_npm(path, behaviour="ok"):
                 fh.write(json.dumps({{"argv": sys.argv[1:], "cwd": str(cwd)}}) + "\\n")
         if behaviour == "fail":
             print("npm error fixture failure", file=sys.stderr); sys.exit(1)
+        if behaviour == "hang":
+            import time; time.sleep(30); sys.exit(0)
         version = json.loads((cwd / "package.json").read_text())["dependencies"]["claude-octopus"]
         payload = os.environ.get("FAKE_NPM_PAYLOAD", "fake-npm")
         def materialise(root, ver, with_bin=True):

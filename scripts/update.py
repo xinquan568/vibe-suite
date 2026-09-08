@@ -17,8 +17,9 @@ registration that launches it.
   `package-lock.json` into an immutable, uniquely named generation directory — or reuses a valid one.
   `boot-verify` probes exactly that generation's `node <bin>`; on success it records the `.verified`
   mark every standalone render path requires. **Nothing pin-dependent is written before that**: a
-  tampered lockfile (`EINTEGRITY`) or a failed probe ends the run with both stores byte-identical,
-  and the advisors stage is reported as skipped rather than moved to an unverified backend.
+  tampered lockfile (`EINTEGRITY`) or a failed probe ends the run with the stores' pin-dependent
+  content byte-identical (the bridge stage's pin-independent mirror refresh has already happened and
+  stays), and the advisors stage is reported as skipped rather than moved to an unverified backend.
 * `advisors` runs before `registration` because `advisors.reconcile` begins by replaying its journal,
   which restores whole store images; the registration is planned on a re-read of the TOML after it.
 * One generation is selected per run (the value `install` returned) and threaded through the probe,

@@ -38,9 +38,11 @@ rewrite `.mcp.json` and `.codex/config.toml` to launch that generation.
 Consequences worth knowing:
 
 - A tampered package (`npm` reports `EINTEGRITY`), a missing `npm`, or a failed or timed-out handshake
-  ends the run with both stores **byte-identical** and an advisory `advisors` row reading
-  *skipped — … not boot-verified this run*; advisor removals and convergence run on the next successful
-  update. Nothing is rolled back because nothing was written.
+  ends the run with the stores' **pin-dependent content byte-identical** — the reverse-server block and
+  every advisor registration untouched; the bridge stage's pin-independent mirror refresh has already
+  happened and stays — and an advisory `advisors` row reading *skipped — … not boot-verified this run*;
+  advisor removals and convergence run on the next successful update. Nothing pin-dependent is rolled
+  back because nothing pin-dependent was written.
 - Every registration executes the verified install (`command = "node"`, `args = ["…/dist/index.js"]`),
   so the path is specific to this machine's plugin directory; run this command after moving the plugin.
 - Older generations are never deleted automatically: a held advisor, a workspace that has not run

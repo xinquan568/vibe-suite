@@ -1002,6 +1002,92 @@ class Install(unittest.TestCase):
         self.oi.mark_verified(self.pin, gen, env=env)          # idempotent: publish_new reports, never overwrites
         self.assertEqual(mark.read_bytes(), first)
 
+    # 25 (Step-8 R1)
+    def test_corrupt_metadata_is_an_invalid_generation_not_a_crash(self):
+        g = add_generation(self.inst, self.pin, verified=True)
+        meta = self.inst / "versions" / self.pin / g / "node_modules" / "claude-octopus" / "package.json"
+        for junk in ("[]", "null", "not json", '"str"'):
+            with self.subTest(junk=junk):
+                meta.write_text(junk, encoding="utf-8")
+                env = self.env()
+                self.assertIsNone(self.oi.current_valid_generation(self.pin, env=env))
+                self.assertIsNone(self.oi.current_verified_generation(self.pin, env=env))
+                self.assertFalse(self.oi.is_valid_generation(self.pin, g, env))
+        status, detail, g2 = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.OK, detail)
+        self.assertNotEqual(g2, g)
+
+    # 26 (Step-8 R1)
+    def test_a_missing_lockfile_is_a_pin_error_not_a_file_not_found(self):
+        g = add_generation(self.inst, self.pin, verified=True)
+        (self.inst / "package-lock.json").unlink()
+        env = self.env()
+        self.assertIsNone(self.oi.current_verified_generation(self.pin, env=env))
+        self.assertIsNone(self.oi.current_valid_generation(self.pin, env=env))
+        with self.assertRaises(mcp_pin.PinError):
+            mcp_pin.launch(f"claude-octopus@{self.pin}", env=env, generation=g)
+        with self.assertRaises(mcp_pin.PinError):
+            mcp_pin.launch(f"claude-octopus@{self.pin}", env=env)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=env, timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertEqual(self.npm_calls(), [])
+
+    # 27 (Step-8 R1)
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory modes")
+    def test_an_unreadable_versions_dir_is_no_generation_and_a_failed_install(self):
+        add_generation(self.inst, self.pin, verified=True)
+        os.chmod(self.inst / "versions", 0o000)
+        self.addCleanup(os.chmod, self.inst / "versions", 0o700)
+        env = self.env()
+        self.assertIsNone(self.oi.current_verified_generation(self.pin, env=env))
+        with self.assertRaises(mcp_pin.PinError):
+            mcp_pin.launch(f"claude-octopus@{self.pin}", env=env)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=env, timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertEqual(self.npm_calls(), [])
+
+    # 28 (Step-8 R3)
+    def test_a_symlinked_versions_dir_with_a_valid_generation_is_refused(self):
+        real = fixture_install(self.d / "real", versions=(self.pin,), lock_version=self.pin)
+        # the linked target holds a complete, valid, verified generation whose marker names OUR lockfile sha
+        (self.inst / "versions").symlink_to(real / "versions", target_is_directory=True)
+        env = self.env()
+        self.assertIsNone(self.oi.current_valid_generation(self.pin, env=env))
+        self.assertIsNone(self.oi.current_verified_generation(self.pin, env=env))
+        with self.assertRaises(mcp_pin.PinError):
+            mcp_pin.launch(f"claude-octopus@{self.pin}", env=env)
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=env, timeout=60)
+        self.assertEqual(status, self.oi.FAIL, detail)
+        self.assertIn("not a real directory", detail)
+        self.assertEqual(self.npm_calls(), [], "nothing reused or built through the link")
+
+    # 29 (Step-8 R4)
+    def test_a_second_dependency_without_integrity_is_refused(self):
+        (self.inst / "package-lock.json").write_text(lockfile_text(
+            self.pin, extra_packages={"leftpad": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/leftpad/-/leftpad-1.0.0.tgz"}}),
+            encoding="utf-8")
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("leftpad", detail)
+        self.assertEqual(self.npm_calls(), [])
+
+    # 30 (Step-8 R4)
+    def test_npm_timeout_is_a_failure_with_staging_removed(self):
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env("hang"), timeout=1)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("did not finish", detail)
+        self.assertEqual(self.staging(), [])
+        self.assertEqual(self.gens(), [])
+
+    # 31 (Step-8 R4)
+    def test_a_missing_npm_executable_is_a_failure_with_staging_removed(self):
+        env = self.env()
+        env["VIBE_SUITE_NPM_BIN"] = str(self.d / "no-such-npm")
+        status, detail, gen = self.oi.ensure_installed(self.pin, env=env, timeout=60)
+        self.assertEqual(status, self.oi.FAIL)
+        self.assertIn("could not run", detail)
+        self.assertEqual(self.staging(), [])
+
     # 24
     def test_the_verification_mark_lives_beside_the_generation_not_inside_it(self):
         env = self.env()
@@ -1012,9 +1098,8 @@ class Install(unittest.TestCase):
         self.assertTrue((self.inst / "versions" / self.pin / f"{gen}.verified").is_file())
 
 
-class InProcessUpdate(TempDirMixin, unittest.TestCase):
-    """`update.run` in-process with the seams pointed at a per-test install — the selection freeze
-    and the production mark write."""
+class _InProcessBase(TempDirMixin, unittest.TestCase):
+    """Shared harness: `update.run` in-process with the seams pointed at a per-test install."""
 
     def setUp(self):
         self.d = Path(self.mkdtemp(prefix="vibe-inproc-"))
@@ -1051,6 +1136,11 @@ class InProcessUpdate(TempDirMixin, unittest.TestCase):
         json_paths = {n: e["args"][-1] for n, e in doc["mcpServers"].items() if self.advisors.is_owned_entry(e)}
         toml_paths = re.findall(r'args = \["([^"]+)"\]', toml)
         return json_paths, toml_paths
+
+
+
+class InProcessUpdate(_InProcessBase):
+    """The selection freeze and the production mark write."""
 
     def test_a_generation_published_after_the_probe_is_not_registered_this_run(self):
         inst = fixture_install(self.d / "inst", versions=(), lock_version=SHIPPED)
@@ -1134,6 +1224,47 @@ class InProcessUpdate(TempDirMixin, unittest.TestCase):
                 self.assertEqual(stages["probe"]["status"], "fail", stages)
                 self.assertFalse((inst / "versions" / SHIPPED / f"{h2}.verified").exists())
                 self.assertNotIn("registration", stages)
+
+
+class InProcessUpdateContracts(_InProcessBase):
+    """Step-8 R4: the install timeout is forwarded; a failed mark publication skips the writes."""
+
+    def test_install_timeout_is_forwarded_from_run_and_from_the_cli(self):
+        inst = fixture_install(self.d / "inst", versions=(SHIPPED,), lock_version=SHIPPED)
+        ws = self.workspace("ws")
+        env = self.seams(inst)
+        seen = []
+        real = self.update_mod.octopus_install.ensure_installed
+
+        def spy(pin, env=None, timeout=600):
+            seen.append(timeout)
+            return real(pin, env=env, timeout=timeout)
+        with mock.patch.dict(os.environ, env), mock.patch.object(self.update_mod.octopus_install, "ensure_installed", side_effect=spy):
+            self.update_mod.run(ws, REPO_ROOT, env=dict(os.environ, **env), probe_timeout=1, install_timeout=7)
+            with mock.patch("sys.stdout"):
+                self.update_mod.main(["--workspace", str(ws), "--plugin-root", str(REPO_ROOT), "--probe-timeout", "1",
+                                      "--install-timeout", "9", "--json"])
+        self.assertEqual(seen, [7, 9])
+
+    def test_a_failed_mark_publication_skips_advisors_and_registration(self):
+        inst = fixture_install(self.d / "inst", versions=(), lock_version=SHIPPED)
+        h = add_generation(inst, SHIPPED, verified=False)
+        ws = self.workspace("ws")
+        self.declare(ws, "steady")
+        with mock.patch.dict(os.environ, {"VIBE_SUITE_OCTOPUS_INSTALL_DIR": str(module_install("update"))}):
+            self.advisors.add(ws, "steady")
+        before = ((ws / ".mcp.json").read_bytes(), bridge.text_block_remove((ws / ".codex" / "config.toml").read_text(), "mcp-mirror"))
+        env = self.seams(inst)
+        with mock.patch.dict(os.environ, env), mock.patch.object(self.update_mod.octopus_install, "mark_verified",
+                                                                    side_effect=bridge.BridgeError("disk says no")):
+            report = self.update_mod.run(ws, REPO_ROOT, env=dict(os.environ, **env), probe_timeout=1)
+        stages = {s["stage"]: s for s in report.stages}
+        self.assertEqual(stages["probe"]["status"], "fail", stages)
+        self.assertIn("could not record the verification", stages["probe"]["detail"])
+        self.assertEqual(stages["advisors"]["status"], "warn")
+        self.assertNotIn("registration", stages)
+        self.assertEqual(((ws / ".mcp.json").read_bytes(), bridge.text_block_remove((ws / ".codex" / "config.toml").read_text(), "mcp-mirror")), before)
+        self.assertFalse((inst / "versions" / SHIPPED / f"{h}.verified").exists())
 
 
 class NetworkOptIn(unittest.TestCase):

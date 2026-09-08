@@ -65,20 +65,20 @@ def lockfile_check(pin, env=None):
     manifest_p, lock_p = root / "package.json", root / "package-lock.json"
     if not manifest_p.is_file() or not lock_p.is_file():
         return f"shipped package.json/package-lock.json missing under {root}"
-    try:
-        manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
-        lock = json.loads(lock_p.read_text(encoding="utf-8"))
-    except (ValueError, OSError) as exc:
-        return f"shipped lockfile pair unreadable: {exc}"
-    if (manifest.get("dependencies") or {}).get(PACKAGE) != pin:
+    manifest, lock = _json_object(manifest_p), _json_object(lock_p)
+    if manifest is None or lock is None:
+        return "shipped lockfile pair unreadable or not JSON objects"
+    if not isinstance(manifest.get("dependencies"), dict) or manifest["dependencies"].get(PACKAGE) != pin:
         return f"package.json pins {PACKAGE}@{(manifest.get('dependencies') or {}).get(PACKAGE)!r}, the pin file says {pin}"
     if lock.get("lockfileVersion") != 3:
         return f"package-lock.json lockfileVersion is {lock.get('lockfileVersion')!r}, expected 3"
     packages = lock.get("packages")
-    if not isinstance(packages, dict) or "" not in packages:
-        return "package-lock.json has no packages map"
-    if (packages[""].get("dependencies") or {}).get(PACKAGE) != pin:
-        return f"package-lock.json root dependency {PACKAGE} is {(packages[''].get('dependencies') or {}).get(PACKAGE)!r}, expected {pin}"
+    if not isinstance(packages, dict) or not isinstance(packages.get(""), dict):
+        return "package-lock.json has no packages map with a root entry"
+    root_deps = packages[""].get("dependencies")
+    if not isinstance(root_deps, dict) or root_deps.get(PACKAGE) != pin:
+        found = root_deps.get(PACKAGE) if isinstance(root_deps, dict) else None
+        return f"package-lock.json root dependency {PACKAGE} is {found!r}, expected {pin}"
     entry = packages.get(f"node_modules/{PACKAGE}")
     if not isinstance(entry, dict) or entry.get("version") != pin:
         return f"package-lock.json entry for {PACKAGE} is at {entry.get('version') if isinstance(entry, dict) else None!r}, expected {pin}"
@@ -96,18 +96,43 @@ def _versions_root(env=None):
     return install_dir(env) / "versions"
 
 
+def _json_object(path):
+    """A JSON object from `path`, or None when the file is unreadable, not JSON, or not an object —
+    every reader below treats None as "not a generation", never as an exception."""
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _audited_dir(root, parts):
+    """Walk `root/parts` through bridge's `O_NOFOLLOW` descent: `"ok"` for a real directory chain,
+    `"absent"` when a component does not exist, `"refused"` when a component is a symlink, a file,
+    or otherwise not safely openable. Pathlib readers follow symlinks; this is what keeps a
+    symlinked `versions/` (or generation) from being reused, rendered or probed."""
+    try:
+        fd = bridge.open_dir_chain(root, tuple(parts))
+    except bridge.AbsentPath:
+        return "absent"
+    except (bridge.BridgeError, OSError):
+        return "refused"
+    os.close(fd)
+    return "ok"
+
+
 def _generation_names(version, env=None):
     d = _versions_root(env) / version
-    if not d.is_dir():
+    try:
+        if not d.is_dir():
+            return []
+        return sorted(p.name for p in d.iterdir() if p.is_dir() and not p.name.startswith("."))
+    except OSError:
         return []
-    return sorted(p.name for p in d.iterdir() if p.is_dir() and not p.name.startswith("."))
 
 
 def _read_marker(version, gen, env=None):
-    try:
-        return json.loads((_versions_root(env) / version / gen / MARKER).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    return _json_object(_versions_root(env) / version / gen / MARKER)
 
 
 def bin_of(version, gen, env=None):
@@ -115,35 +140,58 @@ def bin_of(version, gen, env=None):
 
 
 def _metadata_version(version, gen, env=None):
-    try:
-        return json.loads((_versions_root(env) / version / gen / "node_modules" / PACKAGE / "package.json")
-                          .read_text(encoding="utf-8")).get("version")
-    except (OSError, ValueError):
-        return None
+    meta = _json_object(_versions_root(env) / version / gen / "node_modules" / PACKAGE / "package.json")
+    return meta.get("version") if meta else None
 
 
 def is_valid_generation(version, gen, env=None, sha=None):
     """Marker naming the shipped lockfile's sha + metadata version == directory version + bin."""
     if not gen or "/" in gen or gen.startswith("."):
         return False
+    root = install_dir(env)
+    if _audited_dir(root, ("versions", version, gen)) != "ok":
+        return False
     marker = _read_marker(version, gen, env)
     if not isinstance(marker, dict):
         return False
-    sha = sha or lockfile_sha256(env)
+    try:
+        sha = sha or lockfile_sha256(env)
+    except OSError:
+        return False
     if marker.get("version") != version or marker.get("lockfile_sha256") != sha or marker.get("generation") != gen:
         return False
     if _metadata_version(version, gen, env) != version:
         return False
-    return Path(bin_of(version, gen, env)).is_file()
+    try:
+        return Path(bin_of(version, gen, env)).is_file()
+    except OSError:
+        return False
 
 
 def is_verified(version, gen, env=None):
     return (_versions_root(env) / version / f"{gen}.verified").is_file()
 
 
+def _selectable(version, env):
+    """The (root, sha) a selector needs, or None when the install directory cannot be read safely
+    (a symlinked root, a missing lockfile). A symlinked `versions/` or `versions/<v>` needs no check
+    here: `is_valid_generation` walks every candidate through the audited `O_NOFOLLOW` descent and
+    refuses it there (mutation M20b showed a second check here to be unreachable)."""
+    root = install_dir(env)
+    try:
+        bridge.assert_root(root)
+        sha = lockfile_sha256(env)
+    except (bridge.BridgeError, OSError):
+        return None
+    return root, sha
+
+
 def current_valid_generation(version, env=None):
     """The installer's reuse predicate: the last valid generation by name, or None."""
-    sha = lockfile_sha256(env)
+    selectable = _selectable(version, env)
+    if selectable is None:
+        return None
+    _, sha = selectable
     for gen in reversed(_generation_names(version, env)):
         if is_valid_generation(version, gen, env, sha=sha):
             return gen
@@ -152,12 +200,16 @@ def current_valid_generation(version, env=None):
 
 def current_verified_generation(version, env=None):
     """The render predicate for every standalone path: the last valid AND verified generation."""
-    try:
-        sha = lockfile_sha256(env)
-    except OSError:
+    selectable = _selectable(version, env)
+    if selectable is None:
         return None
+    _, sha = selectable
     for gen in reversed(_generation_names(version, env)):
-        if is_verified(version, gen, env) and is_valid_generation(version, gen, env, sha=sha):
+        try:
+            verified = is_verified(version, gen, env)
+        except OSError:
+            verified = False
+        if verified and is_valid_generation(version, gen, env, sha=sha):
             return gen
     return None
 
@@ -241,19 +293,27 @@ def ensure_installed(pin, env=None, timeout=600):
         return FAIL, f"install directory refused: {exc}", None
     if not root.is_dir():
         return FAIL, f"install directory {root} does not exist", None
+    try:
+        bridge.pin_root(root)          # identity before ANY read through the tree
+    except OSError as exc:
+        return FAIL, f"install directory refused: {exc}", None
     err = lockfile_check(pin, env)
     if err:
         return FAIL, f"lockfile refused before install: {err}", None
-    sha = lockfile_sha256(env)
+    try:
+        sha = lockfile_sha256(env)
+    except OSError as exc:
+        return FAIL, f"lockfile unreadable: {exc}", None
+    # `versions/` and `versions/<pin>` must be real directories (or absent) BEFORE anything is reused:
+    # pathlib readers follow symlinks; the audited descent does not.
+    for parts in (("versions",), ("versions", pin)):
+        if _audited_dir(root, parts) == "refused":
+            return FAIL, f"install directory refused: {'/'.join(parts)} is not a real directory", None
     current = current_valid_generation(pin, env)
     if current:
         return OK, (f"already installed (generation {current}, lockfile {sha[:12]})"
                     + _retained_summary(pin, current, env)), current
 
-    try:
-        bridge.pin_root(root)
-    except OSError as exc:
-        return FAIL, f"install directory refused: {exc}", None
     staging_rel = Path("versions") / f"{STAGING_PREFIX}{os.getpid()}-{secrets.token_hex(4)}"
     try:
         bridge.ensure_dir_at(root, staging_rel)
@@ -276,10 +336,8 @@ def ensure_installed(pin, env=None, timeout=600):
     if proc.returncode != 0:
         problem = f"npm ci exited {proc.returncode}: {_first_line(proc.stderr) or _first_line(proc.stdout) or 'no output'}"
     else:
-        try:
-            meta = json.loads((staged_pkg / "package.json").read_text(encoding="utf-8")).get("version")
-        except (OSError, ValueError):
-            meta = None
+        staged_meta = _json_object(staged_pkg / "package.json")
+        meta = staged_meta.get("version") if staged_meta else None
         if meta != pin:
             problem = f"installed metadata says {meta!r}, expected {pin}"
         elif not (staged_pkg / "dist" / "index.js").is_file():

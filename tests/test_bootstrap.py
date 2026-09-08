@@ -27,7 +27,6 @@ TOOLS = REPO_ROOT / "tools"
 BOOTSTRAP = SCRIPTS / "_bootstrap.py"
 
 MUTATION = re.compile(r"sys\.path\s*(\.\s*(insert|append|extend)\s*\(|\+=)")
-BOOTSTRAP_CALL = re.compile(r"runpy\.run_path\(.*_bootstrap\.py")
 
 #: The pinned inventory (plan decision 2). A program that imports only the standard library is not in
 #: it; (g) asserts the computed selector reproduces exactly this set.
@@ -64,6 +63,11 @@ def module_level_local_imports(tree, names):
             if node.module.split(".")[0] in names:
                 out.append(i)
     return out
+
+
+def calls_run_path(tree):
+    """True when any call anywhere in the module is `runpy.run_path(...)`, whatever its formatting or argument."""
+    return any(isinstance(n, ast.Call) and ast.unparse(n.func) == "runpy.run_path" for n in ast.walk(tree))
 
 
 def bootstrap_positions(tree):
@@ -149,10 +153,11 @@ def program_violations(root=REPO_ROOT):
             boots = bootstrap_positions(tree)
             if not boots or boots[0] > locs[0]:
                 missing.append(f"scripts/migrate/{n}")
+    # libraries half: every non-program module in scripts/lib, the package marker included
     for p in sorted((root / "scripts" / "lib").glob("*.py")):
-        if p.name in inv["LIB_PROGRAMS"] or p.name == "__init__.py":
+        if p.name in inv["LIB_PROGRAMS"]:
             continue
-        if BOOTSTRAP_CALL.search(p.read_text(encoding="utf-8")):
+        if calls_run_path(ast.parse(p.read_text(encoding="utf-8"))):
             extra.append(f"scripts/lib/{p.name}")
     return missing, extra
 
@@ -192,6 +197,12 @@ class TestBootstrapLint(unittest.TestCase):
             self.assertEqual(missing, ["bin/vibe-fixture"])
             fixture.write_text("#!/usr/bin/env python3\nimport runpy, pathlib\nrunpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / 'scripts' / '_bootstrap.py'))\nimport bridge\n")
             self.assertEqual(program_violations(root)[0], [])
+            # libraries half: a multiline call in a library module and a one-liner in the package marker are
+            # both reported, whatever the argument spelling
+            (root / "scripts" / "lib" / "advisors.py").write_text(
+                "import runpy\nimport pathlib\nrunpy.run_path(\n    str(\n        pathlib.Path(__file__).resolve().parents[1]\n        / 'boot.py'\n    )\n)\nX = 1\n")
+            (root / "scripts" / "lib" / "__init__.py").write_text("import runpy; runpy.run_path('scripts/_bootstrap.py')\n")
+            self.assertEqual(program_violations(root), ([], ["scripts/lib/__init__.py", "scripts/lib/advisors.py"]))
 
 
 class TestSingleConfig(unittest.TestCase):
@@ -244,12 +255,15 @@ class TestBootstrapModule(unittest.TestCase):
             "runpy.run_path(boot)\n"
             "second = list(sys.path)\n"
             "print(json.dumps({'lib': first.count(lib), 'scripts': first.count(scripts), 'same': first == second, "
+            "'prefix': first[:2], "
             "'mods': sorted(k for k in sys.modules if '_bootstrap' in k and not k.startswith('importlib'))}))\n"
         )
         proc = fresh(code)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         out = json.loads(proc.stdout.strip().splitlines()[-1])
         self.assertEqual((out["lib"], out["scripts"], out["same"], out["mods"]), (1, 1, True, []), out)
+        # the requested precedence: scripts/lib first, then scripts/, ahead of everything else
+        self.assertEqual(out["prefix"], [lib, scripts], out)
         # already present: the bootstrap adds nothing and removes nothing
         code2 = (
             "import sys, json, runpy\n"

@@ -25,7 +25,7 @@ A `python3 -c` one-liner run from the repository root uses the relative path:
 `runpy.run_path('scripts/_bootstrap.py')`. `tests/test_bootstrap.py` enforces all of this.
 
 Idempotent: a directory already on `sys.path` is not inserted again, and an existing entry is never
-removed or moved.
+removed or moved. On a path holding neither, the result is the prefix `[scripts/lib, scripts]`.
 """
 
 import sys
@@ -33,6 +33,7 @@ from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parent
 
-for _entry in (str(_SCRIPTS / "lib"), str(_SCRIPTS)):
+# Inserted at index 0 in turn, so the LAST entry ends up first: scripts/ goes in, then scripts/lib ahead of it.
+for _entry in (str(_SCRIPTS), str(_SCRIPTS / "lib")):
     if _entry not in sys.path:
         sys.path.insert(0, _entry)

@@ -630,11 +630,7 @@ def _mapping(value, where):
 def _text(value, where):
     if not isinstance(value, str):
         raise ValueError(f"{where}: expected a string, got {type(value).__name__}")
-    try:
-        value.encode("utf-8")           # a lone surrogate (JSON `"\\ud800"`) is not a well-formed string
-    except UnicodeEncodeError as exc:
-        raise ValueError(f"{where}: ill-formed string") from exc
-    return value
+    return value                        # well-formedness is checked for every string by `_check_tree`
 
 
 def _refuse_constant(token):
@@ -642,10 +638,84 @@ def _refuse_constant(token):
     raise ValueError(f"non-JSON constant {token}")
 
 
+#: The document class both loaders accept — stated as numbers, not as whichever parser gives out first.
+#: A row is 400–900 bytes and four levels deep (row → expect → entries_of → list); the caps leave room and sit
+#: far below every interpreter's own limits, so the answer does not depend on the Python or Node version.
+MAX_ROW_BYTES = 65536
+MAX_DEPTH = 16
+#: The admissible row filename, stated identically in both loaders: `id` is the name minus `.json`, nothing else.
+ROW_FILENAME = re.compile(r"[a-z][a-z0-9-]*\.json")
+
+
+def _well_formed(value, where):
+    try:
+        value.encode("utf-8")           # a lone surrogate (JSON `"\\ud800"`) is not a well-formed string
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{where}: ill-formed string") from exc
+
+
+def _check_tree(doc, where):
+    """Iterative walk over the parsed document: nesting deeper than MAX_DEPTH is refused, and EVERY string —
+    object key or value, at any depth, read by the grammar or not — must be well-formed."""
+    stack = [(doc, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > MAX_DEPTH:
+            raise ValueError(f"{where}: nesting deeper than {MAX_DEPTH}")
+        if isinstance(node, dict):
+            for key, child in node.items():
+                _well_formed(key, where)
+                stack.append((child, depth + 1))
+        elif isinstance(node, list):
+            for child in node:
+                stack.append((child, depth + 1))
+        elif isinstance(node, str):
+            _well_formed(node, where)
+
+
+def _raw_depth(text, where):
+    """Nesting depth of the raw JSON text, counted BEFORE parsing — a parser keeps only the last value of a
+    duplicate key, so a post-parse walk never sees a discarded value's nesting, and an interpreter may run out of
+    recursion before any walk runs. Strings are skipped (a bracket inside a string is not nesting)."""
+    depth = in_string = escaped = 0
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = 0
+            elif ch == "\\":
+                escaped = 1
+            elif ch == '"':
+                in_string = 0
+        elif ch == '"':
+            in_string = 1
+        elif ch in "[{":
+            depth += 1
+            if depth > MAX_DEPTH:
+                raise ValueError(f"{where}: nesting deeper than {MAX_DEPTH}")
+        elif ch in "]}":
+            depth -= 1
+
+
 def _read_row(path):
-    """Decode strictly (invalid UTF-8 is a refusal — UnicodeDecodeError is a ValueError) and parse without the
-    non-JSON constants, so this loader accepts exactly the documents JSON.parse accepts."""
-    return json.loads(path.read_bytes().decode("utf-8"), parse_constant=_refuse_constant)
+    """Read exactly the documents the Node loader reads. The filename must match ROW_FILENAME (so `id`
+    is the name minus `.json` on both sides — `Path.stem` and `slice(0, -5)` disagree on a name like `.json`). Bytes over MAX_ROW_BYTES are refused before decoding;
+    invalid UTF-8 is a refusal (UnicodeDecodeError is a ValueError); the non-JSON constants are refused;
+    every number is a double (`parse_int=float`), as it is for JSON.parse — so a 4,301-digit integer is `inf`
+    on both sides instead of Python's int-conversion limit deciding; an interpreter that runs out of recursion
+    before our own nesting cap is checked answers with the same refusal class."""
+    if not ROW_FILENAME.fullmatch(path.name):
+        raise ValueError(f"{path.name}: unknown row filename — expected [a-z][a-z0-9-]*.json")
+    data = path.read_bytes()
+    if len(data) > MAX_ROW_BYTES:
+        raise ValueError(f"{path.name}: {len(data)} bytes exceeds the {MAX_ROW_BYTES}-byte row limit")
+    text = data.decode("utf-8")
+    _raw_depth(text, path.name)          # before the parser: covers discarded duplicate values and every interpreter's limit
+    try:
+        doc = json.loads(text, parse_constant=_refuse_constant, parse_int=float)
+    except RecursionError as exc:        # unreachable past the pre-scan; kept so the refusal class never changes
+        raise ValueError(f"{path.name}: nesting deeper than {MAX_DEPTH}") from exc
+    _check_tree(doc, path.name)
+    return doc
 
 
 def load_write_invariants(directory=WRITE_INVARIANTS):
@@ -844,6 +914,40 @@ class WriteInvariantMatrix(unittest.TestCase):
                                 ("duplicate schema, first Infinity", raw.replace('"schema": 1,', '"schema": Infinity, "schema": 1,'), False),
                                 ("lone surrogate in content", raw.replace('"content": "new"', '"content": "\\ud800"'), False),
                                 ("schema 1e0", raw.replace('"schema": 1,', '"schema": 1e0,'), True),
+                                ("discarded 4301-digit integer", raw.replace('"schema": 1,', '"schema": ' + "9" * 4301 + ', "schema": 1,'), True),
+                                ("discarded 17-level nesting", raw.replace('"schema": 1,', '"schema": ' + "[" * 17 + "0" + "]" * 17 + ', "schema": 1,'), False),
+                                ("discarded 12-level nesting", raw.replace('"schema": 1,', '"schema": ' + "[" * 12 + "0" + "]" * 12 + ', "schema": 1,'), True),
+                                ("discarded 2000-level nesting", raw.replace('"schema": 1,', '"schema": ' + "[" * 2000 + "0" + "]" * 2000 + ', "schema": 1,'), False),
+                                ("brackets inside a string are not nesting", raw.replace('"content": "new"', '"content": "' + "[" * 40 + '"'), True),
+                                ("discarded 15-level nesting is level 16 exactly", raw.replace('"schema": 1,', '"schema": ' + "[" * 15 + "0" + "]" * 15 + ', "schema": 1,'), True),
+                                ("discarded 16-level nesting is level 17", raw.replace('"schema": 1,', '"schema": ' + "[" * 16 + "0" + "]" * 16 + ', "schema": 1,'), False),
+                                ("a bracket run after an escaped backslash inside a string", raw.replace('"content": "new"', '"content": "a\\\\' + "[" * 30 + '"'), True),
+                                ("an escaped quote then brackets inside a string", raw.replace('"content": "new"', '"content": "a\\"' + "[" * 30 + '\\""'), True),
+                                ("an unterminated string followed by brackets", raw.replace('"content": "new"', '"content": "' + "[" * 30), False),
+                                ("lone surrogate in an entries item", raw.replace('"entries": [', '"entries": ["\\ud800", '), False),
+                                ("lone surrogate as a kinds key", raw.replace('"expect": {', '"expect": {"kinds": {"\\ud800": "file"}, '), False),
+                                ("exactly the byte cap", raw + " " * (65536 - len(raw.encode("utf-8"))), True),
+                                ("one byte over the cap", raw + " " * (65537 - len(raw.encode("utf-8"))), False),):
+            (bad / "dotdot-component.json").write_text(text, encoding="utf-8")
+            with self.subTest(agreement=label):
+                if ok:
+                    self.assertEqual(len(load_write_invariants(bad)), 1)
+                else:
+                    with self.assertRaises(ValueError):
+                        load_write_invariants(bad)
+        (bad / "dotdot-component.json").unlink()
+        for name, ok in ((".json", False), ("Dotdot-Component.json", False), ("dotdot component.json", False), ("dotdot.component.json", False), ("dotdot-component.json", True)):
+            for stale in bad.glob("*.json"):
+                stale.unlink()
+            doc = dict(good); doc["id"] = name[:-5]
+            (bad / name).write_text(json.dumps(doc), encoding="utf-8")
+            with self.subTest(filename=name):
+                if ok:
+                    self.assertEqual(len(load_write_invariants(bad)), 1)
+                else:
+                    with self.assertRaises(ValueError):
+                        load_write_invariants(bad)
+        for label, text, ok in (("schema with extra spaces", raw.replace('"schema": 1,', '"schema":  1,'), True),
                                 ("duplicate schema, last 1.0", raw.replace('"schema": 1,', '"schema": 1, "schema": 1.0,'), True),
                                 ("duplicate schema, last 2", raw.replace('"schema": 1,', '"schema": 1, "schema": 2,'), False),
                                 ("escaped key", raw.replace('"schema": 1,', '"\\u0073chema": 1,'), True)):

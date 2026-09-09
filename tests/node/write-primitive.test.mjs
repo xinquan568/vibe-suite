@@ -1208,22 +1208,56 @@ const onlyKeys = (obj, allowed, required, where) => {
 // A lone surrogate (JSON `"\\ud800"`) is not a well-formed string; Node 18 has no `isWellFormed`, so a regex says it.
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 const text = (v, where) => {
-  if (typeof v !== "string" || LONE_SURROGATE.test(v)) throw new Error(`${where}: unknown value — expected a well-formed string`);
-  return v;
+  if (typeof v !== "string") throw new Error(`${where}: unknown value — expected a string`);
+  return v;                               // well-formedness is checked for every string by `checkTree`
 };
 // Decode strictly: an invalid UTF-8 byte is a refusal, as it is for the Python loader (`readFileSync(…, "utf8")`
 // would silently substitute U+FFFD). JSON.parse already refuses the non-JSON constants NaN/Infinity.
+// The document class both loaders accept — stated as numbers, not as whichever parser gives out first. A row is
+// 400–900 bytes and four levels deep; the caps leave room and sit far below every engine's own limits.
+const MAX_ROW_BYTES = 65536;
+const MAX_DEPTH = 16;
+// The admissible row filename, stated identically in both loaders: `id` is the name minus `.json`, nothing else.
+const ROW_FILENAME = /^[a-z][a-z0-9-]*\.json$/;
+// Iterative walk: nesting deeper than MAX_DEPTH is refused, and EVERY string — key or value, at any depth, read
+// by the grammar or not — must be well-formed.
+const checkTree = (doc, where) => {
+  const stack = [[doc, 1]];
+  while (stack.length) {
+    const [node, depth] = stack.pop();
+    if (depth > MAX_DEPTH) throw new Error(`${where}: unknown document — nesting deeper than ${MAX_DEPTH}`);
+    if (Array.isArray(node)) for (const child of node) stack.push([child, depth + 1]);
+    else if (node !== null && typeof node === "object") {
+      for (const [key, child] of Object.entries(node)) { if (LONE_SURROGATE.test(key)) throw new Error(`${where}: unknown value — ill-formed string`); stack.push([child, depth + 1]); }
+    } else if (typeof node === "string" && LONE_SURROGATE.test(node)) throw new Error(`${where}: unknown value — ill-formed string`);
+  }
+};
+// Nesting depth of the raw text, counted BEFORE parsing — JSON.parse keeps only a duplicate key's last value, so a
+// post-parse walk never sees a discarded value's nesting. Strings are skipped (a bracket inside a string is not nesting).
+const rawDepth = (text, where) => {
+  let depth = 0, inString = false, escaped = false;
+  for (const ch of text) {
+    if (inString) { if (escaped) escaped = false; else if (ch === "\\") escaped = true; else if (ch === '"') inString = false; }
+    else if (ch === '"') inString = true;
+    else if (ch === "[" || ch === "{") { depth += 1; if (depth > MAX_DEPTH) throw new Error(`${where}: unknown document — nesting deeper than ${MAX_DEPTH}`); }
+    else if (ch === "]" || ch === "}") depth -= 1;
+  }
+};
 const readRow = (file) => {
+  if (!ROW_FILENAME.test(path.basename(file))) throw new Error(`${path.basename(file)}: unknown row filename — expected [a-z][a-z0-9-]*.json`);
+  const bytes = readFileSync(file);
+  if (bytes.length > MAX_ROW_BYTES) throw new Error(`${path.basename(file)}: unknown document — ${bytes.length} bytes exceeds the ${MAX_ROW_BYTES}-byte row limit`);
   let decoded;
   // `ignoreBOM: true` KEEPS a leading U+FEFF in the output, so JSON.parse refuses it — as `json.loads` does.
-  try { decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(file)); }
+  try { decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
   catch (error) { throw new Error(`${path.basename(file)}: unknown encoding — not UTF-8 (${error.message})`); }
-  try { return JSON.parse(decoded); }
+  rawDepth(decoded, path.basename(file));   // before the parser: covers discarded duplicate values
+  let doc;
+  try { doc = JSON.parse(decoded); }      // every number is a double here, as it is for the Python loader (parse_int=float)
   catch (error) { throw new Error(`${path.basename(file)}: unknown document — not JSON (${error.message})`); }
+  checkTree(doc, path.basename(file));
+  return doc;
 };
-
-// Strict: an unknown key, kind, operation, outcome or mode rule throws — a row this interpreter cannot
-// express must FAIL here, never be skipped, or a typo silently shrinks the matrix on one side.
 export function loadWriteInvariants(directory = WRITE_INVARIANTS) {
   const rows = [];
   for (const name of readdirSync(directory).filter((n) => n.endsWith(".json")).sort()) {
@@ -1387,6 +1421,35 @@ test("write-invariant matrix: a malformed row fails the loader instead of being 
     ["duplicate schema, first Infinity", raw.replace('"schema":1,', '"schema":Infinity,"schema":1,'), false],
     ["lone surrogate in content", raw.replace('"content":"new"', '"content":"\\ud800"'), false],
     ["schema 1e0", raw.replace('"schema":1,', '"schema":1e0,'), true],
+    ["discarded 4301-digit integer", raw.replace('"schema":1,', '"schema":' + "9".repeat(4301) + ',"schema":1,'), true],
+    ["discarded 17-level nesting", raw.replace('"schema":1,', '"schema":' + "[".repeat(17) + "0" + "]".repeat(17) + ',"schema":1,'), false],
+    ["discarded 12-level nesting", raw.replace('"schema":1,', '"schema":' + "[".repeat(12) + "0" + "]".repeat(12) + ',"schema":1,'), true],
+    ["discarded 2000-level nesting", raw.replace('"schema":1,', '"schema":' + "[".repeat(2000) + "0" + "]".repeat(2000) + ',"schema":1,'), false],
+    ["brackets inside a string are not nesting", raw.replace('"content":"new"', '"content":"' + "[".repeat(40) + '"'), true],
+    ["discarded 15-level nesting is level 16 exactly", raw.replace('"schema":1,', '"schema":' + "[".repeat(15) + "0" + "]".repeat(15) + ',"schema":1,'), true],
+    ["discarded 16-level nesting is level 17", raw.replace('"schema":1,', '"schema":' + "[".repeat(16) + "0" + "]".repeat(16) + ',"schema":1,'), false],
+    ["a bracket run after an escaped backslash inside a string", raw.replace('"content":"new"', '"content":"a\\\\' + "[".repeat(30) + '"'), true],
+    ["an escaped quote then brackets inside a string", raw.replace('"content":"new"', '"content":"a\\"' + "[".repeat(30) + '\\""'), true],
+    ["an unterminated string followed by brackets", raw.replace('"content":"new"', '"content":"' + "[".repeat(30)), false],
+    ["lone surrogate in an entries item", raw.replace('"entries":[', '"entries":["\\ud800",'), false],
+    ["lone surrogate as a kinds key", raw.replace('"expect":{', '"expect":{"kinds":{"\\ud800":"file"},'), false],
+    ["exactly the byte cap", raw + " ".repeat(65536 - Buffer.byteLength(raw)), true],
+    ["one byte over the cap", raw + " ".repeat(65537 - Buffer.byteLength(raw)), false],
+  ]) {
+    const dir = tmpWorkspace("write-inv-agree-");
+    assert.notEqual(text, raw, label);
+    writeFileSync(path.join(dir, "dotdot-component.json"), text);
+    if (ok) assert.equal(loadWriteInvariants(dir).length, 1, label);
+    else assert.throws(() => loadWriteInvariants(dir), /unknown/, label);
+  }
+  // Filenames: the admissible domain is stated identically on both sides; `id` = name minus ".json".
+  for (const [name, ok] of [[".json", false], ["Dotdot-Component.json", false], ["dotdot component.json", false], ["dotdot.component.json", false], ["dotdot-component.json", true]]) {
+    const dir = tmpWorkspace("write-inv-name-");
+    writeFileSync(path.join(dir, name), JSON.stringify({ ...good, id: name.slice(0, -5) }));
+    if (ok) assert.equal(loadWriteInvariants(dir).length, 1, name);
+    else assert.throws(() => loadWriteInvariants(dir), /unknown/, name);
+  }
+  for (const [label, text, ok] of [["schema with extra spaces", raw.replace('"schema":1,', '"schema": 1,'), true],
     ["duplicate schema, last 1.0", raw.replace('"schema":1,', '"schema":1,"schema":1.0,'), true],
     ["duplicate schema, last 2", raw.replace('"schema":1,', '"schema":1,"schema":2,'), false],
     ["escaped key", raw.replace('"schema":1,', '"\\u0073chema":1,'), true],

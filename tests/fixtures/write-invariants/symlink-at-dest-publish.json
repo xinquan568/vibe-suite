@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "id": "symlink-at-dest-publish",
+  "invariant": "A symlink at the destination is an error for publication too \u2014 not a lost race.",
+  "setup": [
+    {
+      "kind": "file",
+      "path": "target.txt",
+      "content": "t"
+    },
+    {
+      "kind": "symlink",
+      "path": "x.json",
+      "target": "target.txt"
+    }
+  ],
+  "operation": {
+    "name": "publish_new",
+    "dest": "x.json",
+    "content": "new"
+  },
+  "expect": {
+    "outcome": "refused",
+    "untouched": [
+      "target.txt"
+    ],
+    "kinds": {
+      "x.json": "symlink"
+    },
+    "entries": [
+      "target.txt",
+      "x.json"
+    ]
+  }
+}

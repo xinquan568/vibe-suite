@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "publish-declines-over-existing",
+  "invariant": "Publication over an existing file is a declined race, not an overwrite.",
+  "setup": [
+    {
+      "kind": "file",
+      "path": "x.json",
+      "content": "old"
+    }
+  ],
+  "operation": {
+    "name": "publish_new",
+    "dest": "x.json",
+    "content": "new"
+  },
+  "expect": {
+    "outcome": "declined",
+    "untouched": [
+      "x.json"
+    ],
+    "entries": [
+      "x.json"
+    ]
+  }
+}

@@ -8,17 +8,18 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, closeSync, constants as fsConstants, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 
 import {
   appendLineAt, classify, ensureDirAt, isOwnedTempRoot, judgeGenerationsAt, makeOwnedTempDir, publishNew,
   removeOwnedTree, retireGenerationsAt, rotateLogAt, scratch, openSinkAt, secureDirAt, unlinkOwned, writeAtomic,
-  EVENT_LINE_MAX, PRIVATE_FILE_MODE, STAMP_KEY,
+  EVENT_LINE_MAX, PRIVATE_FILE_MODE, STAMP_KEY, WriteError,
 } from "../../scripts/lib/write.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -1176,3 +1177,144 @@ test("the non-ENOENT error branches: a per-entry lstat failure is refused and th
 
 /** unlink that tolerates a missing file — the peer in a race may already have won. */
 function unlinkSyncSafe(p) { try { unlinkSync(p); } catch (error) { if (error.code !== "ENOENT") throw error; } }
+
+// --------------------------------------------------------------------- write-invariant matrix
+// M11 / vibe-222: ONE invariant list, as data (tests/fixtures/write-invariants/*.json), run against BOTH
+// safety kernels. tests/test_bridge_cli.py::WriteInvariantMatrix interprets the same files against
+// scripts/lib/bridge.py. This block is an interpreter of the rows, not a port of either kernel.
+
+const WRITE_INVARIANTS = path.join(REPO_ROOT, "tests", "fixtures", "write-invariants");
+const REQUIRED_KEYS = ["schema", "id", "invariant", "setup", "operation", "expect"];
+const ROW_KEYS = new Set([...REQUIRED_KEYS, "umask"]);
+const SETUP_KEYS = { dir: ["kind", "path"], file: ["kind", "path", "content", "mode"], symlink: ["kind", "path", "target"] };
+const SETUP_REQUIRED = { dir: ["kind", "path"], file: ["kind", "path", "content"], symlink: ["kind", "path", "target"] };
+const OPERATIONS = { write_atomic: writeAtomic, publish_new: publishNew };
+const OPERATION_KEYS = new Set(["name", "dest", "content", "mode"]);
+const OUTCOMES = new Set(["refused", "written", "declined"]);
+const EXPECT_KEYS = new Set(["outcome", "content", "mode", "untouched", "kinds", "entries", "entries_of"]);
+const MODE_RULES = new Set(["exact", "preserved", "subset_of"]);
+const octal = (s, where) => {
+  if (typeof s !== "string" || !/^0[0-7]{3}$/.test(s)) throw new Error(`${where}: unknown mode/umask carrier ${JSON.stringify(s)} — a four-digit octal string like "0644"`);
+  return parseInt(s, 8);
+};
+const onlyKeys = (obj, allowed, required, where) => {
+  const keys = Object.keys(obj);
+  if (keys.some((k) => !allowed.has(k)) || required.some((k) => !(k in obj))) throw new Error(`${where}: unknown or missing keys ${JSON.stringify(keys)}`);
+};
+
+// Strict: an unknown key, kind, operation, outcome or mode rule throws — a row this interpreter cannot
+// express must FAIL here, never be skipped, or a typo silently shrinks the matrix on one side.
+export function loadWriteInvariants(directory = WRITE_INVARIANTS) {
+  const rows = [];
+  for (const name of readdirSync(directory).filter((n) => n.endsWith(".json")).sort()) {
+    const row = JSON.parse(readFileSync(path.join(directory, name), "utf8"));
+    onlyKeys(row, ROW_KEYS, REQUIRED_KEYS, name);
+    if (row.schema !== 1 || row.id !== name.slice(0, -5)) throw new Error(`${name}: unknown schema, or id does not equal the file stem`);
+    for (const step of row.setup) {
+      if (!(step.kind in SETUP_KEYS)) throw new Error(`${name}: unknown setup kind ${step.kind}`);
+      onlyKeys(step, new Set(SETUP_KEYS[step.kind]), SETUP_REQUIRED[step.kind], name);
+      if ("mode" in step) octal(step.mode, name);
+    }
+    onlyKeys(row.operation, OPERATION_KEYS, ["name", "dest", "content"], name);
+    if (!(row.operation.name in OPERATIONS)) throw new Error(`${name}: unknown operation ${row.operation.name}`);
+    if ("mode" in row.operation) octal(row.operation.mode, name);
+    if ("umask" in row) octal(row.umask, name);
+    const expect = row.expect;
+    if (Object.keys(expect).some((k) => !EXPECT_KEYS.has(k)) || !OUTCOMES.has(expect.outcome)) throw new Error(`${name}: unknown expect keys or outcome`);
+    if ("mode" in expect) {
+      const rules = Object.keys(expect.mode);
+      if (rules.length !== 1 || !MODE_RULES.has(rules[0])) throw new Error(`${name}: unknown mode rule`);
+      if (rules[0] !== "preserved") octal(expect.mode[rules[0]], name);
+    }
+    rows.push(row);
+  }
+  if (rows.length === 0) throw new Error(`${directory}: no rows`);
+  return rows;
+}
+
+const snapshot = async (p) => [await classify(p), lstatSync(p).isSymbolicLink() ? readlinkSync(p) : readFileSync(p)];
+
+async function runRow(row) {
+  const root = realpathSync(tmpWorkspace("write-inv-"));
+  for (const step of row.setup) {
+    const target = path.join(root, step.path);
+    if (step.kind === "dir") mkdirSync(target, { recursive: true });
+    else if (step.kind === "file") { writeFileSync(target, step.content, "utf8"); if (step.mode) chmodSync(target, octal(step.mode)); }
+    else symlinkSync(step.target, target);
+  }
+  const { expect, operation: op } = row;
+  // NOT path.join: it would normalise a '..' component away before the kernel ever saw it.
+  const dest = `${root}${path.sep}${op.dest}`;
+  const before = {};
+  for (const rel of expect.untouched ?? []) before[rel] = await snapshot(path.join(root, rel));
+  const destIsFile = existsSync(dest) && !lstatSync(dest).isSymbolicLink() && statSync(dest).isFile();
+  const beforeMode = destIsFile ? mode(dest) : null;
+  const options = "mode" in op ? { mode: octal(op.mode) } : {};      // omission is the API's own default
+  const previous = "umask" in row ? process.umask(octal(row.umask)) : null;
+  let outcome;
+  try {
+    try {
+      const result = await OPERATIONS[op.name](root, dest, op.content, options);
+      outcome = result === false ? "declined" : "written";
+    } catch (error) {
+      if (!(error instanceof WriteError)) throw error;
+      outcome = "refused";
+    }
+  } finally {
+    if (previous !== null) process.umask(previous);
+  }
+  assert.equal(outcome, expect.outcome, `${row.id}: ${row.invariant}`);
+  if (outcome === "written") {
+    assert.equal(readFileSync(dest, "utf8"), expect.content, row.id);
+    if (expect.mode) {
+      const [[rule, value]] = Object.entries(expect.mode);
+      const actual = mode(dest);
+      if (rule === "exact") assert.equal(actual, octal(value), row.id);
+      else if (rule === "subset_of") assert.equal(actual & ~octal(value), 0, `${row.id}: ${actual.toString(8)} exceeds ${value}`);
+      else assert.equal(actual, beforeMode, row.id);
+    }
+  }
+  for (const [rel, snap] of Object.entries(before)) assert.deepEqual(await snapshot(path.join(root, rel)), snap, `${row.id}: ${rel} changed`);
+  for (const [rel, kind] of Object.entries(expect.kinds ?? {})) assert.equal(await classify(path.join(root, rel)), kind, `${row.id}: ${rel}`);
+  if (expect.entries) assert.deepEqual(readdirSync(root).sort(), [...expect.entries].sort(), row.id);
+  for (const [rel, names] of Object.entries(expect.entries_of ?? {})) assert.deepEqual(readdirSync(path.join(root, rel)).sort(), [...names].sort(), `${row.id}: ${rel}`);
+}
+
+for (const row of loadWriteInvariants()) {
+  test(`write-invariant matrix: ${row.id} holds against write.mjs`, async () => { await runRow(row); });
+}
+
+test("write-invariant matrix: the issue-named rows are present", () => {
+  const ids = new Set(loadWriteInvariants().map((r) => r.id));
+  for (const required of ["symlink-at-dest-replace", "intermediate-symlink", "dotdot-component", "fixed-name-collision", "mode-preserved-when-omitted", "crash-leftover"]) {
+    assert.ok(ids.has(required), required);
+  }
+});
+
+test("write-invariant matrix: a malformed row fails the loader instead of being skipped", () => {
+  const good = JSON.parse(readFileSync(path.join(WRITE_INVARIANTS, "dotdot-component.json"), "utf8"));
+  const mutations = {
+    "unknown operation": (r) => { r.operation.name = "write_anything"; },
+    "unknown outcome": (r) => { r.expect.outcome = "ignored"; },
+    "unknown top-level key": (r) => { r.skip = true; },
+    "unknown setup kind": (r) => { r.setup.push({ kind: "fifo", path: "f" }); },
+    "unknown setup field": (r) => { r.setup[0].mode_bits = "0644"; },
+    "unknown operation field": (r) => { r.operation.force = true; },
+    "missing required key": (r) => { delete r.invariant; },
+    "wrong schema": (r) => { r.schema = 2; },
+    "malformed octal mode": (r) => { r.operation.mode = "644x"; },
+    "decimal mode": (r) => { r.operation.mode = 420; },
+    "malformed umask": (r) => { r.umask = "22"; },
+    "two mode rules": (r) => { r.expect.mode = { exact: "0644", preserved: true }; },
+  };
+  for (const [label, mutate] of Object.entries(mutations)) {
+    const bad = tmpWorkspace("write-inv-bad-");
+    const row = JSON.parse(JSON.stringify(good)); mutate(row);
+    writeFileSync(path.join(bad, "dotdot-component.json"), JSON.stringify(row));
+    assert.throws(() => loadWriteInvariants(bad), /unknown/, label);
+  }
+  const renamed = tmpWorkspace("write-inv-bad-");
+  writeFileSync(path.join(renamed, "renamed.json"), JSON.stringify(good));           // id != file stem
+  assert.throws(() => loadWriteInvariants(renamed), /unknown/);
+  assert.throws(() => loadWriteInvariants(tmpWorkspace("write-inv-empty-")), /no rows/);   // an empty directory is not a matrix
+});

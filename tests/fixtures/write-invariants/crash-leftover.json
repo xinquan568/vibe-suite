@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "crash-leftover",
+  "invariant": "An orphan scratch left by a crash between stage and publish neither blocks nor is touched; the destination never carries partial bytes.",
+  "setup": [
+    {
+      "kind": "file",
+      "path": "x.json",
+      "content": "old"
+    },
+    {
+      "kind": "file",
+      "path": ".x.json.deadbeefcafe.vibe-tmp",
+      "content": "half"
+    }
+  ],
+  "operation": {
+    "name": "write_atomic",
+    "dest": "x.json",
+    "content": "new"
+  },
+  "expect": {
+    "outcome": "written",
+    "content": "new",
+    "untouched": [
+      ".x.json.deadbeefcafe.vibe-tmp"
+    ],
+    "entries": [
+      ".x.json.deadbeefcafe.vibe-tmp",
+      "x.json"
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "publish-creates-fresh",
+  "invariant": "Publication into an absent destination creates it, 0644 by default (the creation API's own default, under a 0022 umask).",
+  "setup": [],
+  "operation": {
+    "name": "publish_new",
+    "dest": "p.json",
+    "content": "new"
+  },
+  "expect": {
+    "outcome": "written",
+    "content": "new",
+    "mode": {
+      "exact": "0644"
+    },
+    "entries": [
+      "p.json"
+    ]
+  },
+  "umask": "0022"
+}

@@ -10,6 +10,7 @@ secret's shape in a second file.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -592,6 +593,179 @@ class WriteAtomicScratchIsUnpredictable(unittest.TestCase):
         self.assertIn("remove stale", message, "the residual refusal does not name the corrective action")
         self.assertIn("no other vibe-suite process is running", message,
                       "the residual refusal does not name the condition for the remedy")
+
+
+# --------------------------------------------------------------------------- write-invariant matrix
+# M11 / vibe-222: ONE invariant list, as data, run against BOTH safety kernels. The rows live in
+# tests/fixtures/write-invariants/*.json; tests/node/write-primitive.test.mjs interprets the same files
+# against scripts/lib/write.mjs. This class is an interpreter of the rows, not a port of either kernel.
+
+WRITE_INVARIANTS = REPO_ROOT / "tests" / "fixtures" / "write-invariants"
+REQUIRED_KEYS = {"schema", "id", "invariant", "setup", "operation", "expect"}
+ROW_KEYS = REQUIRED_KEYS | {"umask"}
+SETUP_KEYS = {"dir": {"kind", "path"}, "file": {"kind", "path", "content", "mode"}, "symlink": {"kind", "path", "target"}}
+SETUP_REQUIRED = {"dir": {"kind", "path"}, "file": {"kind", "path", "content"}, "symlink": {"kind", "path", "target"}}
+OPERATIONS = {"write_atomic", "publish_new"}
+OPERATION_KEYS = {"name", "dest", "content", "mode"}
+OUTCOMES = {"refused", "written", "declined"}
+EXPECT_KEYS = {"outcome", "content", "mode", "untouched", "kinds", "entries", "entries_of"}
+MODE_RULES = {"exact", "preserved", "subset_of"}
+OCTAL = re.compile(r"^0[0-7]{3}$")
+
+
+def _octal(value, where):
+    if not isinstance(value, str) or not OCTAL.match(value):
+        raise ValueError(f"{where}: mode/umask must be a four-digit octal string like '0644', got {value!r}")
+    return int(value, 8)
+
+
+def load_write_invariants(directory=WRITE_INVARIANTS):
+    """Every `*.json` under the fixture directory, validated strictly: an unknown key, kind, operation,
+    outcome or mode rule is a ValueError, never a skipped row — a row one interpreter cannot express must
+    fail that interpreter, or the 'either kernel failing a row fails CI' property is lost."""
+    rows = []
+    for path in sorted(Path(directory).glob("*.json")):
+        row = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(row, dict) or set(row) - ROW_KEYS or REQUIRED_KEYS - set(row):
+            raise ValueError(f"{path.name}: unknown or missing top-level keys")
+        if row["schema"] != 1 or row["id"] != path.stem:
+            raise ValueError(f"{path.name}: schema must be 1 and id must equal the file stem")
+        for step in row["setup"]:
+            kind = step.get("kind")
+            if kind not in SETUP_KEYS or set(step) - SETUP_KEYS[kind] or SETUP_REQUIRED[kind] - set(step):
+                raise ValueError(f"{path.name}: unknown setup kind or fields {step!r}")
+            if "mode" in step:
+                _octal(step["mode"], path.name)
+        op = row["operation"]
+        if set(op) - OPERATION_KEYS or {"name", "dest", "content"} - set(op) or op["name"] not in OPERATIONS:
+            raise ValueError(f"{path.name}: unknown operation or operation fields {op!r}")
+        if "mode" in op:
+            _octal(op["mode"], path.name)
+        if "umask" in row:
+            _octal(row["umask"], path.name)
+        expect = row["expect"]
+        if set(expect) - EXPECT_KEYS or expect.get("outcome") not in OUTCOMES:
+            raise ValueError(f"{path.name}: unknown expect keys or outcome")
+        if "mode" in expect:
+            if len(expect["mode"]) != 1 or set(expect["mode"]) - MODE_RULES:
+                raise ValueError(f"{path.name}: unknown mode rule")
+            (rule, value), = expect["mode"].items()
+            if rule != "preserved":
+                _octal(value, path.name)
+        rows.append(row)
+    if not rows:
+        raise ValueError(f"{directory}: no rows")
+    return rows
+
+
+class WriteInvariantMatrix(unittest.TestCase):
+    """The shared matrix against bridge.py. One subTest per row; the Node twin is
+    `tests/node/write-primitive.test.mjs` ("write-invariant matrix")."""
+
+    def _apply_setup(self, root, setup):
+        for step in setup:
+            target = root / step["path"]
+            if step["kind"] == "dir":
+                target.mkdir(parents=True)
+            elif step["kind"] == "file":
+                target.write_text(step["content"], encoding="utf-8")
+                if "mode" in step:
+                    os.chmod(target, int(step["mode"], 8))
+            else:
+                target.symlink_to(step["target"])
+
+    def _snapshot(self, root, rel):
+        p = root / rel
+        return (bridge.classify(p), os.readlink(p) if p.is_symlink() else p.read_bytes())
+
+    def _run(self, row):
+        root = Path(tempfile.mkdtemp(prefix="vibe-wi-")).resolve()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        self._apply_setup(root, row["setup"])
+        expect = row["expect"]
+        before = {rel: self._snapshot(root, rel) for rel in expect.get("untouched", [])}
+        op = row["operation"]
+        dest_path = root / op["dest"]
+        before_mode = (dest_path.stat().st_mode & 0o777) if dest_path.is_file() and not dest_path.is_symlink() else None
+        kwargs = {"mode": int(op["mode"], 8)} if "mode" in op else {}   # omission is the API's own default
+        fn = getattr(bridge, op["name"])
+        previous = os.umask(int(row["umask"], 8)) if "umask" in row else None
+        try:
+            try:
+                result = fn(root, root / op["dest"], op["content"], **kwargs)
+                outcome = "declined" if result is False else "written"
+            except bridge.BridgeError:
+                outcome = "refused"
+        finally:
+            if previous is not None:
+                os.umask(previous)
+        self.assertEqual(outcome, expect["outcome"], row["invariant"])
+        dest = root / op["dest"]
+        if outcome == "written":
+            self.assertEqual(dest.read_text(encoding="utf-8"), expect["content"])
+            if "mode" in expect:
+                (rule, value), = expect["mode"].items()
+                actual = dest.stat().st_mode & 0o777
+                if rule == "exact":
+                    self.assertEqual(actual, int(value, 8), row["id"])
+                elif rule == "subset_of":
+                    self.assertEqual(actual & ~int(value, 8), 0, f"{row['id']}: {oct(actual)} exceeds {value}")
+                else:
+                    self.assertEqual(actual, before_mode, row["id"])
+        for rel, snap in before.items():
+            self.assertEqual(self._snapshot(root, rel), snap, f"{row['id']}: {rel} changed")
+        for rel, kind in expect.get("kinds", {}).items():
+            self.assertEqual(bridge.classify(root / rel), kind, f"{row['id']}: {rel}")
+        if "entries" in expect:
+            self.assertEqual(sorted(p.name for p in root.iterdir()), sorted(expect["entries"]), row["id"])
+        for rel, names in expect.get("entries_of", {}).items():
+            self.assertEqual(sorted(p.name for p in (root / rel).iterdir()), sorted(names), f"{row['id']}: {rel}")
+
+    def test_every_row_holds_against_bridge_py(self):
+        rows = load_write_invariants()
+        for row in rows:
+            with self.subTest(row=row["id"]):
+                self._run(row)
+
+    def test_the_issue_named_rows_are_present(self):
+        ids = {row["id"] for row in load_write_invariants()}
+        for required in ("symlink-at-dest-replace", "intermediate-symlink", "dotdot-component", "fixed-name-collision",
+                         "mode-preserved-when-omitted", "crash-leftover"):
+            with self.subTest(row=required):
+                self.assertIn(required, ids)
+
+    def test_a_malformed_row_fails_the_loader_instead_of_being_skipped(self):
+        bad = Path(tempfile.mkdtemp(prefix="vibe-wi-bad-"))
+        self.addCleanup(shutil.rmtree, bad, ignore_errors=True)
+        good = json.loads((WRITE_INVARIANTS / "dotdot-component.json").read_text(encoding="utf-8"))
+        mutations = {
+            "unknown operation": lambda r: r["operation"].__setitem__("name", "write_anything"),
+            "unknown outcome": lambda r: r["expect"].__setitem__("outcome", "ignored"),
+            "unknown top-level key": lambda r: r.__setitem__("skip", True),
+            "unknown setup kind": lambda r: r["setup"].append({"kind": "fifo", "path": "f"}),
+            "unknown setup field": lambda r: r["setup"][0].__setitem__("mode_bits", "0644"),
+            "unknown operation field": lambda r: r["operation"].__setitem__("force", True),
+            "missing required key": lambda r: r.pop("invariant"),
+            "wrong schema": lambda r: r.__setitem__("schema", 2),
+            "malformed octal mode": lambda r: r["operation"].__setitem__("mode", "644x"),
+            "decimal mode": lambda r: r["operation"].__setitem__("mode", 420),
+            "malformed umask": lambda r: r.__setitem__("umask", "22"),
+            "two mode rules": lambda r: r["expect"].__setitem__("mode", {"exact": "0644", "preserved": True}),
+        }
+        for label, mutate in mutations.items():
+            row = json.loads(json.dumps(good)); mutate(row)
+            (bad / "dotdot-component.json").write_text(json.dumps(row), encoding="utf-8")
+            with self.subTest(mutation=label):
+                with self.assertRaises(ValueError):
+                    load_write_invariants(bad)
+        (bad / "dotdot-component.json").write_text(json.dumps(good), encoding="utf-8")
+        (bad / "renamed.json").write_text(json.dumps(good), encoding="utf-8")   # id != file stem
+        with self.assertRaises(ValueError):
+            load_write_invariants(bad)
+        for path in bad.glob("*.json"):
+            path.unlink()
+        with self.assertRaises(ValueError):                                   # an empty directory is not a matrix
+            load_write_invariants(bad)
 
 
 class TestAdvisorMirrorSkip(unittest.TestCase):

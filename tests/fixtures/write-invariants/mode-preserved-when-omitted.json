@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "mode-preserved-when-omitted",
+  "invariant": "Replacing a file without naming a mode keeps the file's own mode.",
+  "setup": [
+    {
+      "kind": "file",
+      "path": "x.json",
+      "content": "old",
+      "mode": "0640"
+    }
+  ],
+  "operation": {
+    "name": "write_atomic",
+    "dest": "x.json",
+    "content": "new"
+  },
+  "expect": {
+    "outcome": "written",
+    "content": "new",
+    "mode": {
+      "preserved": true
+    },
+    "entries": [
+      "x.json"
+    ]
+  }
+}

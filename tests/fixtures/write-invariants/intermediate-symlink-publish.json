@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "intermediate-symlink-publish",
+  "invariant": "Publication through a symlinked parent is refused too.",
+  "setup": [
+    {
+      "kind": "dir",
+      "path": "real"
+    },
+    {
+      "kind": "symlink",
+      "path": "link",
+      "target": "real"
+    }
+  ],
+  "operation": {
+    "name": "publish_new",
+    "dest": "link/x.json",
+    "content": "new"
+  },
+  "expect": {
+    "outcome": "refused",
+    "entries": [
+      "link",
+      "real"
+    ],
+    "entries_of": {
+      "real": []
+    }
+  }
+}

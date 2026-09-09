@@ -16,7 +16,7 @@ the new name, so nothing downstream ever sees the fossil.
 A manifest carrying **both** spellings is refused rather than resolved. Two values that disagree cannot
 both be the answer, and picking one silently is worse than saying so.
 
-Writes go through `bridge.write_atomic`.
+Writes go through `fsafe.write_atomic`.
 """
 
 import argparse
@@ -28,7 +28,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE / "_bootstrap.py"))
 
-import bridge  # noqa: E402
+import fsafe  # noqa: E402
 
 EXIT_OK, EXIT_BAD_INPUT, EXIT_BAD_ROOT, EXIT_WRITE_FAILED = 0, 1, 2, 3
 
@@ -100,11 +100,11 @@ def main(argv=None):
 
     root = Path(args.root).absolute()
     try:
-        bridge.assert_root(root)
-        bridge.pin_root(root)
-        bridge.write_atomic(root, Path(args.manifest).absolute(),
+        fsafe.assert_root(root)
+        fsafe.pin_root(root)
+        fsafe.write_atomic(root, Path(args.manifest).absolute(),
                             json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    except (bridge.BridgeError, ValueError) as exc:
+    except (fsafe.BridgeError, ValueError) as exc:
         print("profile_manifest: refusing to write %s: %s" % (args.manifest, exc), file=sys.stderr)
         return EXIT_WRITE_FAILED
 

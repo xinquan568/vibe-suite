@@ -25,6 +25,8 @@ HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE.parent / "_bootstrap.py"))
 
 import bridge  # noqa: E402
+
+import fsafe  # noqa: E402
 import init_bridge  # noqa: E402
 
 #: Read from `bridge`, never redeclared here — one inventory is what F1.4 requires (M12 / vibe-220
@@ -142,11 +144,11 @@ def restore(ws, entry, report):
     """
     path = recorded_path(ws, entry["path"])
     if path is None:
-        raise bridge.BridgeError(
+        raise fsafe.BridgeError(
             f"provenance names a path outside the workspace: {entry['path']}")
     rel = str(path.relative_to(ws))
 
-    st = bridge.lstat_at(ws, rel)
+    st = fsafe.lstat_at(ws, rel)
     if st is None:
         report.append(f"{rel}: already gone")
         return
@@ -166,10 +168,10 @@ def restore(ws, entry, report):
             # init created it and nothing of the user's is in it. Empty either because this call
             # stripped the block or because an earlier phase already did — the file's state is what
             # decides, not whether this particular call changed it.
-            bridge.unlink_at(ws, rel)
+            fsafe.unlink_at(ws, rel)
             report.append(f"{rel}: removed")
         elif stripped != text:
-            bridge.write_atomic(ws, path, stripped)
+            fsafe.write_atomic(ws, path, stripped)
             report.append(f"{rel}: owned block removed")
         else:
             report.append(f"{rel}: nothing of ours remains — left alone")
@@ -195,7 +197,7 @@ def restore(ws, entry, report):
             # installer created is one it can still recognise; anything else stays, as residue.
             report.append(f"{rel}: kept — nothing identifies it as ours; remove it by hand")
             return
-        bridge.unlink_at(ws, rel)
+        fsafe.unlink_at(ws, rel)
         report.append(f"{rel}: removed")
         return
 
@@ -209,7 +211,7 @@ def json_targets(ws, report, dry):
         if bridge.json_server_has(doc, name):
             report.append(f".mcp.json: {name}")
             if not dry:
-                bridge.write_atomic(ws, ws / ".mcp.json",
+                fsafe.write_atomic(ws, ws / ".mcp.json",
                                     json.dumps(bridge.json_server_remove(doc, name),
                                                indent=2, sort_keys=True) + "\n")
     toml_path = ws / ".codex" / "config.toml"
@@ -221,12 +223,12 @@ def json_targets(ws, report, dry):
                 if not dry:
                     text = bridge.toml_server_remove(text, name)
         if not dry:
-            bridge.write_atomic(ws, toml_path, text)
+            fsafe.write_atomic(ws, toml_path, text)
     hooks = bridge.load_json(ws / ".codex" / "hooks.json", strict=False)
     if bridge.json_hook_entry_has(hooks, "Stop"):
         report.append(".codex/hooks.json: owned Stop entry")
         if not dry:
-            bridge.write_atomic(ws, ws / ".codex" / "hooks.json",
+            fsafe.write_atomic(ws, ws / ".codex" / "hooks.json",
                                 json.dumps(bridge.json_hook_entry_remove(hooks, "Stop"),
                                            indent=2, sort_keys=True) + "\n")
 
@@ -238,9 +240,9 @@ def prune(ws, record, report):
         if path is None:
             report.append(f"{raw}: outside the workspace, left alone")
             continue
-        st = bridge.lstat_at(ws, str(path.relative_to(ws)))
+        st = fsafe.lstat_at(ws, str(path.relative_to(ws)))
         if st and stat.S_ISDIR(st.st_mode) and not any(path.iterdir()):
-            bridge.unlink_at(ws, str(path.relative_to(ws)))
+            fsafe.unlink_at(ws, str(path.relative_to(ws)))
             report.append(f"{path.relative_to(ws)}/: removed")
 
 
@@ -470,7 +472,7 @@ def main(argv):
     # Before the record is read, before anything is validated, before any path-based read: fix what
     # "this workspace" means. Everything after is checked against this directory.
     try:
-        bridge.pin_root(ws)
+        fsafe.pin_root(ws)
     except OSError as exc:
         print(f"error: {ws} could not be opened safely ({exc})", file=sys.stderr)
         return 1
@@ -494,7 +496,7 @@ def main(argv):
     if not confirm:
         for entry in record["targets"]:
             candidate = recorded_path(ws, entry["path"])
-            if candidate and bridge.classify(candidate) != "absent":
+            if candidate and fsafe.classify(candidate) != "absent":
                 report.append(f"{candidate.name}: would be restored or removed")
         json_targets(ws, report, dry=True)
         print("\n".join(report))
@@ -517,12 +519,12 @@ def main(argv):
             for child in sorted(state.rglob("*"), key=lambda c: len(str(c)), reverse=True):
                 rel = str(child.relative_to(ws))
                 if _is_suite_state(child.relative_to(state), child):
-                    bridge.unlink_at(ws, rel)
+                    fsafe.unlink_at(ws, rel)
                 else:
                     report.append(f"{rel}: not a suite state file — left alone")
             # Depth-first above, so the directory is empty here exactly when everything in it was ours.
             if not any(state.iterdir()):
-                bridge.unlink_at(ws, ".vibe-suite-state")
+                fsafe.unlink_at(ws, ".vibe-suite-state")
                 report.append(".vibe-suite-state/: removed")
             else:
                 report.append(".vibe-suite-state/: kept — it still holds files that are not ours")
@@ -530,7 +532,7 @@ def main(argv):
         # `unlink_at` propagates raw OSError from os.lstat/os.unlink/os.rmdir (bridge.py:243-245),
         # and `__main__` catches only BridgeError — so without this a permission failure mid-teardown
         # exits by traceback rather than by the one-line `error:` this command promises everywhere else.
-        raise bridge.BridgeError(f"teardown could not complete ({exc})") from exc
+        raise fsafe.BridgeError(f"teardown could not complete ({exc})") from exc
     finally:
         # In the `finally`, not after the loop: a raise inside it used to lose the whole report, so the
         # run destroyed most of the state directory and then told the user nothing about any of it.
@@ -541,6 +543,6 @@ def main(argv):
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv))
-    except bridge.BridgeError as exc:
+    except fsafe.BridgeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)

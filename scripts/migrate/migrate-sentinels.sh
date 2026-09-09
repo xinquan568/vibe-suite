@@ -40,7 +40,7 @@ lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 VIBE_FAIL_AFTER="${VIBE_FAIL_AFTER:-}" python3 - "$workspace" "$confirm" "$lib" <<'PY'
 import json, os, re, sys
 import runpy, pathlib; runpy.run_path(str(pathlib.Path(sys.argv[3]).resolve().parent / "_bootstrap.py"))
-import bridge  # noqa: E402
+import fsafe  # noqa: E402
 from pathlib import Path
 
 ws, confirm = Path(sys.argv[1]), sys.argv[2] == "1"
@@ -64,9 +64,9 @@ def write_provenance(path, text):
     legacy config into a group/world-readable file: the same leak `c2112ac` closed on the install
     record, in the row that migrates the very file the secrets live in."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    bridge.write_atomic(ws, path, text,
+    fsafe.write_atomic(ws, path, text,
                         mode=(path.lstat().st_mode & 0o7777) if path.is_file() else 0o600)
-    bridge.secure_dir(ws, path.parent.relative_to(ws))
+    fsafe.secure_dir(ws, path.parent.relative_to(ws))
 
 
 def write_atomically(path, text):
@@ -82,7 +82,7 @@ def write_atomically(path, text):
     and being right twice is exactly what a shared primitive makes unnecessary.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    bridge.write_atomic(ws, path, text,
+    fsafe.write_atomic(ws, path, text,
                         mode=(path.lstat().st_mode & 0o7777) if path.is_file() else None)
 
 def read_json(path):

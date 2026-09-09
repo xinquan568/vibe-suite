@@ -43,7 +43,7 @@ python3 -m ruff check --select F811 scripts tools bin/vibe-check bin/vibe-badge 
 - **Skills must be registered.** Every `skills/*/SKILL.md` appears in
   `.claude-plugin/plugin.json`; `bin/vibe-check` flags strays.
 - **Write discipline.** PYTHON (and embedded-shell-Python) mutation under `scripts/`
-  routes through `scripts/lib/bridge.py`'s audited primitives —
+  routes through `scripts/lib/fsafe.py`'s audited primitives (the kernel split out of `bridge.py`, M9) —
   `tests/test_write_discipline.py` enforces this by AST for that surface; the Node surface
   uses `scripts/lib/write.mjs` and is explicitly outside that test's scope (its own
   discipline is tracked separately).

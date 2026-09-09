@@ -4,7 +4,7 @@
 
 **Nothing here writes.** F1.2 specifies read-only and E2.3 (#20) owns repair, so this module imports
 predicates only — `bridge`'s `*_has`/`inventory_enumerate`, `config`'s loader — and never
-`bridge.write_atomic` or `Store.set`. A fixture asserts the workspace is byte-identical across a run.
+`fsafe.write_atomic` or `Store.set`. A fixture asserts the workspace is byte-identical across a run.
 
 **Findings and capabilities are different things.** A check that cannot run — F4.4 pending #30,
 mirror staleness pending E7.2 — is a fact about the installation, not a defect in the project.
@@ -32,6 +32,8 @@ HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import bridge  # noqa: E402
+
+import fsafe  # noqa: E402
 import mcp_pin  # noqa: E402
 import retired_names  # noqa: E402
 import config as config_mod  # noqa: E402
@@ -180,7 +182,7 @@ def check_bridge(ws, out):
 def check_symlinks(ws, out):
     for rel in init_bridge.TARGETS:
         path = ws / rel
-        kind = bridge.classify(path)
+        kind = fsafe.classify(path)
         if kind == "symlink":
             out.append(finding("[HIGH]", "symlinks",
                                f"{rel} is a symlink; the installer writes regular files", False))
@@ -343,7 +345,7 @@ def check_advisors(ws, out):
                                f"advisor '{row['name']}' is {row['state']}; "
                                "/vibe-suite:repair reconciles registrations to definitions",
                                True))
-    except bridge.BridgeError as exc:
+    except fsafe.BridgeError as exc:
         out.append(finding("[HIGH]", "advisor-state",
                            f"advisor inventory unreadable: {exc}", False))
 

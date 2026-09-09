@@ -905,14 +905,14 @@ class HistoryAppend(unittest.TestCase):
             def boom(*args, **kwargs):
                 raise OSError("injected replace failure")
 
-            original = engine.bridge.os.replace
-            engine.bridge.os.replace = boom
+            original = engine.fsafe.os.replace
+            engine.fsafe.os.replace = boom
             try:
                 with self.assertRaises(OSError):
                     engine._append_history(
                         hist, "s2", [{"path": "b", "score": 90, "band": "Excellent"}], [-10])
             finally:
-                engine.bridge.os.replace = original
+                engine.fsafe.os.replace = original
             self.assertEqual(hist.read_bytes(), before, "prior bytes must stay untouched")
             self.assertEqual(
                 [p.name for p in Path(tmp).iterdir()], ["vibe-history.json"],

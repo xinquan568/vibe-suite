@@ -25,7 +25,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 import sys
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
-import bridge  # noqa: E402
+import fsafe  # noqa: E402
 STORE_PY = REPO_ROOT / "scripts" / "lib" / "store.py"
 
 
@@ -308,7 +308,7 @@ class SetGoesThroughTheAuditedPrimitive(unittest.TestCase):
         target = self.ws / "theirs.json"
         target.write_text("{}")
         self.path.symlink_to(target)
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             self.store().set("gate.stop_review_gate", True)
         self.assertTrue(self.path.is_symlink(), "the user's link was replaced by a regular file")
 

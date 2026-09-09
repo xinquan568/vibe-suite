@@ -23,6 +23,7 @@ runpy.run_path(str(REPO_ROOT / "scripts" / "_bootstrap.py"))
 
 from site_markdown import md_escape  # noqa: E402  (corpus strings render as text — vibe-196)
 import bridge  # noqa: E402  (scripts/lib — the audited write primitive)
+import fsafe  # noqa: E402  (scripts/lib — the audited write primitive)
 
 BUILDER = "vibe-build-site-report-pages"
 SLUG = "reports"
@@ -154,7 +155,7 @@ def main(argv=None):
         write(anchor, args.out / PAGE, render_index(entries))
         for entry in entries:
             write(anchor, args.out / entry["page"], render_report(entry))
-    except bridge.BridgeError as exc:
+    except fsafe.BridgeError as exc:
         print(f"{BUILDER}: {exc}", file=sys.stderr)
         return 2
     return 0

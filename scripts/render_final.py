@@ -7,7 +7,7 @@
 **Why this is Python and not the shell script it was ported from.** The source skill rendered through
 `render_final.sh`, which wrote its output with `> "$target"`. This repository settled that question
 already: `tests/test_write_discipline.py` keeps an allowlist of shell scripts permitted to redirect
-into a real path, and that allowlist is **empty** — every write goes through `bridge.write_atomic`,
+into a real path, and that allowlist is **empty** — every write goes through `fsafe.write_atomic`,
 because a redirection follows a destination symlink and an AST lint cannot see it. Carrying the shell
 version across would have re-opened a closed rule; **P6** says a port fixes an inherited defect rather
 than inheriting it.
@@ -33,7 +33,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE / "_bootstrap.py"))
 
-import bridge  # noqa: E402
+import fsafe  # noqa: E402
 
 EXIT_OK, EXIT_BAD_INPUT, EXIT_BAD_ROOT, EXIT_WRITE_FAILED = 0, 2, 3, 4
 
@@ -60,8 +60,8 @@ def _write(root, dest, content):
     exception type, and an uncaught traceback is a worse way to say it.
     """
     try:
-        bridge.write_atomic(root, dest, content)
-    except (bridge.BridgeError, ValueError) as exc:
+        fsafe.write_atomic(root, dest, content)
+    except (fsafe.BridgeError, ValueError) as exc:
         print("render_final: refusing to write %s: %s" % (dest, exc), file=sys.stderr)
         return False
     return True
@@ -92,7 +92,7 @@ def render_html(pandoc, document):
     filesystem mutations outside the audited primitive, and `tests/test_write_discipline.py` keeps an
     empty allowlist for exactly that — the rule is not "write somewhere harmless", it is "do not write
     outside `bridge`". Passing markdown on stdin and taking HTML from stdout removes the question
-    instead of arguing it: the only write left is `bridge.write_atomic`.
+    instead of arguing it: the only write left is `fsafe.write_atomic`.
 
     Returns the rendered HTML, or `None`. A pandoc that exists but cannot **embed** is, from
     finalize's point of view, the same as one that is absent — either way the reader gets markdown,
@@ -128,9 +128,9 @@ def main(argv=None):
     # the identity alone.
     root = _lexical(Path(args.root))
     try:
-        bridge.assert_root(root)
-        bridge.pin_root(root)
-    except bridge.BridgeError as exc:
+        fsafe.assert_root(root)
+        fsafe.pin_root(root)
+    except fsafe.BridgeError as exc:
         print("render_final: %s" % exc, file=sys.stderr)
         return EXIT_BAD_ROOT
 

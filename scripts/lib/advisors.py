@@ -46,6 +46,8 @@ import re
 from pathlib import Path
 
 import bridge
+
+import fsafe
 import mcp_pin
 
 AGENTS_REL = Path(".vibe-suite/agents")
@@ -84,7 +86,7 @@ IGNORE_BLOCK = "advisor-ignore"
 IGNORE_BODY = ".vibe-suite/agents/*/timeline/"
 
 
-class AdvisorError(bridge.BridgeError):
+class AdvisorError(fsafe.BridgeError):
     """Refusal. Nothing has been written."""
 
 
@@ -451,16 +453,16 @@ def _load_json_file(path):
 
 def _save_ledger(ws, ledger):
     if not ledger:
-        bridge.unlink_at(ws, LEDGER_REL)
+        fsafe.unlink_at(ws, LEDGER_REL)
         try:
-            bridge.unlink_at(ws, STATE_REL)   # rmdir when empty; harmless refusal otherwise
-        except (OSError, bridge.BridgeError):
+            fsafe.unlink_at(ws, STATE_REL)   # rmdir when empty; harmless refusal otherwise
+        except (OSError, fsafe.BridgeError):
             pass
         return
     # vibe-184: only provenance-image members carry a recorded mode; the acceptance map is keyed
     # by advisor names (NAME_RE admits "mode") and must never be read as one.
     mode = _record_mode(v for k, v in ledger.items() if k not in LEDGER_RECORD_KEYS)
-    bridge.write_atomic(ws, Path(ws) / LEDGER_REL,
+    fsafe.write_atomic(ws, Path(ws) / LEDGER_REL,
                         json.dumps(ledger, indent=2, sort_keys=True) + "\n", mode=mode)
 
 
@@ -695,8 +697,8 @@ def recover(ws):
     interrupted recovery is itself recoverable.
     """
     ws = Path(ws)
-    bridge.assert_root(ws)
-    bridge.pin_root(ws)
+    fsafe.assert_root(ws)
+    fsafe.pin_root(ws)
     txn_path = ws / TXN_REL
     if not txn_path.is_file():
         return None
@@ -705,24 +707,24 @@ def recover(ws):
 
     def restore(rel, entry):
         if entry is None:
-            bridge.unlink_at(ws, Path(rel))
+            fsafe.unlink_at(ws, Path(rel))
         else:
-            bridge.write_atomic(ws, ws / rel, base64.b64decode(entry.get("content_b64", "")))
+            fsafe.write_atomic(ws, ws / rel, base64.b64decode(entry.get("content_b64", "")))
 
     if txn.get("intent") == "remove":
         post = txn["post_images"]
-        bridge.write_atomic(ws, ws / MCP_REL, base64.b64decode(post[str(MCP_REL)]))
-        bridge.write_atomic(ws, ws / TOML_REL, post[str(TOML_REL)])
+        fsafe.write_atomic(ws, ws / MCP_REL, base64.b64decode(post[str(MCP_REL)]))
+        fsafe.write_atomic(ws, ws / TOML_REL, post[str(TOML_REL)])
         name = txn["remove_name"]
         if pre.get("definition") is not None:
             # None provenance means no definition existed when the journal was written; a
             # deletion the record cannot vouch for is refused by omission.
-            bridge.unlink_at(ws, AGENTS_REL / f"{name}.md")
+            fsafe.unlink_at(ws, AGENTS_REL / f"{name}.md")
         if txn["delete_timeline"]:
-            bridge.remove_tree_at(ws, timeline_rel(name))
+            fsafe.remove_tree_at(ws, timeline_rel(name))
             try:
-                bridge.unlink_at(ws, AGENTS_REL / name)
-            except (OSError, bridge.BridgeError):
+                fsafe.unlink_at(ws, AGENTS_REL / name)
+            except (OSError, fsafe.BridgeError):
                 pass
         baseline = _load_json_file(ws / LEDGER_REL)
         post_base = txn.get("post_baseline")
@@ -736,7 +738,7 @@ def recover(ws):
         # recovery asks only that (no parsing) — an unreadable definition must not leave a journal
         # pending, and a targeted add of an unrelated name is never refused at recovery.
         _ignore_block(ws, _declared_stems(ws))
-        bridge.unlink_at(ws, TXN_REL)
+        fsafe.unlink_at(ws, TXN_REL)
     else:
         for rel in (str(MCP_REL), str(TOML_REL)):
             restore(rel, pre.get(rel))
@@ -748,7 +750,7 @@ def recover(ws):
             baseline[str(MCP_REL)] = prior
         _install_records(baseline, txn, "prior")   # vibe-184/185: roll the records back
         _save_ledger(ws, baseline)
-        bridge.unlink_at(ws, TXN_REL)
+        fsafe.unlink_at(ws, TXN_REL)
     return {"intent": txn.get("intent"), "remove_name": txn.get("remove_name")}
 
 
@@ -905,12 +907,12 @@ def listing(ws, pin=None, pin_file=None, pending_file=None):
 
 def _outside_workspace(ws, raw):
     """True when `raw` (a cwd or additional_dirs entry, `~` expanded, anchored at the workspace when
-    relative) resolves outside the workspace — `bridge.assert_inside`'s realpath containment."""
+    relative) resolves outside the workspace — `fsafe.assert_inside`'s realpath containment."""
     expanded = os.path.expanduser(str(raw))
     candidate = Path(expanded) if os.path.isabs(expanded) else Path(ws) / expanded
     try:
-        bridge.assert_inside(ws, candidate)
-    except bridge.BridgeError:
+        fsafe.assert_inside(ws, candidate)
+    except fsafe.BridgeError:
         return True
     return False
 
@@ -1021,8 +1023,8 @@ def reconcile(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=Fal
     is still removed.
     """
     ws = Path(ws)
-    bridge.assert_root(ws)
-    bridge.pin_root(ws)
+    fsafe.assert_root(ws)
+    fsafe.pin_root(ws)
     recover(ws)
     # vibe-185 (round 3): a targeted add reads strictly only what it acts on — an unrelated
     # definition that does not parse is held and reported, never a refusal; its records survive.
@@ -1214,8 +1216,8 @@ def _transact(ws, doc, toml_before, toml_after, defs,
 
     # The state directory is brought into existence by the primitive whose job that is; tightening
     # its mode no longer creates it as a side effect (vibe-179).
-    bridge.ensure_dir_at(ws, STATE_REL)
-    bridge.secure_dir(ws, STATE_REL)
+    fsafe.ensure_dir_at(ws, STATE_REL)
+    fsafe.secure_dir(ws, STATE_REL)
     pre_images = {
         str(MCP_REL): bridge.record_pre_image(mcp_path) if mcp_before is not None else None,
         str(TOML_REL): (bridge.record_pre_image(ws / TOML_REL)
@@ -1251,12 +1253,12 @@ def _transact(ws, doc, toml_before, toml_after, defs,
         REGISTRATIONS_KEY: {"prior": registered_before, "post": registered_after},   # vibe-185
     }
     mode = _record_mode(pre_images.values())
-    bridge.write_atomic(ws, ws / TXN_REL, json.dumps(journal) + "\n", mode=mode)
+    fsafe.write_atomic(ws, ws / TXN_REL, json.dumps(journal) + "\n", mode=mode)
     _fail_point("journal")
 
     try:
         if json_changed:
-            bridge.write_atomic(ws, mcp_path, mcp_final)
+            fsafe.write_atomic(ws, mcp_path, mcp_final)
         _fail_point("json")
         if toml_changed:
             _write_toml_store(ws, toml_after)
@@ -1267,11 +1269,11 @@ def _transact(ws, doc, toml_before, toml_after, defs,
     except BaseException:
         if True:  # both intents roll back in-process: the destructive tail has not run yet
             if mcp_before is not None:
-                bridge.write_atomic(ws, mcp_path, mcp_before)
+                fsafe.write_atomic(ws, mcp_path, mcp_before)
             elif json_changed:
-                bridge.unlink_at(ws, MCP_REL)
+                fsafe.unlink_at(ws, MCP_REL)
             if toml_changed and (ws / TOML_REL).is_file():
-                bridge.write_atomic(ws, ws / TOML_REL, toml_before)
+                fsafe.write_atomic(ws, ws / TOML_REL, toml_before)
             restored = _restore_baseline(ws, prior_baseline)
             # vibe-184: the ledger was written with the post-transaction acceptance map before
             # `_ignore_block` could raise — the in-process rollback restores the journaled prior
@@ -1279,10 +1281,10 @@ def _transact(ws, doc, toml_before, toml_after, defs,
             # failed remove keeps what it had.
             _install_records(restored, journal, "prior")
             _save_ledger(ws, restored)
-            bridge.unlink_at(ws, TXN_REL)
+            fsafe.unlink_at(ws, TXN_REL)
         raise
     if intent == "apply":
-        bridge.unlink_at(ws, TXN_REL)
+        fsafe.unlink_at(ws, TXN_REL)
 
 
 def _restore_baseline(ws, prior):
@@ -1303,17 +1305,17 @@ def _ignore_block(ws, defs):
     if defs or timelines:
         updated = bridge.text_block_upsert(existing, IGNORE_BLOCK, IGNORE_BODY)
         if updated != existing:
-            bridge.write_atomic(ws, ws / ".gitignore", updated)
+            fsafe.write_atomic(ws, ws / ".gitignore", updated)
     elif bridge.text_block_has(existing, IGNORE_BLOCK):
         updated = bridge.text_block_remove(existing, IGNORE_BLOCK)
         if updated.strip():
-            bridge.write_atomic(ws, ws / ".gitignore", updated)
+            fsafe.write_atomic(ws, ws / ".gitignore", updated)
         else:
-            bridge.unlink_at(ws, Path(".gitignore"))
+            fsafe.unlink_at(ws, Path(".gitignore"))
 
 
 def _write_toml_store(ws, text):
-    bridge.write_atomic(ws, Path(ws) / TOML_REL, text)
+    fsafe.write_atomic(ws, Path(ws) / TOML_REL, text)
 
 
 # --------------------------------------------------------------------------------------------
@@ -1324,8 +1326,8 @@ def add(ws, name, pin=None, plugin_root=None, custom_text=None,
         pin_file=None, pending_file=None, confirm_danger=False):
     """Preflight everything fallible — backend included — before creating anything."""
     ws = Path(ws)
-    bridge.assert_root(ws)
-    bridge.pin_root(ws)
+    fsafe.assert_root(ws)
+    fsafe.pin_root(ws)
     recover(ws)
     if not NAME_RE.match(name or ""):
         raise AdvisorError(f"advisor name {name!r} is not a valid MCP server key")
@@ -1346,27 +1348,27 @@ def add(ws, name, pin=None, plugin_root=None, custom_text=None,
         # The backend must resolve BEFORE anything is created: a pending pin with no --pin
         # refuses with zero residue — no definition, no timeline, no state directory.
         resolve_backend(pin, pin_file=pin_file, pending_file=pending_file)
-        bridge.write_atomic(ws, def_path, text)
+        fsafe.write_atomic(ws, def_path, text)
         created_def = True
     tl_rel = timeline_rel(name)
     created_tl = not (ws / tl_rel).exists()
     try:
-        bridge.ensure_dir_at(ws, tl_rel)
+        fsafe.ensure_dir_at(ws, tl_rel)
         return reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file,
                          confirm_danger=confirm_danger, register={name})
     except BaseException:
         try:
             if created_tl:
-                bridge.remove_tree_at(ws, tl_rel)
-                bridge.unlink_at(ws, AGENTS_REL / name)
+                fsafe.remove_tree_at(ws, tl_rel)
+                fsafe.unlink_at(ws, AGENTS_REL / name)
             if created_def:
-                bridge.unlink_at(ws, AGENTS_REL / f"{name}.md")
+                fsafe.unlink_at(ws, AGENTS_REL / f"{name}.md")
                 try:
-                    bridge.unlink_at(ws, AGENTS_REL)
-                    bridge.unlink_at(ws, AGENTS_REL.parent)
-                except (OSError, bridge.BridgeError):
+                    fsafe.unlink_at(ws, AGENTS_REL)
+                    fsafe.unlink_at(ws, AGENTS_REL.parent)
+                except (OSError, fsafe.BridgeError):
                     pass
-        except (OSError, bridge.BridgeError):
+        except (OSError, fsafe.BridgeError):
             pass
         raise
 
@@ -1375,8 +1377,8 @@ def add_all(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False
     """`advisor add --all`: register (stamp) every declared definition at once — the explicit bulk
     act the init listing offers. Refuses when nothing is declared."""
     ws = Path(ws)
-    bridge.assert_root(ws)
-    bridge.pin_root(ws)
+    fsafe.assert_root(ws)
+    fsafe.pin_root(ws)
     recover(ws)
     defs = load_definitions(ws)
     if not defs:
@@ -1391,9 +1393,9 @@ def add_all(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False
         for name in sorted(defs):
             tl_rel = timeline_rel(name)
             try:
-                absent = bridge.lstat_at(ws, tl_rel) is None
-                bridge.ensure_dir_at(ws, tl_rel)
-            except bridge.BridgeError as exc:
+                absent = fsafe.lstat_at(ws, tl_rel) is None
+                fsafe.ensure_dir_at(ws, tl_rel)
+            except fsafe.BridgeError as exc:
                 raise AdvisorError(
                     f"{name}: timeline path {tl_rel} cannot be created safely ({exc}); "
                     "nothing has been registered") from exc
@@ -1404,9 +1406,9 @@ def add_all(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False
     except BaseException:
         for name in reversed(created):
             try:
-                bridge.remove_tree_at(ws, timeline_rel(name))
-                bridge.unlink_at(ws, AGENTS_REL / name)
-            except (OSError, bridge.BridgeError):
+                fsafe.remove_tree_at(ws, timeline_rel(name))
+                fsafe.unlink_at(ws, AGENTS_REL / name)
+            except (OSError, fsafe.BridgeError):
                 pass
         raise
 
@@ -1414,8 +1416,8 @@ def add_all(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False
 def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_file=None):
     """Preflight → two-store transaction → definition → timeline, journaled for roll-forward."""
     ws = Path(ws)
-    bridge.assert_root(ws)
-    bridge.pin_root(ws)
+    fsafe.assert_root(ws)
+    fsafe.pin_root(ws)
     recover(ws)
     if not NAME_RE.match(name or ""):
         raise AdvisorError(f"advisor name {name!r} is not a valid MCP server key")
@@ -1495,7 +1497,7 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
               intent="remove", remove_name=name, delete_timeline=delete_timeline,
               definition_pre=definition_pre)
     if def_path.is_file():
-        bridge.unlink_at(ws, AGENTS_REL / f"{name}.md")
+        fsafe.unlink_at(ws, AGENTS_REL / f"{name}.md")
     _fail_point("definition")
     if delete_timeline:
         if os.environ.get("VIBE_ADVISOR_FAIL_AFTER") == "timeline-partial":
@@ -1503,23 +1505,23 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
             tl = ws / timeline_rel(name)
             for leaf in sorted(tl.rglob("*")):
                 if leaf.is_file():
-                    bridge.unlink_at(ws, leaf.relative_to(ws))
+                    fsafe.unlink_at(ws, leaf.relative_to(ws))
                     break
             os._exit(9)
         delete_timeline_dir(ws, name)
         try:
-            bridge.unlink_at(ws, AGENTS_REL / name)
-        except (OSError, bridge.BridgeError):
+            fsafe.unlink_at(ws, AGENTS_REL / name)
+        except (OSError, fsafe.BridgeError):
             pass  # the advisor dir holds user files beyond the timeline; leave them
     _fail_point("timeline")
-    bridge.unlink_at(ws, TXN_REL)
+    fsafe.unlink_at(ws, TXN_REL)
     # A final pass through the shared engine converges the end-state artifacts the deletions
     # changed after the transaction (the ignore block once the last timeline is gone) and keeps
     # add and remove on one lifecycle path. Best-effort: the removal itself has already
     # succeeded, so a convergence refusal is reported, never raised over a completed removal.
     try:
         report.update(reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file))
-    except (AdvisorError, bridge.BridgeError) as exc:
+    except (AdvisorError, fsafe.BridgeError) as exc:
         report["_warning"] = f"post-removal convergence deferred: {exc}"
     report[name] = "removed"
     return report
@@ -1528,9 +1530,9 @@ def remove(ws, name, delete_timeline=False, pin=None, pin_file=None, pending_fil
 def delete_timeline_dir(ws, name):
     """Deletion confined to the exact advisor-timeline shape; anything else is refused."""
     if not NAME_RE.match(name or ""):
-        raise bridge.BridgeError(
+        raise fsafe.BridgeError(
             f"{name!r} is not an advisor name; timeline deletion takes a bare advisor name")
-    return bridge.remove_tree_at(ws, timeline_rel(name))
+    return fsafe.remove_tree_at(ws, timeline_rel(name))
 
 
 #: Back-compat alias used by tests and the CLI.

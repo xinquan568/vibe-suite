@@ -38,7 +38,7 @@ python3 - "$legacy" "$target" "$lib" <<'PY'
 import json, os, sys, hashlib, datetime
 from pathlib import Path
 import runpy, pathlib; runpy.run_path(str(pathlib.Path(sys.argv[3]).resolve().parent / "_bootstrap.py"))
-import bridge  # noqa: E402
+import fsafe  # noqa: E402
 
 legacy_path, target_path = sys.argv[1], sys.argv[2]
 raw = open(legacy_path, "rb").read()
@@ -106,7 +106,7 @@ if len(markers_in(check)) != 1:
 # there, and publishing it 0644 exposes exactly that. The workspace is the root, not the
 # destination's own parent.
 source_mode = os.stat(legacy_path).st_mode & 0o7777
-if not bridge.publish_new(Path(target_path).parent.parent, Path(target_path), body,
+if not fsafe.publish_new(Path(target_path).parent.parent, Path(target_path), body,
                           mode=source_mode):
     sys.stderr.write("note: row 3: .claude/vibe-history.json appeared concurrently — left as "
                      "it is (new store wins)\n")

@@ -37,6 +37,7 @@ python3 - "$workspace" "$lib" "$report" "${legacy_dirs[@]}" <<'PY'
 import importlib.util, json, os, sys
 import runpy, pathlib; runpy.run_path(str(pathlib.Path(sys.argv[2]).resolve().parent / "_bootstrap.py"))
 import bridge  # noqa: E402
+import fsafe  # noqa: E402
 from pathlib import Path
 
 workspace, lib, report = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -95,7 +96,7 @@ if len(distinct) > 1:
     if existing.is_file() and not bridge.stamp_matches(report, stamp):
         sys.stderr.write(f"error: row 5: {report} exists and is not ours; refusing to overwrite\n")
         raise SystemExit(1)
-    bridge.write_atomic(Path(sys.argv[1]), Path(report), stamp + "\n".join(lines) + "\n")
+    fsafe.write_atomic(Path(sys.argv[1]), Path(report), stamp + "\n".join(lines) + "\n")
     sys.stderr.write(f"decision required — see {report}\n")
     raise SystemExit(3)
 

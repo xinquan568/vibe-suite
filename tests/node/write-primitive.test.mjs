@@ -1181,7 +1181,7 @@ function unlinkSyncSafe(p) { try { unlinkSync(p); } catch (error) { if (error.co
 // --------------------------------------------------------------------- write-invariant matrix
 // M11 / vibe-222: ONE invariant list, as data (tests/fixtures/write-invariants/*.json), run against BOTH
 // safety kernels. tests/test_bridge_cli.py::WriteInvariantMatrix interprets the same files against
-// scripts/lib/bridge.py. This block is an interpreter of the rows, not a port of either kernel.
+// scripts/lib/fsafe.py (the Python kernel, split out of bridge.py by M9). This block is an interpreter of the rows, not a port of either kernel.
 
 const WRITE_INVARIANTS = path.join(REPO_ROOT, "tests", "fixtures", "write-invariants");
 const REQUIRED_KEYS = ["schema", "id", "invariant", "setup", "operation", "expect"];

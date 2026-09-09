@@ -30,6 +30,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import advisors  # noqa: E402
 import bridge  # noqa: E402
+import fsafe  # noqa: E402
 import mcp_pin  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tmpdirs import TempDirMixin, scratch_dir  # noqa: E402
@@ -289,9 +290,9 @@ class TestTransactionality(unittest.TestCase):
         real = advisors._write_toml_store
         try:
             def boom(*a, **k):
-                raise bridge.BridgeError("injected failure")
+                raise fsafe.BridgeError("injected failure")
             advisors._write_toml_store = boom
-            with self.assertRaises(bridge.BridgeError):
+            with self.assertRaises(fsafe.BridgeError):
                 advisors.add(ws, "probe_advisor", pin=PIN)
         finally:
             advisors._write_toml_store = real
@@ -428,9 +429,9 @@ class TestTimelineDeletion(unittest.TestCase):
 
     def test_non_timeline_rel_refused(self):
         ws = make_ws(mcp=CANONICAL_FOREIGN, toml=TOML_FOREIGN)
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             advisors.delete_timeline(ws, "../../etc")
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             advisors.delete_timeline(ws, "not_a_name/..")
 
 
@@ -1398,7 +1399,7 @@ class TestRegistrationStamp(TempDirMixin, unittest.TestCase):
         self.assertTrue((outside / "keep.txt").is_file(), "the external target is untouched")
         self.assertTrue((agents / "beta_two" / "timeline").is_symlink(), "the link is not ours to remove")
         self.assertFalse((agents / "alpha_one").exists(), "alpha rolled back again")
-        with self.assertRaises((advisors.AdvisorError, bridge.BridgeError)):   # the single add refuses the same path (existing rule), zero residue
+        with self.assertRaises((advisors.AdvisorError, fsafe.BridgeError)):   # the single add refuses the same path (existing rule), zero residue
             advisors.add(ws, "beta_two", pin=PIN)
         self.assertEqual(self._servers(ws), {})
         # (3) the advisor DIRECTORY itself a symlink to an external directory that contains timeline/keep.txt: a different descent component
@@ -1946,7 +1947,7 @@ class TestSafeCreationAndPrivacy(TempDirMixin, unittest.TestCase):
         outside = Path(self.mkdtemp(prefix="advisor-outside-"))
         (ws / ".vibe-suite").mkdir()
         (ws / ".vibe-suite" / "agents").symlink_to(outside)
-        with self.assertRaises((advisors.AdvisorError, bridge.BridgeError)):
+        with self.assertRaises((advisors.AdvisorError, fsafe.BridgeError)):
             advisors.add(ws, "north_star_advisor", plugin_root=REPO_ROOT, pin=PIN)
         self.assertEqual(list(outside.iterdir()), [], "nothing may be created outside the ws")
 
@@ -1955,7 +1956,7 @@ class TestSafeCreationAndPrivacy(TempDirMixin, unittest.TestCase):
         add_definition(ws)
         outside = Path(self.mkdtemp(prefix="advisor-outside2-"))
         (ws / ".vibe-suite" / "agents" / "probe_advisor").symlink_to(outside)
-        with self.assertRaises((advisors.AdvisorError, bridge.BridgeError)):
+        with self.assertRaises((advisors.AdvisorError, fsafe.BridgeError)):
             advisors.add(ws, "probe_advisor", pin=PIN)
         self.assertEqual(list(outside.iterdir()), [])
 
@@ -2234,7 +2235,7 @@ class TestRootAndTargetSafety(TempDirMixin, unittest.TestCase):
         real = Path(self.mkdtemp(prefix="advisor-real-"))
         link = Path(self.mkdtemp(prefix="advisor-link-")) / "ws"
         link.symlink_to(real)
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             advisors.reconcile(link)
 
     def test_foreign_toml_target_is_invalid_not_half(self):
@@ -2313,7 +2314,7 @@ class TestResidueHardening(TempDirMixin, unittest.TestCase):
         (real / ".vibe-suite-state" / "advisor-txn.json").write_text("{}")
         link = Path(self.mkdtemp(prefix="advisor-link2-")) / "ws"
         link.symlink_to(real)
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             advisors.recover(link)
 
 

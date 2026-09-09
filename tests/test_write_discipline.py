@@ -28,7 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
 
 #: The primitive itself, and the module that owns the descriptor discipline it is built on.
-PRIMITIVE = {"scripts/lib/bridge.py"}
+PRIMITIVE = {"scripts/lib/fsafe.py"}
 
 #: Mutating call shapes. Method names are matched on the attribute, so `p.write_text(...)` is caught
 #: whatever `p` is called; bare names are matched only when they resolve to the `os` module.
@@ -61,7 +61,7 @@ SAFE_RECEIVER_TYPES = (ast.Constant, ast.JoinedStr)  # `ast.Str` was removed in 
 #: file has no mutation to audit; an entry with a reason is a scoping decision, not an oversight.
 EXEMPT = {
     # The primitive and its descriptor plumbing — this is where the low-level calls belong.
-    "scripts/lib/bridge.py": "the audited primitive itself",
+    "scripts/lib/fsafe.py": "the audited primitive itself",
 }
 
 #: **Empty, and it stays empty.** This began as a ratchet with 37 recorded sites so the sweep could
@@ -296,7 +296,7 @@ class NoDirectFilesystemMutation(unittest.TestCase):
                 if entry not in KNOWN:
                     offenders.append(entry)
         self.assertEqual(offenders, [], "direct filesystem mutation outside the audited primitive "
-                                        "— route it through bridge.write_atomic / publish_new / "
+                                        "— route it through fsafe.write_atomic / publish_new / "
                                         "unlink_at / symlink_at / secure_dir:\n"
                                         + "\n".join(f"  - {o}" for o in offenders))
 

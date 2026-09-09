@@ -45,6 +45,8 @@ HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import bridge            # noqa: E402
+
+import fsafe            # noqa: E402
 import mcp_pin           # noqa: E402
 import octopus_install   # noqa: E402
 import retired_names     # noqa: E402
@@ -172,7 +174,7 @@ def run(workspace, plugin_root, env=None, probe_timeout=30, install_timeout=600)
         try:
             octopus_install.mark_verified(pin, generation, env=env, detail=pdetail)
             pdetail = f"{pdetail}; verified generation {generation}"
-        except (bridge.BridgeError, OSError) as exc:
+        except (fsafe.BridgeError, OSError) as exc:
             pstatus, pdetail = FAIL, f"{pdetail}; could not record the verification: {exc}"
     report.add("probe", pstatus, pdetail)
     if pstatus != OK:
@@ -190,10 +192,10 @@ def run(workspace, plugin_root, env=None, probe_timeout=30, install_timeout=600)
         action, updated = mcp_pin.plan(current, pin, generation=generation, env=env)
         if action != "current":  # `current` means the fence already holds this exact body
             toml_path.parent.mkdir(parents=True, exist_ok=True)
-            bridge.write_atomic(ws, toml_path, updated)
+            fsafe.write_atomic(ws, toml_path, updated)
         report.add("registration", OK,
                    f"[mcp_servers.{mcp_pin.SERVER_NAME}] {action} ({target}, generation {generation})")
-    except (mcp_pin.PinError, bridge.BridgeError) as exc:
+    except (mcp_pin.PinError, fsafe.BridgeError) as exc:
         report.add("registration", FAIL, str(exc))
     return report
 

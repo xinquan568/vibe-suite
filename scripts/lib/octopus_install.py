@@ -35,8 +35,7 @@ import os
 import secrets
 import subprocess
 from pathlib import Path
-
-import bridge
+import fsafe
 import mcp_pin
 
 OK, FAIL = "ok", "fail"
@@ -114,10 +113,10 @@ def _audited_dir(root, parts):
     or otherwise not safely openable. Pathlib readers follow symlinks; this is what keeps a
     symlinked `versions/` (or generation) from being reused, rendered or probed."""
     try:
-        fd = bridge.open_dir_chain(root, tuple(parts))
-    except bridge.AbsentPath:
+        fd = fsafe.open_dir_chain(root, tuple(parts))
+    except fsafe.AbsentPath:
         return "absent"
-    except (bridge.BridgeError, OSError):
+    except (fsafe.BridgeError, OSError):
         return "refused"
     os.close(fd)
     return "ok"
@@ -181,9 +180,9 @@ def _selectable(version, env):
     refuses it there (mutation M20b showed a second check here to be unreachable)."""
     root = install_dir(env)
     try:
-        bridge.assert_root(root)
+        fsafe.assert_root(root)
         sha = lockfile_sha256(env)
-    except (bridge.BridgeError, OSError):
+    except (fsafe.BridgeError, OSError):
         return None
     return root, sha
 
@@ -220,12 +219,12 @@ def mark_verified(version, gen, env=None, detail=""):
     """`publish_new`: create the mark, or report it already exists. Never overwrites, never touches
     the generation tree. Returns True when this call created it."""
     root = install_dir(env)
-    bridge.assert_root(root)
+    fsafe.assert_root(root)
     dest = root / "versions" / version / f"{gen}.verified"
     payload = json.dumps({"generation": gen, "version": version,
                           "verified_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                           "probe_detail": detail}, indent=2) + "\n"
-    return bridge.publish_new(root, dest, payload)
+    return fsafe.publish_new(root, dest, payload)
 
 
 def retained_generations(version, env=None):
@@ -267,8 +266,8 @@ def _retained_summary(version, current, env=None):
 
 def _cleanup(root, rel):
     try:
-        bridge.remove_tree_at(root, rel)
-    except (bridge.BridgeError, OSError) as exc:
+        fsafe.remove_tree_at(root, rel)
+    except (fsafe.BridgeError, OSError) as exc:
         return f"; cleanup of {rel} failed: {exc}"
     return ""
 
@@ -302,13 +301,13 @@ def ensure_installed(pin, env=None, timeout=600):
 
 def _install(pin, env, timeout, root, staging):
     try:
-        bridge.assert_root(root)
-    except bridge.BridgeError as exc:
+        fsafe.assert_root(root)
+    except fsafe.BridgeError as exc:
         return FAIL, f"install directory refused: {exc}", None
     if not root.is_dir():
         return FAIL, f"install directory {root} does not exist", None
     try:
-        bridge.pin_root(root)          # identity before ANY read through the tree
+        fsafe.pin_root(root)          # identity before ANY read through the tree
     except OSError as exc:
         return FAIL, f"install directory refused: {exc}", None
     err = lockfile_check(pin, env)
@@ -331,10 +330,10 @@ def _install(pin, env, timeout, root, staging):
     staging_rel = Path("versions") / f"{STAGING_PREFIX}{os.getpid()}-{secrets.token_hex(4)}"
     staging[0] = staging_rel
     try:
-        bridge.ensure_dir_at(root, staging_rel)
-        bridge.write_atomic(root, root / staging_rel / "package.json", (root / "package.json").read_bytes())
-        bridge.write_atomic(root, root / staging_rel / "package-lock.json", (root / "package-lock.json").read_bytes())
-    except (bridge.BridgeError, OSError) as exc:
+        fsafe.ensure_dir_at(root, staging_rel)
+        fsafe.write_atomic(root, root / staging_rel / "package.json", (root / "package.json").read_bytes())
+        fsafe.write_atomic(root, root / staging_rel / "package-lock.json", (root / "package-lock.json").read_bytes())
+    except (fsafe.BridgeError, OSError) as exc:
         return FAIL, f"could not stage the install: {exc}" + _cleanup(root, staging_rel), None
 
     npm = env.get(NPM_BIN_ENV, "npm")
@@ -366,9 +365,9 @@ def _install(pin, env, timeout, root, staging):
                         indent=2) + "\n"
     dest_rel = Path("versions") / pin / gen
     try:
-        bridge.write_atomic(root, root / staging_rel / MARKER, marker)
-        bridge.ensure_dir_at(root, Path("versions") / pin)
-        bridge.rename_at(root, staging_rel, dest_rel)
-    except (bridge.BridgeError, OSError) as exc:
+        fsafe.write_atomic(root, root / staging_rel / MARKER, marker)
+        fsafe.ensure_dir_at(root, Path("versions") / pin)
+        fsafe.rename_at(root, staging_rel, dest_rel)
+    except (fsafe.BridgeError, OSError) as exc:
         return FAIL, f"could not publish generation {gen}: {exc}" + _cleanup(root, staging_rel), None
     return OK, f"installed generation {gen} (lockfile {sha[:12]})" + _retained_summary(pin, gen, env), gen

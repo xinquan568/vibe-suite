@@ -344,7 +344,7 @@ class TestHistoryRefusal(RunsTreeCase):
 
 
 class TestAuditedWrites(RunsTreeCase):
-    """H12 (vibe-216): every write goes through bridge.write_atomic — symlinked destinations below the
+    """H12 (vibe-216): every write goes through fsafe.write_atomic — symlinked destinations below the
     anchor are refused, missing directories are created through the audited descent."""
 
     def test_symlinked_reports_dir_is_refused_with_an_empty_target(self):

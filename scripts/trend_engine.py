@@ -40,7 +40,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE / "_bootstrap.py"))
 
-import bridge  # noqa: E402
+import fsafe  # noqa: E402
 
 LEGACY_RUN = "(pre-run-id)"
 
@@ -218,8 +218,8 @@ def _append(root, history, raw_text, shape, existing_entries, scope, current_fil
             insertion = "\n" + rendered + "\n" + (" " * (0 if shape == "list" else 2))
         content = raw_text[:open_idx + 1] + insertion + raw_text[close_idx:]
     rel = Path(history).resolve().relative_to(Path(root).resolve())
-    bridge.ensure_dir_at(root, rel.parent)
-    bridge.write_atomic(root, Path(root) / rel, content.encode("utf-8"))
+    fsafe.ensure_dir_at(root, rel.parent)
+    fsafe.write_atomic(root, Path(root) / rel, content.encode("utf-8"))
 
 
 def main(argv=None):

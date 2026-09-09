@@ -35,6 +35,8 @@ runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import bridge  # noqa: E402
 
+import fsafe  # noqa: E402
+
 #: The events both tools have. Claude-only events are skipped rather than mirrored into a runtime
 #: that would never fire them.
 SHARED_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
@@ -48,7 +50,7 @@ ENV_NAME_RE = re.compile(r"[A-Za-z0-9_]+")
 
 
 def _refuse_unsafe_env_names(servers):
-    """Raise `bridge.BridgeError` naming the first server/variable whose env name is not a name.
+    """Raise `fsafe.BridgeError` naming the first server/variable whose env name is not a name.
 
     Runs over every server the mirror loop would render — the loop's own exclusions (a `cc-suite-*`
     name, a non-dict spec, our own registration, an advisor-owned entry) apply here first — BEFORE
@@ -67,7 +69,7 @@ def _refuse_unsafe_env_names(servers):
             continue
         for var in env:
             if not isinstance(var, str) or not ENV_NAME_RE.fullmatch(var):
-                raise bridge.BridgeError(
+                raise fsafe.BridgeError(
                     f"mcp: refused — server {name!r} declares an env variable name that is not a "
                     f"name ({var!r}: only [A-Za-z0-9_] may cross into the owned TOML block); "
                     ".codex/config.toml left unchanged")
@@ -175,7 +177,7 @@ def mirror_mcp(ws, report):
     existing = bridge.read_text_verbatim(dest)
     updated = bridge.text_block_upsert(existing, "mcp-mirror", body)
     if updated != existing:
-        bridge.write_atomic(ws, dest, updated)
+        fsafe.write_atomic(ws, dest, updated)
     report.append(f"mcp: mirrored {len(servers)} server(s)"
                   + (f"; {reduced} declare env, so only names crossed" if reduced else ""))
 
@@ -228,7 +230,7 @@ def mirror_hooks(ws, report):
             report.append(f"hooks: {SIDE_FILE} exists and is not ours — left alone, not mirrored")
             return
         if not side.is_file() or side.read_text(encoding="utf-8") != payload:
-            bridge.write_atomic(ws, side, payload)
+            fsafe.write_atomic(ws, side, payload)
         report.append(f"hooks: {len(shared)} event(s) mirrored to {SIDE_FILE} "
                       "(the target holds your own entries)")
     else:
@@ -236,7 +238,7 @@ def mirror_hooks(ws, report):
         if side.is_file() and _side_file_is_ours(side):
             # The fallback existed because the target was the user's; it no longer is. Leaving it
             # behind would let two mirrors drift apart with nothing saying which one is live.
-            bridge.unlink_at(ws, SIDE_FILE)
+            fsafe.unlink_at(ws, SIDE_FILE)
             report.append(f"hooks: removed {SIDE_FILE} — the target is no longer user-owned")
         merged = dict(marked)
         for entries in hooks.values():
@@ -248,7 +250,7 @@ def mirror_hooks(ws, report):
         out["hooks"] = merged
         updated = json.dumps(out, indent=2, sort_keys=True) + "\n"
         if updated != (dest.read_text(encoding="utf-8") if dest.is_file() else ""):
-            bridge.write_atomic(ws, dest, updated)
+            fsafe.write_atomic(ws, dest, updated)
         report.append(f"hooks: {len(shared)} event(s) mirrored, "
                       f"{len(owned)} owned entr(y/ies) preserved")
     if skipped:
@@ -258,14 +260,14 @@ def mirror_hooks(ws, report):
 def _open_parent(ws, rel):
     """The audited descent, from the module that owns it.
 
-    This was a second copy of `bridge._open_dir_chain` — and a copy of a safety rule drifts from the
+    This was a second copy of `fsafe._open_dir_chain` — and a copy of a safety rule drifts from the
     original, which is how this codebase kept guarding one writer while another went unguarded.
     """
     # `link_skills` runs this as a preflight before `symlink_at` creates the link; on a fresh
     # workspace the preflight is what brings `.claude/skills/` and `.agents/` into existence, and a
     # refusal here skips the link — so the parent chain is created on purpose now that the descent
     # no longer does it implicitly (vibe-179).
-    return bridge.open_dir_chain(ws, Path(rel).parent.parts, create=True)
+    return fsafe.open_dir_chain(ws, Path(rel).parent.parts, create=True)
 
 
 def _link_mirror_skills(ws, report, plugin_root):
@@ -284,14 +286,14 @@ def _link_mirror_skills(ws, report, plugin_root):
             if claude_skills.is_dir():
                 legacy_exposed = sorted(p.name for p in claude_skills.iterdir()
                                         if p.is_dir() and p.name != "vibe-suite")
-            bridge.unlink_at(ws, ".agents/skills")
+            fsafe.unlink_at(ws, ".agents/skills")
             report.append("skills: migrated legacy .agents/skills symlink to directory form")
         else:
             report.append(f"skills: .agents/skills points at {os.readlink(skills_dir)} — "
                           "refused, not replaced")
             return
-    bridge.ensure_dir_at(ws, ".agents")
-    bridge.ensure_dir_at(ws, ".agents/skills")
+    fsafe.ensure_dir_at(ws, ".agents")
+    fsafe.ensure_dir_at(ws, ".agents/skills")
     for d in sorted(p for p in mirror.iterdir() if p.is_dir()):
         entry = skills_dir / d.name
         target = d
@@ -303,13 +305,13 @@ def _link_mirror_skills(ws, report, plugin_root):
         if entry.exists():
             report.append(f"skills: .agents/skills/{d.name} is the user's — refused")
             continue
-        bridge.symlink_at(ws, f".agents/skills/{d.name}", target)
+        fsafe.symlink_at(ws, f".agents/skills/{d.name}", target)
         report.append(f"skills: .agents/skills/{d.name} → {target}")
     for name in legacy_exposed:
         entry = skills_dir / name
         if entry.exists() or entry.is_symlink():
             continue
-        bridge.symlink_at(ws, f".agents/skills/{name}",
+        fsafe.symlink_at(ws, f".agents/skills/{name}",
                           Path("../../.claude/skills") / name)
         report.append(f"skills: .agents/skills/{name} → ../../.claude/skills/{name} "
                       "(legacy exposure preserved)")
@@ -331,7 +333,7 @@ def link_skills(ws, report, plugin_root):
             # through the audited descent here; `symlink_at` below reopens it through the same
             # descent to create the link.
             parent_fd = _open_parent(ws, rel)
-        except bridge.BridgeError as exc:
+        except fsafe.BridgeError as exc:
             report.append(f"skills: {rel} refused — {exc}")
             continue
         if path.is_symlink():
@@ -349,16 +351,16 @@ def link_skills(ws, report, plugin_root):
             continue
         os.close(parent_fd)
         try:
-            if bridge.symlink_at(ws, rel, target):
+            if fsafe.symlink_at(ws, rel, target):
                 report.append(f"skills: {rel} → {target}")
             else:
                 report.append(f"skills: {rel} appeared concurrently — left as it is")
-        except (OSError, bridge.BridgeError) as exc:
+        except (OSError, fsafe.BridgeError) as exc:
             report.append(f"skills: {rel} could not be linked ({exc})")
     if (Path(plugin_root) / "codex" / "skills").is_dir():
         try:
             _link_mirror_skills(ws, report, plugin_root)
-        except (OSError, bridge.BridgeError) as exc:
+        except (OSError, fsafe.BridgeError) as exc:
             report.append(f"skills: mirror wiring failed ({exc})")
 
 

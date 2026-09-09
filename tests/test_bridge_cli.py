@@ -25,6 +25,7 @@ CLI = REPO_ROOT / "scripts" / "bridge_cli.py"
 import sys
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import bridge  # noqa: E402
+import fsafe  # noqa: E402
 
 SECRET = "sk-live-DO-NOT-COPY-8f3a91"
 
@@ -453,8 +454,8 @@ class WriteAtomicRefusesSymlinks(unittest.TestCase):
         target.write_text("user data")
         link = self.ws / "CLAUDE.md"
         link.symlink_to(target)
-        with self.assertRaises(bridge.BridgeError):
-            bridge.write_atomic(self.ws, link, "ours\n")
+        with self.assertRaises(fsafe.BridgeError):
+            fsafe.write_atomic(self.ws, link, "ours\n")
         self.assertTrue(link.is_symlink(), "the user's link was converted to a regular file")
         self.assertEqual(os.readlink(link), str(target))
         self.assertEqual(target.read_text(), "user data")
@@ -464,20 +465,20 @@ class WriteAtomicRefusesSymlinks(unittest.TestCase):
         "is it already there?" guard waves through."""
         link = self.ws / "GEMINI.md"
         link.symlink_to(self.ws / "never-existed.txt")
-        with self.assertRaises(bridge.BridgeError):
-            bridge.write_atomic(self.ws, link, "ours\n")
+        with self.assertRaises(fsafe.BridgeError):
+            fsafe.write_atomic(self.ws, link, "ours\n")
         self.assertTrue(link.is_symlink())
 
     def test_a_regular_destination_is_still_written(self):
         plain = self.ws / "AGENTS.md"
         plain.write_text("before")
-        bridge.write_atomic(self.ws, plain, "after\n")
+        fsafe.write_atomic(self.ws, plain, "after\n")
         self.assertEqual(plain.read_text(), "after\n")
         self.assertFalse(plain.is_symlink())
 
     def test_a_fresh_destination_is_still_created(self):
         fresh = self.ws / "new.md"
-        bridge.write_atomic(self.ws, fresh, "made\n")
+        fsafe.write_atomic(self.ws, fresh, "made\n")
         self.assertEqual(fresh.read_text(), "made\n")
 
 
@@ -507,17 +508,18 @@ class WriteAtomicScratchIsUnpredictable(unittest.TestCase):
             import os, sys
             sys.path.insert(0, {str(REPO_ROOT / "scripts" / "lib")!r})
             import bridge
+            import fsafe
             def die(*args, **kwargs):
                 os._exit(137)
-            bridge.os.replace = die
-            bridge.write_atomic({str(self.ws)!r}, {str(dest)!r}, "second\\n")
+            fsafe.os.replace = die
+            fsafe.write_atomic({str(self.ws)!r}, {str(dest)!r}, "second\\n")
         """)
         proc = subprocess.run([sys.executable, "-c", child], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 137, proc.stderr)
         self.assertEqual(dest.read_text(), "first\n", "the interrupted write published a partial result")
         orphans = self.scratch_names(self.ws)
         self.assertEqual(len(orphans), 1, f"the seam did not leave the scratch behind: {orphans}")
-        bridge.write_atomic(self.ws, dest, "third\n")
+        fsafe.write_atomic(self.ws, dest, "third\n")
         self.assertEqual(dest.read_bytes(), b"third\n", "the next write did not land intact")
 
     def test_a_stale_fixed_name_scratch_from_an_earlier_crash_no_longer_blocks(self):
@@ -527,7 +529,7 @@ class WriteAtomicScratchIsUnpredictable(unittest.TestCase):
         dest.write_text("{}\n")
         stale = self.ws / ".{}.vibe-tmp".format(dest.name)
         stale.write_text("left behind by a crash before the fix\n")
-        bridge.write_atomic(self.ws, dest, '{"a": 1}\n')
+        fsafe.write_atomic(self.ws, dest, '{"a": 1}\n')
         self.assertEqual(dest.read_text(), '{"a": 1}\n')
         self.assertEqual(stale.read_text(), "left behind by a crash before the fix\n",
                          "a file at the legacy scratch name was consumed or destroyed")
@@ -555,7 +557,7 @@ class WriteAtomicScratchIsUnpredictable(unittest.TestCase):
 
         def writer_a():
             try:
-                bridge.write_atomic(self.ws, dest, "A\n")
+                fsafe.write_atomic(self.ws, dest, "A\n")
             except BaseException as exc:  # noqa: BLE001 — the test reports whatever A raised
                 failures.append(exc)
 
@@ -563,7 +565,7 @@ class WriteAtomicScratchIsUnpredictable(unittest.TestCase):
             thread = threading.Thread(target=writer_a, name="writer-A")
             thread.start()
             self.assertTrue(first_open.wait(10), "writer-A never reached its scratch")
-            bridge.write_atomic(self.ws, dest, "B\n")
+            fsafe.write_atomic(self.ws, dest, "B\n")
             self.assertEqual(dest.read_text(), "B\n", "writer-B did not complete while A held its scratch")
             release.set()
             thread.join(10)
@@ -583,8 +585,8 @@ class WriteAtomicScratchIsUnpredictable(unittest.TestCase):
         planted = self.ws / ".config.toml.{}.vibe-tmp".format("00" * 6)
         planted.symlink_to(outside / "pwned")
         with mock.patch.object(os, "urandom", lambda n: b"\x00" * n):
-            with self.assertRaises(bridge.BridgeError) as caught:
-                bridge.write_atomic(self.ws, dest, "owned\n")
+            with self.assertRaises(fsafe.BridgeError) as caught:
+                fsafe.write_atomic(self.ws, dest, "owned\n")
         self.assertFalse((outside / "pwned").exists(), "the write escaped through the planted link")
         self.assertEqual(dest.read_text(), "before\n")
         self.assertTrue(planted.is_symlink(), "the planted link was consumed")
@@ -610,7 +612,7 @@ OPERATION_KEYS = {"name", "dest", "content", "mode"}
 OUTCOMES = {"refused", "written", "declined"}
 EXPECT_KEYS = {"outcome", "content", "mode", "untouched", "kinds", "entries", "entries_of"}
 MODE_RULES = {"exact", "preserved", "subset_of"}
-KINDS = {"absent", "symlink", "dir", "file", "other"}   # bridge.classify's answers
+KINDS = {"absent", "symlink", "dir", "file", "other"}   # fsafe.classify's answers
 OCTAL = re.compile(r"0[0-7]{3}")
 
 
@@ -805,7 +807,7 @@ class WriteInvariantMatrix(unittest.TestCase):
     def _snapshot(self, root, rel):
         # Observation goes through the kernel's own `classify`; the interpreter decides nothing about kinds.
         p = root / rel
-        kind = bridge.classify(p)
+        kind = fsafe.classify(p)
         return (kind, os.readlink(p) if kind == "symlink" else p.read_bytes() if kind == "file" else None)
 
     def _run(self, row):
@@ -816,15 +818,15 @@ class WriteInvariantMatrix(unittest.TestCase):
         before = {rel: self._snapshot(root, rel) for rel in expect.get("untouched", [])}
         op = row["operation"]
         dest_path = root / op["dest"]
-        before_mode = (dest_path.stat().st_mode & 0o777) if bridge.classify(dest_path) == "file" else None
+        before_mode = (dest_path.stat().st_mode & 0o777) if fsafe.classify(dest_path) == "file" else None
         kwargs = {"mode": int(op["mode"], 8)} if "mode" in op else {}   # omission is the API's own default
-        fn = getattr(bridge, op["name"])
+        fn = getattr(fsafe, op["name"])
         previous = os.umask(int(row["umask"], 8)) if "umask" in row else None
         try:
             try:
                 result = fn(root, root / op["dest"], op["content"], **kwargs)
                 outcome = "declined" if result is False else "written"
-            except bridge.BridgeError:
+            except fsafe.BridgeError:
                 outcome = "refused"
         finally:
             if previous is not None:
@@ -845,7 +847,7 @@ class WriteInvariantMatrix(unittest.TestCase):
         for rel, snap in before.items():
             self.assertEqual(self._snapshot(root, rel), snap, f"{row['id']}: {rel} changed")
         for rel, kind in expect.get("kinds", {}).items():
-            self.assertEqual(bridge.classify(root / rel), kind, f"{row['id']}: {rel}")
+            self.assertEqual(fsafe.classify(root / rel), kind, f"{row['id']}: {rel}")
         if "entries" in expect:
             self.assertEqual(sorted(p.name for p in root.iterdir()), sorted(expect["entries"]), row["id"])
         for rel, names in expect.get("entries_of", {}).items():
@@ -1222,13 +1224,13 @@ class TestAnchoredWrites(unittest.TestCase):
         # a symlinked directory component below the anchor is refused
         elsewhere = self.ws / "elsewhere"; elsewhere.mkdir()
         (self.ws / "out" / "linkdir").symlink_to(elsewhere)
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             bridge.write_below(anchor, self.ws / "out" / "linkdir" / "g.txt", "x")
         self.assertEqual(list(elsewhere.iterdir()), [])
         # a symlinked destination file is refused and preserved
         theirs = self.ws / "theirs.txt"; theirs.write_text("user")
         (self.ws / "out" / "sub" / "h.txt").symlink_to(theirs)
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             bridge.write_below(anchor, self.ws / "out" / "sub" / "h.txt", "ours")
         self.assertTrue((self.ws / "out" / "sub" / "h.txt").is_symlink())
         self.assertEqual(theirs.read_text(), "user")
@@ -1247,7 +1249,7 @@ class TestAnchoredWrites(unittest.TestCase):
         self.assertEqual(dest.read_bytes(), b"first")
         theirs = self.ws / "theirs.html"; theirs.write_text("user")
         link = self.ws / "out" / "b.html"; link.symlink_to(theirs)
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             bridge.publish_below(anchor, link, b"ours")
         self.assertEqual(theirs.read_text(), "user")
 
@@ -1282,7 +1284,7 @@ class TestLoadJson(unittest.TestCase):
                     self.write(name, data)
                 with self.assertRaises(bridge.JsonUnreadable) as ctx:
                     bridge.load_json(self.ws / name)
-                self.assertIsInstance(ctx.exception, bridge.BridgeError)
+                self.assertIsInstance(ctx.exception, fsafe.BridgeError)
                 self.assertEqual(Path(ctx.exception.path), self.ws / name)
                 self.assertIsInstance(ctx.exception.cause, cause, repr(ctx.exception.cause))
         p = self.write("unreadable.json", b"{}"); p.chmod(0)
@@ -1319,6 +1321,6 @@ class TestLoadJson(unittest.TestCase):
         (self.ws / "adir").mkdir()
         self.assertEqual(bridge.load_json(self.ws / "adir", strict=False), {})
         self.assertEqual(bridge.load_json(self.write("empty.json", b""), strict=False), {})
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             bridge.load_json(self.write("bad.json", b"{not json"), strict=False)
         self.assertEqual(bridge.load_json(self.write("ok.json", b'{"b": 2}'), strict=False), {"b": 2})

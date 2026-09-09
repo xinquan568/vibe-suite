@@ -11,9 +11,15 @@ read from here. Two independently-maintained lists is the W4 defect itself.
 concrete agents exist only at runtime, so the inventory exports a rule and an enumerator rather than
 three strings.
 
-**Five codecs, because the six targets share no syntax.** JSON has no comments, so ownership there is
-structural — a named key under `mcpServers`, or an entry inside an event array carrying its own
-marker. A single comment-delimited block cannot express either.
+**Five codecs, because the nine owned targets share no syntax.** JSON has no comments, so ownership
+there is structural — a named key under `mcpServers`, or an entry inside an event array carrying its
+own marker. A single comment-delimited block cannot express either.
+
+**`OWNED_TARGETS` is the one inventory of what init owns in a workspace** (M12 / vibe-220): nine
+paths, each with its codec and the block names or JSON keys that are ours (six marker blocks among
+them). `TARGETS` and `OWNED_BLOCKS` are derived from it here; `init`, `doctor`, `bridge`, `repair`
+and `unbridge` read those derivations, and `unbridge`'s JSON-key and exclusive-file views derive
+from the same rows. Three hand-held views of "what is ours" is the W4 defect one level up.
 """
 
 import base64
@@ -77,10 +83,41 @@ def stamp_matches(path, stamp):
 ADVISOR_MARKER_KEY = f"_{MARKER}_owned"
 ADVISOR_MARKER = {"kind": "advisor", "schema": SCHEMA}
 
-OWNED_BLOCKS = (("AGENTS.md", "memory", "md"), ("CLAUDE.md", "import", "md"),
-                ("GEMINI.md", "import", "md"), (".gitignore", "ignore", "text"),
-                (".gitignore", "advisor-ignore", "text"),
-                (".codex/config.toml", "server:vibe-mcp", "text"))
+#: The one inventory (M12 / vibe-220). Rows in the order init creates the targets — the provenance
+#: record's `targets` list follows it, so this order is a persisted shape. `(rel, kind, blocks)`:
+#:   md-block / text-block — a file the suite contributes marker blocks to; `blocks` names them, in
+#:                           the order they are recognised (first match wins per path);
+#:   json-keys             — a shared JSON store; `blocks` are the top-level keys that are ours;
+#:   exclusive-md          — a whole file that is ours while its one block is present;
+#:   exclusive-json        — a whole file that is ours by its JSON stamp (`vibe_suite_owned`).
+#: `.codex/config.toml`'s `server:vibe-mcp` block has had no writer since vibe-191; it stays so the
+#: teardown of an older install still recognises it.
+OWNED_TARGETS = (
+    (".gitignore", "text-block", ("ignore", "advisor-ignore")),
+    ("AGENTS.md", "md-block", ("memory",)),
+    ("CLAUDE.md", "md-block", ("import",)),
+    ("GEMINI.md", "md-block", ("import",)),
+    (".codex/config.toml", "text-block", ("server:vibe-mcp",)),
+    (".mcp.json", "json-keys", ("mcpServers",)),
+    (".codex/hooks.json", "json-keys", ("hooks",)),
+    (".vibe-suite.md", "exclusive-md", ("config",)),
+    (".claude/vibe-history.json", "exclusive-json", ()),
+)
+OWNED_KINDS = ("md-block", "text-block", "json-keys", "exclusive-md", "exclusive-json")
+
+#: Every artefact init owns — the nine paths, in creation order. Derived; never listed twice.
+TARGETS = tuple(rel for rel, _kind, _blocks in OWNED_TARGETS)
+
+#: The marker blocks the suite contributes to shared text files, as `(rel, name, style)`. Derived
+#: from OWNED_TARGETS — md-block rows first, then text-block rows, each in table order — which is
+#: the order `unbridge._owned_artefacts_present` reads paths in and returns at the first owned
+#: block, so it is behaviour, not style: AGENTS.md, CLAUDE.md, GEMINI.md, then .gitignore's two
+#: blocks (`ignore` before `advisor-ignore`), then .codex/config.toml.
+OWNED_BLOCKS = tuple(
+    (rel, name, style)
+    for kind, style in (("md-block", "md"), ("text-block", "text"))
+    for rel, k, blocks in OWNED_TARGETS if k == kind
+    for name in blocks)
 
 
 class BridgeError(Exception):

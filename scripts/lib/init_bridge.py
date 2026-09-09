@@ -97,10 +97,10 @@ def _drop_bare_owned_stop_hooks(doc):
     doc.setdefault("hooks", {})["Stop"] = kept
     return doc
 
-#: Every artefact init owns. The codec table names seven; `config-fill` and `history-baseline` add
-#: two more, and those two merge into content migration may just have written.
-TARGETS = (".gitignore", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".codex/config.toml",
-           ".mcp.json", ".codex/hooks.json", ".vibe-suite.md", ".claude/vibe-history.json")
+#: Every artefact init owns — read from `bridge.OWNED_TARGETS`, never listed here (M12 / vibe-220).
+#: `config-fill` and `history-baseline` write the two whole-file exclusives, which merge into
+#: content migration may just have written.
+TARGETS = bridge.TARGETS
 
 PROVENANCE = ".vibe-suite-state/install-provenance.json"
 

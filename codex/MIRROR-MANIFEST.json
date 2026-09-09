@@ -383,9 +383,9 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-writing-plugins/SKILL.md",
-      "mirror_sha256": "d8b01e9c4df8386dd3cdbb3a8bd6209087bbcb4b707cffff84548cf67f6ed464",
+      "mirror_sha256": "3b46b3bbdc6f3ecf601bf32b80dcb955cdb5e59aa95a2d337159e6b4e46f0ece",
       "source": "skills/writing-plugins/SKILL.md",
-      "source_sha256": "399ea5bb920de2bd01cc07d12727cec463c5460f74d58eb60ae027d2b002cfc2",
+      "source_sha256": "1146353e25bdaa866e0268284c898f1c7673dd691e2da62e981927fa83977d39",
       "transform": "markdown"
     },
     {
@@ -460,19 +460,32 @@
     "slash_literal": [
       "advisor",
       "bridge",
+      "bug-analyze",
       "check",
+      "config",
+      "continue",
+      "delegate",
+      "doctor",
       "fix",
       "init",
       "issue2pr",
       "jobs",
+      "ls",
       "nl-audit",
+      "preflight",
       "refine-proposal",
+      "refresh-knowledge",
       "repair",
-      "scan",
+      "report",
+      "runs-stats",
       "score",
       "security-scan",
+      "spec-sync",
       "test",
-      "update"
+      "trend",
+      "unbridge",
+      "update",
+      "vocab"
     ],
     "slash_occurrences": {
       "skills/agent-design/SKILL.md": {
@@ -523,8 +536,7 @@
         "score": 1
       },
       "skills/writing-plugins/SKILL.md": {
-        "scan": 1,
-        "score": 1
+        "score": 2
       }
     },
     "slash_rewritten": [

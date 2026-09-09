@@ -148,8 +148,8 @@ Auto-discovered: `.claude-plugin/` (manifest), `commands/`, `commands/shared/`
 `hooks.json`. NOT auto-discovered: `scripts/` — reference scripts explicitly,
 and always through `${CLAUDE_PLUGIN_ROOT}` (for example
 `${CLAUDE_PLUGIN_ROOT}/scripts/check.sh`) so the plugin works from wherever it
-is installed. A command file named `commands/scan.md` in a plugin named
-`vibe-suite` is invoked as `/vibe-suite:scan` — the general form is
+is installed. A command file named `commands/score.md` in a plugin named
+`vibe-suite` is invoked as `/vibe-suite:score` — the general form is
 `/plugin-name:command-name`.
 
 ### Naming Conventions

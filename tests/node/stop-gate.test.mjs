@@ -1100,3 +1100,25 @@ test("vibe-274: an under-budget capture is stored byte-identical, with no marker
   assert.ok(!String(record.rawOutput ?? "").includes("[vibe-274: "),
     "a capture that fits must carry no marker at all");
 });
+
+// ---- M12 (vibe-220): the Stop budget is one number held in two files. hooks.json's `timeout` is what
+// Claude Code enforces; HOOK_BUDGET_MS is what the hook plans against. Read both, compare both.
+test("vibe-220: hooks.json's Stop timeout equals HOOK_BUDGET_MS — both of its literals, one declaration", () => {
+  const hooks = JSON.parse(readFileSync(path.join(REPO_ROOT, "hooks", "hooks.json"), "utf8"));
+  const stop = hooks.hooks.Stop.flatMap((group) => group.hooks);
+  assert.equal(stop.length, 1, "exactly one Stop handler");
+  assert.ok(String(stop[0].command).includes("stop-review-gate-hook.mjs"));
+  const timeoutMs = Number(stop[0].timeout) * 1000;
+  assert.ok(Number.isInteger(timeoutMs) && timeoutMs > 0, `hooks.json Stop timeout is not a positive integer: ${stop[0].timeout}`);
+  const source = readFileSync(HOOK, "utf8");
+  const declarations = source.match(/^const HOOK_BUDGET_MS = /gm) ?? [];
+  assert.equal(declarations.length, 1, "HOOK_BUDGET_MS is declared exactly once");
+  const decl = source.slice(source.indexOf("const HOOK_BUDGET_MS = "));
+  const body = decl.slice(0, decl.indexOf(";") + 1);
+  const cap = body.match(/Math\.min\((\d[\d_]*),/);
+  const fallback = body.match(/:\s*(\d[\d_]*);/);
+  assert.ok(cap && fallback, `HOOK_BUDGET_MS declaration shape not recognised: ${body}`);
+  const literal = (m) => Number(m[1].replaceAll("_", ""));
+  assert.equal(literal(cap), timeoutMs, "the env cap must equal hooks.json's Stop timeout");
+  assert.equal(literal(fallback), timeoutMs, "the default budget must equal hooks.json's Stop timeout");
+});

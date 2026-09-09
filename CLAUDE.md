@@ -47,10 +47,14 @@ python3 -m ruff check --select F811 scripts tools bin/vibe-check bin/vibe-badge 
   `tests/test_write_discipline.py` enforces this by AST for that surface; the Node surface
   uses `scripts/lib/write.mjs` and is explicitly outside that test's scope (its own
   discipline is tracked separately).
-- **Cross-pinned pairs.** Two separate pin pairs exist: the MIRROR inventory (generator
-  tables ↔ vibe-check `MIRROR_EXPECTED`, held identical by `test_mirror_sync.py`) and the
-  RETIRED patterns (`retired_names.RETIRED` ↔ the sweep's list, held by
-  `test_legacy_sweep.py`). Extend each pair together; they are not one table.
+- **Cross-pinned pairs.** The MIRROR inventory has ONE home, a shared table module read by
+  the generator and by the checker — `scripts/lib/mirror_tables.py`; `bin/vibe-check` still compares the manifest to it
+  (`test_mirror_sync.py` holds that neither program keeps a private copy); the literal slash set
+  is derived from `commands/*.md` at generation time. The RETIRED patterns stay a pin pair
+  (`retired_names.RETIRED` ↔ the sweep's list, held by `test_legacy_sweep.py`) — extend that
+  pair together. What init owns in a workspace is one table too: `bridge.OWNED_TARGETS`
+  (`test_owned_targets.py`). The Stop budget is one number in two files (`hooks/hooks.json`
+  ↔ `HOOK_BUDGET_MS`), held by `tests/node/stop-gate.test.mjs`.
 
 ## Conventions
 

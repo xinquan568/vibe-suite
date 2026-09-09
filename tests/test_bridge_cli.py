@@ -642,9 +642,12 @@ def load_write_invariants(directory=WRITE_INVARIANTS):
         row = _mapping(json.loads(path.read_text(encoding="utf-8")), path.name)
         if set(row) - ROW_KEYS or REQUIRED_KEYS - set(row):
             raise ValueError(f"{path.name}: unknown or missing top-level keys")
-        # `type(...) is int`: a JSON `true` is a bool, and bool is a subclass of int — `== 1` would accept it.
-        if type(row["schema"]) is not int or row["schema"] != 1 or row["id"] != path.stem:
-            raise ValueError(f"{path.name}: schema must be the integer 1 and id must equal the file stem")
+        # `schema` is the JSON NUMBER 1. `1.0` is the same JSON number (every parser agrees; the Node loader cannot
+        # tell them apart, so neither does this one); `true` is not a number (bool is refused explicitly — it is a
+        # subclass of int); a string is not a number. Duplicate keys keep the last value, as both parsers do.
+        schema = row["schema"]
+        if isinstance(schema, bool) or not isinstance(schema, (int, float)) or schema != 1 or row["id"] != path.stem:
+            raise ValueError(f"{path.name}: schema must be the JSON number 1 and id must equal the file stem")
         _text(row["invariant"], path.name)
         if not isinstance(row["setup"], list):
             raise ValueError(f"{path.name}: setup must be a list")
@@ -809,7 +812,8 @@ class WriteInvariantMatrix(unittest.TestCase):
             "unknown classify kind": lambda r: r["expect"].__setitem__("kinds", {"x.json": "bogus"}),
             "kinds value a list": lambda r: r["expect"].__setitem__("kinds", {"x.json": ["file"]}),
             "kinds value an object": lambda r: r["expect"].__setitem__("kinds", {"x.json": {}}),
-            "schema 1.0": lambda r: r.__setitem__("schema", 1.0),
+            "schema as a string": lambda r: r.__setitem__("schema", "1"),
+            "schema 2": lambda r: r.__setitem__("schema", 2),
         }
         for label, mutate in mutations.items():
             row = json.loads(json.dumps(good)); mutate(row)
@@ -817,6 +821,20 @@ class WriteInvariantMatrix(unittest.TestCase):
             with self.subTest(mutation=label):
                 with self.assertRaises(ValueError):
                     load_write_invariants(bad)
+        # Agreement cases the Node loader must answer identically (its test carries the same raw texts): `1.0` is the
+        # JSON number 1; a duplicate key keeps its LAST value; an escaped key spells the same key.
+        raw = json.dumps(good)
+        for label, text, ok in (("schema 1.0", raw.replace('"schema": 1,', '"schema": 1.0,'), True),
+                                ("duplicate schema, last 1.0", raw.replace('"schema": 1,', '"schema": 1, "schema": 1.0,'), True),
+                                ("duplicate schema, last 2", raw.replace('"schema": 1,', '"schema": 1, "schema": 2,'), False),
+                                ("escaped key", raw.replace('"schema": 1,', '"\\u0073chema": 1,'), True)):
+            (bad / "dotdot-component.json").write_text(text, encoding="utf-8")
+            with self.subTest(agreement=label):
+                if ok:
+                    self.assertEqual(len(load_write_invariants(bad)), 1)
+                else:
+                    with self.assertRaises(ValueError):
+                        load_write_invariants(bad)
         (bad / "dotdot-component.json").write_text(json.dumps(good), encoding="utf-8")
         (bad / "renamed.json").write_text(json.dumps(good), encoding="utf-8")   # id != file stem
         with self.assertRaises(ValueError):

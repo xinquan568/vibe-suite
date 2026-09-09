@@ -1212,12 +1212,12 @@ const text = (v, where) => { if (typeof v !== "string") throw new Error(`${where
 export function loadWriteInvariants(directory = WRITE_INVARIANTS) {
   const rows = [];
   for (const name of readdirSync(directory).filter((n) => n.endsWith(".json")).sort()) {
-    const raw = readFileSync(path.join(directory, name), "utf8");
-    const row = JSON.parse(raw);
+    const row = JSON.parse(readFileSync(path.join(directory, name), "utf8"));
     onlyKeys(row, ROW_KEYS, REQUIRED_KEYS, name);
-    // `=== 1` refuses `true` but not `1.0`: JSON.parse turns both `1` and `1.0` into the number 1, so the raw token is
-    // checked too — the Python loader refuses a float, and the two loaders must agree.
-    if (row.schema !== 1 || !/"schema"\s*:\s*1(?![.\deE])/.test(raw) || row.id !== name.slice(0, -5)) throw new Error(`${name}: unknown schema, or id does not equal the file stem`);
+    // `schema` is the JSON NUMBER 1: `1.0` is that number (JSON.parse cannot tell them apart, and the Python loader
+    // agrees by construction); `true` and `"1"` are not (`=== 1` is strict). Duplicate keys keep the last value, as
+    // both parsers do; an escaped key spells the same key.
+    if (row.schema !== 1 || row.id !== name.slice(0, -5)) throw new Error(`${name}: unknown schema, or id does not equal the file stem`);
     text(row.invariant, name);
     if (!Array.isArray(row.setup)) throw new Error(`${name}: unknown shape — setup must be an array`);
     for (const step of row.setup) {
@@ -1353,6 +1353,8 @@ test("write-invariant matrix: a malformed row fails the loader instead of being 
     "unknown classify kind": (r) => { r.expect.kinds = { "x.json": "bogus" }; },
     "kinds value a list": (r) => { r.expect.kinds = { "x.json": ["file"] }; },
     "kinds value an object": (r) => { r.expect.kinds = { "x.json": {} }; },
+    "schema as a string": (r) => { r.schema = "1"; },
+    "schema 2": (r) => { r.schema = 2; },
   };
   for (const [label, mutate] of Object.entries(mutations)) {
     const bad = tmpWorkspace("write-inv-bad-");
@@ -1360,10 +1362,22 @@ test("write-invariant matrix: a malformed row fails the loader instead of being 
     writeFileSync(path.join(bad, "dotdot-component.json"), JSON.stringify(row));
     assert.throws(() => loadWriteInvariants(bad), /unknown/, label);
   }
-  // `1.0` survives only as raw text — JSON.stringify would write `1` — so this negative is written as text.
-  const floatSchema = tmpWorkspace("write-inv-bad-");
-  writeFileSync(path.join(floatSchema, "dotdot-component.json"), JSON.stringify(good).replace('"schema":1', '"schema":1.0'));
-  assert.throws(() => loadWriteInvariants(floatSchema), /unknown/, "schema 1.0");
+  // Agreement cases the Python loader must answer identically (its test carries the same raw texts): `1.0` is the
+  // JSON number 1; a duplicate key keeps its LAST value; an escaped key spells the same key. Written as raw text —
+  // JSON.stringify would erase the `.0` and the duplicate.
+  const raw = JSON.stringify(good);
+  for (const [label, text, ok] of [
+    ["schema 1.0", raw.replace('"schema":1,', '"schema":1.0,'), true],
+    ["duplicate schema, last 1.0", raw.replace('"schema":1,', '"schema":1,"schema":1.0,'), true],
+    ["duplicate schema, last 2", raw.replace('"schema":1,', '"schema":1,"schema":2,'), false],
+    ["escaped key", raw.replace('"schema":1,', '"\\u0073chema":1,'), true],
+  ]) {
+    const dir = tmpWorkspace("write-inv-agree-");
+    assert.notEqual(text, raw, label);
+    writeFileSync(path.join(dir, "dotdot-component.json"), text);
+    if (ok) assert.equal(loadWriteInvariants(dir).length, 1, label);
+    else assert.throws(() => loadWriteInvariants(dir), /unknown/, label);
+  }
   const renamed = tmpWorkspace("write-inv-bad-");
   writeFileSync(path.join(renamed, "renamed.json"), JSON.stringify(good));           // id != file stem
   assert.throws(() => loadWriteInvariants(renamed), /unknown/);

@@ -1193,6 +1193,7 @@ const OPERATION_KEYS = new Set(["name", "dest", "content", "mode"]);
 const OUTCOMES = new Set(["refused", "written", "declined"]);
 const EXPECT_KEYS = new Set(["outcome", "content", "mode", "untouched", "kinds", "entries", "entries_of"]);
 const MODE_RULES = new Set(["exact", "preserved", "subset_of"]);
+const KINDS = new Set(["absent", "symlink", "dir", "file", "other"]);   // classify's answers
 const octal = (s, where) => {
   // `[\s\S]`-free anchors: JavaScript's `$` without the m flag matches only at the very end, so a trailing newline is refused.
   if (typeof s !== "string" || !/^0[0-7]{3}$/.test(s)) throw new Error(`${where}: unknown mode/umask carrier ${JSON.stringify(s)} — a four-digit octal string like "0644"`);
@@ -1218,24 +1219,31 @@ export function loadWriteInvariants(directory = WRITE_INVARIANTS) {
     text(row.invariant, name);
     if (!Array.isArray(row.setup)) throw new Error(`${name}: unknown shape — setup must be an array`);
     for (const step of row.setup) {
-      if (!isObject(step) || !Object.hasOwn(SETUP_KEYS, step.kind)) throw new Error(`${name}: unknown setup kind ${JSON.stringify(step)}`);
+      if (!isObject(step) || typeof step.kind !== "string" || !Object.hasOwn(SETUP_KEYS, step.kind)) throw new Error(`${name}: unknown setup kind ${JSON.stringify(step)}`);
       onlyKeys(step, new Set(SETUP_KEYS[step.kind]), SETUP_REQUIRED[step.kind], name);
       for (const key of ["path", "content", "target"]) if (key in step) text(step[key], name);
       if ("mode" in step) octal(step.mode, name);
     }
     onlyKeys(row.operation, OPERATION_KEYS, ["name", "dest", "content"], name);
     // Own-property membership: `"toString" in OPERATIONS` is true through the prototype.
-    if (!Object.hasOwn(OPERATIONS, row.operation.name)) throw new Error(`${name}: unknown operation ${row.operation.name}`);
+    if (typeof row.operation.name !== "string" || !Object.hasOwn(OPERATIONS, row.operation.name)) throw new Error(`${name}: unknown operation ${JSON.stringify(row.operation.name)}`);
     text(row.operation.dest, name); text(row.operation.content, name);
     if ("mode" in row.operation) octal(row.operation.mode, name);
     if ("umask" in row) octal(row.umask, name);
     const expect = row.expect;
     onlyKeys(expect, EXPECT_KEYS, ["outcome"], name);
-    if (!OUTCOMES.has(expect.outcome)) throw new Error(`${name}: unknown expect keys or outcome`);
+    if (typeof expect.outcome !== "string" || !OUTCOMES.has(expect.outcome)) throw new Error(`${name}: unknown expect keys or outcome`);
     for (const key of ["untouched", "entries"]) {
       if (key in expect && (!Array.isArray(expect[key]) || expect[key].some((x) => typeof x !== "string"))) throw new Error(`${name}: unknown shape — ${key} must be a list of strings`);
     }
-    for (const key of ["kinds", "entries_of"]) if (key in expect && !isObject(expect[key])) throw new Error(`${name}: unknown shape — ${key} must be an object`);
+    if ("kinds" in expect) {
+      if (!isObject(expect.kinds)) throw new Error(`${name}: unknown shape — kinds must be an object`);
+      for (const [rel, kind] of Object.entries(expect.kinds)) if (!KINDS.has(kind)) throw new Error(`${name}: unknown kind ${JSON.stringify(kind)} for ${rel}`);
+    }
+    if ("entries_of" in expect) {
+      if (!isObject(expect.entries_of)) throw new Error(`${name}: unknown shape — entries_of must be an object`);
+      for (const [rel, names] of Object.entries(expect.entries_of)) if (!Array.isArray(names) || names.some((x) => typeof x !== "string")) throw new Error(`${name}: unknown shape — entries_of[${rel}] must be a list of strings`);
+    }
     if ("content" in expect) text(expect.content, name);
     if ("mode" in expect) {
       if (!isObject(expect.mode)) throw new Error(`${name}: unknown mode rule`);
@@ -1336,6 +1344,11 @@ test("write-invariant matrix: a malformed row fails the loader instead of being 
     "expect not an object": (r) => { r.expect = ["refused"]; },
     "operation not an object": (r) => { r.operation = "write_atomic"; },
     "untouched not a list of strings": (r) => { r.expect.untouched = "real"; },
+    "operation name not a string": (r) => { r.operation.name = ["write_atomic"]; },
+    "setup kind not a string": (r) => { r.setup[0].kind = ["dir"]; },
+    "outcome not a string": (r) => { r.expect.outcome = ["refused"]; },
+    "entries_of value not a list": (r) => { r.expect.entries_of = { real: null }; },
+    "unknown classify kind": (r) => { r.expect.kinds = { "x.json": "bogus" }; },
   };
   for (const [label, mutate] of Object.entries(mutations)) {
     const bad = tmpWorkspace("write-inv-bad-");

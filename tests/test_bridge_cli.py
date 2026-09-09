@@ -610,6 +610,7 @@ OPERATION_KEYS = {"name", "dest", "content", "mode"}
 OUTCOMES = {"refused", "written", "declined"}
 EXPECT_KEYS = {"outcome", "content", "mode", "untouched", "kinds", "entries", "entries_of"}
 MODE_RULES = {"exact", "preserved", "subset_of"}
+KINDS = {"absent", "symlink", "dir", "file", "other"}   # bridge.classify's answers
 OCTAL = re.compile(r"0[0-7]{3}")
 
 
@@ -649,7 +650,7 @@ def load_write_invariants(directory=WRITE_INVARIANTS):
             raise ValueError(f"{path.name}: setup must be a list")
         for step in row["setup"]:
             step = _mapping(step, path.name)
-            kind = step.get("kind")
+            kind = _text(step.get("kind"), path.name)          # a string BEFORE the membership test
             if kind not in SETUP_KEYS or set(step) - SETUP_KEYS[kind] or SETUP_REQUIRED[kind] - set(step):
                 raise ValueError(f"{path.name}: unknown setup kind or fields {step!r}")
             for key in ("path", "content", "target"):
@@ -658,7 +659,7 @@ def load_write_invariants(directory=WRITE_INVARIANTS):
             if "mode" in step:
                 _octal(step["mode"], path.name)
         op = _mapping(row["operation"], path.name)
-        if set(op) - OPERATION_KEYS or {"name", "dest", "content"} - set(op) or op["name"] not in OPERATIONS:
+        if set(op) - OPERATION_KEYS or {"name", "dest", "content"} - set(op) or _text(op["name"], path.name) not in OPERATIONS:
             raise ValueError(f"{path.name}: unknown operation or operation fields {op!r}")
         _text(op["dest"], path.name); _text(op["content"], path.name)
         if "mode" in op:
@@ -666,14 +667,19 @@ def load_write_invariants(directory=WRITE_INVARIANTS):
         if "umask" in row:
             _octal(row["umask"], path.name)
         expect = _mapping(row["expect"], path.name)
-        if set(expect) - EXPECT_KEYS or expect.get("outcome") not in OUTCOMES:
+        if set(expect) - EXPECT_KEYS or _text(expect.get("outcome"), path.name) not in OUTCOMES:
             raise ValueError(f"{path.name}: unknown expect keys or outcome")
         for key in ("untouched", "entries"):
             if key in expect and (not isinstance(expect[key], list) or not all(isinstance(x, str) for x in expect[key])):
                 raise ValueError(f"{path.name}: {key} must be a list of strings")
-        for key in ("kinds", "entries_of"):
-            if key in expect:
-                _mapping(expect[key], path.name)
+        if "kinds" in expect:
+            for rel, kind in _mapping(expect["kinds"], path.name).items():
+                if kind not in KINDS:
+                    raise ValueError(f"{path.name}: unknown kind {kind!r} for {rel}")
+        if "entries_of" in expect:
+            for rel, names in _mapping(expect["entries_of"], path.name).items():
+                if not isinstance(names, list) or not all(isinstance(x, str) for x in names):
+                    raise ValueError(f"{path.name}: entries_of[{rel!r}] must be a list of strings")
         if "content" in expect:
             _text(expect["content"], path.name)
         if "mode" in expect:
@@ -796,6 +802,11 @@ class WriteInvariantMatrix(unittest.TestCase):
             "expect not an object": lambda r: r.__setitem__("expect", ["refused"]),
             "operation not an object": lambda r: r.__setitem__("operation", "write_atomic"),
             "untouched not a list of strings": lambda r: r["expect"].__setitem__("untouched", "real"),
+            "operation name not a string": lambda r: r["operation"].__setitem__("name", ["write_atomic"]),
+            "setup kind not a string": lambda r: r["setup"][0].__setitem__("kind", ["dir"]),
+            "outcome not a string": lambda r: r["expect"].__setitem__("outcome", ["refused"]),
+            "entries_of value not a list": lambda r: r["expect"].__setitem__("entries_of", {"real": None}),
+            "unknown classify kind": lambda r: r["expect"].__setitem__("kinds", {"x.json": "bogus"}),
         }
         for label, mutate in mutations.items():
             row = json.loads(json.dumps(good)); mutate(row)

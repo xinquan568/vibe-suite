@@ -17,7 +17,7 @@ that breaks it fails without anyone remembering to add a case.
 **A conflict is a no-op and is reported, never a guess.** Where both the old and new form of a key are
 present, dropping either would lose a value the author wrote.
 
-**Every write goes through `bridge.write_atomic`**, the repository's audited primitive, rather than
+**Every write goes through `fsafe.write_atomic`**, the repository's audited primitive, rather than
 `Path.write_text`. `tests/test_write_discipline.py` enforces that across `scripts/` for good reason,
 and it is doubly right here: a fixer interrupted midway through a non-atomic write leaves a corrupted
 artifact, which is the worst possible failure for a tool whose job is repair.
@@ -43,7 +43,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE / "_bootstrap.py"))
 
-import bridge  # noqa: E402
+import fsafe  # noqa: E402
 
 EXIT_OK, EXIT_BAD_ROOT, EXIT_WRITE_FAILED = 0, 2, 3
 
@@ -212,9 +212,9 @@ def main(argv=None):
     # swapped in between would receive content derived from the original tree. `pin_root`'s own
     # docstring describes exactly this window.
     try:
-        bridge.assert_root(root)
-        bridge.pin_root(root)
-    except bridge.BridgeError as exc:
+        fsafe.assert_root(root)
+        fsafe.pin_root(root)
+    except fsafe.BridgeError as exc:
         sys.stderr.write("mechanical_fix: %s\n" % exc)
         return EXIT_BAD_ROOT
 
@@ -228,8 +228,8 @@ def main(argv=None):
                             "changes": [{"rule": r, "note": n} for r, n in notes]})
         if new_text != text and not args.dry_run:
             try:
-                bridge.write_atomic(root, path, new_text)
-            except bridge.BridgeError as exc:
+                fsafe.write_atomic(root, path, new_text)
+            except fsafe.BridgeError as exc:
                 sys.stderr.write("mechanical_fix: %s\n" % exc)
                 return EXIT_WRITE_FAILED
 

@@ -111,6 +111,7 @@ from pathlib import Path
 path, step, lib = sys.argv[1], sys.argv[2], sys.argv[3]
 import runpy, pathlib; runpy.run_path(str(pathlib.Path(lib).resolve().parent / "_bootstrap.py"))
 import bridge  # noqa: E402
+import fsafe  # noqa: E402
 
 with open(path, encoding="utf-8") as handle:
     data = json.load(handle)
@@ -122,7 +123,7 @@ if step not in data.setdefault("steps", []):
 # pre-images, so that scratch file was a world-readable copy of a `0600` `.mcp.json`: the very leak
 # `c2112ac` closed on the record itself, reopened one path over.
 target = Path(path)
-bridge.write_atomic(target.parent.parent, target,
+fsafe.write_atomic(target.parent.parent, target,
                     json.dumps(data, indent=2, sort_keys=True) + "\n",
                     mode=(target.lstat().st_mode & 0o7777) if target.is_file() else 0o600)
 PY

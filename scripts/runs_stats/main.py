@@ -32,6 +32,7 @@ from runs_stats.aggregate import (aggregate, bucket_ids_for_date, bucket_signatu
                                   parse_rate, rollup_tickets)
 from runs_stats.render import render_html, render_index  # noqa: E402
 import bridge  # noqa: E402  (scripts/lib — the audited write primitive)
+import fsafe  # noqa: E402  (scripts/lib — the audited write primitive)
 
 
 class HistoryUnreadable(Exception):
@@ -50,7 +51,7 @@ def _write(anchor, dest, content):
     else is written in that step (the anchor rule itself lives in `bridge.existing_anchor`)."""
     try:
         bridge.write_below(anchor, dest, content)
-    except bridge.BridgeError as exc:
+    except fsafe.BridgeError as exc:
         print(f"runs-stats: {exc}", file=sys.stderr)
         raise SystemExit(2)
 

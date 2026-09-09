@@ -30,6 +30,8 @@ PROBE = REPO_ROOT / "scripts" / "lib" / "boot_probe.mjs"
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
 import bridge          # noqa: E402
+
+import fsafe          # noqa: E402
 import mcp_pin         # noqa: E402
 import retired_names   # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -895,9 +897,9 @@ class Install(unittest.TestCase):
         import errno
         old = add_generation(self.inst, "1.0.0", verified=True)
         before = self.snapshot("1.0.0", old)
-        for label, exc in (("BridgeError", bridge.BridgeError("x")), ("OSError", OSError(errno.EXDEV, "x"))):
+        for label, exc in (("BridgeError", fsafe.BridgeError("x")), ("OSError", OSError(errno.EXDEV, "x"))):
             with self.subTest(case=label):
-                with mock.patch.object(bridge, "rename_at", side_effect=exc):
+                with mock.patch.object(fsafe, "rename_at", side_effect=exc):
                     status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
                 self.assertEqual(status, self.oi.FAIL, detail)
                 self.assertIsNone(gen)
@@ -956,7 +958,7 @@ class Install(unittest.TestCase):
 
     # 20
     def test_cleanup_error_is_reported_and_the_status_stays_fail(self):
-        with mock.patch.object(bridge, "remove_tree_at", side_effect=bridge.BridgeError("cleanup boom")):
+        with mock.patch.object(fsafe, "remove_tree_at", side_effect=fsafe.BridgeError("cleanup boom")):
             status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env("partial"), timeout=60)
         self.assertEqual(status, self.oi.FAIL)
         self.assertIn("EINTEGRITY", detail)
@@ -974,12 +976,12 @@ class Install(unittest.TestCase):
     # 22
     def test_the_marker_is_inside_the_staged_tree_before_the_rename(self):
         seen = {}
-        real = bridge.rename_at
+        real = fsafe.rename_at
 
         def spy(root, src_rel, dst_rel):
             seen["marker_in_source"] = (Path(root) / src_rel / ".vibe-suite-install.json").is_file()
             return real(root, src_rel, dst_rel)
-        with mock.patch.object(bridge, "rename_at", side_effect=spy):
+        with mock.patch.object(fsafe, "rename_at", side_effect=spy):
             status, detail, gen = self.oi.ensure_installed(self.pin, env=self.env(), timeout=60)
         self.assertEqual(status, self.oi.OK, detail)
         self.assertTrue(seen.get("marker_in_source"), "the marker must be written into the staged tree first")
@@ -1285,7 +1287,7 @@ class InProcessUpdateContracts(_InProcessBase):
         before = ((ws / ".mcp.json").read_bytes(), bridge.text_block_remove((ws / ".codex" / "config.toml").read_text(), "mcp-mirror"))
         env = self.seams(inst)
         with mock.patch.dict(os.environ, env), mock.patch.object(self.update_mod.octopus_install, "mark_verified",
-                                                                    side_effect=bridge.BridgeError("disk says no")):
+                                                                    side_effect=fsafe.BridgeError("disk says no")):
             report = self.update_mod.run(ws, REPO_ROOT, env=dict(os.environ, **env), probe_timeout=1)
         stages = {s["stage"]: s for s in report.stages}
         self.assertEqual(stages["probe"]["status"], "fail", stages)

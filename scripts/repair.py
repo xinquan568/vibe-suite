@@ -25,6 +25,8 @@ HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import bridge  # noqa: E402
+
+import fsafe  # noqa: E402
 import config as config_mod  # noqa: E402
 import init_bridge  # noqa: E402
 
@@ -50,7 +52,7 @@ def settings(ws):
     try:
         loaded = config_mod.load(str(ws))
     except Exception as exc:
-        raise bridge.BridgeError(f"{config_mod.CONFIG_FILENAME} is invalid: {exc}") from exc
+        raise fsafe.BridgeError(f"{config_mod.CONFIG_FILENAME} is invalid: {exc}") from exc
     return {"effort": loaded.get("effort") or "medium",
             "sandbox": loaded.get("sandbox") or "read-only",
             "depth": loaded.get("audit_depth") or "mini",

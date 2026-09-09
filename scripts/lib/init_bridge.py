@@ -6,7 +6,7 @@ Nine targets, five codecs, one provenance record. The shell orchestrator owns ph
 §7A decision protocol; this module owns the writes, because JSON and TOML manipulation in bash is
 how the sources acquired the defects this merge is fixing.
 
-Every target goes through `bridge.write_atomic` — full-file replacement, fsync, rename, directory
+Every target goes through `fsafe.write_atomic` — full-file replacement, fsync, rename, directory
 fsync. Two writers stay outside that guarantee and the exclusion is a fact about them, not a choice:
 `Store.set` does its own temp-write/replace without fsync (`store.py:109`), and each migration helper
 owns its writes.
@@ -24,6 +24,8 @@ HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE.parent / "_bootstrap.py"))
 
 import bridge  # noqa: E402
+
+import fsafe  # noqa: E402
 import store as store_mod  # noqa: E402
 import config as config_mod  # noqa: E402
 
@@ -77,7 +79,7 @@ def remove_dangling(ws, only=None):
             continue
         if rel == ".codex/config.toml":
             text = bridge.read_text_verbatim(ws / rel)
-            bridge.write_atomic(ws, ws / rel, bridge.toml_server_remove(text, DANGLING_SERVER))
+            fsafe.write_atomic(ws, ws / rel, bridge.toml_server_remove(text, DANGLING_SERVER))
         elif rel == ".mcp.json":
             _upsert_json(ws, rel, lambda d: bridge.json_server_remove(d, DANGLING_SERVER))
         elif rel == ".codex/hooks.json":
@@ -138,9 +140,9 @@ def provenance_open(ws):
     """
     ws = Path(ws)
     out = ws / PROVENANCE
-    bridge.assert_inside(ws, out)
-    if bridge.classify(out) == "symlink":
-        raise bridge.BridgeError(f"{out} is a symlink; refusing to treat it as a restore source")
+    fsafe.assert_inside(ws, out)
+    if fsafe.classify(out) == "symlink":
+        raise fsafe.BridgeError(f"{out} is a symlink; refusing to treat it as a restore source")
     if out.is_file():
         # Write once. A second run's "pre-image" is the installed state, so rewriting would discard
         # the only record of what the workspace looked like before the suite touched it. An existing
@@ -153,7 +155,7 @@ def provenance_open(ws):
                 or not all(_valid_target(t) for t in existing["targets"])
                 or len(existing["targets"]) != len(TARGETS)
                 or {t["path"] for t in existing["targets"]} != {str(ws / rel) for rel in TARGETS}):
-            raise bridge.BridgeError(
+            raise fsafe.BridgeError(
                 f"{out} exists but is not a v{bridge.SCHEMA} provenance record; refusing to "
                 "continue, because unbridge would treat it as one")
         return
@@ -166,7 +168,7 @@ def provenance_open(ws):
     parents = []
     for rel in TARGETS + (PROVENANCE,):
         dest = ws / rel
-        bridge.assert_inside(ws, dest)
+        fsafe.assert_inside(ws, dest)
         if rel != PROVENANCE:
             record["targets"].append(bridge.record_pre_image(dest))
         for parent in bridge.parents_created(ws, dest):
@@ -187,18 +189,18 @@ def provenance_open(ws):
             except ValueError:
                 strictest = 0o600
                 break
-    bridge.write_atomic(ws, out, json.dumps(record, indent=2, sort_keys=True) + "\n",
+    fsafe.write_atomic(ws, out, json.dumps(record, indent=2, sort_keys=True) + "\n",
                         mode=strictest or 0o600)
     # The directory holding it is traversable by default, so a pre-existing looser mode would
     # undo the file's own protection.
-    bridge.secure_dir(ws, Path(PROVENANCE).parent)
+    fsafe.secure_dir(ws, Path(PROVENANCE).parent)
 
 
 def set_gate(ws, value):
     """Row 5's resolution. The helper takes no flag: `migrate-state.sh:77` directs the caller to
     re-run with the value already in the new store, and `overrides()` reads the nested leaf."""
     if value not in ("true", "false"):
-        raise bridge.BridgeError(f"--resolve-state expects true|false, got '{value}'")
+        raise fsafe.BridgeError(f"--resolve-state expects true|false, got '{value}'")
     wanted = value == "true"
     store = store_mod.Store(ws)
     # `Store.set` replaces the file unconditionally, so a resumed run carrying the same flag would
@@ -254,7 +256,7 @@ def _verify_config(ws, text):  # noqa: D401
     try:
         config_mod.resolve_text(text, str(ws))
     except Exception as exc:
-        raise bridge.BridgeError(
+        raise fsafe.BridgeError(
             f"refusing to write a config the canonical loader rejects: {exc}") from exc
 
 
@@ -264,7 +266,7 @@ def _upsert_text(ws, rel, name, body, markdown=False):
     updated = (bridge.md_block_upsert(existing, name, body) if markdown
                else bridge.text_block_upsert(existing, name, body))
     if updated != existing:
-        bridge.write_atomic(ws, dest, updated)
+        fsafe.write_atomic(ws, dest, updated)
 
 
 def _upsert_json(ws, rel, mutate):
@@ -274,7 +276,7 @@ def _upsert_json(ws, rel, mutate):
     doc = mutate(doc)
     after = json.dumps(doc, indent=2, sort_keys=True)
     if after != before or not dest.is_file():
-        bridge.write_atomic(ws, dest, after + "\n")
+        fsafe.write_atomic(ws, dest, after + "\n")
 
 
 def _ensure_document(ws, rel, empty):
@@ -284,8 +286,8 @@ def _ensure_document(ws, rel, empty):
     file that appears between the probe and the publication wins and is not clobbered; `classify`
     (lstat-based) keeps a symlink — which publish_new would refuse — and a directory out of its way."""
     dest = Path(ws) / rel
-    if bridge.classify(dest) == "absent":
-        bridge.publish_new(ws, dest, empty)
+    if fsafe.classify(dest) == "absent":
+        fsafe.publish_new(ws, dest, empty)
 
 
 def _dangling_note(removed):
@@ -324,7 +326,7 @@ def repair_step(ws, step, values):
     elif step == "history":
         _history_baseline(ws, threshold if threshold is not None else 70)
     else:
-        raise bridge.BridgeError(f"unknown repair step: {step}")
+        raise fsafe.BridgeError(f"unknown repair step: {step}")
 
 
 def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
@@ -335,7 +337,7 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
             raise SystemExit(f"error: aborting after {step} (VIBE_FAIL_AFTER)")
 
     if strictness not in STRICTNESS:
-        raise bridge.BridgeError(f"--strictness expects {'|'.join(STRICTNESS)}, got '{strictness}'")
+        raise fsafe.BridgeError(f"--strictness expects {'|'.join(STRICTNESS)}, got '{strictness}'")
 
     # config-fill — merge into whatever migration produced; never a fresh overwrite. The keys are
     # `config.py`'s, not this module's: F1.1 asks for Codex **effort** and **sandbox**, and both are
@@ -369,7 +371,7 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
             "Created by /vibe-suite:init. Remove this block to keep the file on teardown.")
     if rendered != existing:
         _verify_config(ws, rendered)
-        bridge.write_atomic(ws, dest, rendered)
+        fsafe.write_atomic(ws, dest, rendered)
     checkpoint("config-fill")
 
     memory = ("Project memory for vibe-suite. Commands ship under the `/vibe-suite:` namespace.\n"
@@ -425,7 +427,7 @@ def install(ws, effort, sandbox, depth, strictness, skip, fail_after=""):
             print("note: init registers no advisor — register one with /vibe-suite:advisor add <name> "
                   "(or add --all after reading the listing): " + ", ".join(unregistered), file=sys.stderr)
         advisors.reconcile(ws)
-    except bridge.BridgeError as exc:
+    except fsafe.BridgeError as exc:
         print(f"note: advisor reconcile deferred — {exc}", file=sys.stderr)
     checkpoint("advisors")
 
@@ -443,7 +445,7 @@ def _history_baseline(ws, threshold):
     elif isinstance(history, dict):
         snapshots = history.setdefault("snapshots", [])
         if not isinstance(snapshots, list):
-            raise bridge.BridgeError(
+            raise fsafe.BridgeError(
                 f"{dest}: 'snapshots' is {type(snapshots).__name__}, not a list; refusing to append")
         container = history
     elif history is None and not dest.is_file():
@@ -455,11 +457,11 @@ def _history_baseline(ws, threshold):
     else:
         # Valid JSON of an unexpected shape. Replacing it would discard a file the user may care
         # about, and this command has no mandate to decide that.
-        raise bridge.BridgeError(
+        raise fsafe.BridgeError(
             f"{dest} holds a JSON {type(history).__name__}, not a history; refusing to replace it")
     if not any(isinstance(s, dict) and s.get("baseline") for s in snapshots):
         snapshots.append({"baseline": True, "threshold": threshold})
-        bridge.write_atomic(ws, dest, json.dumps(container, indent=2, sort_keys=True) + "\n")
+        fsafe.write_atomic(ws, dest, json.dumps(container, indent=2, sort_keys=True) + "\n")
 
 
 def main(argv):
@@ -474,7 +476,7 @@ def main(argv):
         else:
             print(f"unknown subcommand: {argv[1]}", file=sys.stderr)
             return 2
-    except bridge.BridgeError as exc:
+    except fsafe.BridgeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0

@@ -24,6 +24,7 @@ from pathlib import Path
 
 runpy.run_path(str(Path(__file__).resolve().parents[1] / "_bootstrap.py"))
 import bridge  # noqa: E402
+import fsafe  # noqa: E402
 import config  # noqa: E402
 
 STATE_DIRNAME = ".vibe-suite-state"
@@ -127,7 +128,7 @@ class Store:
         # The workspace is the root, not the file's own parent. Anchoring on the parent lets a
         # symlinked `.vibe-suite-state` *be* the trusted root, so `assert_inside` can no longer
         # catch a write that escapes the workspace.
-        bridge.write_atomic(self.workspace, self.path,
+        fsafe.write_atomic(self.workspace, self.path,
                             json.dumps(raw, indent=2, sort_keys=True) + "\n", mode=fresh_mode)
 
     def overrides(self):

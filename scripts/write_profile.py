@@ -4,7 +4,7 @@
 
     write_profile.py --root <dir> --fields <file|-> [--force]
 
-**Everything that can fail happens before anything is published.** `bridge.write_atomic` makes each
+**Everything that can fail happens before anything is published.** `fsafe.write_atomic` makes each
 *file* atomic; it does not make profile-plus-pointer atomic, and the gap between two writes is where a
 half-finished state lives. So: pin the root before any *read*, preflight both destinations, render the
 profile and **lint the candidate in memory** — a profile that would not pass is never written at all —
@@ -31,7 +31,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE / "_bootstrap.py"))
 
-import bridge  # noqa: E402
+import fsafe  # noqa: E402
 import profile_lint  # noqa: E402
 
 EXIT_OK, EXIT_BAD_INPUT, EXIT_GUARD, EXIT_INVALID, EXIT_WRITE_FAILED = 0, 1, 2, 3, 4
@@ -228,9 +228,9 @@ def main(argv=None):
     #    program's own stated invariant — and the fields file may itself be inside the root.
     root = Path(args.root).absolute()
     try:
-        bridge.assert_root(root)
-        bridge.pin_root(root)
-    except bridge.BridgeError as exc:
+        fsafe.assert_root(root)
+        fsafe.pin_root(root)
+    except fsafe.BridgeError as exc:
         print("write_profile: %s" % exc, file=sys.stderr)
         return EXIT_GUARD
 
@@ -302,14 +302,14 @@ def main(argv=None):
     # existence through the same audited chain the write uses — and an explicit call here was both
     # redundant and, passing a Path where components were wanted, wrong.
     try:
-        bridge.write_atomic(root, profile_path, document)
-    except (bridge.BridgeError, ValueError) as exc:
+        fsafe.write_atomic(root, profile_path, document)
+    except (fsafe.BridgeError, ValueError) as exc:
         print("write_profile: refusing to write %s: %s" % (profile_path, exc), file=sys.stderr)
         return EXIT_WRITE_FAILED
 
     try:
-        bridge.write_atomic(root, pointer_path, set_pointer(existing, profile_id))
-    except (bridge.BridgeError, ValueError) as exc:
+        fsafe.write_atomic(root, pointer_path, set_pointer(existing, profile_id))
+    except (fsafe.BridgeError, ValueError) as exc:
         # 5. Name the residue rather than leaving it to be discovered.
         print("write_profile: wrote %s but could not update %s (%s).\n"
               "  The profile exists and nothing points at it. Add "

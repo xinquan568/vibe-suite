@@ -113,8 +113,8 @@ class TestArtifactsExist(unittest.TestCase):
         would have re-opened a closed question.
         """
         text = RENDERER.read_text(encoding="utf-8")
-        self.assertIn("bridge.write_atomic", text)
-        self.assertIn("bridge.assert_root", text)
+        self.assertIn("fsafe.write_atomic", text)
+        self.assertIn("fsafe.assert_root", text)
         self.assertFalse((REPO_ROOT / "scripts" / "render_final.sh").exists(),
                          "the shell renderer must not survive alongside the audited one")
 

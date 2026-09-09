@@ -25,6 +25,7 @@ UNBRIDGE = REPO_ROOT / "scripts" / "unbridge.sh"
 import sys
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import bridge      # noqa: E402
+import fsafe      # noqa: E402
 import unbridge    # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from octopus_fixture import start_module_seams, stop_module_seams  # noqa: E402
@@ -357,15 +358,17 @@ class TestDescriptorRelativeDeletion(UnbridgeCase):
         import sys
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         import bridge
+        import fsafe
         (self.ws / "adir").mkdir()
-        self.assertTrue(bridge.unlink_at(self.ws, "adir"))
+        self.assertTrue(fsafe.unlink_at(self.ws, "adir"))
         self.assertFalse((self.ws / "adir").exists())
 
     def test_unlink_at_reports_a_missing_entry_rather_than_raising(self):
         import sys
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         import bridge
-        self.assertFalse(bridge.unlink_at(self.ws, "never-existed"))
+        import fsafe
+        self.assertFalse(fsafe.unlink_at(self.ws, "never-existed"))
 
 
 class ReadAndDeleteDoNotCreateDirectories(UnbridgeCase):
@@ -376,20 +379,20 @@ class ReadAndDeleteDoNotCreateDirectories(UnbridgeCase):
 
     def test_lstat_at_on_a_missing_intermediate_directory_does_not_create_it(self):
         self.assertFalse((self.ws / ".codex").exists())
-        self.assertIsNone(bridge.lstat_at(self.ws, ".codex/config.toml"))
+        self.assertIsNone(fsafe.lstat_at(self.ws, ".codex/config.toml"))
         self.assertFalse((self.ws / ".codex").exists(), "a read created .codex/")
 
     def test_unlink_at_on_a_missing_intermediate_directory_does_not_create_it(self):
-        self.assertFalse(bridge.unlink_at(self.ws, ".vibe-suite-state/advisor-preimages.json"))
+        self.assertFalse(fsafe.unlink_at(self.ws, ".vibe-suite-state/advisor-preimages.json"))
         self.assertFalse((self.ws / ".vibe-suite-state").exists(), "a deletion created .vibe-suite-state/")
 
     def test_remove_tree_at_on_a_missing_intermediate_directory_does_not_create_it(self):
-        self.assertFalse(bridge.remove_tree_at(self.ws, ".vibe-suite/agents/gone"))
+        self.assertFalse(fsafe.remove_tree_at(self.ws, ".vibe-suite/agents/gone"))
         self.assertFalse((self.ws / ".vibe-suite").exists(), "a tree removal created .vibe-suite/")
 
     def test_secure_dir_on_a_missing_directory_refuses_and_creates_nothing(self):
-        with self.assertRaises(bridge.BridgeError):
-            bridge.secure_dir(self.ws, ".vibe-suite-state")
+        with self.assertRaises(fsafe.BridgeError):
+            fsafe.secure_dir(self.ws, ".vibe-suite-state")
         self.assertFalse((self.ws / ".vibe-suite-state").exists(), "a mode change created the directory")
 
     def test_a_symlink_component_is_still_refused_not_reported_absent(self):
@@ -398,17 +401,17 @@ class ReadAndDeleteDoNotCreateDirectories(UnbridgeCase):
         outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (self.ws / "link").symlink_to(outside, target_is_directory=True)
-        with self.assertRaises(bridge.BridgeError) as caught:
-            bridge.lstat_at(self.ws, "link/config.toml")
-        self.assertNotIsInstance(caught.exception, bridge.AbsentPath)
+        with self.assertRaises(fsafe.BridgeError) as caught:
+            fsafe.lstat_at(self.ws, "link/config.toml")
+        self.assertNotIsInstance(caught.exception, fsafe.AbsentPath)
 
     def test_the_creating_primitives_still_bring_parents_into_existence(self):
-        self.assertTrue(bridge.symlink_at(self.ws, "a/b/link", "target"))
+        self.assertTrue(fsafe.symlink_at(self.ws, "a/b/link", "target"))
         self.assertTrue((self.ws / "a" / "b" / "link").is_symlink())
-        bridge.write_atomic(self.ws, self.ws / "c" / "d" / "file.txt", "x")
+        fsafe.write_atomic(self.ws, self.ws / "c" / "d" / "file.txt", "x")
         self.assertEqual((self.ws / "c" / "d" / "file.txt").read_text(), "x")
-        self.assertTrue(bridge.publish_new(self.ws, self.ws / "e" / "f" / "new.txt", "y"))
-        bridge.ensure_dir_at(self.ws, "g/h")
+        self.assertTrue(fsafe.publish_new(self.ws, self.ws / "e" / "f" / "new.txt", "y"))
+        fsafe.ensure_dir_at(self.ws, "g/h")
         self.assertTrue((self.ws / "g" / "h").is_dir())
 
     def test_unbridge_on_a_workspace_whose_codex_dir_is_gone_leaves_no_codex_dir(self):
@@ -427,9 +430,9 @@ class ReadAndDeleteDoNotCreateDirectories(UnbridgeCase):
         refusal (`BridgeError`), never `AbsentPath` — a read must not answer "nothing there" for a
         root that was simply mistyped. The anchor open used to leak a raw `FileNotFoundError`."""
         missing = self.ws / "never-made"
-        with self.assertRaises(bridge.BridgeError) as caught:
-            bridge.lstat_at(missing, "config.toml")
-        self.assertNotIsInstance(caught.exception, bridge.AbsentPath)
+        with self.assertRaises(fsafe.BridgeError) as caught:
+            fsafe.lstat_at(missing, "config.toml")
+        self.assertNotIsInstance(caught.exception, fsafe.AbsentPath)
         self.assertFalse(missing.exists(), "the refusal created the root")
 
 
@@ -509,7 +512,7 @@ class ContentLossPaths(unittest.TestCase):
         # so an unguarded removal would delete it.
         self.assertNotIn("USER DATA", bridge._block_re("ignore", "#", "").sub("", text))
         # And the codec now refuses rather than performing that removal.
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             bridge.text_block_remove(text, "ignore")
 
     def test_the_toml_codec_is_guarded_too(self):
@@ -520,7 +523,7 @@ class ContentLossPaths(unittest.TestCase):
                 "# >>> vibe-suite:server:x v1 >>>\n"
                 "ours\n"
                 "# <<< vibe-suite:server:x <<<\n")
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             bridge.toml_server_remove(text, "x")
 
     def test_a_closer_with_trailing_text_is_rejected(self):
@@ -640,8 +643,8 @@ class SymlinkTargetsAreRefused(unittest.TestCase):
         secret.write_text("theirs")
         link = self.ws / "CLAUDE.md"
         link.symlink_to(secret)
-        with self.assertRaises(bridge.BridgeError):
-            bridge.write_atomic(self.ws, link, "ours\n")
+        with self.assertRaises(fsafe.BridgeError):
+            fsafe.write_atomic(self.ws, link, "ours\n")
         # The link is intact, still a link, still pointing where the user put it.
         self.assertTrue(link.is_symlink())
         self.assertEqual(os.readlink(link), str(secret))
@@ -650,7 +653,7 @@ class SymlinkTargetsAreRefused(unittest.TestCase):
     def test_a_regular_file_is_still_written(self):
         target = self.ws / "CLAUDE.md"
         target.write_text("before")
-        bridge.write_atomic(self.ws, target, "after\n")
+        fsafe.write_atomic(self.ws, target, "after\n")
         self.assertEqual(target.read_text(), "after\n")
         self.assertFalse(target.is_symlink())
 
@@ -1259,7 +1262,7 @@ class ListedNonJsonStateFile(UnbridgeCase):
     def test_an_unparseable_json_member_still_raises(self):
         path = self.state() / "state.json"
         path.write_text("{not json", encoding="utf-8")
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             self.ours("state.json", path)
 
     # T10 — regression: placement of the new branch must not disturb these.

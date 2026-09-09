@@ -26,7 +26,7 @@ from pathlib import Path
 runpy.run_path(str(Path(__file__).resolve().parent / "_bootstrap.py"))
 
 import advisors  # noqa: E402
-import bridge  # noqa: E402
+import fsafe  # noqa: E402
 
 
 def _plugin_root():
@@ -152,7 +152,7 @@ def main(argv=None):
                 print("no advisors declared or registered; nothing to reconcile")
             for name, transition in sorted(report.items()):
                 print(f"{name}: {transition}")
-    except (advisors.AdvisorError, bridge.BridgeError) as exc:
+    except (advisors.AdvisorError, fsafe.BridgeError) as exc:
         print(f"advisor: {exc}", file=sys.stderr)
         return 2
     return 0

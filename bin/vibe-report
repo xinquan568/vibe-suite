@@ -49,6 +49,8 @@ REPO = HERE.parent
 runpy.run_path(str(REPO / "scripts" / "_bootstrap.py"))
 
 import bridge  # noqa: E402  (scripts/lib — the audited write primitive)
+
+import fsafe  # noqa: E402  (scripts/lib — the audited write primitive)
 DEFAULT_TEMPLATE = REPO / "templates" / "report" / "single.html"
 VENDOR_BUNDLE = REPO / "templates" / "report" / "vendor" / "g6.min.js"
 
@@ -459,7 +461,7 @@ def main(argv=None):
     try:
         archive = _write_archive(anchor, out_dir, content)
         _write_index(anchor, out_dir, content)
-    except bridge.BridgeError as exc:
+    except fsafe.BridgeError as exc:
         print(f"vibe-report: {exc}", file=sys.stderr)
         return 2
     print(f"vibe-report: wrote {out_dir / 'index.html'} (archive {archive})")

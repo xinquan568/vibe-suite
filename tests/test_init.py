@@ -44,6 +44,7 @@ INIT = REPO_ROOT / "scripts" / "init.sh"
 import sys
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import bridge        # noqa: E402
+import fsafe        # noqa: E402
 import init_bridge   # noqa: E402
 
 #: Everything an install may add while reporting a decision, and nothing more. `migrate-*` writes its
@@ -639,12 +640,14 @@ class TestRegressions(InitCase):
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         import bridge
 
+        import fsafe
+
         outside = Path(tempfile.mkdtemp(prefix="vibe-outside-"))
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (self.ws / ".codex").mkdir()
         planted = self.ws / ".codex" / ".config.toml.vibe-tmp"
         planted.symlink_to(outside / "pwned")
-        bridge.write_atomic(self.ws, self.ws / ".codex" / "config.toml", "owned")
+        fsafe.write_atomic(self.ws, self.ws / ".codex" / "config.toml", "owned")
         self.assertEqual((self.ws / ".codex" / "config.toml").read_text(), "owned")
         self.assertFalse((outside / "pwned").exists(), "the write escaped the workspace")
         self.assertTrue(planted.is_symlink(), "the planted link was consumed")
@@ -703,9 +706,11 @@ class TestRegressions(InitCase):
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         import bridge
 
+        import fsafe
+
         doubled = (bridge.md_block_upsert("", "memory", "one")
                    + bridge.md_block_upsert("", "memory", "two"))
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             bridge.md_block_upsert(doubled, "memory", "three")
 
     def test_an_agent_registered_only_in_toml_is_still_enumerated(self):
@@ -746,6 +751,7 @@ class TestRound5Regressions(InitCase):
         import sys
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         import bridge
+        import fsafe
         return bridge
 
     def test_a_rewritten_user_file_keeps_its_mode(self):
@@ -824,6 +830,7 @@ class TestRound6Regressions(InitCase):
         import sys
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         import bridge
+        import fsafe
         return bridge
 
     def test_a_symlinked_ancestor_cannot_redirect_a_write(self):
@@ -835,8 +842,8 @@ class TestRound6Regressions(InitCase):
         (outside / "codex").mkdir()
         # `.config` is a symlink; `.config/codex/config.toml` would land outside.
         (self.ws / ".config").symlink_to(outside, target_is_directory=True)
-        with self.assertRaises(bridge.BridgeError):
-            bridge.write_atomic(self.ws, self.ws / ".config" / "codex" / "config.toml", "owned")
+        with self.assertRaises(fsafe.BridgeError):
+            fsafe.write_atomic(self.ws, self.ws / ".config" / "codex" / "config.toml", "owned")
         self.assertFalse((outside / "codex" / "config.toml").exists(),
                          "the write escaped through a symlinked ancestor")
 
@@ -955,7 +962,7 @@ class ConfigValidationDoesNotWidenTheWindow(unittest.TestCase):
 
     def test_an_invalid_candidate_is_still_rejected(self):
         """Removing the swap must not remove the validation."""
-        with self.assertRaises(bridge.BridgeError):
+        with self.assertRaises(fsafe.BridgeError):
             init_bridge._verify_config(self.ws, "---\neffort: sonnet\n---\n")
 
 

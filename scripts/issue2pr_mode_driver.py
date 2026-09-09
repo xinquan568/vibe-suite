@@ -35,6 +35,8 @@ runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import bridge  # noqa: E402  — the audited write primitive; nothing here writes directly
 
+import fsafe  # noqa: E402  — the audited write primitive; nothing here writes directly
+
 REPO_ROOT = HERE.parent
 DEFAULT_REFERENCE = (REPO_ROOT / "skills" / "issue2pr" / "references"
                      / "operational-modes.md")
@@ -94,14 +96,14 @@ def load_json(path):
 
 def dump_json(path, data):
     path = Path(path)
-    bridge.write_atomic(path.parent, path,
+    fsafe.write_atomic(path.parent, path,
                         json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def append_text(path, text):
     path = Path(path)
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    bridge.write_atomic(path.parent, path, existing + text)
+    fsafe.write_atomic(path.parent, path, existing + text)
 
 
 # --------------------------------------------------------------------------- run modes

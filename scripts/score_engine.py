@@ -73,7 +73,7 @@ Config is read through scripts/lib/config.py — the one reader; no second parse
 History (--history H --scope S [--run-id R]): one {"scope","score","band","total_penalty","file"}
 (plus "run" when R is given; dedup is then per-run rather than global) entry per
 scored file; an entry identical to an existing one is not appended (same-scope dedupe — a distinct
-scope produces a distinct entry and appends). The write goes through bridge.write_atomic: a temp
+scope produces a distinct entry and appends). The write goes through fsafe.write_atomic: a temp
 file created IN the destination directory, then an atomic rename — so a failed append leaves the
 history byte-identical, leaves no temp residue, and exits non-zero.
 
@@ -91,7 +91,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE / "_bootstrap.py"))
 
-import bridge                  # noqa: E402
+import fsafe                  # noqa: E402
 import config as config_mod    # noqa: E402
 import ls_counts               # noqa: E402
 
@@ -1276,7 +1276,7 @@ def _append_history(history, scope, files, totals, run_id=None):
         content = json.dumps(existing, indent=2, sort_keys=True) + "\n"
         # Temp file in the destination directory, then an atomic rename; on any failure the
         # primitive removes its temp and the original bytes are never touched.
-        bridge.write_atomic(history.parent, history, content)
+        fsafe.write_atomic(history.parent, history, content)
 
 
 def main(argv=None):
@@ -1376,7 +1376,7 @@ def main(argv=None):
             return 2
         try:
             _append_history(Path(args.history), args.scope, files, totals, run_id=args.run_id)
-        except (bridge.BridgeError, OSError, ValueError) as err:
+        except (fsafe.BridgeError, OSError, ValueError) as err:
             print(f"score_engine: history append failed: {err}", file=sys.stderr)
             return 1
     return 0

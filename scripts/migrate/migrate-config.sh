@@ -36,6 +36,7 @@ python3 - "$workspace" "$lib" "$resolution" <<'PY'
 import importlib.util, json, re, sys
 import runpy, pathlib; runpy.run_path(str(pathlib.Path(sys.argv[2]).resolve().parent / "_bootstrap.py"))
 import bridge  # noqa: E402
+import fsafe  # noqa: E402
 from pathlib import Path
 
 workspace, lib, resolution = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -125,7 +126,7 @@ if conflicts:
             if not (isinstance(prior, dict) and prior.get("vibe_suite_owned") is True):
                 sys.stderr.write(f"error: rows 1-2: {report} exists and is not ours; refusing\n")
                 raise SystemExit(1)
-        bridge.write_atomic(ws, report,
+        fsafe.write_atomic(ws, report,
                             json.dumps({"rows": [1, 2], "conflicts": conflicts,
                                         "vibe_suite_owned": True},
                                        indent=2, sort_keys=True) + "\n")
@@ -172,7 +173,7 @@ except config.ConfigValueError as exc:
 # Through the primitive: it refuses a symlinked target (a dangling one reports False from
 # `exists()`), picks a scratch name that cannot collide with a user's file, and carries the
 # destination's prior mode.
-bridge.write_atomic(ws, target, rendered,
+fsafe.write_atomic(ws, target, rendered,
                     mode=(target.lstat().st_mode & 0o7777) if target.is_file() else None)
 sys.stderr.write(f"note: rows 1-2: wrote {config.CONFIG_FILENAME} from "
                  f"{len(merged)} legacy value(s); originals untouched\n")

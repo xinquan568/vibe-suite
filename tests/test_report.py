@@ -217,8 +217,8 @@ class TestOutDirDiscipline(TempDirMixin, unittest.TestCase):
         root = Path(self.mkdtemp(prefix="report-archive-link-"))
         out = root / "out"; out.mkdir()
         anchor = mod.bridge.existing_anchor(out.parent)
-        with mock.patch.object(mod.bridge, "publish_below", side_effect=mod.bridge.BridgeError("symlink at name")) as pb:
-            with self.assertRaises(mod.bridge.BridgeError):
+        with mock.patch.object(mod.bridge, "publish_below", side_effect=mod.fsafe.BridgeError("symlink at name")) as pb:
+            with self.assertRaises(mod.fsafe.BridgeError):
                 mod._write_archive(anchor, out, "<html/>")
         self.assertEqual(pb.call_count, 1, "a refusal propagates; only a regular-file collision retries")
 

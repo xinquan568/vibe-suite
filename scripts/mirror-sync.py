@@ -28,7 +28,7 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 runpy.run_path(str(_HERE / "_bootstrap.py"))
 
-import bridge  # noqa: E402  (the audited write primitive — vibe-94/vibe-103 discipline)
+import fsafe  # noqa: E402  (the audited write primitive — vibe-94/vibe-103 discipline)
 
 # The inventory tables have ONE home (M12 / vibe-220): scripts/lib/mirror_tables.py, read by this
 # generator and by bin/vibe-check. Imported by name so `mirror_sync.KNOWLEDGE` etc. stay this
@@ -425,46 +425,46 @@ def generate(root, sets=None):
         # Only OUR staging (marker present) is removable; anything else is the user's.
         if not (staging / MARKER).is_file():
             raise MirrorError(f"{staging_rel} exists and is not ours - refusing to touch it")
-        bridge.remove_tree_at(root, staging_rel)
+        fsafe.remove_tree_at(root, staging_rel)
     if (root / old_rel).exists():
         if not ((root / old_rel / MARKER).is_file()
                 or (root / old_rel / "MIRROR-MANIFEST.json").is_file()):
             raise MirrorError(f"{old_rel} exists and is not ours - refusing to touch it")
-        bridge.remove_tree_at(root, old_rel)
+        fsafe.remove_tree_at(root, old_rel)
     try:
-        bridge.ensure_dir_at(root, staging_rel)
-        if not bridge.publish_new(root, staging / MARKER, b"vibe-suite mirror staging\n"):
+        fsafe.ensure_dir_at(root, staging_rel)
+        if not fsafe.publish_new(root, staging / MARKER, b"vibe-suite mirror staging\n"):
             raise MirrorError("staging marker collision")
         for dest_rel in sorted(outputs):
             staged_rel = staging_rel + dest_rel[len("codex"):]
-            bridge.ensure_dir_at(root, str(Path(staged_rel).parent))
-            if not bridge.publish_new(root, root / staged_rel, outputs[dest_rel]):
+            fsafe.ensure_dir_at(root, str(Path(staged_rel).parent))
+            if not fsafe.publish_new(root, root / staged_rel, outputs[dest_rel]):
                 raise MirrorError(f"staging collision at {staged_rel}")
         for dest_rel in sorted(outputs):
             staged = root / (staging_rel + dest_rel[len("codex"):])
             if hashlib.sha256(staged.read_bytes()).hexdigest() != \
                     hashlib.sha256(outputs[dest_rel]).hexdigest():
                 raise MirrorError(f"staging verification failed at {dest_rel}")
-        bridge.unlink_at(root, f"{staging_rel}/{MARKER}")
+        fsafe.unlink_at(root, f"{staging_rel}/{MARKER}")
     except Exception:
         if staging.exists() and (staging / MARKER).is_file():
-            bridge.remove_tree_at(root, staging_rel)
+            fsafe.remove_tree_at(root, staging_rel)
         raise
     # The exchange: two audited renames. The old tree keeps every byte until the new one
     # holds the name; any failure renames it straight back.
     had_old = codex.exists()
     if had_old:
-        bridge.rename_at(root, "codex", old_rel)
+        fsafe.rename_at(root, "codex", old_rel)
     try:
-        bridge.rename_at(root, staging_rel, "codex")
+        fsafe.rename_at(root, staging_rel, "codex")
     except Exception:
         if had_old:
-            bridge.rename_at(root, old_rel, "codex")
+            fsafe.rename_at(root, old_rel, "codex")
         if staging.exists():
-            bridge.remove_tree_at(root, staging_rel)
+            fsafe.remove_tree_at(root, staging_rel)
         raise
     if had_old:
-        bridge.remove_tree_at(root, old_rel)
+        fsafe.remove_tree_at(root, old_rel)
     return manifest
 
 

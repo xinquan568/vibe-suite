@@ -355,19 +355,19 @@ class FailureAtomicity(unittest.TestCase):
         root = make_source_tree(tmp)
         mirror_sync.generate(root, sets=FIXTURE_SETS)
         before = tree_digest(root / "codex")
-        real_publish = mirror_sync.bridge.publish_new
+        real_publish = mirror_sync.fsafe.publish_new
         calls = {"n": 0}
         def failing(rootp, dest, content, mode=0o644):
             calls["n"] += 1
             if calls["n"] == 5:
                 raise OSError("injected write failure")
             return real_publish(rootp, dest, content, mode)
-        mirror_sync.bridge.publish_new = failing
+        mirror_sync.fsafe.publish_new = failing
         try:
             with self.assertRaises(OSError):
                 mirror_sync.generate(root, sets=FIXTURE_SETS)
         finally:
-            mirror_sync.bridge.publish_new = real_publish
+            mirror_sync.fsafe.publish_new = real_publish
         self.assertEqual(tree_digest(root / "codex"), before,
                          "the previous tree was not restored after a write failure")
 
@@ -407,31 +407,31 @@ class SwapHardening(unittest.TestCase):
 
     def test_exchange_failure_restores_the_old_name(self):
         before = tree_digest(self.root / "codex")
-        real = mirror_sync.bridge.rename_at
+        real = mirror_sync.fsafe.rename_at
         def failing(root, src, dst):
             if src == "codex.staging" and dst == "codex":
                 raise OSError("injected exchange failure")
             return real(root, src, dst)
-        mirror_sync.bridge.rename_at = failing
+        mirror_sync.fsafe.rename_at = failing
         try:
             with self.assertRaises(OSError):
                 mirror_sync.generate(self.root, sets=FIXTURE_SETS)
         finally:
-            mirror_sync.bridge.rename_at = real
+            mirror_sync.fsafe.rename_at = real
         self.assertEqual(tree_digest(self.root / "codex"), before,
                          "the old tree did not return after an exchange failure")
 
     def test_persistent_publish_failure_leaves_committed_tree_untouched(self):
         before = tree_digest(self.root / "codex")
-        real = mirror_sync.bridge.publish_new
+        real = mirror_sync.fsafe.publish_new
         def always_failing(rootp, dest, content, mode=0o644):
             raise OSError("persistent write failure")
-        mirror_sync.bridge.publish_new = always_failing
+        mirror_sync.fsafe.publish_new = always_failing
         try:
             with self.assertRaises(OSError):
                 mirror_sync.generate(self.root, sets=FIXTURE_SETS)
         finally:
-            mirror_sync.bridge.publish_new = real
+            mirror_sync.fsafe.publish_new = real
         self.assertEqual(tree_digest(self.root / "codex"), before,
                          "staging failure must never reach the committed tree")
 

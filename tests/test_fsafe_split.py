@@ -28,27 +28,37 @@ KERNEL = ("assert_root", "assert_inside", "classify", "pin_root", "_open_dir_cha
 MOVED_CALLABLES = tuple(n for n in KERNEL if n not in ("O_NOFOLLOW_FLAG", "_ROOT_PIN"))
 
 
-def _local_module_names():
-    return {p.stem for p in LIB.glob("*.py")} | {p.stem for p in (REPO_ROOT / "scripts").glob("*.py")}
-
-
-def _module_imports(path):
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    names = []
+def _non_stdlib_imports(source):
+    """Every import in `source` that is NOT the standard library — a repository module or package (`bridge`, `tests`,
+    `runs_stats`), a third-party distribution, or a relative import. `sys.stdlib_module_names` (3.10+) is the authority,
+    so the check does not depend on what happens to sit beside the kernel. A leaf passes with `[]`."""
+    tree = ast.parse(source); found = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            names += [a.name.split(".")[0] for a in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            names.append(node.module.split(".")[0])
-    return names
+            found += [a.name for a in node.names if a.name.split(".")[0] not in sys.stdlib_module_names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                found.append("." * node.level + (node.module or ""))
+            elif node.module.split(".")[0] not in sys.stdlib_module_names:
+                found.append(node.module)
+    return sorted(found)
 
 
 class TestTheKernelIsALeaf(unittest.TestCase):
     def test_fsafe_imports_only_the_standard_library_and_never_bootstraps(self):        # (a)
-        imports = _module_imports(LIB / "fsafe.py")
-        self.assertEqual(sorted(set(imports) & _local_module_names()), [], "fsafe.py must import no repository module")
-        self.assertNotIn("runpy", imports, "a leaf library never bootstraps")
-        self.assertNotIn("_bootstrap", (LIB / "fsafe.py").read_text(encoding="utf-8"))
+        source = (LIB / "fsafe.py").read_text(encoding="utf-8")
+        self.assertEqual(_non_stdlib_imports(source), [], "fsafe.py must import nothing outside the standard library")
+        self.assertNotIn("runpy", [n.names[0].name for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Import)],
+                         "a leaf library never bootstraps")
+        self.assertNotIn("_bootstrap", source)
+
+    def test_the_leaf_check_rejects_repository_third_party_and_relative_imports(self):   # (a) — both directions
+        self.assertEqual(_non_stdlib_imports("import binascii\nimport os\nfrom pathlib import Path\nimport os.path\n"), [])
+        self.assertEqual(_non_stdlib_imports("import bridge\n"), ["bridge"])
+        self.assertEqual(_non_stdlib_imports("import tests.helpers\n"), ["tests.helpers"])
+        self.assertEqual(_non_stdlib_imports("from runs_stats import discover\n"), ["runs_stats"])
+        self.assertEqual(_non_stdlib_imports("import yaml\n"), ["yaml"])
+        self.assertEqual(_non_stdlib_imports("from . import sibling\nfrom ..lib import x\n"), [".", "..lib"])
 
     def test_every_kernel_name_is_defined_in_fsafe(self):                              # (c)
         for name in KERNEL:
@@ -91,16 +101,21 @@ class TestOneRefusalClassAndOnePin(unittest.TestCase):
 
     def test_the_root_pin_is_one_dict_shared_by_pin_root_and_the_descent(self):        # (c)
         import tempfile, shutil, os
-        root = Path(tempfile.mkdtemp(prefix="fsafe-pin-")); self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        (root / "sub").mkdir()
-        fsafe.pin_root(root)
-        self.assertIn(str(root), fsafe._ROOT_PIN)
-        fd = fsafe._open_dir_chain(root, ("sub",)); os.close(fd)             # the descent reads the same pin
-        swapped = Path(tempfile.mkdtemp(prefix="fsafe-pin-swap-")); self.addCleanup(shutil.rmtree, swapped, ignore_errors=True)
-        shutil.rmtree(root); shutil.copytree(swapped, root)                   # a different inode under the same path
+        base = Path(tempfile.mkdtemp(prefix="fsafe-pin-")); self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        root = base / "ws"; root.mkdir(); (root / "sub").mkdir()
+        fsafe._ROOT_PIN.pop(str(root), None); self.addCleanup(fsafe._ROOT_PIN.pop, str(root), None)
+        pinned = fsafe.pin_root(root)                                         # pin_root writes the pin ...
+        self.assertEqual(fsafe._ROOT_PIN.get(str(root)), pinned)
+        # ... and NO descent has run yet. Now swap the directory under the pinned path. The original stays
+        # alive under another name so the replacement cannot inherit its inode (Linux hands freed inodes
+        # straight back — an rmtree+recreate swap is invisible to a (dev, ino) pin there).
+        os.rename(root, base / "ws.orig"); root.mkdir(); (root / "sub").mkdir()
+        st = os.stat(root); self.assertNotEqual((st.st_dev, st.st_ino), pinned, "the swap must change the identity")
+        # The FIRST descent through the swapped root must refuse: it reads pin_root's dict. A descent with a
+        # pin of its own would pin the swapped directory lazily here and accept it.
         with self.assertRaises(fsafe.BridgeError):
-            fsafe._open_dir_chain(root, ())
-        fsafe._ROOT_PIN.pop(str(root), None)
+            fsafe._open_dir_chain(root, ("sub",))
+        self.assertEqual(fsafe._ROOT_PIN.get(str(root)), pinned, "a refusal must not re-pin")
 
 
 def _heredoc_bodies(text):

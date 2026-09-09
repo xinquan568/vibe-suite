@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: ISC
 """Ownership marking, containment, atomic writes and provenance for the bridge (E2.1 / vibe-18).
 
+**The filesystem-safety kernel lives in `scripts/lib/fsafe.py`** (split out of this file by M9 / vibe-223):
+containment (`assert_root`/`assert_inside`/`classify`), the `O_NOFOLLOW` descent with its root pin, the mutation
+primitives that ride the descent, `write_atomic`/`publish_new`, and the refusal classes `BridgeError`/`AbsentPath`.
+This module imports it as `fsafe` and re-exports nothing; the anchored writes below build on it.
+
 **This module owns the sentinel inventory**, and it is the only place that owns it. F1.4 requires the
 teardown to iterate a single source — *"fixes cc-suite W4 (incomplete teardown) by making the sentinel
 inventory the single source the script iterates"* — so `init`, `bridge`, `repair` and `unbridge` all

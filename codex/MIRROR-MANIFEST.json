@@ -273,7 +273,7 @@
       "mirror": "codex/skills/vibe-roast/SKILL.md",
       "mirror_sha256": "14cf552edbde9ab3f19ac6a5b9e7d93677efa74699a5c97dd063bdb0c18f251f",
       "source": "commands/roast.md",
-      "source_sha256": "230bcd93b8dcd853da76e9257f848fba50bd833cd4270d79246dc12eeb8e848e",
+      "source_sha256": "7a112d106426d3c2c1bf67f1bf7dd3324258e7e7a9f3d4de91569b92daf0dd3e",
       "transform": "variant"
     },
     {

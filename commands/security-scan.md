@@ -88,9 +88,9 @@ same branch rather than a second policy.
 
 ## The second opinion — `--second-opinion`
 
-Requested, never a default. It runs on the P8-resolved audit engine via
-[`commands/shared/model-selection.md`](shared/model-selection.md) — `codex` in v1, `agy` after the gate
-flips — dispatching `scripts/codex-runner.mjs --sandbox read-only` **directly**, never
+Requested, never a default. It runs on the P8-resolved audit engine — the seam's `cross_model_audit_engine`
+(`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace "<abs-target>" resolve-engine`; [`commands/shared/model-selection.md`](shared/model-selection.md)
+holds the vocabulary) — `codex` in v1, `agy` after the gate flips — dispatching `scripts/codex-runner.mjs --sandbox read-only` **directly**, never
 `scripts/agy-audit-cli.mjs`, which refuses before dispatching while the gate is shut. No model is named
 (P9); the prompt opens with a provenance line (P4) and carries the same
 [`skills/security/SKILL.md`](../skills/security/SKILL.md) pattern database the agent uses, so both lanes

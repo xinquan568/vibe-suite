@@ -45,7 +45,9 @@ exclusion to its own target scan, so a second run never reviews the first run's 
 
 ## Step 4 — resolve the engine and dispatch
 
-Engine resolution is [`commands/shared/model-selection.md`](shared/model-selection.md)'s ladder.
+Engine resolution is the seam's output — `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace "<abs-target>" resolve-engine --default claude
+${ENGINE_ARG:+--engine "$ENGINE_ARG"}` — read `lanes` and `model`; [`commands/shared/model-selection.md`](shared/model-selection.md)
+holds the vocabulary and the staged cross-model default.
 **No model flag is ever passed** — the engine CLI picks its own best model (P9).
 
 | Resolved engine | Gate | Lane |

@@ -25,6 +25,7 @@ HERE = Path(__file__).resolve().parent
 runpy.run_path(str(HERE / "_bootstrap.py"))
 
 import config as config_mod  # noqa: E402
+import engine_resolution  # noqa: E402  (M8 / vibe-221: the one statement of the engine ladder)
 import store as store_mod  # noqa: E402
 
 #: CLI vocabulary → the store's `bool` domain. F1.8 says `on|off`; `_validate` accepts only booleans,
@@ -88,15 +89,45 @@ def apply_set(ws, assignment):
     return key, value
 
 
+def resolve_engine(ws, *, engine=None, model=None, default=engine_resolution.DEFAULT_ENGINE):
+    """The seam the engine-dispatching commands call (M8 / vibe-221). Returns the four-key mapping.
+
+    Warnings from the reader go to stderr, as `--show` sends them; nothing is written anywhere."""
+    resolved, warnings = config_mod.load_with_warnings(str(ws))
+    for warning in warnings:
+        print(f"config: {warning}", file=sys.stderr)
+    return engine_resolution.resolve(
+        resolved, engine=engine, model=model, default=default,
+        engines=config_mod.SCHEMA["engine"].domain.split("|"))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="/vibe-suite:config", description="view and set vibe-suite configuration")
+    parser.add_argument("action", nargs="?", choices=("resolve-engine",),
+                        help="resolve-engine: print {engine, cross_model_audit_engine, lanes, model} for a command")
     parser.add_argument("--workspace", default=".")
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--set", dest="assignment")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--engine", help="resolve-engine: the caller's explicit --engine choice")
+    parser.add_argument("--model", help="resolve-engine: the caller's explicit --model choice")
+    parser.add_argument("--default", dest="default_engine", default=engine_resolution.DEFAULT_ENGINE,
+                        help="resolve-engine: the calling command's default engine (claude when omitted)")
     args = parser.parse_args(argv)
     ws = Path(args.workspace).resolve()
+
+    if args.action == "resolve-engine":
+        try:
+            out = resolve_engine(ws, engine=args.engine, model=args.model, default=args.default_engine)
+        except engine_resolution.EngineResolutionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:                       # the reader's refusals: a broken .vibe-suite.md
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(out, sort_keys=True))
+        return 0
 
     try:
         if args.assignment:

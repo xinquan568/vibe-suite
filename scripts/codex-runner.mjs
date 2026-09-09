@@ -64,7 +64,7 @@ import { emit } from "./lib/eventlog.mjs";
 import { billableTokens, classifyFailure, readEventStream } from "./lib/events.mjs";
 import { UsageError, readValue, runMain } from "./lib/cli.mjs";
 import { boundRawOutput, noTerminalEvent, stderrTail } from "./lib/render.mjs";
-import { loadConfig, resolveDefaults } from "./lib/config-bridge.mjs";
+import { loadConfig, resolveDefaults, resolveModel } from "./lib/config-bridge.mjs";
 import {
   DEFAULT_TIMEOUT_MS, heartbeatInterval, pollGroupGone, runWithDeadline, signalGroup,
 } from "./lib/process.mjs";
@@ -145,9 +145,10 @@ function parseArgs(argv) {
       case "--wait": options.wait = true; break;
       case "--confirm-danger": options.confirmDanger = true; break;
       // E1.6 / vibe-16: "run the backend's own default model", which an OMITTED --model cannot
-      // express — resolveDefaults falls back to the project's model_overrides.codex. The stop
-      // gate needs the difference: `gate.model` unset must mean the backend default, not whatever
-      // the project configured for ordinary dispatches.
+      // express — the seam (config-bridge.mjs resolveModel, M8 / vibe-221) falls back to the
+      // project's override for the codex lane. The stop gate needs the difference: `gate.model`
+      // unset must mean the backend default, not whatever the project configured for ordinary
+      // dispatches.
       case "--no-model": options.noModel = true; break;
       // E1.6 / vibe-16: a large prompt cannot travel in argv — a multi-hundred-KB review prompt
       // hits the OS limit (observed as spawnSync E2BIG on Linux CI while passing on macOS, which
@@ -366,9 +367,14 @@ async function execute(workspace, record, prompt) {
 async function prepareRecord(workspace, options, timeoutMs, claimDigest) {
   if (!options.resume) {
     const defaults = resolveDefaults(loadConfig(workspace), {
-      sandbox: options.sandbox, effort: options.effort, model: options.model,
+      sandbox: options.sandbox, effort: options.effort,
     });
-    if (options.noModel) defaults.model = null;      // past the config fallback, deliberately
+    // M8 / vibe-221: the model comes from the one statement of the engine ladder; `--no-model`
+    // short-circuits past the project override, deliberately. `loadConfig` above already forwarded
+    // the reader's warnings for this dispatch, so the seam's copy is not forwarded again.
+    defaults.model = resolveModel(workspace, {
+      engine: "codex", model: options.model, noModel: options.noModel, notices: false,
+    });
     assertSandboxAllowed(defaults.sandbox, { confirmDanger: options.confirmDanger });
     assertEffortAllowed(defaults.effort);
     return createRecord(workspace, newRecord({

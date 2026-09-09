@@ -27,7 +27,7 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { agyGate, STAGED_NOTICE } from "./lib/agy-gate.mjs";
-import { loadConfig } from "./lib/config-bridge.mjs";
+import { resolveModel as resolveLaneModel } from "./lib/config-bridge.mjs";
 import { runWithDeadline } from "./lib/process.mjs";
 import {
   createRecord, finaliseRecord, newJobId, newRecord, readRecord, resultLine, updateRecord,
@@ -66,13 +66,14 @@ function resolveModel(workspace, options) {
   if (options.noModel && options.model) {
     throw new UsageError("--no-model and --model are mutually exclusive");
   }
-  if (options.model) return options.model;
-  if (options.noModel) return null;                       // past the config override, deliberately
-  // Engine-specific: agy's override, never codex's (P9 — no default is ever synthesised).
+  // Engine-specific — agy's lane, never codex's — resolved by the one statement of the engine ladder
+  // (config-bridge.mjs resolveModel → config_cli.py resolve-engine; M8 / vibe-221). P9: nothing is
+  // synthesised. `--no-model` short-circuits past the project override, deliberately. An unreadable
+  // project file resolves to "no model", as this runner always did — the dispatch itself still runs.
   try {
-    return loadConfig(workspace)?.model_overrides?.agy ?? null;
+    return resolveLaneModel(workspace, { engine: "agy", model: options.model, noModel: options.noModel });
   } catch {
-    return null;
+    return options.model ?? null;
   }
 }
 

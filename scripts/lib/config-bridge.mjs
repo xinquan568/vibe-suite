@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PY = path.join(HERE, "config.py");
+// M8 / vibe-221: the one executable statement of the engine ladder lives behind this CLI.
+const CONFIG_CLI_PY = path.join(HERE, "..", "config_cli.py");
 
 /**
  * The bound on the interpreter this bridge shells to (vibe-209 / grill P4).
@@ -71,15 +73,66 @@ export function loadConfig(root = process.cwd(),
 }
 
 /**
- * The engine-relevant defaults, with the caller's explicit choices winning.
+ * The runner-record defaults — sandbox and effort — with the caller's explicit choices winning.
  *
- * Priority is the suite's documented order: user > `.vibe-suite.md` > tool default. No model default
- * is ever synthesised (P9) — an unset model means the Codex CLI runs whatever it is configured with.
+ * The MODEL is deliberately not here (M8 / vibe-221). Until that change this function carried a
+ * second statement of the model rule — the caller's model, else the project's per-engine override,
+ * else null — beside the one every command reads; two statements of one rule are the defect class
+ * this repository documents. The runners obtain `model` from `resolveModel` below, which asks the one
+ * executable statement (`scripts/lib/engine_resolution.py` behind `config_cli.py resolve-engine`).
  */
 export function resolveDefaults(config, overrides = {}) {
   return {
     sandbox: overrides.sandbox ?? config.sandbox ?? "read-only",
     effort: overrides.effort ?? config.effort ?? "medium",
-    model: overrides.model ?? config.model_overrides?.codex ?? null,
   };
+}
+
+/**
+ * The model for one external lane, from the one statement of the engine ladder (M8 / vibe-221).
+ *
+ * Spawns `python3 scripts/config_cli.py --workspace <root> resolve-engine --engine <engine>
+ * [--model <model>]` — bounded like `loadConfig`, fail-closed like `loadConfig`: a non-zero exit or
+ * non-JSON stdout is a ConfigBridgeError, never a silent `null`, because a model chosen by accident
+ * is a P9 decision made by accident. `noModel` is the caller's deliberate "the backend's own
+ * default" (E1.6): it returns `null` without spawning anything — past the project override, on
+ * purpose. `null` means pass no model flag at all.
+ *
+ * The seam's stdout is one JSON object; its stderr carries the reader's warnings. A caller that has
+ * already forwarded those through `loadConfig` in the same dispatch passes `notices: false` so the
+ * operator sees each warning once.
+ */
+export function resolveModel(root = process.cwd(), {
+  engine, model = null, noModel = false, notices = true,
+  python = "python3", timeoutMs = CONFIG_TIMEOUT_MS,
+} = {}) {
+  if (noModel) return null;
+  if (typeof engine !== "string" || engine === "") {
+    throw new ConfigBridgeError("resolveModel needs the lane's engine");
+  }
+  const args = [CONFIG_CLI_PY, "--workspace", root, "resolve-engine", "--engine", engine];
+  if (model !== null && model !== undefined) args.push("--model", String(model));
+  const result = spawnSync(python, args, { encoding: "utf8", timeout: timeoutMs });
+
+  if (result.error) {
+    throw new ConfigBridgeError(`cannot run ${python}: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new ConfigBridgeError(
+      `config_cli.py resolve-engine exited ${result.status}: ${(result.stderr || "").trim() || "no diagnostic"}`);
+  }
+  if (notices && result.stderr && result.stderr.trim()) {
+    process.stderr.write(result.stderr.endsWith("\n") ? result.stderr : `${result.stderr}\n`);
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new ConfigBridgeError(`config_cli.py resolve-engine did not emit JSON: ${error.message}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || !("model" in parsed)) {
+    throw new ConfigBridgeError("config_cli.py resolve-engine emitted JSON without a model key");
+  }
+  return parsed.model ?? null;
 }

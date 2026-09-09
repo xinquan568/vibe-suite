@@ -61,8 +61,9 @@ The codex lane passes `workspace-write` explicitly — implementation must write
 that entry point refuses before dispatching while the agy contract gate is shut.
 
 Write the prompt to a `mktemp` path with the Write tool, dispatch, and remove it on every path. No
-model is named on any dispatch (P9); engine resolution is
-[`commands/shared/model-selection.md`](shared/model-selection.md)'s ladder.
+model is named on any dispatch (P9); the codex lane's model comes from the seam — `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace "<abs-target>" resolve-engine
+--engine codex` — read `model` (`null` means no `--model` flag); [`commands/shared/model-selection.md`](shared/model-selection.md)
+holds the vocabulary.
 
 ## Step 4 — verification, by the engine that did not fix
 

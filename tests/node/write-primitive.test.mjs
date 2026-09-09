@@ -1205,14 +1205,29 @@ const onlyKeys = (obj, allowed, required, where) => {
   const keys = Object.keys(obj);
   if (keys.some((k) => !allowed.has(k)) || required.some((k) => !Object.hasOwn(obj, k))) throw new Error(`${where}: unknown or missing keys ${JSON.stringify(keys)}`);
 };
-const text = (v, where) => { if (typeof v !== "string") throw new Error(`${where}: unknown value — expected a string`); return v; };
+// A lone surrogate (JSON `"\\ud800"`) is not a well-formed string; Node 18 has no `isWellFormed`, so a regex says it.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const text = (v, where) => {
+  if (typeof v !== "string" || LONE_SURROGATE.test(v)) throw new Error(`${where}: unknown value — expected a well-formed string`);
+  return v;
+};
+// Decode strictly: an invalid UTF-8 byte is a refusal, as it is for the Python loader (`readFileSync(…, "utf8")`
+// would silently substitute U+FFFD). JSON.parse already refuses the non-JSON constants NaN/Infinity.
+const readRow = (file) => {
+  let decoded;
+  // `ignoreBOM: true` KEEPS a leading U+FEFF in the output, so JSON.parse refuses it — as `json.loads` does.
+  try { decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readFileSync(file)); }
+  catch (error) { throw new Error(`${path.basename(file)}: unknown encoding — not UTF-8 (${error.message})`); }
+  try { return JSON.parse(decoded); }
+  catch (error) { throw new Error(`${path.basename(file)}: unknown document — not JSON (${error.message})`); }
+};
 
 // Strict: an unknown key, kind, operation, outcome or mode rule throws — a row this interpreter cannot
 // express must FAIL here, never be skipped, or a typo silently shrinks the matrix on one side.
 export function loadWriteInvariants(directory = WRITE_INVARIANTS) {
   const rows = [];
   for (const name of readdirSync(directory).filter((n) => n.endsWith(".json")).sort()) {
-    const row = JSON.parse(readFileSync(path.join(directory, name), "utf8"));
+    const row = readRow(path.join(directory, name));
     onlyKeys(row, ROW_KEYS, REQUIRED_KEYS, name);
     // `schema` is the JSON NUMBER 1: `1.0` is that number (JSON.parse cannot tell them apart, and the Python loader
     // agrees by construction); `true` and `"1"` are not (`=== 1` is strict). Duplicate keys keep the last value, as
@@ -1368,6 +1383,10 @@ test("write-invariant matrix: a malformed row fails the loader instead of being 
   const raw = JSON.stringify(good);
   for (const [label, text, ok] of [
     ["schema 1.0", raw.replace('"schema":1,', '"schema":1.0,'), true],
+    ["duplicate schema, first NaN", raw.replace('"schema":1,', '"schema":NaN,"schema":1,'), false],
+    ["duplicate schema, first Infinity", raw.replace('"schema":1,', '"schema":Infinity,"schema":1,'), false],
+    ["lone surrogate in content", raw.replace('"content":"new"', '"content":"\\ud800"'), false],
+    ["schema 1e0", raw.replace('"schema":1,', '"schema":1e0,'), true],
     ["duplicate schema, last 1.0", raw.replace('"schema":1,', '"schema":1,"schema":1.0,'), true],
     ["duplicate schema, last 2", raw.replace('"schema":1,', '"schema":1,"schema":2,'), false],
     ["escaped key", raw.replace('"schema":1,', '"\\u0073chema":1,'), true],
@@ -1378,6 +1397,12 @@ test("write-invariant matrix: a malformed row fails the loader instead of being 
     if (ok) assert.equal(loadWriteInvariants(dir).length, 1, label);
     else assert.throws(() => loadWriteInvariants(dir), /unknown/, label);
   }
+  const badBytes = tmpWorkspace("write-inv-agree-");
+  writeFileSync(path.join(badBytes, "dotdot-component.json"), Buffer.concat([Buffer.from(raw.replace('"content":"new"', '"content":"n')), Buffer.from([0xff]), Buffer.from('w"' + raw.split('"content":"new"')[1])]));
+  assert.throws(() => loadWriteInvariants(badBytes), /unknown encoding/, "invalid UTF-8 byte");
+  const bom = tmpWorkspace("write-inv-agree-");
+  writeFileSync(path.join(bom, "dotdot-component.json"), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(raw)]));
+  assert.throws(() => loadWriteInvariants(bom), /unknown document/, "UTF-8 BOM prefix");
   const renamed = tmpWorkspace("write-inv-bad-");
   writeFileSync(path.join(renamed, "renamed.json"), JSON.stringify(good));           // id != file stem
   assert.throws(() => loadWriteInvariants(renamed), /unknown/);

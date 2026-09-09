@@ -630,7 +630,22 @@ def _mapping(value, where):
 def _text(value, where):
     if not isinstance(value, str):
         raise ValueError(f"{where}: expected a string, got {type(value).__name__}")
+    try:
+        value.encode("utf-8")           # a lone surrogate (JSON `"\\ud800"`) is not a well-formed string
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{where}: ill-formed string") from exc
     return value
+
+
+def _refuse_constant(token):
+    # `json.loads` accepts NaN/Infinity/-Infinity by default; they are not JSON, and JSON.parse refuses them.
+    raise ValueError(f"non-JSON constant {token}")
+
+
+def _read_row(path):
+    """Decode strictly (invalid UTF-8 is a refusal — UnicodeDecodeError is a ValueError) and parse without the
+    non-JSON constants, so this loader accepts exactly the documents JSON.parse accepts."""
+    return json.loads(path.read_bytes().decode("utf-8"), parse_constant=_refuse_constant)
 
 
 def load_write_invariants(directory=WRITE_INVARIANTS):
@@ -639,7 +654,7 @@ def load_write_invariants(directory=WRITE_INVARIANTS):
     fail that interpreter, or the 'either kernel failing a row fails CI' property is lost."""
     rows = []
     for path in sorted(Path(directory).glob("*.json")):
-        row = _mapping(json.loads(path.read_text(encoding="utf-8")), path.name)
+        row = _mapping(_read_row(path), path.name)
         if set(row) - ROW_KEYS or REQUIRED_KEYS - set(row):
             raise ValueError(f"{path.name}: unknown or missing top-level keys")
         # `schema` is the JSON NUMBER 1. `1.0` is the same JSON number (every parser agrees; the Node loader cannot
@@ -825,6 +840,10 @@ class WriteInvariantMatrix(unittest.TestCase):
         # JSON number 1; a duplicate key keeps its LAST value; an escaped key spells the same key.
         raw = json.dumps(good)
         for label, text, ok in (("schema 1.0", raw.replace('"schema": 1,', '"schema": 1.0,'), True),
+                                ("duplicate schema, first NaN", raw.replace('"schema": 1,', '"schema": NaN, "schema": 1,'), False),
+                                ("duplicate schema, first Infinity", raw.replace('"schema": 1,', '"schema": Infinity, "schema": 1,'), False),
+                                ("lone surrogate in content", raw.replace('"content": "new"', '"content": "\\ud800"'), False),
+                                ("schema 1e0", raw.replace('"schema": 1,', '"schema": 1e0,'), True),
                                 ("duplicate schema, last 1.0", raw.replace('"schema": 1,', '"schema": 1, "schema": 1.0,'), True),
                                 ("duplicate schema, last 2", raw.replace('"schema": 1,', '"schema": 1, "schema": 2,'), False),
                                 ("escaped key", raw.replace('"schema": 1,', '"\\u0073chema": 1,'), True)):
@@ -835,6 +854,14 @@ class WriteInvariantMatrix(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):
                         load_write_invariants(bad)
+        (bad / "dotdot-component.json").write_bytes(raw.encode("utf-8").replace(b'"content": "new"', b'"content": "n\xffw"'))
+        with self.subTest(agreement="invalid UTF-8 byte"):
+            with self.assertRaises(ValueError):
+                load_write_invariants(bad)
+        (bad / "dotdot-component.json").write_bytes(b"\xef\xbb\xbf" + raw.encode("utf-8"))
+        with self.subTest(agreement="UTF-8 BOM prefix"):
+            with self.assertRaises(ValueError):          # json.loads refuses a BOM; so does JSON.parse when the decoder keeps it
+                load_write_invariants(bad)
         (bad / "dotdot-component.json").write_text(json.dumps(good), encoding="utf-8")
         (bad / "renamed.json").write_text(json.dumps(good), encoding="utf-8")   # id != file stem
         with self.assertRaises(ValueError):

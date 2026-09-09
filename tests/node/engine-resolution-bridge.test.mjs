@@ -8,7 +8,7 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -78,6 +78,35 @@ test("codex-runner forwards the project's codex override through the seam, and -
   assert.equal((await dispatch([])).model, "project-codex");
   assert.equal((await dispatch(["--no-model"])).model, null);
   assert.equal((await dispatch(["--model", "explicit-model"])).model, "explicit-model");
+});
+
+// A controlled "interpreter": the seam's failure paths are exercised by substituting python3 with a shell
+// script that misbehaves in exactly one way, so each protection is the only thing standing between the
+// bridge and a wrong model.
+function fakePython(body) {
+  const bin = tmpWorkspace("engine-resolution-fakepy-");
+  const fake = path.join(bin, "python3");
+  writeFileSync(fake, `#!/bin/sh\n${body}\n`);
+  chmodSync(fake, 0o755);
+  return fake;
+}
+
+test("a seam that never returns is a ConfigBridgeError within the bound — the spawn is timed, not trusted", () => {
+  const started = Date.now();
+  assert.throws(() => resolveModel(workspace(null), { engine: "codex", python: fakePython("sleep 30"), timeoutMs: 300 }),
+    ConfigBridgeError, "a timed-out seam is an error, never a silent null");
+  assert.ok(Date.now() - started < 10_000, `the spawn must be bounded — took ${Date.now() - started}ms`);
+});
+
+test("a seam that prints non-JSON is a ConfigBridgeError", () => {
+  assert.throws(() => resolveModel(workspace(null), { engine: "codex", python: fakePython("echo not-json") }),
+    /did not emit JSON/);
+});
+
+test("a seam whose JSON carries no model key is a ConfigBridgeError — never read as null", () => {
+  assert.throws(() => resolveModel(workspace(null), { engine: "codex", python: fakePython("echo '{\"engine\": \"codex\"}'") }),
+    /without a model key/);
+  assert.throws(() => resolveModel(workspace(null), { engine: "codex", python: fakePython("echo '[1]'") }), /without a model key/);
 });
 
 test("resolveDefaults resolves sandbox and effort only — the model rule left with the seam", () => {

@@ -185,10 +185,7 @@ class TestSchemaAgreement(unittest.TestCase):
         # (config.SCHEMA and vibe-core's documented table, both held to the oracle above) instead of restating them.
         text = MODEL_SELECTION.read_text(encoding="utf-8")
         self.assertNotIn("## `.vibe-suite.md` keys", text, "the partial restates the schema again")
-        with self.assertRaises(Exception, msg="parse_schema_table must find no schema table in the partial"):
-            table = config.parse_schema_table(text)
-            if not table:
-                raise ValueError("no table")
+        self.assertEqual(config.parse_schema_table(text), {}, "parse_schema_table must find no schema table in the partial")
         self.assertIn("scripts/lib/config.py", text)
         self.assertIn("skills/vibe-core/SKILL.md", text)
 

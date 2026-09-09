@@ -92,7 +92,8 @@ def apply_set(ws, assignment):
 def resolve_engine(ws, *, engine=None, model=None, default=engine_resolution.DEFAULT_ENGINE):
     """The seam the engine-dispatching commands call (M8 / vibe-221). Returns the four-key mapping.
 
-    Warnings from the reader go to stderr, as `--show` sends them; nothing is written anywhere."""
+    Warnings from the reader go to stderr (`--show` renders them inside its own output; the seam's stdout
+    is the one JSON object and nothing else); nothing is written anywhere."""
     resolved, warnings = config_mod.load_with_warnings(str(ws))
     for warning in warnings:
         print(f"config: {warning}", file=sys.stderr)

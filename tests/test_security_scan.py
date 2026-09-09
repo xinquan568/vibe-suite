@@ -139,7 +139,7 @@ FROZEN_PATTERN_NAMES = {
 #: "## Step 3 -- report (output format)". NO contract sentence was added, removed or reworded:
 #: every clause test above passed unchanged BEFORE this hash was recomputed, which is the same
 #: ordering vibe-39 established.
-#: Re-blessed (command only) by M8 (vibe-221): the one sentence in "## The second opinion" that
+#: Re-blessed (command only) by M8 (vibe-221, 2026-09-09): the one sentence in "## The second opinion" that
 #: pointed at model-selection.md's prose ladder now names the executable seam
 #: (`config_cli.py resolve-engine`, read for `cross_model_audit_engine`); "codex in v1, agy after
 #: the gate flips", the direct codex-runner dispatch, the agy-audit-cli refusal and P9 are the same

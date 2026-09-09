@@ -27,7 +27,8 @@ runpy.run_path(str(HERE.parent / "_bootstrap.py"))
 import bridge  # noqa: E402
 import init_bridge  # noqa: E402
 
-#: Read from `bridge`, never redeclared here — one inventory is what F1.4 requires.
+#: Read from `bridge`, never redeclared here — one inventory is what F1.4 requires (M12 / vibe-220
+#: extends the rule to every view below: JSON keys and exclusive files derive from the same rows).
 BLOCKS = bridge.OWNED_BLOCKS
 
 
@@ -51,11 +52,11 @@ def recorded_path(ws, raw):
 
 #: **Shared** JSON stores: the tool contributes named keys to a document the user also uses, so only
 #: those keys are ours and any foreign key means the file has become theirs.
-OWNED_JSON_KEYS = {".mcp.json": ("mcpServers",), ".codex/hooks.json": ("hooks",)}
+OWNED_JSON_KEYS = {rel: blocks for rel, kind, blocks in bridge.OWNED_TARGETS if kind == "json-keys"}
 
 #: **Exclusive** JSON files: created by the suite, for the suite, with no shared shape. The whole
 #: document is ours, so an init-created one is removable whatever it now contains.
-EXCLUSIVE_JSON = (".claude/vibe-history.json",)
+EXCLUSIVE_JSON = tuple(rel for rel, kind, _ in bridge.OWNED_TARGETS if kind == "exclusive-json")
 
 
 def markers_sane(text, name, style):
@@ -251,7 +252,7 @@ def prune(ws, record, report):
 #: to delete these files outright. Corroboration buys nothing against an attacker who already has it,
 #: and for the accidental-corruption case the duplicate and allowed-path checks in `validate_record`
 #: are what catch a record that has drifted.
-EXCLUSIVE_FILES = (".vibe-suite.md", ".claude/vibe-history.json")
+EXCLUSIVE_FILES = tuple(rel for rel, kind, _ in bridge.OWNED_TARGETS if kind.startswith("exclusive-"))
 
 
 #: What the suite writes into `.vibe-suite-state/`. Anything else in there is the user's.

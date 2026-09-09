@@ -480,31 +480,13 @@ def _sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-#: E7.2 (vibe-54): the checker's OWN production inventories — deliberately duplicated from
-#: scripts/mirror-sync.py and cross-pinned by tests/test_mirror_sync.py, so a corrupted
-#: manifest cannot shrink the oracle by editing its own declarations. `expected=None` uses
-#: these production tables; the parameter is an API-only test seam (the CLI passes nothing).
-MIRROR_EXPECTED = {
-    "knowledge": (
-        "agent-design", "auditing", "conventions", "conventions-antigravity",
-        "conventions-claude", "conventions-codex", "orchestration", "patterns", "roasting",
-        "rules", "scoring", "security", "testing", "vibe-core", "vocabulary",
-        "writing-agents", "writing-hooks", "writing-plugins", "writing-prompts",
-        "writing-rules", "writing-skills",
-    ),
-    "workflow": ("issue2pr", "refine-proposal", "runs-stats"),
-    "roast_agents": ("architecture", "edge-cases", "error-handling", "recon", "security",
-                     "testing"),
-    "copied_deps": {
-        "schemas/audit-output.schema.json": "codex/schemas/audit-output.schema.json",
-    },
-    "generated_outputs": {
-        "commands/roast.md": "codex/skills/vibe-roast/SKILL.md",
-        "commands/shared/classify.md": "codex/skills/vibe-auditing/references/classify.md",
-        "commands/shared/discover.md": "codex/skills/vibe-auditing/references/discover.md",
-        ".claude-plugin/plugin.json": "codex/README.md",
-    },
-}
+#: E7.2 (vibe-54) / M12 (vibe-220): the inventory the tree and the manifest are checked against.
+#: ONE home — scripts/lib/mirror_tables.py, shared with the generator. The manifest's own
+#: declarations are COMPARED to this table, never trusted, so a corrupted manifest still cannot
+#: shrink the oracle. `expected=None` uses the production table; the parameter is an API-only test
+#: seam (the CLI passes nothing).
+import mirror_tables  # noqa: E402  (after the bootstrap above, like validate_audit_output)
+MIRROR_EXPECTED = mirror_tables.EXPECTED
 
 
 def check_mirrors(root, expected=None):

@@ -41,6 +41,13 @@ def _load_gen():
 
 mirror_sync = _load_gen()
 
+
+def _load_lib(name):
+    spec = importlib.util.spec_from_file_location(name, REPO_ROOT / "scripts" / "lib" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 FIX = REPO_ROOT / "tests" / "fixtures" / "mirror-sync"
 
 
@@ -59,8 +66,8 @@ def make_source_tree(tmp):
     (root / ".claude-plugin").mkdir(parents=True)
     (root / ".claude-plugin" / "plugin.json").write_text(json.dumps(
         {"name": "vibe-suite", "version": "9.9.9-fixture", "description": "x",
-         "commands": ["./commands/roast.md", "./commands/shared/classify.md",
-                      "./commands/shared/discover.md"],
+         "commands": ["./commands/roast.md", "./commands/score.md",
+                      "./commands/shared/classify.md", "./commands/shared/discover.md"],
          "agents": ["./agents/gamma.md"],
          "skills": ["./skills/alpha", "./skills/beta", "./skills/flow"]}) + "\n")
     # knowledge skill with a sidecar, a data file, an out-of-mirror schema link,
@@ -97,6 +104,10 @@ def make_source_tree(tmp):
         "---\ndescription: roast fixture\n---\n\n# roast\n\nstyles and "
         "[scope](shared/scope-parse.md) [models](shared/model-selection.md) "
         "[fallback](shared/fallback.md)\n")
+    # a real command file for the slash reference alpha carries: the literal set is derived from
+    # commands/*.md at generation time (M12 / vibe-220), so the fixture world must own its commands
+    (root / "commands" / "score.md").write_text(
+        "---\ndescription: score fixture\n---\n\n# score\n")
     # codex-src skill (set d)
     cs = root / "codex-src" / "delta"
     cs.mkdir(parents=True)
@@ -281,6 +292,32 @@ class GeneratorFixture(unittest.TestCase):
                                               template=good.replace("{version}", "{version} {{kept}}"))
         self.assertIn("0 {kept}", rendered, "escaped braces render as literal braces")
 
+    # ---- M12 / vibe-220: the literal slash set is derived from the tree's own commands/*.md
+    def test_slash_literal_is_derived_from_the_command_files(self):
+        self.assertEqual(self.manifest["transform_notes"]["slash_literal"], ["score"],
+                         "roast is rewritten; every other command file is the literal set")
+        # a FIXTURE-ONLY command (no such file in the repository) plus a reference to it: both
+        # consumers of the derived set must use this tree's inventory, not the repository's
+        self.assertFalse((REPO_ROOT / "commands" / "extra.md").exists(), "the probe must not exist in the repository")
+        (self.root / "commands" / "extra.md").write_text("---\ndescription: extra fixture\n---\n\n# extra\n")
+        beta = self.root / "skills" / "beta" / "SKILL.md"
+        beta.write_text(beta.read_text() + "\nRun /vibe-suite:extra when in doubt.\n")
+        mirror_sync.generate(self.root, sets=FIXTURE_SETS)
+        manifest = json.loads((self.root / "codex" / "MIRROR-MANIFEST.json").read_text())
+        self.assertEqual(manifest["transform_notes"]["slash_literal"], ["extra", "score"])
+        self.assertIn("/vibe-suite:extra", self.read("codex/skills/vibe-beta/SKILL.md"), "kept literal under the banner note")
+        self.assertEqual(manifest["transform_notes"]["slash_occurrences"]["skills/beta/SKILL.md"], {"extra": 1})
+
+    def test_an_unknown_slash_reference_still_fails_generation(self):
+        # the safety property the hand-held table used to provide, kept under derivation
+        beta = self.root / "skills" / "beta" / "SKILL.md"
+        beta.write_text(beta.read_text() + "\nRun /vibe-suite:typo first.\n")
+        before = tree_digest(self.root / "codex")
+        with self.assertRaises(mirror_sync.MirrorError) as ctx:
+            mirror_sync.generate(self.root, sets=FIXTURE_SETS)
+        self.assertIn("typo", str(ctx.exception)); self.assertIn("skills/beta/SKILL.md", str(ctx.exception))
+        self.assertEqual(tree_digest(self.root / "codex"), before, "a render-phase failure leaves the tree untouched")
+
     def test_roast_variant_contract(self):
         text = self.read("codex/skills/vibe-roast/SKILL.md")
         for token in ("styles", "sequential", "scope", "trivial", "add-ons"):
@@ -405,34 +442,55 @@ class ProductionBinding(unittest.TestCase):
         self.assertNotIn("VIBE_SUITE_MIRROR_SETS", source)
         self.assertNotIn("--sets", source)
 
-    def test_checker_inventories_match_the_generator(self):
-        # B1: the checker's deliberately duplicated MIRROR_EXPECTED must never drift from
-        # the generator's production tables.
-        import importlib.machinery
-        import importlib.util
-        loader = importlib.machinery.SourceFileLoader(
-            "vibe_check_mod2", str(REPO_ROOT / "bin" / "vibe-check"))
-        spec = importlib.util.spec_from_loader("vibe_check_mod2", loader)
-        vc = importlib.util.module_from_spec(spec)
-        loader.exec_module(vc)
-        self.assertEqual(tuple(sorted(vc.MIRROR_EXPECTED["knowledge"])),
-                         tuple(sorted(mirror_sync.KNOWLEDGE)))
-        self.assertEqual(tuple(sorted(vc.MIRROR_EXPECTED["workflow"])),
-                         tuple(sorted(mirror_sync.WORKFLOW)))
-        self.assertEqual(tuple(sorted(vc.MIRROR_EXPECTED["roast_agents"])),
-                         tuple(sorted(mirror_sync.ROAST_AGENTS)))
-        self.assertEqual(dict(vc.MIRROR_EXPECTED["copied_deps"]),
-                         dict(mirror_sync.COPIED_DEPS))
+    # ---- M12 / vibe-220: the mirror inventory has ONE home, scripts/lib/mirror_tables.py
+    SHARED_TABLES = ("KNOWLEDGE", "WORKFLOW", "ROAST_AGENTS", "COPIED_DEPS", "GENERATED_OUTPUTS",
+                     "AUDITING_PARTIALS", "SLASH_REWRITE")
 
-    def test_generated_outputs_cross_pinned(self):
-        import importlib.machinery, importlib.util
-        loader = importlib.machinery.SourceFileLoader(
-            "vibe_check_mod3", str(REPO_ROOT / "bin" / "vibe-check"))
-        spec = importlib.util.spec_from_loader("vibe_check_mod3", loader)
+    def _checker(self, tag):
+        import importlib.machinery
+        loader = importlib.machinery.SourceFileLoader(tag, str(REPO_ROOT / "bin" / "vibe-check"))
+        spec = importlib.util.spec_from_loader(tag, loader)
         vc = importlib.util.module_from_spec(spec)
         loader.exec_module(vc)
-        self.assertEqual(dict(vc.MIRROR_EXPECTED["generated_outputs"]),
-                         dict(mirror_sync.GENERATED_OUTPUTS))
+        return vc
+
+    def test_the_mirror_tables_have_one_home(self):
+        # the instance the generator imported (its bootstrap put scripts/lib on the path) — a second
+        # by-path load of the same file is a different module object and would fail identity for the
+        # RIGHT code
+        tables = sys.modules["mirror_tables"]
+        for name in self.SHARED_TABLES:
+            with self.subTest(table=name):
+                self.assertIs(getattr(mirror_sync, name), getattr(tables, name),
+                              f"the generator's {name} is not the shared table object")
+        for key, name in (("knowledge", "KNOWLEDGE"), ("workflow", "WORKFLOW"), ("roast_agents", "ROAST_AGENTS"),
+                          ("copied_deps", "COPIED_DEPS"), ("generated_outputs", "GENERATED_OUTPUTS")):
+            self.assertIs(tables.EXPECTED[key], getattr(tables, name), key)
+        vc = self._checker("vibe_check_mod_one_home")
+        # a fresh exec of the checker binds its own `mirror_tables` import; compare by content of the
+        # shared module it loaded and by the absence of any private copy in its source
+        self.assertEqual(vc.MIRROR_EXPECTED, tables.EXPECTED)
+        self.assertIs(vc.MIRROR_EXPECTED, vc.mirror_tables.EXPECTED, "the checker's inventory is the shared module's object")
+        import re as _re
+        guard = _re.compile(r"^(KNOWLEDGE|WORKFLOW|ROAST_AGENTS|COPIED_DEPS|AUDITING_PARTIALS|GENERATED_OUTPUTS|"
+                            r"SLASH_REWRITE|SLASH_LITERAL|MIRROR_EXPECTED)\s*=\s*[({\[]", _re.M)
+        for rel in ("bin/vibe-check", "scripts/mirror-sync.py"):
+            with self.subTest(program=rel):
+                self.assertEqual(guard.findall((REPO_ROOT / rel).read_text(encoding="utf-8")), [],
+                                 f"{rel} defines a table literal of its own")
+
+    def test_manifest_slash_literal_equals_the_command_files(self):
+        # the acceptance: dropping a command file (or adding one) fails this test until regeneration
+        tables = sys.modules["mirror_tables"]
+        manifest = json.loads((REPO_ROOT / "codex" / "MIRROR-MANIFEST.json").read_text(encoding="utf-8"))
+        self.assertEqual(tuple(manifest["transform_notes"]["slash_literal"]), tables.slash_literal(REPO_ROOT))
+        self.assertEqual(tuple(manifest["transform_notes"]["slash_rewritten"]), tuple(sorted(tables.SLASH_REWRITE)))
+        import re as _re
+        names = set()
+        for f in sorted((REPO_ROOT / "codex").rglob("*.md")):
+            names |= set(_re.findall(r"/vibe-suite:([a-z0-9-]+)", f.read_text(encoding="utf-8", errors="replace")))
+        self.assertLessEqual(names, set(tables.slash_literal(REPO_ROOT)),
+                             "a surviving slash command in the mirror names no command file")
 
     def test_roast_variant_matches_the_golden(self):
         # Round-5 F5: exact normalized equality against the frozen golden — behavioral text

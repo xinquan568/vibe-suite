@@ -179,12 +179,15 @@ class TestSchemaAgreement(unittest.TestCase):
         documented = config.parse_schema_table(VIBE_CORE.read_text(encoding="utf-8"))
         self.assertEqual(set(documented) - set(EXPECTED_SCHEMA), set())
 
-    def test_model_selection_partial_matches_the_oracle(self):
-        # The merged contract from #74. A divergence in either artifact fails here.
-        partial = config.parse_schema_table(MODEL_SELECTION.read_text(encoding="utf-8"))
-        for key in ("engine", "cross_model_audit_engine", "reviewer_backend", "reviewer_model"):
-            with self.subTest(key=key):
-                self.assertEqual(partial[key], EXPECTED_SCHEMA[key])
+    def test_model_selection_partial_defers_the_schema_to_vibe_core_and_the_reader(self):
+        # The merged contract from #74 held the partial's schema table to the oracle. M8 (vibe-221) removed that
+        # table — a third statement of the schema — so the partial now POINTS at the two statements that remain
+        # (config.SCHEMA and vibe-core's documented table, both held to the oracle above) instead of restating them.
+        text = MODEL_SELECTION.read_text(encoding="utf-8")
+        self.assertNotIn("## `.vibe-suite.md` keys", text, "the partial restates the schema again")
+        self.assertEqual(config.parse_schema_table(text), {}, "parse_schema_table must find no schema table in the partial")
+        self.assertIn("scripts/lib/config.py", text)
+        self.assertIn("skills/vibe-core/SKILL.md", text)
 
 
 class TestGrammarRejections(unittest.TestCase):

@@ -97,8 +97,9 @@ reproducible baseline costs nothing.
 | `agy` | pre-gate: **refuses**, naming the gate status and `docs/agy-flip-checklist.md`. post-gate: as `codex` | — | — |
 | `both` | as `codex`, **plus** the disagreement listing | both numbers + disagreements | on the **computed** score |
 
-Engine resolution is [`commands/shared/model-selection.md`](shared/model-selection.md)'s ladder — this
-command never parses `.vibe-suite.md` itself. The cross-model lane dispatches
+Engine resolution is the seam's output — `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace "<abs-target>" resolve-engine --default claude
+${ENGINE_ARG:+--engine "$ENGINE_ARG"}` — read `lanes` and `model`; [`commands/shared/model-selection.md`](shared/model-selection.md)
+holds the vocabulary and the staged cross-model default. This command never parses `.vibe-suite.md` itself. The cross-model lane dispatches
 `scripts/codex-runner.mjs --sandbox read-only` **directly**, never `scripts/agy-audit-cli.mjs`, which
 refuses before dispatching while the agy gate is shut. No model is named on any dispatch (P9), and the
 prompt opens with a provenance line (P4).

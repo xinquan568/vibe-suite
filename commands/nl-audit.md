@@ -51,8 +51,9 @@ cross-reference map; those are the inputs the dimensions read.
 
 ## Step 3 — resolve the engine
 
-Through [`commands/shared/model-selection.md`](shared/model-selection.md): the priority ladder, the
-`cross_model_audit_engine` staged default, and `DEFER` for the model. **No model flag is ever passed**
+Through the seam — `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace "<abs-target>" resolve-engine --default codex
+${ENGINE_ARG:+--engine "$ENGINE_ARG"}` — read `lanes` and `model`; [`commands/shared/model-selection.md`](shared/model-selection.md)
+holds the vocabulary and the `cross_model_audit_engine` staged default. **No model flag is ever passed** when `model` is `null`
 — the engine CLI picks its own best model.
 
 `--type plugin` is **local analysis and dispatches no engine at all** (its D2 Security Posture is

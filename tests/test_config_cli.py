@@ -176,6 +176,63 @@ class TestSetDiscipline(ConfigCase):
         self.assertEqual(self.show()["gate"]["fail_policy"], "closed")
 
 
+class TestResolveEngine(ConfigCase):
+    """M8 / vibe-221: the seam the engine-dispatching commands call."""
+
+    def resolve(self, *args):
+        r = self.run_cli("resolve-engine", *args)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_a_fresh_project_resolves_to_the_callers_default_and_defers_the_model(self):
+        self.assertEqual(self.resolve(), {"engine": "claude", "cross_model_audit_engine": "codex", "lanes": ["claude"], "model": None})
+        self.assertEqual(self.resolve("--default", "codex")["engine"], "codex")
+
+    def test_the_project_file_and_the_user_flags_are_read_through_the_ladder(self):
+        (self.ws / ".vibe-suite.md").write_text("---\nengine: codex\nmodel_overrides:\n  codex: cfg-model\n---\n", encoding="utf-8")
+        self.assertEqual(self.resolve(), {"engine": "codex", "cross_model_audit_engine": "codex", "lanes": ["codex"], "model": "cfg-model"})
+        self.assertEqual(self.resolve("--engine", "both")["lanes"], ["claude", "codex"])
+
+    def test_the_users_model_beats_a_conflicting_project_override(self):
+        (self.ws / ".vibe-suite.md").write_text("---\nmodel_overrides:\n  codex: cfg-model\n---\n", encoding="utf-8")
+        self.assertEqual(self.resolve("--engine", "codex", "--model", "user-model")["model"], "user-model")
+        self.assertEqual(self.resolve("--engine", "codex")["model"], "cfg-model")
+
+    def test_reader_warnings_go_to_stderr_and_stdout_stays_one_json_object(self):
+        (self.ws / ".vibe-suite.md").write_text("---\nsandbax: read-only\n---\n", encoding="utf-8")
+        r = self.run_cli("resolve-engine")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("unknown key 'sandbax'", r.stderr)
+        self.assertEqual(len(r.stdout.strip().splitlines()), 1)
+        self.assertEqual(json.loads(r.stdout)["engine"], "claude")
+
+    def test_a_malformed_project_file_is_exit_1_with_no_json(self):
+        (self.ws / ".vibe-suite.md").write_text("---\nengine: codex\n", encoding="utf-8")   # frontmatter never closes
+        r = self.run_cli("resolve-engine")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("error:", r.stderr)
+        self.assertEqual(r.stdout, "")
+
+    def test_a_bad_engine_or_default_is_a_usage_error(self):
+        # argparse's own rejection of the unknown positional ALSO exits 2, says "error:" and echoes the value,
+        # so only the resolver's wording discriminates: "is not one of <domain>", and never "unrecognized arguments".
+        for args in (("--engine", "bogus"), ("--default", "bogus")):
+            with self.subTest(args=args):
+                r = self.run_cli("resolve-engine", *args)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn("error:", r.stderr)
+                self.assertIn("'bogus' is not one of claude, codex, agy, both", r.stderr)
+                self.assertNotIn("unrecognized arguments", r.stderr)
+                self.assertEqual(r.stdout, "")
+
+    def test_show_is_unchanged(self):
+        self.assertEqual(self.show()["config"]["cross_model_audit_engine"], "codex")
+
+    def test_the_command_doc_describes_the_seam(self):
+        text = (REPO_ROOT / "commands" / "config.md").read_text(encoding="utf-8")
+        self.assertIn("resolve-engine", text)
+
+
 class TestNamespace(ConfigCase):
     def test_no_retired_command_name_appears_in_output(self):
         combined = self.run_cli("--show").stdout + self.run_cli("--help").stdout

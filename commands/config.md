@@ -63,3 +63,14 @@ every codex dispatch prints the same line to stderr. `danger-full-access` still 
   the one signal that a setting you wrote is not being read.
 - **An invalid file is reported, not survived.** A config the canonical reader rejects exits non-zero
   with the reason, because a viewer that prints defaults over a broken file would hide it.
+
+## `resolve-engine` — the seam other commands call
+
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace <root> resolve-engine [--default <engine>] [--engine <v>] [--model <v>]`
+prints one JSON object — `engine`, `cross_model_audit_engine`, `lanes`, `model` — resolved by the one
+statement of the engine ladder (`scripts/lib/engine_resolution.py`; the order is that module's and its
+tests', not this page's); `model` is `null` when nothing names one (P9: no default model is ever
+synthesised — `null` means pass no model flag). The Node runners obtain their `model` through the same
+seam (`config-bridge.mjs resolveModel`). It is for the
+engine-dispatching commands (`roast`, `score`, `nl-audit`, `fix`, `security-scan`) to call; it writes
+nothing. An engine outside the schema's four is refused with exit 2.

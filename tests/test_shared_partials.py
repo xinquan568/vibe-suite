@@ -357,51 +357,12 @@ def parse_manifest_outcomes(text=None):
 
 
 # ------------------------------------------------------------------- E0.4 engine selection
-
-
-ACTION_TOKENS = frozenset({"USE_VALUE", "DEFER"})
-
-
-def parse_priority_ladder(text=None):
-    """Ordered (source, present_when, action) rows from `model-selection.md`.
-
-    The action column is a **closed** token set. An unrecognised token raises rather than being
-    tolerated: a permissive parser would let a partial carry a model literal here, which is the
-    pinned default P9 exists to forbid.
-    """
-    text = _read("model-selection") if text is None else text
-    rows = []
-    for row in _table_after(text, "## Priority ladder", "model-selection.md"):
-        if len(row) < 3:
-            raise PartialParseError(f"model-selection.md: ladder row needs 3 columns: {row!r}")
-        action = row[2].strip().strip("`")
-        if action not in ACTION_TOKENS:
-            raise PartialParseError(
-                f"model-selection.md: unknown action {action!r}; expected one of {sorted(ACTION_TOKENS)}"
-            )
-        rows.append((row[0].strip().strip("`"), row[1].strip(), action))
-    if not rows:
-        raise PartialParseError("model-selection.md: empty priority ladder")
-    if rows[-1][2] != "DEFER":
-        raise PartialParseError("model-selection.md: the terminal ladder action must be DEFER")
-    return rows
-
-
-def resolve(ladder, supplied):
-    """Execute the parsed ladder over a mapping of source -> supplied value.
-
-    Reads the **action column**, deliberately. A resolver keyed on row position would return the
-    same answer for every well-formed table and so could not detect a wrong action.
-    """
-    for source, _present_when, action in ladder:
-        value = supplied.get(source)
-        if value is None:
-            continue
-        if action == "USE_VALUE":
-            return value
-        if action == "DEFER":
-            return "DEFER"
-    return "DEFER"
+#
+# M8 / vibe-221: the priority ladder and the `.vibe-suite.md` schema left this partial for code —
+# `scripts/lib/engine_resolution.py` (tests/test_engine_resolution.py) and `config.SCHEMA`
+# (tests/test_config.py). Their prose parsers (`parse_priority_ladder`, `resolve`,
+# `parse_config_schema`) and `TestPriorityLadder` were deleted with them; only the staged
+# cross-model default is still a table here.
 
 
 def parse_lifecycle(text=None):
@@ -416,19 +377,6 @@ def parse_lifecycle(text=None):
         if required not in fields:
             raise PartialParseError(f"model-selection.md: lifecycle missing {required!r}")
     return fields
-
-
-def parse_config_schema(text=None):
-    """key -> (type, allowed, default) from `model-selection.md`'s schema table."""
-    text = _read("model-selection") if text is None else text
-    schema = {}
-    for row in _table_after(text, "## `.vibe-suite.md` keys", "model-selection.md"):
-        if len(row) < 4:
-            raise PartialParseError(f"model-selection.md: schema row needs 4 columns: {row!r}")
-        schema[row[0].strip().strip("`")] = (row[1].strip(), row[2].strip(), row[3].strip())
-    if not schema:
-        raise PartialParseError("model-selection.md: empty config schema")
-    return schema
 
 
 def parse_applicability(text=None):
@@ -1216,104 +1164,8 @@ class TestPluginDiscoverBehaviour(unittest.TestCase):
 # Written here, not read back from the partials — the vibe-5 lesson. Deleting a row from a partial
 # must fail a test, not quietly remove the obligation.
 
-REQUIRED_ENGINE_VALUES = ["claude", "codex", "agy", "both"]
-REQUIRED_LADDER = [("user choice", "USE_VALUE"), (".vibe-suite.md", "USE_VALUE"),
-                   ("tool default", "DEFER")]
 REQUIRED_LIFECYCLE = {"pre-gate default": "codex", "post-gate default": "agy"}
-REQUIRED_CONFIG_KEYS = ["engine", "cross_model_audit_engine", "reviewer_backend", "reviewer_model"]
 REQUIRED_HOPS = [("agy", "codex"), ("codex", "manual")]
-
-
-class TestPriorityLadder(unittest.TestCase):
-    """The ladder is *executed*, not inspected — and three mutants separate the ways a test could
-    pass without reading the action column."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.ladder = parse_priority_ladder()
-
-    def test_ladder_matches_the_independent_expectation(self):
-        self.assertEqual([(s, a) for s, _, a in self.ladder], REQUIRED_LADDER)
-
-    def test_no_row_carries_a_model_literal(self):
-        # The pinned-default loophole: a literal in any action cell.
-        for source, _, action in self.ladder:
-            with self.subTest(source=source):
-                self.assertIn(action, ACTION_TOKENS)
-
-    def test_user_choice_wins(self):
-        self.assertEqual(resolve(self.ladder, {"user choice": "codex",
-                                               ".vibe-suite.md": "agy"}), "codex")
-
-    def test_config_wins_when_no_user_choice(self):
-        self.assertEqual(resolve(self.ladder, {".vibe-suite.md": "agy"}), "agy")
-
-    def test_two_distinct_tool_default_canaries_propagate_by_identity(self):
-        # Rules out a hard-coded echo: the terminal action must pass *the supplied* value through.
-        for canary in ("CANARY-ALPHA", "CANARY-BETA"):
-            with self.subTest(canary=canary):
-                self.assertEqual(resolve(self.ladder, {"tool default": canary}), "DEFER")
-
-    def test_no_input_at_all_yields_defer_not_a_value(self):
-        self.assertEqual(resolve(self.ladder, {}), "DEFER")
-
-    # ---- mutants: each defeats a different way of passing without reading the action ----
-
-    def _mutate(self, old, new):
-        """Apply a mutation and assert it actually changed the text.
-
-        A `str.replace` that matches nothing returns the original silently, so an unapplied mutant
-        would test the unmutated partial. Here that surfaces as a failure rather than a pass, but
-        only because `assertRaises` gets nothing — assert the application directly instead.
-        """
-        text = _read("model-selection")
-        mutated = text.replace(old, new)
-        self.assertNotEqual(text, mutated, f"mutation did not apply: {old!r}")
-        return mutated
-
-    def test_mutant_literal_in_terminal_action_is_rejected(self):
-        text = self._mutate("| `tool default` | always | `DEFER` |",
-                            "| `tool default` | always | `sonnet` |")
-        with self.assertRaises(PartialParseError):
-            parse_priority_ladder(text)
-
-    def test_mutant_unknown_action_token_is_rejected(self):
-        text = self._mutate("| `tool default` | always | `DEFER` |",
-                            "| `tool default` | always | `WHATEVER` |")
-        with self.assertRaises(PartialParseError):
-            parse_priority_ladder(text)
-
-    def test_mutant_legal_action_flip_on_the_same_object_changes_the_result(self):
-        """The discriminating mutant, applied **in place on one object**.
-
-        Parsing a mutated document yields a *new* list, and object identity is a discriminator a
-        cheating resolver can use: cache the first ladder seen, resolve it by source position, and
-        return DEFER for anything else. That survives a mutant built from a second parse. It does not
-        survive mutating the very ladder whose baseline behaviour was just established.
-
-        The two invalid-token mutants above cannot close this hole either — they fail during
-        *parsing* and never reach the resolver at all.
-        """
-        ladder = list(parse_priority_ladder())
-        supplied = {".vibe-suite.md": "agy"}
-        self.assertEqual(resolve(ladder, supplied), "agy", "baseline on this exact object")
-
-        index = next(i for i, (source, _, _) in enumerate(ladder) if source == ".vibe-suite.md")
-        source, present_when, action = ladder[index]
-        self.assertEqual(action, "USE_VALUE", "mutation precondition")
-        ladder[index] = (source, present_when, "DEFER")          # same object, same order
-
-        self.assertEqual([s for s, _, _ in ladder],
-                         [s for s, _, _ in parse_priority_ladder()],
-                         "row order must be untouched, or the mutant proves nothing")
-        self.assertEqual(resolve(ladder, supplied), "DEFER",
-                         "an action-blind resolver returns 'agy' here and must fail")
-
-    def test_resolver_reads_the_action_not_the_row_position(self):
-        # Same property from the other side: a hand-built ladder whose first row DEFERs must defer,
-        # even though a position-based resolver would take its value.
-        ladder = [("user choice", "always", "DEFER"), ("tool default", "always", "DEFER")]
-        self.assertEqual(resolve(ladder, {"user choice": "codex"}), "DEFER")
 
 
 class TestStagedDefault(unittest.TestCase):
@@ -1334,33 +1186,20 @@ class TestStagedDefault(unittest.TestCase):
 
 
 class TestEngineVocabulary(unittest.TestCase):
-    def test_engine_values(self):
-        schema = parse_config_schema()
-        for value in REQUIRED_ENGINE_VALUES:
-            with self.subTest(value=value):
-                self.assertIn(value, schema["engine"][1])
-
-    def test_every_required_key_is_declared(self):
-        schema = parse_config_schema()
-        for key in REQUIRED_CONFIG_KEYS:
-            with self.subTest(key=key):
-                self.assertIn(key, schema)
-
-    def test_reviewer_backend_and_model_are_separate_keys(self):
-        schema = parse_config_schema()
-        self.assertIn("reviewer_backend", schema)
-        self.assertIn("reviewer_model", schema)
-
-    def test_reviewer_model_has_an_open_domain(self):
-        # A discovered model cannot have a closed set; asserting one would be a lie the schema
-        # would then have to keep.
-        allowed = parse_config_schema()["reviewer_model"][1].lower()
-        self.assertTrue("open" in allowed or "dynamic" in allowed, allowed)
-
     def test_both_is_documented_as_having_no_model_of_its_own(self):
         text = _read("model-selection").lower()
         self.assertIn("no model of its own", text)
         self.assertIn("independently", text)
+
+    def test_the_partial_no_longer_restates_the_ladder_or_the_schema(self):
+        # M8 / vibe-221: the ladder is code (scripts/lib/engine_resolution.py behind config_cli.py resolve-engine);
+        # the schema is config.SCHEMA and skills/vibe-core/SKILL.md; the partial keeps the vocabulary and points at both.
+        text = _read("model-selection")
+        self.assertNotIn("## Priority ladder", text)
+        self.assertNotIn("## `.vibe-suite.md` keys", text)
+        self.assertIn('scripts/config_cli.py" --workspace "<abs-target>" resolve-engine', text)
+        self.assertIn("scripts/lib/config.py", text)
+        self.assertIn("skills/vibe-core/SKILL.md", text)
 
 
 class TestFallbackChain(unittest.TestCase):

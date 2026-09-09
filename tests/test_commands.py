@@ -534,3 +534,41 @@ class TestDoctorDocReconciled(unittest.TestCase):
     def test_stale_48_citation_gone_everywhere(self):
         self.assertNotIn("#48", self.doc)
         self.assertNotIn("#48", self.py)
+
+
+class TestEngineSeamInvocation(unittest.TestCase):
+    """M8 / vibe-221: the five engine-dispatching commands resolve their engine through ONE seam, each with its own
+    contract — the way score and trend invoke scope_tag verbatim rather than restating its mapping."""
+
+    SEAM = 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace "<abs-target>" resolve-engine'
+    CONTRACTS = {
+        "roast": "--default claude",
+        "score": "--default claude",
+        "nl-audit": "--default codex",
+        "fix": "--engine codex",
+        "security-scan": None,          # reads cross_model_audit_engine; passes no --engine
+    }
+
+    def _text(self, name):
+        return (REPO_ROOT / "commands" / f"{name}.md").read_text(encoding="utf-8")
+
+    def test_each_caller_carries_the_seam_line_with_its_contract(self):
+        for name, contract in self.CONTRACTS.items():
+            with self.subTest(command=name):
+                text = self._text(name)
+                self.assertIn(self.SEAM, text, f"{name} must invoke the seam verbatim")
+                after = text[text.index(self.SEAM) + len(self.SEAM):].split("`", 1)[0]
+                if contract is None:
+                    self.assertNotIn("--engine", after, "security-scan resolves the cross-model default, not a user engine")
+                else:
+                    self.assertIn(contract, after.replace("\n", " "), f"{name}: {contract} missing from its seam line")
+
+    def test_no_caller_restates_the_ladder(self):
+        for name in self.CONTRACTS:
+            with self.subTest(command=name):
+                self.assertNotIn("model-selection.md`](shared/model-selection.md)'s ladder", self._text(name))
+
+    def test_fix_keeps_its_fixer_verifier_pairing(self):
+        text = self._text("fix")
+        self.assertIn("| `--fixer` | Where it runs |", text)
+        self.assertIn("by the engine that did not fix", text)

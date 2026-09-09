@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "symlink-at-dest-replace",
+  "invariant": "A symlink observed at the destination is refused, never followed or converted; the link and its target are untouched.",
+  "setup": [
+    {
+      "kind": "file",
+      "path": "target.txt",
+      "content": "t"
+    },
+    {
+      "kind": "symlink",
+      "path": "x.json",
+      "target": "target.txt"
+    }
+  ],
+  "operation": {
+    "name": "write_atomic",
+    "dest": "x.json",
+    "content": "new"
+  },
+  "expect": {
+    "outcome": "refused",
+    "untouched": [
+      "target.txt",
+      "x.json"
+    ],
+    "kinds": {
+      "x.json": "symlink"
+    },
+    "entries": [
+      "target.txt",
+      "x.json"
+    ]
+  }
+}

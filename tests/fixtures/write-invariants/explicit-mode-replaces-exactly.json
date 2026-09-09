@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "explicit-mode-replaces-exactly",
+  "invariant": "An explicit mode wins over preservation, exactly, whatever the umask.",
+  "setup": [
+    {
+      "kind": "file",
+      "path": "x.json",
+      "content": "old",
+      "mode": "0644"
+    }
+  ],
+  "operation": {
+    "name": "write_atomic",
+    "dest": "x.json",
+    "content": "new",
+    "mode": "0600"
+  },
+  "expect": {
+    "outcome": "written",
+    "content": "new",
+    "mode": {
+      "exact": "0600"
+    },
+    "entries": [
+      "x.json"
+    ]
+  },
+  "umask": "0277"
+}

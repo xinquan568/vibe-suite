@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "fixed-name-collision",
+  "invariant": "A stale fixed-name scratch ('.<name>.vibe-tmp') from an older kernel neither blocks nor is touched.",
+  "setup": [
+    {
+      "kind": "file",
+      "path": ".x.json.vibe-tmp",
+      "content": "stale"
+    }
+  ],
+  "operation": {
+    "name": "write_atomic",
+    "dest": "x.json",
+    "content": "new"
+  },
+  "expect": {
+    "outcome": "written",
+    "content": "new",
+    "untouched": [
+      ".x.json.vibe-tmp"
+    ],
+    "entries": [
+      ".x.json.vibe-tmp",
+      "x.json"
+    ]
+  }
+}

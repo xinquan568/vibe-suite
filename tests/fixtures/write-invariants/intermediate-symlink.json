@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "id": "intermediate-symlink",
+  "invariant": "A symlink anywhere in the destination's parent chain is refused even when it stays inside the root.",
+  "setup": [
+    {
+      "kind": "dir",
+      "path": "real"
+    },
+    {
+      "kind": "symlink",
+      "path": "link",
+      "target": "real"
+    }
+  ],
+  "operation": {
+    "name": "write_atomic",
+    "dest": "link/x.json",
+    "content": "new"
+  },
+  "expect": {
+    "outcome": "refused",
+    "kinds": {
+      "link": "symlink"
+    },
+    "entries": [
+      "link",
+      "real"
+    ],
+    "entries_of": {
+      "real": []
+    },
+    "untouched": [
+      "link"
+    ]
+  }
+}

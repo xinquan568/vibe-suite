@@ -10,6 +10,7 @@ secret's shape in a second file.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -592,6 +593,387 @@ class WriteAtomicScratchIsUnpredictable(unittest.TestCase):
         self.assertIn("remove stale", message, "the residual refusal does not name the corrective action")
         self.assertIn("no other vibe-suite process is running", message,
                       "the residual refusal does not name the condition for the remedy")
+
+
+# --------------------------------------------------------------------------- write-invariant matrix
+# M11 / vibe-222: ONE invariant list, as data, run against BOTH safety kernels. The rows live in
+# tests/fixtures/write-invariants/*.json; tests/node/write-primitive.test.mjs interprets the same files
+# against scripts/lib/write.mjs. This class is an interpreter of the rows, not a port of either kernel.
+
+WRITE_INVARIANTS = REPO_ROOT / "tests" / "fixtures" / "write-invariants"
+REQUIRED_KEYS = {"schema", "id", "invariant", "setup", "operation", "expect"}
+ROW_KEYS = REQUIRED_KEYS | {"umask"}
+SETUP_KEYS = {"dir": {"kind", "path"}, "file": {"kind", "path", "content", "mode"}, "symlink": {"kind", "path", "target"}}
+SETUP_REQUIRED = {"dir": {"kind", "path"}, "file": {"kind", "path", "content"}, "symlink": {"kind", "path", "target"}}
+OPERATIONS = {"write_atomic", "publish_new"}
+OPERATION_KEYS = {"name", "dest", "content", "mode"}
+OUTCOMES = {"refused", "written", "declined"}
+EXPECT_KEYS = {"outcome", "content", "mode", "untouched", "kinds", "entries", "entries_of"}
+MODE_RULES = {"exact", "preserved", "subset_of"}
+KINDS = {"absent", "symlink", "dir", "file", "other"}   # bridge.classify's answers
+OCTAL = re.compile(r"0[0-7]{3}")
+
+
+def _octal(value, where):
+    # `fullmatch`, not `match`: `$` would accept a trailing newline.
+    if not isinstance(value, str) or not OCTAL.fullmatch(value):
+        raise ValueError(f"{where}: mode/umask must be a four-digit octal string like '0644', got {value!r}")
+    return int(value, 8)
+
+
+def _mapping(value, where):
+    if not isinstance(value, dict):
+        raise ValueError(f"{where}: expected an object, got {type(value).__name__}")
+    return value
+
+
+def _text(value, where):
+    if not isinstance(value, str):
+        raise ValueError(f"{where}: expected a string, got {type(value).__name__}")
+    return value                        # well-formedness is checked for every string by `_check_tree`
+
+
+def _refuse_constant(token):
+    # `json.loads` accepts NaN/Infinity/-Infinity by default; they are not JSON, and JSON.parse refuses them.
+    raise ValueError(f"non-JSON constant {token}")
+
+
+#: The document class both loaders accept — stated as numbers, not as whichever parser gives out first.
+#: A row is 400–900 bytes and four levels deep (row → expect → entries_of → list); the caps leave room and sit
+#: far below every interpreter's own limits, so the answer does not depend on the Python or Node version.
+MAX_ROW_BYTES = 65536
+MAX_DEPTH = 16
+#: The admissible row filename, stated identically in both loaders: `id` is the name minus `.json`, nothing else.
+ROW_FILENAME = re.compile(r"[a-z][a-z0-9-]*\.json")
+
+
+def _well_formed(value, where):
+    try:
+        value.encode("utf-8")           # a lone surrogate (JSON `"\\ud800"`) is not a well-formed string
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{where}: ill-formed string") from exc
+
+
+def _check_tree(doc, where):
+    """Iterative walk over the parsed document: nesting deeper than MAX_DEPTH is refused, and EVERY string —
+    object key or value, at any depth, read by the grammar or not — must be well-formed."""
+    stack = [(doc, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > MAX_DEPTH:
+            raise ValueError(f"{where}: nesting deeper than {MAX_DEPTH}")
+        if isinstance(node, dict):
+            for key, child in node.items():
+                _well_formed(key, where)
+                stack.append((child, depth + 1))
+        elif isinstance(node, list):
+            for child in node:
+                stack.append((child, depth + 1))
+        elif isinstance(node, str):
+            _well_formed(node, where)
+
+
+def _raw_depth(text, where):
+    """Nesting depth of the raw JSON text, counted BEFORE parsing — a parser keeps only the last value of a
+    duplicate key, so a post-parse walk never sees a discarded value's nesting, and an interpreter may run out of
+    recursion before any walk runs. Strings are skipped (a bracket inside a string is not nesting)."""
+    depth = in_string = escaped = 0
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = 0
+            elif ch == "\\":
+                escaped = 1
+            elif ch == '"':
+                in_string = 0
+        elif ch == '"':
+            in_string = 1
+        elif ch in "[{":
+            depth += 1
+            if depth > MAX_DEPTH:
+                raise ValueError(f"{where}: nesting deeper than {MAX_DEPTH}")
+        elif ch in "]}":
+            depth -= 1
+
+
+def _read_row(path):
+    """Read exactly the documents the Node loader reads. The filename must match ROW_FILENAME (so `id`
+    is the name minus `.json` on both sides — `Path.stem` and `slice(0, -5)` disagree on a name like `.json`). Bytes over MAX_ROW_BYTES are refused before decoding;
+    invalid UTF-8 is a refusal (UnicodeDecodeError is a ValueError); the non-JSON constants are refused;
+    every number is a double (`parse_int=float`), as it is for JSON.parse — so a 4,301-digit integer is `inf`
+    on both sides instead of Python's int-conversion limit deciding; an interpreter that runs out of recursion
+    before our own nesting cap is checked answers with the same refusal class."""
+    if not ROW_FILENAME.fullmatch(path.name):
+        raise ValueError(f"{path.name}: unknown row filename — expected [a-z][a-z0-9-]*.json")
+    data = path.read_bytes()
+    if len(data) > MAX_ROW_BYTES:
+        raise ValueError(f"{path.name}: {len(data)} bytes exceeds the {MAX_ROW_BYTES}-byte row limit")
+    text = data.decode("utf-8")
+    _raw_depth(text, path.name)          # before the parser: covers discarded duplicate values and every interpreter's limit
+    try:
+        doc = json.loads(text, parse_constant=_refuse_constant, parse_int=float)
+    except RecursionError as exc:        # unreachable past the pre-scan; kept so the refusal class never changes
+        raise ValueError(f"{path.name}: nesting deeper than {MAX_DEPTH}") from exc
+    _check_tree(doc, path.name)
+    return doc
+
+
+def load_write_invariants(directory=WRITE_INVARIANTS):
+    """Every `*.json` under the fixture directory, validated strictly: an unknown key, kind, operation,
+    outcome or mode rule is a ValueError, never a skipped row — a row one interpreter cannot express must
+    fail that interpreter, or the 'either kernel failing a row fails CI' property is lost."""
+    rows = []
+    for path in sorted(Path(directory).glob("*.json")):
+        row = _mapping(_read_row(path), path.name)
+        if set(row) - ROW_KEYS or REQUIRED_KEYS - set(row):
+            raise ValueError(f"{path.name}: unknown or missing top-level keys")
+        # `schema` is the JSON NUMBER 1. `1.0` is the same JSON number (every parser agrees; the Node loader cannot
+        # tell them apart, so neither does this one); `true` is not a number (bool is refused explicitly — it is a
+        # subclass of int); a string is not a number. Duplicate keys keep the last value, as both parsers do.
+        schema = row["schema"]
+        if isinstance(schema, bool) or not isinstance(schema, (int, float)) or schema != 1 or row["id"] != path.stem:
+            raise ValueError(f"{path.name}: schema must be the JSON number 1 and id must equal the file stem")
+        _text(row["invariant"], path.name)
+        if not isinstance(row["setup"], list):
+            raise ValueError(f"{path.name}: setup must be a list")
+        for step in row["setup"]:
+            step = _mapping(step, path.name)
+            kind = _text(step.get("kind"), path.name)          # a string BEFORE the membership test
+            if kind not in SETUP_KEYS or set(step) - SETUP_KEYS[kind] or SETUP_REQUIRED[kind] - set(step):
+                raise ValueError(f"{path.name}: unknown setup kind or fields {step!r}")
+            for key in ("path", "content", "target"):
+                if key in step:
+                    _text(step[key], path.name)
+            if "mode" in step:
+                _octal(step["mode"], path.name)
+        op = _mapping(row["operation"], path.name)
+        if set(op) - OPERATION_KEYS or {"name", "dest", "content"} - set(op) or _text(op["name"], path.name) not in OPERATIONS:
+            raise ValueError(f"{path.name}: unknown operation or operation fields {op!r}")
+        _text(op["dest"], path.name); _text(op["content"], path.name)
+        if "mode" in op:
+            _octal(op["mode"], path.name)
+        if "umask" in row:
+            _octal(row["umask"], path.name)
+        expect = _mapping(row["expect"], path.name)
+        if set(expect) - EXPECT_KEYS or _text(expect.get("outcome"), path.name) not in OUTCOMES:
+            raise ValueError(f"{path.name}: unknown expect keys or outcome")
+        for key in ("untouched", "entries"):
+            if key in expect and (not isinstance(expect[key], list) or not all(isinstance(x, str) for x in expect[key])):
+                raise ValueError(f"{path.name}: {key} must be a list of strings")
+        if "kinds" in expect:
+            for rel, kind in _mapping(expect["kinds"], path.name).items():
+                if _text(kind, path.name) not in KINDS:                # a string BEFORE the membership test
+                    raise ValueError(f"{path.name}: unknown kind {kind!r} for {rel}")
+        if "entries_of" in expect:
+            for rel, names in _mapping(expect["entries_of"], path.name).items():
+                if not isinstance(names, list) or not all(isinstance(x, str) for x in names):
+                    raise ValueError(f"{path.name}: entries_of[{rel!r}] must be a list of strings")
+        if "content" in expect:
+            _text(expect["content"], path.name)
+        if "mode" in expect:
+            mode = _mapping(expect["mode"], path.name)
+            if len(mode) != 1 or set(mode) - MODE_RULES:
+                raise ValueError(f"{path.name}: unknown mode rule")
+            (rule, value), = mode.items()
+            if rule == "preserved":
+                if value is not True:
+                    raise ValueError(f"{path.name}: preserved must be exactly true")
+            else:
+                _octal(value, path.name)
+        rows.append(row)
+    if not rows:
+        raise ValueError(f"{directory}: no rows")
+    return rows
+
+
+class WriteInvariantMatrix(unittest.TestCase):
+    """The shared matrix against bridge.py. One subTest per row; the Node twin is
+    `tests/node/write-primitive.test.mjs` ("write-invariant matrix")."""
+
+    def _apply_setup(self, root, setup):
+        for step in setup:
+            target = root / step["path"]
+            if step["kind"] == "dir":
+                target.mkdir(parents=True)
+            elif step["kind"] == "file":
+                target.write_text(step["content"], encoding="utf-8")
+                if "mode" in step:
+                    os.chmod(target, int(step["mode"], 8))
+            else:
+                target.symlink_to(step["target"])
+
+    def _snapshot(self, root, rel):
+        # Observation goes through the kernel's own `classify`; the interpreter decides nothing about kinds.
+        p = root / rel
+        kind = bridge.classify(p)
+        return (kind, os.readlink(p) if kind == "symlink" else p.read_bytes() if kind == "file" else None)
+
+    def _run(self, row):
+        root = Path(tempfile.mkdtemp(prefix="vibe-wi-")).resolve()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        self._apply_setup(root, row["setup"])
+        expect = row["expect"]
+        before = {rel: self._snapshot(root, rel) for rel in expect.get("untouched", [])}
+        op = row["operation"]
+        dest_path = root / op["dest"]
+        before_mode = (dest_path.stat().st_mode & 0o777) if bridge.classify(dest_path) == "file" else None
+        kwargs = {"mode": int(op["mode"], 8)} if "mode" in op else {}   # omission is the API's own default
+        fn = getattr(bridge, op["name"])
+        previous = os.umask(int(row["umask"], 8)) if "umask" in row else None
+        try:
+            try:
+                result = fn(root, root / op["dest"], op["content"], **kwargs)
+                outcome = "declined" if result is False else "written"
+            except bridge.BridgeError:
+                outcome = "refused"
+        finally:
+            if previous is not None:
+                os.umask(previous)
+        self.assertEqual(outcome, expect["outcome"], row["invariant"])
+        dest = root / op["dest"]
+        if outcome == "written":
+            self.assertEqual(dest.read_text(encoding="utf-8"), expect["content"])
+            if "mode" in expect:
+                (rule, value), = expect["mode"].items()
+                actual = dest.stat().st_mode & 0o777
+                if rule == "exact":
+                    self.assertEqual(actual, int(value, 8), row["id"])
+                elif rule == "subset_of":
+                    self.assertEqual(actual & ~int(value, 8), 0, f"{row['id']}: {oct(actual)} exceeds {value}")
+                else:
+                    self.assertEqual(actual, before_mode, row["id"])
+        for rel, snap in before.items():
+            self.assertEqual(self._snapshot(root, rel), snap, f"{row['id']}: {rel} changed")
+        for rel, kind in expect.get("kinds", {}).items():
+            self.assertEqual(bridge.classify(root / rel), kind, f"{row['id']}: {rel}")
+        if "entries" in expect:
+            self.assertEqual(sorted(p.name for p in root.iterdir()), sorted(expect["entries"]), row["id"])
+        for rel, names in expect.get("entries_of", {}).items():
+            self.assertEqual(sorted(p.name for p in (root / rel).iterdir()), sorted(names), f"{row['id']}: {rel}")
+
+    def test_every_row_holds_against_bridge_py(self):
+        rows = load_write_invariants()
+        for row in rows:
+            with self.subTest(row=row["id"]):
+                self._run(row)
+
+    def test_the_issue_named_rows_are_present(self):
+        ids = {row["id"] for row in load_write_invariants()}
+        for required in ("symlink-at-dest-replace", "intermediate-symlink", "dotdot-component", "fixed-name-collision",
+                         "mode-preserved-when-omitted", "crash-leftover"):
+            with self.subTest(row=required):
+                self.assertIn(required, ids)
+
+    def test_a_malformed_row_fails_the_loader_instead_of_being_skipped(self):
+        bad = Path(tempfile.mkdtemp(prefix="vibe-wi-bad-"))
+        self.addCleanup(shutil.rmtree, bad, ignore_errors=True)
+        good = json.loads((WRITE_INVARIANTS / "dotdot-component.json").read_text(encoding="utf-8"))
+        mutations = {
+            "unknown operation": lambda r: r["operation"].__setitem__("name", "write_anything"),
+            "unknown outcome": lambda r: r["expect"].__setitem__("outcome", "ignored"),
+            "unknown top-level key": lambda r: r.__setitem__("skip", True),
+            "unknown setup kind": lambda r: r["setup"].append({"kind": "fifo", "path": "f"}),
+            "unknown setup field": lambda r: r["setup"][0].__setitem__("mode_bits", "0644"),
+            "unknown operation field": lambda r: r["operation"].__setitem__("force", True),
+            "missing required key": lambda r: r.pop("invariant"),
+            "wrong schema": lambda r: r.__setitem__("schema", 2),
+            "malformed octal mode": lambda r: r["operation"].__setitem__("mode", "644x"),
+            "decimal mode": lambda r: r["operation"].__setitem__("mode", 420),
+            "malformed umask": lambda r: r.__setitem__("umask", "22"),
+            "two mode rules": lambda r: r["expect"].__setitem__("mode", {"exact": "0644", "preserved": True}),
+            "boolean schema": lambda r: r.__setitem__("schema", True),
+            "setup not a list": lambda r: r.__setitem__("setup", {}),
+            "setup step not an object": lambda r: r.__setitem__("setup", ["real"]),
+            "mode with a trailing newline": lambda r: r["operation"].__setitem__("mode", "0644\n"),
+            "inherited-property operation name": lambda r: r["operation"].__setitem__("name", "toString"),
+            "preserved false": lambda r: r["expect"].__setitem__("mode", {"preserved": False}),
+            "expect not an object": lambda r: r.__setitem__("expect", ["refused"]),
+            "operation not an object": lambda r: r.__setitem__("operation", "write_atomic"),
+            "untouched not a list of strings": lambda r: r["expect"].__setitem__("untouched", "real"),
+            "operation name not a string": lambda r: r["operation"].__setitem__("name", ["write_atomic"]),
+            "setup kind not a string": lambda r: r["setup"][0].__setitem__("kind", ["dir"]),
+            "outcome not a string": lambda r: r["expect"].__setitem__("outcome", ["refused"]),
+            "entries_of value not a list": lambda r: r["expect"].__setitem__("entries_of", {"real": None}),
+            "unknown classify kind": lambda r: r["expect"].__setitem__("kinds", {"x.json": "bogus"}),
+            "kinds value a list": lambda r: r["expect"].__setitem__("kinds", {"x.json": ["file"]}),
+            "kinds value an object": lambda r: r["expect"].__setitem__("kinds", {"x.json": {}}),
+            "schema as a string": lambda r: r.__setitem__("schema", "1"),
+            "schema 2": lambda r: r.__setitem__("schema", 2),
+        }
+        for label, mutate in mutations.items():
+            row = json.loads(json.dumps(good)); mutate(row)
+            (bad / "dotdot-component.json").write_text(json.dumps(row), encoding="utf-8")
+            with self.subTest(mutation=label):
+                with self.assertRaises(ValueError):
+                    load_write_invariants(bad)
+        # Agreement cases the Node loader must answer identically (its test carries the same raw texts): `1.0` is the
+        # JSON number 1; a duplicate key keeps its LAST value; an escaped key spells the same key.
+        raw = json.dumps(good)
+        for label, text, ok in (("schema 1.0", raw.replace('"schema": 1,', '"schema": 1.0,'), True),
+                                ("duplicate schema, first NaN", raw.replace('"schema": 1,', '"schema": NaN, "schema": 1,'), False),
+                                ("duplicate schema, first Infinity", raw.replace('"schema": 1,', '"schema": Infinity, "schema": 1,'), False),
+                                ("lone surrogate in content", raw.replace('"content": "new"', '"content": "\\ud800"'), False),
+                                ("schema 1e0", raw.replace('"schema": 1,', '"schema": 1e0,'), True),
+                                ("discarded 4301-digit integer", raw.replace('"schema": 1,', '"schema": ' + "9" * 4301 + ', "schema": 1,'), True),
+                                ("discarded 17-level nesting", raw.replace('"schema": 1,', '"schema": ' + "[" * 17 + "0" + "]" * 17 + ', "schema": 1,'), False),
+                                ("discarded 12-level nesting", raw.replace('"schema": 1,', '"schema": ' + "[" * 12 + "0" + "]" * 12 + ', "schema": 1,'), True),
+                                ("discarded 2000-level nesting", raw.replace('"schema": 1,', '"schema": ' + "[" * 2000 + "0" + "]" * 2000 + ', "schema": 1,'), False),
+                                ("brackets inside a string are not nesting", raw.replace('"content": "new"', '"content": "' + "[" * 40 + '"'), True),
+                                ("discarded 15-level nesting is level 16 exactly", raw.replace('"schema": 1,', '"schema": ' + "[" * 15 + "0" + "]" * 15 + ', "schema": 1,'), True),
+                                ("discarded 16-level nesting is level 17", raw.replace('"schema": 1,', '"schema": ' + "[" * 16 + "0" + "]" * 16 + ', "schema": 1,'), False),
+                                ("a bracket run after an escaped backslash inside a string", raw.replace('"content": "new"', '"content": "a\\\\' + "[" * 30 + '"'), True),
+                                ("an escaped quote then brackets inside a string", raw.replace('"content": "new"', '"content": "a\\"' + "[" * 30 + '\\""'), True),
+                                ("an unterminated string followed by brackets", raw.replace('"content": "new"', '"content": "' + "[" * 30), False),
+                                ("lone surrogate in an entries item", raw.replace('"entries": [', '"entries": ["\\ud800", '), False),
+                                ("lone surrogate as a kinds key", raw.replace('"expect": {', '"expect": {"kinds": {"\\ud800": "file"}, '), False),
+                                ("exactly the byte cap", raw + " " * (65536 - len(raw.encode("utf-8"))), True),
+                                ("one byte over the cap", raw + " " * (65537 - len(raw.encode("utf-8"))), False),):
+            (bad / "dotdot-component.json").write_text(text, encoding="utf-8")
+            with self.subTest(agreement=label):
+                if ok:
+                    self.assertEqual(len(load_write_invariants(bad)), 1)
+                else:
+                    with self.assertRaises(ValueError):
+                        load_write_invariants(bad)
+        (bad / "dotdot-component.json").unlink()
+        for name, ok in ((".json", False), ("Dotdot-Component.json", False), ("dotdot component.json", False), ("dotdot.component.json", False), ("dotdot-component.json", True)):
+            for stale in bad.glob("*.json"):
+                stale.unlink()
+            doc = dict(good); doc["id"] = name[:-5]
+            (bad / name).write_text(json.dumps(doc), encoding="utf-8")
+            with self.subTest(filename=name):
+                if ok:
+                    self.assertEqual(len(load_write_invariants(bad)), 1)
+                else:
+                    with self.assertRaises(ValueError):
+                        load_write_invariants(bad)
+        for label, text, ok in (("schema with extra spaces", raw.replace('"schema": 1,', '"schema":  1,'), True),
+                                ("duplicate schema, last 1.0", raw.replace('"schema": 1,', '"schema": 1, "schema": 1.0,'), True),
+                                ("duplicate schema, last 2", raw.replace('"schema": 1,', '"schema": 1, "schema": 2,'), False),
+                                ("escaped key", raw.replace('"schema": 1,', '"\\u0073chema": 1,'), True)):
+            (bad / "dotdot-component.json").write_text(text, encoding="utf-8")
+            with self.subTest(agreement=label):
+                if ok:
+                    self.assertEqual(len(load_write_invariants(bad)), 1)
+                else:
+                    with self.assertRaises(ValueError):
+                        load_write_invariants(bad)
+        (bad / "dotdot-component.json").write_bytes(raw.encode("utf-8").replace(b'"content": "new"', b'"content": "n\xffw"'))
+        with self.subTest(agreement="invalid UTF-8 byte"):
+            with self.assertRaises(ValueError):
+                load_write_invariants(bad)
+        (bad / "dotdot-component.json").write_bytes(b"\xef\xbb\xbf" + raw.encode("utf-8"))
+        with self.subTest(agreement="UTF-8 BOM prefix"):
+            with self.assertRaises(ValueError):          # json.loads refuses a BOM; so does JSON.parse when the decoder keeps it
+                load_write_invariants(bad)
+        (bad / "dotdot-component.json").write_text(json.dumps(good), encoding="utf-8")
+        (bad / "renamed.json").write_text(json.dumps(good), encoding="utf-8")   # id != file stem
+        with self.assertRaises(ValueError):
+            load_write_invariants(bad)
+        for path in bad.glob("*.json"):
+            path.unlink()
+        with self.assertRaises(ValueError):                                   # an empty directory is not a matrix
+            load_write_invariants(bad)
 
 
 class TestAdvisorMirrorSkip(unittest.TestCase):

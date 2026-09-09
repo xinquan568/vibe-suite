@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "new-file-mode-never-exceeds-request",
+  "invariant": "A new file's permission bits are a subset of the requested bits under any umask \u2014 the invariant both kernels share. They differ inside it: bridge.py keeps the umask-filtered subset (0644 under 0077 -> 0600), write.mjs restores the requested bits (0644); neither exceeds the request.",
+  "setup": [],
+  "operation": {
+    "name": "write_atomic",
+    "dest": "n.json",
+    "content": "new",
+    "mode": "0644"
+  },
+  "expect": {
+    "outcome": "written",
+    "content": "new",
+    "mode": {
+      "subset_of": "0644"
+    },
+    "entries": [
+      "n.json"
+    ]
+  },
+  "umask": "0077"
+}

@@ -8,17 +8,18 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, closeSync, constants as fsConstants, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, renameSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 
 import {
   appendLineAt, classify, ensureDirAt, isOwnedTempRoot, judgeGenerationsAt, makeOwnedTempDir, publishNew,
   removeOwnedTree, retireGenerationsAt, rotateLogAt, scratch, openSinkAt, secureDirAt, unlinkOwned, writeAtomic,
-  EVENT_LINE_MAX, PRIVATE_FILE_MODE, STAMP_KEY,
+  EVENT_LINE_MAX, PRIVATE_FILE_MODE, STAMP_KEY, WriteError,
 } from "../../scripts/lib/write.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -1176,3 +1177,297 @@ test("the non-ENOENT error branches: a per-entry lstat failure is refused and th
 
 /** unlink that tolerates a missing file — the peer in a race may already have won. */
 function unlinkSyncSafe(p) { try { unlinkSync(p); } catch (error) { if (error.code !== "ENOENT") throw error; } }
+
+// --------------------------------------------------------------------- write-invariant matrix
+// M11 / vibe-222: ONE invariant list, as data (tests/fixtures/write-invariants/*.json), run against BOTH
+// safety kernels. tests/test_bridge_cli.py::WriteInvariantMatrix interprets the same files against
+// scripts/lib/bridge.py. This block is an interpreter of the rows, not a port of either kernel.
+
+const WRITE_INVARIANTS = path.join(REPO_ROOT, "tests", "fixtures", "write-invariants");
+const REQUIRED_KEYS = ["schema", "id", "invariant", "setup", "operation", "expect"];
+const ROW_KEYS = new Set([...REQUIRED_KEYS, "umask"]);
+const SETUP_KEYS = { dir: ["kind", "path"], file: ["kind", "path", "content", "mode"], symlink: ["kind", "path", "target"] };
+const SETUP_REQUIRED = { dir: ["kind", "path"], file: ["kind", "path", "content"], symlink: ["kind", "path", "target"] };
+const OPERATIONS = { write_atomic: writeAtomic, publish_new: publishNew };
+const OPERATION_KEYS = new Set(["name", "dest", "content", "mode"]);
+const OUTCOMES = new Set(["refused", "written", "declined"]);
+const EXPECT_KEYS = new Set(["outcome", "content", "mode", "untouched", "kinds", "entries", "entries_of"]);
+const MODE_RULES = new Set(["exact", "preserved", "subset_of"]);
+const KINDS = new Set(["absent", "symlink", "dir", "file", "other"]);   // classify's answers
+const octal = (s, where) => {
+  // `[\s\S]`-free anchors: JavaScript's `$` without the m flag matches only at the very end, so a trailing newline is refused.
+  if (typeof s !== "string" || !/^0[0-7]{3}$/.test(s)) throw new Error(`${where}: unknown mode/umask carrier ${JSON.stringify(s)} — a four-digit octal string like "0644"`);
+  return parseInt(s, 8);
+};
+const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const onlyKeys = (obj, allowed, required, where) => {
+  if (!isObject(obj)) throw new Error(`${where}: unknown shape — expected an object, got ${Array.isArray(obj) ? "array" : typeof obj}`);
+  const keys = Object.keys(obj);
+  if (keys.some((k) => !allowed.has(k)) || required.some((k) => !Object.hasOwn(obj, k))) throw new Error(`${where}: unknown or missing keys ${JSON.stringify(keys)}`);
+};
+// A lone surrogate (JSON `"\\ud800"`) is not a well-formed string; Node 18 has no `isWellFormed`, so a regex says it.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const text = (v, where) => {
+  if (typeof v !== "string") throw new Error(`${where}: unknown value — expected a string`);
+  return v;                               // well-formedness is checked for every string by `checkTree`
+};
+// Decode strictly: an invalid UTF-8 byte is a refusal, as it is for the Python loader (`readFileSync(…, "utf8")`
+// would silently substitute U+FFFD). JSON.parse already refuses the non-JSON constants NaN/Infinity.
+// The document class both loaders accept — stated as numbers, not as whichever parser gives out first. A row is
+// 400–900 bytes and four levels deep; the caps leave room and sit far below every engine's own limits.
+const MAX_ROW_BYTES = 65536;
+const MAX_DEPTH = 16;
+// The admissible row filename, stated identically in both loaders: `id` is the name minus `.json`, nothing else.
+const ROW_FILENAME = /^[a-z][a-z0-9-]*\.json$/;
+// Iterative walk: nesting deeper than MAX_DEPTH is refused, and EVERY string — key or value, at any depth, read
+// by the grammar or not — must be well-formed.
+const checkTree = (doc, where) => {
+  const stack = [[doc, 1]];
+  while (stack.length) {
+    const [node, depth] = stack.pop();
+    if (depth > MAX_DEPTH) throw new Error(`${where}: unknown document — nesting deeper than ${MAX_DEPTH}`);
+    if (Array.isArray(node)) for (const child of node) stack.push([child, depth + 1]);
+    else if (node !== null && typeof node === "object") {
+      for (const [key, child] of Object.entries(node)) { if (LONE_SURROGATE.test(key)) throw new Error(`${where}: unknown value — ill-formed string`); stack.push([child, depth + 1]); }
+    } else if (typeof node === "string" && LONE_SURROGATE.test(node)) throw new Error(`${where}: unknown value — ill-formed string`);
+  }
+};
+// Nesting depth of the raw text, counted BEFORE parsing — JSON.parse keeps only a duplicate key's last value, so a
+// post-parse walk never sees a discarded value's nesting. Strings are skipped (a bracket inside a string is not nesting).
+const rawDepth = (text, where) => {
+  let depth = 0, inString = false, escaped = false;
+  for (const ch of text) {
+    if (inString) { if (escaped) escaped = false; else if (ch === "\\") escaped = true; else if (ch === '"') inString = false; }
+    else if (ch === '"') inString = true;
+    else if (ch === "[" || ch === "{") { depth += 1; if (depth > MAX_DEPTH) throw new Error(`${where}: unknown document — nesting deeper than ${MAX_DEPTH}`); }
+    else if (ch === "]" || ch === "}") depth -= 1;
+  }
+};
+const readRow = (file) => {
+  if (!ROW_FILENAME.test(path.basename(file))) throw new Error(`${path.basename(file)}: unknown row filename — expected [a-z][a-z0-9-]*.json`);
+  const bytes = readFileSync(file);
+  if (bytes.length > MAX_ROW_BYTES) throw new Error(`${path.basename(file)}: unknown document — ${bytes.length} bytes exceeds the ${MAX_ROW_BYTES}-byte row limit`);
+  let decoded;
+  // `ignoreBOM: true` KEEPS a leading U+FEFF in the output, so JSON.parse refuses it — as `json.loads` does.
+  try { decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
+  catch (error) { throw new Error(`${path.basename(file)}: unknown encoding — not UTF-8 (${error.message})`); }
+  rawDepth(decoded, path.basename(file));   // before the parser: covers discarded duplicate values
+  let doc;
+  try { doc = JSON.parse(decoded); }      // every number is a double here, as it is for the Python loader (parse_int=float)
+  catch (error) { throw new Error(`${path.basename(file)}: unknown document — not JSON (${error.message})`); }
+  checkTree(doc, path.basename(file));
+  return doc;
+};
+export function loadWriteInvariants(directory = WRITE_INVARIANTS) {
+  const rows = [];
+  for (const name of readdirSync(directory).filter((n) => n.endsWith(".json")).sort()) {
+    const row = readRow(path.join(directory, name));
+    onlyKeys(row, ROW_KEYS, REQUIRED_KEYS, name);
+    // `schema` is the JSON NUMBER 1: `1.0` is that number (JSON.parse cannot tell them apart, and the Python loader
+    // agrees by construction); `true` and `"1"` are not (`=== 1` is strict). Duplicate keys keep the last value, as
+    // both parsers do; an escaped key spells the same key.
+    if (row.schema !== 1 || row.id !== name.slice(0, -5)) throw new Error(`${name}: unknown schema, or id does not equal the file stem`);
+    text(row.invariant, name);
+    if (!Array.isArray(row.setup)) throw new Error(`${name}: unknown shape — setup must be an array`);
+    for (const step of row.setup) {
+      if (!isObject(step) || typeof step.kind !== "string" || !Object.hasOwn(SETUP_KEYS, step.kind)) throw new Error(`${name}: unknown setup kind ${JSON.stringify(step)}`);
+      onlyKeys(step, new Set(SETUP_KEYS[step.kind]), SETUP_REQUIRED[step.kind], name);
+      for (const key of ["path", "content", "target"]) if (key in step) text(step[key], name);
+      if ("mode" in step) octal(step.mode, name);
+    }
+    onlyKeys(row.operation, OPERATION_KEYS, ["name", "dest", "content"], name);
+    // Own-property membership: `"toString" in OPERATIONS` is true through the prototype.
+    if (typeof row.operation.name !== "string" || !Object.hasOwn(OPERATIONS, row.operation.name)) throw new Error(`${name}: unknown operation ${JSON.stringify(row.operation.name)}`);
+    text(row.operation.dest, name); text(row.operation.content, name);
+    if ("mode" in row.operation) octal(row.operation.mode, name);
+    if ("umask" in row) octal(row.umask, name);
+    const expect = row.expect;
+    onlyKeys(expect, EXPECT_KEYS, ["outcome"], name);
+    if (typeof expect.outcome !== "string" || !OUTCOMES.has(expect.outcome)) throw new Error(`${name}: unknown expect keys or outcome`);
+    for (const key of ["untouched", "entries"]) {
+      if (key in expect && (!Array.isArray(expect[key]) || expect[key].some((x) => typeof x !== "string"))) throw new Error(`${name}: unknown shape — ${key} must be a list of strings`);
+    }
+    if ("kinds" in expect) {
+      if (!isObject(expect.kinds)) throw new Error(`${name}: unknown shape — kinds must be an object`);
+      for (const [rel, kind] of Object.entries(expect.kinds)) if (typeof kind !== "string" || !KINDS.has(kind)) throw new Error(`${name}: unknown kind ${JSON.stringify(kind)} for ${rel}`);
+    }
+    if ("entries_of" in expect) {
+      if (!isObject(expect.entries_of)) throw new Error(`${name}: unknown shape — entries_of must be an object`);
+      for (const [rel, names] of Object.entries(expect.entries_of)) if (!Array.isArray(names) || names.some((x) => typeof x !== "string")) throw new Error(`${name}: unknown shape — entries_of[${rel}] must be a list of strings`);
+    }
+    if ("content" in expect) text(expect.content, name);
+    if ("mode" in expect) {
+      if (!isObject(expect.mode)) throw new Error(`${name}: unknown mode rule`);
+      const rules = Object.keys(expect.mode);
+      if (rules.length !== 1 || !MODE_RULES.has(rules[0])) throw new Error(`${name}: unknown mode rule`);
+      if (rules[0] === "preserved") { if (expect.mode.preserved !== true) throw new Error(`${name}: unknown mode rule — preserved must be exactly true`); }
+      else octal(expect.mode[rules[0]], name);
+    }
+    rows.push(row);
+  }
+  if (rows.length === 0) throw new Error(`${directory}: no rows`);
+  return rows;
+}
+
+// Observation goes through the kernel's own `classify`; the interpreter decides nothing about kinds.
+const snapshot = async (p) => {
+  const kind = await classify(p);
+  return [kind, kind === "symlink" ? readlinkSync(p) : kind === "file" ? readFileSync(p) : null];
+};
+
+async function runRow(row) {
+  const root = realpathSync(tmpWorkspace("write-inv-"));
+  for (const step of row.setup) {
+    const target = path.join(root, step.path);
+    if (step.kind === "dir") mkdirSync(target, { recursive: true });
+    else if (step.kind === "file") { writeFileSync(target, step.content, "utf8"); if (step.mode) chmodSync(target, octal(step.mode)); }
+    else symlinkSync(step.target, target);
+  }
+  const { expect, operation: op } = row;
+  // NOT path.join: it would normalise a '..' component away before the kernel ever saw it.
+  const dest = `${root}${path.sep}${op.dest}`;
+  const before = {};
+  for (const rel of expect.untouched ?? []) before[rel] = await snapshot(path.join(root, rel));
+  const beforeMode = (await classify(dest)) === "file" ? mode(dest) : null;
+  const options = "mode" in op ? { mode: octal(op.mode) } : {};      // omission is the API's own default
+  const previous = "umask" in row ? process.umask(octal(row.umask)) : null;
+  let outcome;
+  try {
+    try {
+      const result = await OPERATIONS[op.name](root, dest, op.content, options);
+      outcome = result === false ? "declined" : "written";
+    } catch (error) {
+      if (!(error instanceof WriteError)) throw error;
+      outcome = "refused";
+    }
+  } finally {
+    if (previous !== null) process.umask(previous);
+  }
+  assert.equal(outcome, expect.outcome, `${row.id}: ${row.invariant}`);
+  if (outcome === "written") {
+    assert.equal(readFileSync(dest, "utf8"), expect.content, row.id);
+    if (expect.mode) {
+      const [[rule, value]] = Object.entries(expect.mode);
+      const actual = mode(dest);
+      if (rule === "exact") assert.equal(actual, octal(value), row.id);
+      else if (rule === "subset_of") assert.equal(actual & ~octal(value), 0, `${row.id}: ${actual.toString(8)} exceeds ${value}`);
+      else assert.equal(actual, beforeMode, row.id);
+    }
+  }
+  for (const [rel, snap] of Object.entries(before)) assert.deepEqual(await snapshot(path.join(root, rel)), snap, `${row.id}: ${rel} changed`);
+  for (const [rel, kind] of Object.entries(expect.kinds ?? {})) assert.equal(await classify(path.join(root, rel)), kind, `${row.id}: ${rel}`);
+  if (expect.entries) assert.deepEqual(readdirSync(root).sort(), [...expect.entries].sort(), row.id);
+  for (const [rel, names] of Object.entries(expect.entries_of ?? {})) assert.deepEqual(readdirSync(path.join(root, rel)).sort(), [...names].sort(), `${row.id}: ${rel}`);
+}
+
+for (const row of loadWriteInvariants()) {
+  test(`write-invariant matrix: ${row.id} holds against write.mjs`, async () => { await runRow(row); });
+}
+
+test("write-invariant matrix: the issue-named rows are present", () => {
+  const ids = new Set(loadWriteInvariants().map((r) => r.id));
+  for (const required of ["symlink-at-dest-replace", "intermediate-symlink", "dotdot-component", "fixed-name-collision", "mode-preserved-when-omitted", "crash-leftover"]) {
+    assert.ok(ids.has(required), required);
+  }
+});
+
+test("write-invariant matrix: a malformed row fails the loader instead of being skipped", () => {
+  const good = JSON.parse(readFileSync(path.join(WRITE_INVARIANTS, "dotdot-component.json"), "utf8"));
+  const mutations = {
+    "unknown operation": (r) => { r.operation.name = "write_anything"; },
+    "unknown outcome": (r) => { r.expect.outcome = "ignored"; },
+    "unknown top-level key": (r) => { r.skip = true; },
+    "unknown setup kind": (r) => { r.setup.push({ kind: "fifo", path: "f" }); },
+    "unknown setup field": (r) => { r.setup[0].mode_bits = "0644"; },
+    "unknown operation field": (r) => { r.operation.force = true; },
+    "missing required key": (r) => { delete r.invariant; },
+    "wrong schema": (r) => { r.schema = 2; },
+    "malformed octal mode": (r) => { r.operation.mode = "644x"; },
+    "decimal mode": (r) => { r.operation.mode = 420; },
+    "malformed umask": (r) => { r.umask = "22"; },
+    "two mode rules": (r) => { r.expect.mode = { exact: "0644", preserved: true }; },
+    "boolean schema": (r) => { r.schema = true; },
+    "setup not a list": (r) => { r.setup = {}; },
+    "setup step not an object": (r) => { r.setup = ["real"]; },
+    "mode with a trailing newline": (r) => { r.operation.mode = "0644\n"; },
+    "inherited-property operation name": (r) => { r.operation.name = "toString"; },
+    "preserved false": (r) => { r.expect.mode = { preserved: false }; },
+    "expect not an object": (r) => { r.expect = ["refused"]; },
+    "operation not an object": (r) => { r.operation = "write_atomic"; },
+    "untouched not a list of strings": (r) => { r.expect.untouched = "real"; },
+    "operation name not a string": (r) => { r.operation.name = ["write_atomic"]; },
+    "setup kind not a string": (r) => { r.setup[0].kind = ["dir"]; },
+    "outcome not a string": (r) => { r.expect.outcome = ["refused"]; },
+    "entries_of value not a list": (r) => { r.expect.entries_of = { real: null }; },
+    "unknown classify kind": (r) => { r.expect.kinds = { "x.json": "bogus" }; },
+    "kinds value a list": (r) => { r.expect.kinds = { "x.json": ["file"] }; },
+    "kinds value an object": (r) => { r.expect.kinds = { "x.json": {} }; },
+    "schema as a string": (r) => { r.schema = "1"; },
+    "schema 2": (r) => { r.schema = 2; },
+  };
+  for (const [label, mutate] of Object.entries(mutations)) {
+    const bad = tmpWorkspace("write-inv-bad-");
+    const row = JSON.parse(JSON.stringify(good)); mutate(row);
+    writeFileSync(path.join(bad, "dotdot-component.json"), JSON.stringify(row));
+    assert.throws(() => loadWriteInvariants(bad), /unknown/, label);
+  }
+  // Agreement cases the Python loader must answer identically (its test carries the same raw texts): `1.0` is the
+  // JSON number 1; a duplicate key keeps its LAST value; an escaped key spells the same key. Written as raw text —
+  // JSON.stringify would erase the `.0` and the duplicate.
+  const raw = JSON.stringify(good);
+  for (const [label, text, ok] of [
+    ["schema 1.0", raw.replace('"schema":1,', '"schema":1.0,'), true],
+    ["duplicate schema, first NaN", raw.replace('"schema":1,', '"schema":NaN,"schema":1,'), false],
+    ["duplicate schema, first Infinity", raw.replace('"schema":1,', '"schema":Infinity,"schema":1,'), false],
+    ["lone surrogate in content", raw.replace('"content":"new"', '"content":"\\ud800"'), false],
+    ["schema 1e0", raw.replace('"schema":1,', '"schema":1e0,'), true],
+    ["discarded 4301-digit integer", raw.replace('"schema":1,', '"schema":' + "9".repeat(4301) + ',"schema":1,'), true],
+    ["discarded 17-level nesting", raw.replace('"schema":1,', '"schema":' + "[".repeat(17) + "0" + "]".repeat(17) + ',"schema":1,'), false],
+    ["discarded 12-level nesting", raw.replace('"schema":1,', '"schema":' + "[".repeat(12) + "0" + "]".repeat(12) + ',"schema":1,'), true],
+    ["discarded 2000-level nesting", raw.replace('"schema":1,', '"schema":' + "[".repeat(2000) + "0" + "]".repeat(2000) + ',"schema":1,'), false],
+    ["brackets inside a string are not nesting", raw.replace('"content":"new"', '"content":"' + "[".repeat(40) + '"'), true],
+    ["discarded 15-level nesting is level 16 exactly", raw.replace('"schema":1,', '"schema":' + "[".repeat(15) + "0" + "]".repeat(15) + ',"schema":1,'), true],
+    ["discarded 16-level nesting is level 17", raw.replace('"schema":1,', '"schema":' + "[".repeat(16) + "0" + "]".repeat(16) + ',"schema":1,'), false],
+    ["a bracket run after an escaped backslash inside a string", raw.replace('"content":"new"', '"content":"a\\\\' + "[".repeat(30) + '"'), true],
+    ["an escaped quote then brackets inside a string", raw.replace('"content":"new"', '"content":"a\\"' + "[".repeat(30) + '\\""'), true],
+    ["an unterminated string followed by brackets", raw.replace('"content":"new"', '"content":"' + "[".repeat(30)), false],
+    ["lone surrogate in an entries item", raw.replace('"entries":[', '"entries":["\\ud800",'), false],
+    ["lone surrogate as a kinds key", raw.replace('"expect":{', '"expect":{"kinds":{"\\ud800":"file"},'), false],
+    ["exactly the byte cap", raw + " ".repeat(65536 - Buffer.byteLength(raw)), true],
+    ["one byte over the cap", raw + " ".repeat(65537 - Buffer.byteLength(raw)), false],
+  ]) {
+    const dir = tmpWorkspace("write-inv-agree-");
+    assert.notEqual(text, raw, label);
+    writeFileSync(path.join(dir, "dotdot-component.json"), text);
+    if (ok) assert.equal(loadWriteInvariants(dir).length, 1, label);
+    else assert.throws(() => loadWriteInvariants(dir), /unknown/, label);
+  }
+  // Filenames: the admissible domain is stated identically on both sides; `id` = name minus ".json".
+  for (const [name, ok] of [[".json", false], ["Dotdot-Component.json", false], ["dotdot component.json", false], ["dotdot.component.json", false], ["dotdot-component.json", true]]) {
+    const dir = tmpWorkspace("write-inv-name-");
+    writeFileSync(path.join(dir, name), JSON.stringify({ ...good, id: name.slice(0, -5) }));
+    if (ok) assert.equal(loadWriteInvariants(dir).length, 1, name);
+    else assert.throws(() => loadWriteInvariants(dir), /unknown/, name);
+  }
+  for (const [label, text, ok] of [["schema with extra spaces", raw.replace('"schema":1,', '"schema": 1,'), true],
+    ["duplicate schema, last 1.0", raw.replace('"schema":1,', '"schema":1,"schema":1.0,'), true],
+    ["duplicate schema, last 2", raw.replace('"schema":1,', '"schema":1,"schema":2,'), false],
+    ["escaped key", raw.replace('"schema":1,', '"\\u0073chema":1,'), true],
+  ]) {
+    const dir = tmpWorkspace("write-inv-agree-");
+    assert.notEqual(text, raw, label);
+    writeFileSync(path.join(dir, "dotdot-component.json"), text);
+    if (ok) assert.equal(loadWriteInvariants(dir).length, 1, label);
+    else assert.throws(() => loadWriteInvariants(dir), /unknown/, label);
+  }
+  const badBytes = tmpWorkspace("write-inv-agree-");
+  writeFileSync(path.join(badBytes, "dotdot-component.json"), Buffer.concat([Buffer.from(raw.replace('"content":"new"', '"content":"n')), Buffer.from([0xff]), Buffer.from('w"' + raw.split('"content":"new"')[1])]));
+  assert.throws(() => loadWriteInvariants(badBytes), /unknown encoding/, "invalid UTF-8 byte");
+  const bom = tmpWorkspace("write-inv-agree-");
+  writeFileSync(path.join(bom, "dotdot-component.json"), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(raw)]));
+  assert.throws(() => loadWriteInvariants(bom), /unknown document/, "UTF-8 BOM prefix");
+  const renamed = tmpWorkspace("write-inv-bad-");
+  writeFileSync(path.join(renamed, "renamed.json"), JSON.stringify(good));           // id != file stem
+  assert.throws(() => loadWriteInvariants(renamed), /unknown/);
+  assert.throws(() => loadWriteInvariants(tmpWorkspace("write-inv-empty-")), /no rows/);   // an empty directory is not a matrix
+});

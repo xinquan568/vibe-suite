@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "dotdot-component",
+  "invariant": "A '..' component in the destination is refused before any normalisation; nothing lands.",
+  "setup": [
+    {
+      "kind": "dir",
+      "path": "real"
+    }
+  ],
+  "operation": {
+    "name": "write_atomic",
+    "dest": "real/../x.json",
+    "content": "new"
+  },
+  "expect": {
+    "outcome": "refused",
+    "entries": [
+      "real"
+    ],
+    "entries_of": {
+      "real": []
+    }
+  }
+}

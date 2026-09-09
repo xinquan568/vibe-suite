@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "dangling-symlink-at-dest",
+  "invariant": "A dangling symlink is a symlink (lstat), not an absent destination.",
+  "setup": [
+    {
+      "kind": "symlink",
+      "path": "x.json",
+      "target": "nowhere.txt"
+    }
+  ],
+  "operation": {
+    "name": "write_atomic",
+    "dest": "x.json",
+    "content": "new"
+  },
+  "expect": {
+    "outcome": "refused",
+    "kinds": {
+      "x.json": "symlink"
+    },
+    "entries": [
+      "x.json"
+    ],
+    "untouched": [
+      "x.json"
+    ]
+  }
+}

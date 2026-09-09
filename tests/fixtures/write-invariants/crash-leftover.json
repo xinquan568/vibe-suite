@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "crash-leftover",
-  "invariant": "An orphan scratch left by a crash between stage and publish neither blocks nor is touched; the destination never carries partial bytes.",
+  "invariant": "An orphan scratch left by a crash between stage and publish neither blocks the next write nor is touched by it, and the destination ends with the complete new content. (A pin on recovery from a supplied leftover; atomicity itself is not observed here.)",
   "setup": [
     {
       "kind": "file",

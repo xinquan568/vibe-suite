@@ -21,6 +21,9 @@
     },
     "entries": [
       "x.json"
+    ],
+    "untouched": [
+      "x.json"
     ]
   }
 }

@@ -610,13 +610,26 @@ OPERATION_KEYS = {"name", "dest", "content", "mode"}
 OUTCOMES = {"refused", "written", "declined"}
 EXPECT_KEYS = {"outcome", "content", "mode", "untouched", "kinds", "entries", "entries_of"}
 MODE_RULES = {"exact", "preserved", "subset_of"}
-OCTAL = re.compile(r"^0[0-7]{3}$")
+OCTAL = re.compile(r"0[0-7]{3}")
 
 
 def _octal(value, where):
-    if not isinstance(value, str) or not OCTAL.match(value):
+    # `fullmatch`, not `match`: `$` would accept a trailing newline.
+    if not isinstance(value, str) or not OCTAL.fullmatch(value):
         raise ValueError(f"{where}: mode/umask must be a four-digit octal string like '0644', got {value!r}")
     return int(value, 8)
+
+
+def _mapping(value, where):
+    if not isinstance(value, dict):
+        raise ValueError(f"{where}: expected an object, got {type(value).__name__}")
+    return value
+
+
+def _text(value, where):
+    if not isinstance(value, str):
+        raise ValueError(f"{where}: expected a string, got {type(value).__name__}")
+    return value
 
 
 def load_write_invariants(directory=WRITE_INVARIANTS):
@@ -625,32 +638,53 @@ def load_write_invariants(directory=WRITE_INVARIANTS):
     fail that interpreter, or the 'either kernel failing a row fails CI' property is lost."""
     rows = []
     for path in sorted(Path(directory).glob("*.json")):
-        row = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(row, dict) or set(row) - ROW_KEYS or REQUIRED_KEYS - set(row):
+        row = _mapping(json.loads(path.read_text(encoding="utf-8")), path.name)
+        if set(row) - ROW_KEYS or REQUIRED_KEYS - set(row):
             raise ValueError(f"{path.name}: unknown or missing top-level keys")
-        if row["schema"] != 1 or row["id"] != path.stem:
-            raise ValueError(f"{path.name}: schema must be 1 and id must equal the file stem")
+        # `type(...) is int`: a JSON `true` is a bool, and bool is a subclass of int — `== 1` would accept it.
+        if type(row["schema"]) is not int or row["schema"] != 1 or row["id"] != path.stem:
+            raise ValueError(f"{path.name}: schema must be the integer 1 and id must equal the file stem")
+        _text(row["invariant"], path.name)
+        if not isinstance(row["setup"], list):
+            raise ValueError(f"{path.name}: setup must be a list")
         for step in row["setup"]:
+            step = _mapping(step, path.name)
             kind = step.get("kind")
             if kind not in SETUP_KEYS or set(step) - SETUP_KEYS[kind] or SETUP_REQUIRED[kind] - set(step):
                 raise ValueError(f"{path.name}: unknown setup kind or fields {step!r}")
+            for key in ("path", "content", "target"):
+                if key in step:
+                    _text(step[key], path.name)
             if "mode" in step:
                 _octal(step["mode"], path.name)
-        op = row["operation"]
+        op = _mapping(row["operation"], path.name)
         if set(op) - OPERATION_KEYS or {"name", "dest", "content"} - set(op) or op["name"] not in OPERATIONS:
             raise ValueError(f"{path.name}: unknown operation or operation fields {op!r}")
+        _text(op["dest"], path.name); _text(op["content"], path.name)
         if "mode" in op:
             _octal(op["mode"], path.name)
         if "umask" in row:
             _octal(row["umask"], path.name)
-        expect = row["expect"]
+        expect = _mapping(row["expect"], path.name)
         if set(expect) - EXPECT_KEYS or expect.get("outcome") not in OUTCOMES:
             raise ValueError(f"{path.name}: unknown expect keys or outcome")
+        for key in ("untouched", "entries"):
+            if key in expect and (not isinstance(expect[key], list) or not all(isinstance(x, str) for x in expect[key])):
+                raise ValueError(f"{path.name}: {key} must be a list of strings")
+        for key in ("kinds", "entries_of"):
+            if key in expect:
+                _mapping(expect[key], path.name)
+        if "content" in expect:
+            _text(expect["content"], path.name)
         if "mode" in expect:
-            if len(expect["mode"]) != 1 or set(expect["mode"]) - MODE_RULES:
+            mode = _mapping(expect["mode"], path.name)
+            if len(mode) != 1 or set(mode) - MODE_RULES:
                 raise ValueError(f"{path.name}: unknown mode rule")
-            (rule, value), = expect["mode"].items()
-            if rule != "preserved":
+            (rule, value), = mode.items()
+            if rule == "preserved":
+                if value is not True:
+                    raise ValueError(f"{path.name}: preserved must be exactly true")
+            else:
                 _octal(value, path.name)
         rows.append(row)
     if not rows:
@@ -675,8 +709,10 @@ class WriteInvariantMatrix(unittest.TestCase):
                 target.symlink_to(step["target"])
 
     def _snapshot(self, root, rel):
+        # Observation goes through the kernel's own `classify`; the interpreter decides nothing about kinds.
         p = root / rel
-        return (bridge.classify(p), os.readlink(p) if p.is_symlink() else p.read_bytes())
+        kind = bridge.classify(p)
+        return (kind, os.readlink(p) if kind == "symlink" else p.read_bytes() if kind == "file" else None)
 
     def _run(self, row):
         root = Path(tempfile.mkdtemp(prefix="vibe-wi-")).resolve()
@@ -686,7 +722,7 @@ class WriteInvariantMatrix(unittest.TestCase):
         before = {rel: self._snapshot(root, rel) for rel in expect.get("untouched", [])}
         op = row["operation"]
         dest_path = root / op["dest"]
-        before_mode = (dest_path.stat().st_mode & 0o777) if dest_path.is_file() and not dest_path.is_symlink() else None
+        before_mode = (dest_path.stat().st_mode & 0o777) if bridge.classify(dest_path) == "file" else None
         kwargs = {"mode": int(op["mode"], 8)} if "mode" in op else {}   # omission is the API's own default
         fn = getattr(bridge, op["name"])
         previous = os.umask(int(row["umask"], 8)) if "umask" in row else None
@@ -751,6 +787,15 @@ class WriteInvariantMatrix(unittest.TestCase):
             "decimal mode": lambda r: r["operation"].__setitem__("mode", 420),
             "malformed umask": lambda r: r.__setitem__("umask", "22"),
             "two mode rules": lambda r: r["expect"].__setitem__("mode", {"exact": "0644", "preserved": True}),
+            "boolean schema": lambda r: r.__setitem__("schema", True),
+            "setup not a list": lambda r: r.__setitem__("setup", {}),
+            "setup step not an object": lambda r: r.__setitem__("setup", ["real"]),
+            "mode with a trailing newline": lambda r: r["operation"].__setitem__("mode", "0644\n"),
+            "inherited-property operation name": lambda r: r["operation"].__setitem__("name", "toString"),
+            "preserved false": lambda r: r["expect"].__setitem__("mode", {"preserved": False}),
+            "expect not an object": lambda r: r.__setitem__("expect", ["refused"]),
+            "operation not an object": lambda r: r.__setitem__("operation", "write_atomic"),
+            "untouched not a list of strings": lambda r: r["expect"].__setitem__("untouched", "real"),
         }
         for label, mutate in mutations.items():
             row = json.loads(json.dumps(good)); mutate(row)

@@ -22,7 +22,8 @@
   "expect": {
     "outcome": "refused",
     "untouched": [
-      "target.txt"
+      "target.txt",
+      "x.json"
     ],
     "kinds": {
       "x.json": "symlink"

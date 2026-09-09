@@ -26,6 +26,9 @@
     ],
     "entries_of": {
       "real": []
-    }
+    },
+    "untouched": [
+      "link"
+    ]
   }
 }

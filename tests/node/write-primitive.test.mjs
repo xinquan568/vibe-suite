@@ -1194,13 +1194,17 @@ const OUTCOMES = new Set(["refused", "written", "declined"]);
 const EXPECT_KEYS = new Set(["outcome", "content", "mode", "untouched", "kinds", "entries", "entries_of"]);
 const MODE_RULES = new Set(["exact", "preserved", "subset_of"]);
 const octal = (s, where) => {
+  // `[\s\S]`-free anchors: JavaScript's `$` without the m flag matches only at the very end, so a trailing newline is refused.
   if (typeof s !== "string" || !/^0[0-7]{3}$/.test(s)) throw new Error(`${where}: unknown mode/umask carrier ${JSON.stringify(s)} — a four-digit octal string like "0644"`);
   return parseInt(s, 8);
 };
+const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const onlyKeys = (obj, allowed, required, where) => {
+  if (!isObject(obj)) throw new Error(`${where}: unknown shape — expected an object, got ${Array.isArray(obj) ? "array" : typeof obj}`);
   const keys = Object.keys(obj);
-  if (keys.some((k) => !allowed.has(k)) || required.some((k) => !(k in obj))) throw new Error(`${where}: unknown or missing keys ${JSON.stringify(keys)}`);
+  if (keys.some((k) => !allowed.has(k)) || required.some((k) => !Object.hasOwn(obj, k))) throw new Error(`${where}: unknown or missing keys ${JSON.stringify(keys)}`);
 };
+const text = (v, where) => { if (typeof v !== "string") throw new Error(`${where}: unknown value — expected a string`); return v; };
 
 // Strict: an unknown key, kind, operation, outcome or mode rule throws — a row this interpreter cannot
 // express must FAIL here, never be skipped, or a typo silently shrinks the matrix on one side.
@@ -1209,22 +1213,36 @@ export function loadWriteInvariants(directory = WRITE_INVARIANTS) {
   for (const name of readdirSync(directory).filter((n) => n.endsWith(".json")).sort()) {
     const row = JSON.parse(readFileSync(path.join(directory, name), "utf8"));
     onlyKeys(row, ROW_KEYS, REQUIRED_KEYS, name);
+    // `=== 1` is strict already (a JSON `true` is not 1 in JavaScript); the id must be the file stem.
     if (row.schema !== 1 || row.id !== name.slice(0, -5)) throw new Error(`${name}: unknown schema, or id does not equal the file stem`);
+    text(row.invariant, name);
+    if (!Array.isArray(row.setup)) throw new Error(`${name}: unknown shape — setup must be an array`);
     for (const step of row.setup) {
-      if (!(step.kind in SETUP_KEYS)) throw new Error(`${name}: unknown setup kind ${step.kind}`);
+      if (!isObject(step) || !Object.hasOwn(SETUP_KEYS, step.kind)) throw new Error(`${name}: unknown setup kind ${JSON.stringify(step)}`);
       onlyKeys(step, new Set(SETUP_KEYS[step.kind]), SETUP_REQUIRED[step.kind], name);
+      for (const key of ["path", "content", "target"]) if (key in step) text(step[key], name);
       if ("mode" in step) octal(step.mode, name);
     }
     onlyKeys(row.operation, OPERATION_KEYS, ["name", "dest", "content"], name);
-    if (!(row.operation.name in OPERATIONS)) throw new Error(`${name}: unknown operation ${row.operation.name}`);
+    // Own-property membership: `"toString" in OPERATIONS` is true through the prototype.
+    if (!Object.hasOwn(OPERATIONS, row.operation.name)) throw new Error(`${name}: unknown operation ${row.operation.name}`);
+    text(row.operation.dest, name); text(row.operation.content, name);
     if ("mode" in row.operation) octal(row.operation.mode, name);
     if ("umask" in row) octal(row.umask, name);
     const expect = row.expect;
-    if (Object.keys(expect).some((k) => !EXPECT_KEYS.has(k)) || !OUTCOMES.has(expect.outcome)) throw new Error(`${name}: unknown expect keys or outcome`);
+    onlyKeys(expect, EXPECT_KEYS, ["outcome"], name);
+    if (!OUTCOMES.has(expect.outcome)) throw new Error(`${name}: unknown expect keys or outcome`);
+    for (const key of ["untouched", "entries"]) {
+      if (key in expect && (!Array.isArray(expect[key]) || expect[key].some((x) => typeof x !== "string"))) throw new Error(`${name}: unknown shape — ${key} must be a list of strings`);
+    }
+    for (const key of ["kinds", "entries_of"]) if (key in expect && !isObject(expect[key])) throw new Error(`${name}: unknown shape — ${key} must be an object`);
+    if ("content" in expect) text(expect.content, name);
     if ("mode" in expect) {
+      if (!isObject(expect.mode)) throw new Error(`${name}: unknown mode rule`);
       const rules = Object.keys(expect.mode);
       if (rules.length !== 1 || !MODE_RULES.has(rules[0])) throw new Error(`${name}: unknown mode rule`);
-      if (rules[0] !== "preserved") octal(expect.mode[rules[0]], name);
+      if (rules[0] === "preserved") { if (expect.mode.preserved !== true) throw new Error(`${name}: unknown mode rule — preserved must be exactly true`); }
+      else octal(expect.mode[rules[0]], name);
     }
     rows.push(row);
   }
@@ -1232,7 +1250,11 @@ export function loadWriteInvariants(directory = WRITE_INVARIANTS) {
   return rows;
 }
 
-const snapshot = async (p) => [await classify(p), lstatSync(p).isSymbolicLink() ? readlinkSync(p) : readFileSync(p)];
+// Observation goes through the kernel's own `classify`; the interpreter decides nothing about kinds.
+const snapshot = async (p) => {
+  const kind = await classify(p);
+  return [kind, kind === "symlink" ? readlinkSync(p) : kind === "file" ? readFileSync(p) : null];
+};
 
 async function runRow(row) {
   const root = realpathSync(tmpWorkspace("write-inv-"));
@@ -1247,8 +1269,7 @@ async function runRow(row) {
   const dest = `${root}${path.sep}${op.dest}`;
   const before = {};
   for (const rel of expect.untouched ?? []) before[rel] = await snapshot(path.join(root, rel));
-  const destIsFile = existsSync(dest) && !lstatSync(dest).isSymbolicLink() && statSync(dest).isFile();
-  const beforeMode = destIsFile ? mode(dest) : null;
+  const beforeMode = (await classify(dest)) === "file" ? mode(dest) : null;
   const options = "mode" in op ? { mode: octal(op.mode) } : {};      // omission is the API's own default
   const previous = "umask" in row ? process.umask(octal(row.umask)) : null;
   let outcome;
@@ -1306,6 +1327,15 @@ test("write-invariant matrix: a malformed row fails the loader instead of being 
     "decimal mode": (r) => { r.operation.mode = 420; },
     "malformed umask": (r) => { r.umask = "22"; },
     "two mode rules": (r) => { r.expect.mode = { exact: "0644", preserved: true }; },
+    "boolean schema": (r) => { r.schema = true; },
+    "setup not a list": (r) => { r.setup = {}; },
+    "setup step not an object": (r) => { r.setup = ["real"]; },
+    "mode with a trailing newline": (r) => { r.operation.mode = "0644\n"; },
+    "inherited-property operation name": (r) => { r.operation.name = "toString"; },
+    "preserved false": (r) => { r.expect.mode = { preserved: false }; },
+    "expect not an object": (r) => { r.expect = ["refused"]; },
+    "operation not an object": (r) => { r.operation = "write_atomic"; },
+    "untouched not a list of strings": (r) => { r.expect.untouched = "real"; },
   };
   for (const [label, mutate] of Object.entries(mutations)) {
     const bad = tmpWorkspace("write-inv-bad-");

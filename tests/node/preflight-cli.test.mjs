@@ -8,7 +8,7 @@
 
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import path from "node:path";
@@ -441,6 +441,37 @@ test("R-REAP: an unreaped probe group is a failure, not a version (vibe-209)", a
   assert.equal(confirmed.available, true, "and the same output WITH confirmation is fine");
 });
 
+// vibe-283: readiness for a shell fixture that publishes a pid.
+//
+// Synchronous BY DESIGN. `runWithDeadline` invokes `onSpawned` at `scripts/lib/process.mjs:160` and
+// creates its deadline timer at `:183`; the callback's return value is discarded, so a promise would
+// not be awaited and only synchronous work can delay arming. Blocking this loop is safe here: the
+// fixture is a separate OS process and keeps running while we wait.
+//
+// The sleep uses `Atomics.wait` rather than a spin so it does not compete for CPU with the very
+// fixture it is waiting for — the original defect only appeared when CPU was scarce.
+const READY_BUDGET_MS = 10_000;
+
+function readPublishedPidSync(target, budgetMs, stepMs = 10) {
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    // Existence is not readiness: `printf '%s' "$!" > file` creates and truncates the target before
+    // it writes, so the contents must parse to a positive integer before we call the fixture ready.
+    if (existsSync(target)) {
+      let raw = "";
+      try { raw = readFileSync(target, "utf8").trim(); } catch { raw = ""; }
+      if (/^[0-9]+$/.test(raw)) {
+        const pid = Number(raw);
+        if (Number.isInteger(pid) && pid > 0) return pid;
+      }
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return null;
+    Atomics.wait(sleeper, 0, 0, Math.min(stepMs, remaining));
+  }
+}
+
 test("R-DESCENDANT: only a GROUP-wide deadline reaps a probe's descendant (vibe-209)", async () => {
   // What `detached: true` is FOR, measured in both directions rather than asserted in one.
   //
@@ -461,20 +492,30 @@ test("R-DESCENDANT: only a GROUP-wide deadline reaps a probe's descendant (vibe-
     const fake = path.join(bin, "python3");
     // A backgrounded grandchild that would outlive its parent, then a parent that hangs past the
     // deadline. Only signalling the whole group reaches the grandchild.
+    // Published atomically: `> dest` would create and truncate `dest` before `printf` writes, so a
+    // reader can observe it empty. A rename within one directory cannot be observed half-done.
+    const tmp = JSON.stringify(`${pidFile}.tmp`);
+    const dest = JSON.stringify(pidFile);
     writeFileSync(fake,
-      `#!/bin/sh\nsh -c 'sleep 30' &\nprintf '%s' "$!" > ${JSON.stringify(pidFile)}\nsleep 30\n`);
+      `#!/bin/sh\nsh -c 'sleep 30' &\nprintf '%s' "$!" > ${tmp}\nmv ${tmp} ${dest}\nsleep 30\n`);
     chmodSync(fake, 0o755);
     return { fake, pidFile };
   };
 
   const observe = async (detached) => {
     const { fake, pidFile } = spawnHangingParentWithChild();
+    let ready = null;
     const outcome = await runWithDeadline({
       command: fake, args: ["--version"], env: process.env, timeoutMs: 1000, detached,
+      // vibe-283: the deadline must not start until the fixture has published. Before this gate the
+      // 1s deadline raced the fixture's startup, and a starved fixture reported as a reaping failure.
+      onSpawned: () => { ready = readPublishedPidSync(pidFile, READY_BUDGET_MS); },
     });
     await new Promise((resolve) => { setTimeout(resolve, 600); });
-    assert.ok(existsSync(pidFile), "the fixture must actually have spawned a descendant");
-    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    assert.ok(ready !== null,
+      "fixture setup: the descendant's pid must be published before the deadline is armed. A failure "
+      + "here is a readiness failure, not a reaping regression (vibe-283).");
+    const pid = ready;
     assert.ok(Number.isInteger(pid) && pid > 0, `a descendant pid was recorded: ${pid}`);
     let alive = true;
     try { process.kill(pid, 0); } catch { alive = false; }
@@ -494,6 +535,91 @@ test("R-DESCENDANT: only a GROUP-wide deadline reaps a probe's descendant (vibe-
     "and the descendant SURVIVES — which is the failure the runtime probe must not have. If this "
     + "assertion ever fails, the measurement no longer discriminates and the test above proves "
     + "nothing.");
+});
+
+// --- vibe-283: fixture readiness must be established BEFORE the deadline is armed ---------------
+//
+// `R-DESCENDANT` above measures reaping, but its precondition — that the fixture had published its
+// descendant's pid — raced the deadline. `runWithDeadline` calls `onSpawned` at `process.mjs:160`
+// and only then creates its timer at `:183`, so the clock runs from spawn whether or not the child
+// has been scheduled. Under load the fixture lost that race and the suite reported a reaping
+// failure that had not happened.
+//
+// Readiness is a PUBLISHED VALID PID, never a merely-created path: `printf '%s' "$!" > file`
+// creates and truncates its target BEFORE `printf` runs, so gating on existence alone would arm the
+// deadline over an empty file and move the race to the pid-parse assertion instead of removing it.
+
+/** A fixture that spawns its descendant immediately but publishes the pid only after `delay`. */
+const slowPublishFixture = (pidFile, delay) => {
+  const tmp = JSON.stringify(`${pidFile}.tmp`);
+  const dest = JSON.stringify(pidFile);
+  return `#!/bin/sh\nsh -c 'sleep 30' &\nsleep ${delay}\nprintf '%s' "$!" > ${tmp}\nmv ${tmp} ${dest}\nsleep 30\n`;
+};
+
+test("R-READY-TIMEOUT: readiness times out rather than reporting a pid that was never published (vibe-283)", () => {
+  const target = path.join(tempDir("ready-timeout-"), "never.pid");
+  const started = Date.now();
+  const pid = readPublishedPidSync(target, 300);
+  const elapsed = Date.now() - started;
+  assert.equal(pid, null, "a path that never appears is never ready");
+  assert.ok(elapsed >= 250, `it must actually wait out its budget, waited ${elapsed}ms`);
+  assert.ok(elapsed < 5000, `and must not hang past it, waited ${elapsed}ms`);
+});
+
+test("R-READY-EMPTY: an existing but EMPTY pid file is not readiness (vibe-283)", () => {
+  // The mutant this kills: a helper gating on existSync alone. The shell creates the redirect
+  // target before writing it, so existence-only readiness re-opens the vibe-283 race silently.
+  const target = path.join(tempDir("ready-empty-"), "empty.pid");
+  writeFileSync(target, "");
+  assert.ok(existsSync(target), "precondition: the path exists");
+  assert.equal(readPublishedPidSync(target, 300), null,
+    "an existing but empty file is not a published pid");
+  writeFileSync(target, "not-a-pid");
+  assert.equal(readPublishedPidSync(target, 300), null,
+    "and neither is a file whose contents do not parse to a positive integer");
+});
+
+test("R-READY-WAITS: readiness returns the published pid, and not before it is published (vibe-283)", () => {
+  const target = path.join(tempDir("ready-waits-"), "late.pid");
+  const tmp = `${target}.tmp`;
+  const publisher = spawn("/bin/sh",
+    ["-c", `sleep 0.5; printf '%s' 4242 > ${JSON.stringify(tmp)}; mv ${JSON.stringify(tmp)} ${JSON.stringify(target)}`],
+    { stdio: "ignore" });
+  const started = Date.now();
+  const pid = readPublishedPidSync(target, READY_BUDGET_MS);
+  const elapsed = Date.now() - started;
+  publisher.kill();
+  assert.equal(pid, 4242, "the published pid is returned");
+  assert.ok(elapsed >= 400, `and not before it was published, returned after ${elapsed}ms`);
+});
+
+test("R-DESCENDANT-SLOWSTART: a slow-publishing fixture still measures reaping, not startup (vibe-283)", async () => {
+  // The regression for the flake itself, made DETERMINISTIC: the delay is a property of the fixture
+  // rather than of machine load, so this fails on any machine — not only a contended one — when the
+  // readiness gate is removed. A 1.5s publish against a 1s deadline loses every time.
+  const { runWithDeadline } = await import("../../scripts/lib/process.mjs");
+  const bin = tempDir("preflight-slowstart-");
+  const pidFile = path.join(bin, "descendant.pid");
+  const fake = path.join(bin, "python3");
+  writeFileSync(fake, slowPublishFixture(pidFile, "1.5"));
+  chmodSync(fake, 0o755);
+
+  let ready = null;
+  const outcome = await runWithDeadline({
+    command: fake, args: ["--version"], env: process.env, timeoutMs: 1000, detached: true,
+    onSpawned: () => { ready = readPublishedPidSync(pidFile, READY_BUDGET_MS); },
+  });
+
+  assert.ok(ready !== null,
+    "the readiness gate must complete before the deadline is armed. Without it the fixture's 1.5s "
+    + "publish loses to the 1s deadline on EVERY machine — which is the vibe-283 flake, made "
+    + "deterministic. A failure here means the gate is gone, not that reaping regressed.");
+  assert.equal(outcome.groupReaped, true, "the detached form still confirms the group is gone");
+  let alive = true;
+  try { process.kill(ready, 0); } catch { alive = false; }
+  if (alive) { try { process.kill(ready, "SIGKILL"); } catch { /* already gone */ } }
+  assert.equal(alive, false,
+    "and the descendant still dies with the group — the property R-DESCENDANT exists to measure");
 });
 
 test("R-BOUNDS: an implausible version component is REJECTED, not truncated (vibe-209)", () => {

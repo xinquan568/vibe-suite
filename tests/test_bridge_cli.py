@@ -674,7 +674,7 @@ def load_write_invariants(directory=WRITE_INVARIANTS):
                 raise ValueError(f"{path.name}: {key} must be a list of strings")
         if "kinds" in expect:
             for rel, kind in _mapping(expect["kinds"], path.name).items():
-                if kind not in KINDS:
+                if _text(kind, path.name) not in KINDS:                # a string BEFORE the membership test
                     raise ValueError(f"{path.name}: unknown kind {kind!r} for {rel}")
         if "entries_of" in expect:
             for rel, names in _mapping(expect["entries_of"], path.name).items():
@@ -807,6 +807,9 @@ class WriteInvariantMatrix(unittest.TestCase):
             "outcome not a string": lambda r: r["expect"].__setitem__("outcome", ["refused"]),
             "entries_of value not a list": lambda r: r["expect"].__setitem__("entries_of", {"real": None}),
             "unknown classify kind": lambda r: r["expect"].__setitem__("kinds", {"x.json": "bogus"}),
+            "kinds value a list": lambda r: r["expect"].__setitem__("kinds", {"x.json": ["file"]}),
+            "kinds value an object": lambda r: r["expect"].__setitem__("kinds", {"x.json": {}}),
+            "schema 1.0": lambda r: r.__setitem__("schema", 1.0),
         }
         for label, mutate in mutations.items():
             row = json.loads(json.dumps(good)); mutate(row)

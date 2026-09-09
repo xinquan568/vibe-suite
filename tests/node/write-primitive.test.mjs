@@ -1212,10 +1212,12 @@ const text = (v, where) => { if (typeof v !== "string") throw new Error(`${where
 export function loadWriteInvariants(directory = WRITE_INVARIANTS) {
   const rows = [];
   for (const name of readdirSync(directory).filter((n) => n.endsWith(".json")).sort()) {
-    const row = JSON.parse(readFileSync(path.join(directory, name), "utf8"));
+    const raw = readFileSync(path.join(directory, name), "utf8");
+    const row = JSON.parse(raw);
     onlyKeys(row, ROW_KEYS, REQUIRED_KEYS, name);
-    // `=== 1` is strict already (a JSON `true` is not 1 in JavaScript); the id must be the file stem.
-    if (row.schema !== 1 || row.id !== name.slice(0, -5)) throw new Error(`${name}: unknown schema, or id does not equal the file stem`);
+    // `=== 1` refuses `true` but not `1.0`: JSON.parse turns both `1` and `1.0` into the number 1, so the raw token is
+    // checked too — the Python loader refuses a float, and the two loaders must agree.
+    if (row.schema !== 1 || !/"schema"\s*:\s*1(?![.\deE])/.test(raw) || row.id !== name.slice(0, -5)) throw new Error(`${name}: unknown schema, or id does not equal the file stem`);
     text(row.invariant, name);
     if (!Array.isArray(row.setup)) throw new Error(`${name}: unknown shape — setup must be an array`);
     for (const step of row.setup) {
@@ -1238,7 +1240,7 @@ export function loadWriteInvariants(directory = WRITE_INVARIANTS) {
     }
     if ("kinds" in expect) {
       if (!isObject(expect.kinds)) throw new Error(`${name}: unknown shape — kinds must be an object`);
-      for (const [rel, kind] of Object.entries(expect.kinds)) if (!KINDS.has(kind)) throw new Error(`${name}: unknown kind ${JSON.stringify(kind)} for ${rel}`);
+      for (const [rel, kind] of Object.entries(expect.kinds)) if (typeof kind !== "string" || !KINDS.has(kind)) throw new Error(`${name}: unknown kind ${JSON.stringify(kind)} for ${rel}`);
     }
     if ("entries_of" in expect) {
       if (!isObject(expect.entries_of)) throw new Error(`${name}: unknown shape — entries_of must be an object`);
@@ -1349,6 +1351,8 @@ test("write-invariant matrix: a malformed row fails the loader instead of being 
     "outcome not a string": (r) => { r.expect.outcome = ["refused"]; },
     "entries_of value not a list": (r) => { r.expect.entries_of = { real: null }; },
     "unknown classify kind": (r) => { r.expect.kinds = { "x.json": "bogus" }; },
+    "kinds value a list": (r) => { r.expect.kinds = { "x.json": ["file"] }; },
+    "kinds value an object": (r) => { r.expect.kinds = { "x.json": {} }; },
   };
   for (const [label, mutate] of Object.entries(mutations)) {
     const bad = tmpWorkspace("write-inv-bad-");
@@ -1356,6 +1360,10 @@ test("write-invariant matrix: a malformed row fails the loader instead of being 
     writeFileSync(path.join(bad, "dotdot-component.json"), JSON.stringify(row));
     assert.throws(() => loadWriteInvariants(bad), /unknown/, label);
   }
+  // `1.0` survives only as raw text — JSON.stringify would write `1` — so this negative is written as text.
+  const floatSchema = tmpWorkspace("write-inv-bad-");
+  writeFileSync(path.join(floatSchema, "dotdot-component.json"), JSON.stringify(good).replace('"schema":1', '"schema":1.0'));
+  assert.throws(() => loadWriteInvariants(floatSchema), /unknown/, "schema 1.0");
   const renamed = tmpWorkspace("write-inv-bad-");
   writeFileSync(path.join(renamed, "renamed.json"), JSON.stringify(good));           // id != file stem
   assert.throws(() => loadWriteInvariants(renamed), /unknown/);

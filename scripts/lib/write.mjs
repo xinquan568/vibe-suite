@@ -690,6 +690,33 @@ async function removeInside(dir, keep) {
 }
 
 /**
+ * Read a file's bytes WITHOUT traversing a symlink at its final component (vibe-261).
+ *
+ * The sibling of `readOwned` for callers that must not require an ownership stamp -- the jobs
+ * store's committed version slots predate stamping, and requiring one would reject every slot
+ * written before `554be10` (that migration is #302). It lives here rather than at the call site
+ * because `O_NOFOLLOW` needs a numeric flag, and raw `open` in a shipped module is exactly what
+ * `tests/node/no-raw-fs-writes.mjs` refuses: fs capabilities belong to this primitive.
+ *
+ * Unlike `readOwned` this does NOT collapse failures into `null`. The errno is the caller's
+ * evidence: `ENOENT` means absent, `ELOOP` means a link was refused (raised at `open`, so a
+ * DANGLING link is reported as a link and never as absence), and `EISDIR` means a directory sits
+ * at the name. A caller that cannot tell those apart cannot report them apart.
+ */
+export async function readNoFollow(root, rel) {
+  await assertRoot(root);
+  const target = path.resolve(root, rel);
+  await assertInside(root, target);
+  let handle;
+  try {
+    handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+    return await handle.readFile("utf8");
+  } finally {
+    await handle?.close();
+  }
+}
+
+/**
  * Read a stamped file of ours (vibe-204): parsed JSON, or `null`. Opened `O_NOFOLLOW` and checked
  * to be a regular file THROUGH THE HANDLE, so a symlink at the path — even one whose target is a
  * perfectly valid file of ours — is `null`, as is a directory, an unparseable file, or a file

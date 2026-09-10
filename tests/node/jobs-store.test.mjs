@@ -18,6 +18,7 @@ import test from "node:test";
 import {
   createRecord, finaliseRecord, isAbandoned, jobsDir, listRecords, newRecord, pruneTerminalJobs,
   readRecord, reapOrphanTemps, recordPath, transact, updateRecord, DEFAULT_PRUNE_OLDER_THAN_MS,
+  JobStoreError,
   PRUNE_TOMBSTONE_TTL_MS, REJECT, TEMP_REAP_MIN_AGE_MS,
 } from "../../scripts/lib/jobs.mjs";
 import { writeAtomic } from "../../scripts/lib/write.mjs";
@@ -57,6 +58,243 @@ const isTombstone = (ws, id) => {
   return stamp["_vibe-suite_owned"].kind === "job-tombstone" && stamp.jobId === id && readdirSync(p).length === 1;
 };
 const DAY = 24 * 60 * 60 * 1000;
+
+// --- vibe-261: authoritative slot reads must not traverse a symlink ---------------------------
+//
+// The store picks the authoritative slot BY FILENAME (`highestSlot`) and then reads that name with
+// `readFile`, which follows symlinks. A link pointing at a valid, higher-version, correct-identity
+// record therefore passes every existing check — and `readCanonical` SELF-HEALS by publishing those
+// bytes over the canonical. Same-uid is out of scope as a privilege boundary (see write.mjs); this
+// is defence in depth against a sandboxed same-uid agent linking out of its sandbox.
+//
+// Scope: NO-FOLLOW only. An unstamped REGULAR file still reads, because requiring the ownership
+// stamp would reject every pre-554be10 slot and three existing positive fixtures — that is #302.
+
+const foreignRecord = (jobId, version) => JSON.stringify({
+  ...baseTerminal(jobId, version), [Symbol.iterator]: undefined,
+}, null, 2) + "\n";
+
+function baseTerminal(jobId, version) {
+  return { jobId, version, kind: "review", status: "completed", createdAt: new Date().toISOString(),
+           endedAt: new Date().toISOString(), background: false };
+}
+
+test("vibe-261: a symlinked higher slot is not followed, and the canonical survives", async () => {
+  const ws = workspace();
+  await seed(ws);                                   // canonical at v1, running
+  const canonical = recordPath(ws, "job_test");
+  const before = readFileSync(canonical, "utf8");
+
+  // A REAL, valid, correct-identity higher record living outside the slot namespace.
+  const outside = path.join(jobsDir(ws), "planted.json");
+  writeFileSync(outside, foreignRecord("job_test", 2), "utf8");
+  symlinkSync(outside, path.join(jobsDir(ws), "job_test.v2.json"));
+
+  // Today: the link is followed, the record validates (jobId and version match the name), and
+  // readCanonical self-heals it over the canonical. That is the defect.
+  await assert.rejects(() => readRecord(ws, "job_test"), /unreadable|foreign|symlink/i,
+    "a symlinked slot must be refused, not followed");
+  assert.equal(readFileSync(canonical, "utf8"), before,
+    "and the canonical must be byte-unchanged: a refusal is not a publication");
+  assert.ok(lstatSync(path.join(jobsDir(ws), "job_test.v2.json")).isSymbolicLink(),
+    "the foreign entry is reported, never deleted");
+});
+
+test("vibe-261: a dangling symlinked slot is refused by the read path, never resolved as absent", async () => {
+  // The refusal lands in `readCanonical`, which is the gate ahead of `rollForward` on every
+  // in-process path: it reads the top slot itself and refuses an unreadable one before `transact`
+  // can contend. What this pins is that O_NOFOLLOW reports a DANGLING link as ELOOP at `open`
+  // (measured) rather than ENOENT -- so it can never reach the "someone completed it already"
+  // branch that treats absence as benign.
+  const ws = workspace();
+  await seed(ws);
+  symlinkSync(path.join(jobsDir(ws), "does-not-exist.json"),
+              path.join(jobsDir(ws), "job_test.v2.json"));
+  await assert.rejects(() => readRecord(ws, "job_test"), /unreadable|foreign|symlink/i,
+    "a dangling link is a foreign entry, not a benign ENOENT");
+  assert.ok(lstatSync(path.join(jobsDir(ws), "job_test.v2.json")).isSymbolicLink());
+});
+
+test("vibe-261: commit's own re-read does not traverse a symlink swapped in after the win", async () => {
+  // `commit` re-reads the slot pathname itself and publishes THOSE bytes, so gating its callers
+  // proves nothing. `onWon` is the documented seam for the window between winning the link and
+  // confirming it — exactly where a swap lands.
+  const ws = workspace();
+  await seed(ws);
+  await transact(ws, "job_test", (r) => ({ ...r, kind: "first" }));   // an OWNED lower slot: v2
+  const lower = path.join(jobsDir(ws), "job_test.v2.json");
+  const lowerBytes = readFileSync(lower, "utf8");
+  const canonical = recordPath(ws, "job_test");
+  const before = readFileSync(canonical, "utf8");
+  const outside = path.join(jobsDir(ws), "planted-commit.json");
+  writeFileSync(outside, foreignRecord("job_test", 3), "utf8");
+
+  await assert.rejects(() => transact(ws, "job_test", (r) => ({ ...r, kind: "later" }), {
+    onWon: (jobId, target) => {
+      const slot = path.join(jobsDir(ws), `${jobId}.v${target}.json`);
+      unlinkSync(slot);
+      symlinkSync(outside, slot);          // swap the won slot for a link, before commit reads it
+    },
+  }), /unreadable|foreign|symlink/i, "commit must not publish bytes read through a symlink");
+  assert.equal(readFileSync(canonical, "utf8"), before, "the canonical survives the refusal");
+  // A refused publication must not be confusable with a destructive one: what this store already
+  // owned is still on disk, byte for byte.
+  assert.equal(readFileSync(lower, "utf8"), lowerBytes, "the owned lower slot is byte-unchanged");
+});
+
+test("vibe-261: a slot-shaped directory is refused with repair guidance, not a raw errno", async () => {
+  // `highestSlot` matches slot names without checking file type, so a directory at a slot pathname
+  // is chosen as the top and reaches the read. O_NOFOLLOW opens it; the EISDIR arrives at the read
+  // instead. It must surface as a JobStoreError carrying the repair wording -- the same posture as
+  // a refused symlink -- and must be left in place for the operator.
+  const ws = workspace();
+  await seed(ws);
+  const dir = path.join(jobsDir(ws), "job_test.v2.json");
+  mkdirSync(dir, { mode: 0o700 });
+  await assert.rejects(() => readRecord(ws, "job_test"),
+    (error) => error instanceof JobStoreError && /NOT deleted automatically/.test(error.message),
+    "a directory is reported with repair guidance, not a raw EISDIR");
+  assert.ok(lstatSync(dir).isDirectory(), "and it is left in place");
+});
+
+test("vibe-261: commit's re-read of a slot replaced by a directory is refused, not published", async () => {
+  // The same barrier at the site that re-reads and publishes. Before this issue a non-ENOENT errno
+  // escaped `commit` raw; the store's API must not leak one.
+  const ws = workspace();
+  await seed(ws);
+  const canonical = recordPath(ws, "job_test");
+  const before = readFileSync(canonical, "utf8");
+
+  await assert.rejects(() => transact(ws, "job_test", (r) => ({ ...r, kind: "later" }), {
+    onWon: (jobId, target) => {
+      const slot = path.join(jobsDir(ws), `${jobId}.v${target}.json`);
+      unlinkSync(slot);
+      mkdirSync(slot, { mode: 0o700 });
+    },
+  }), (error) => error instanceof JobStoreError && /NOT deleted automatically/.test(error.message),
+    "a directory at the slot pathname is refused with repair guidance");
+  assert.equal(readFileSync(canonical, "utf8"), before, "the canonical survives the refusal");
+});
+
+// Reachability, traced and pinned by mutation. `transact` re-reads the canonical at the TOP of every
+// attempt, and that read refuses a bad top slot itself -- so a fixture planted before the call never
+// reaches `rollForward`, it is refused one frame earlier. The updater callback is the seam that runs
+// AFTER the initial read: planting there loses the CAS (a REGULAR file yields EEXIST; a symlink does
+// not, because `publishNew` classifies at write.mjs:257 before its `link` at :265), which is what
+// routes the failure through `rollForward`'s own identity check rather than `readCanonical`'s.
+function plantOnce(file, bytes) {
+  let planted = false;
+  return (record) => {
+    if (!planted) { planted = true; writeFileSync(file, bytes, "utf8"); }
+    return { ...record, kind: "later" };
+  };
+}
+
+test("vibe-261: a wrong-jobId slot planted after the read is refused inside rollForward", async () => {
+  const ws = workspace();
+  await seed(ws);
+  const slot = path.join(jobsDir(ws), "job_test.v2.json");
+  await assert.rejects(
+    () => transact(ws, "job_test", plantOnce(slot, foreignRecord("job_other", 2))),
+    /malformed|mismatch/i, "rollForward must refuse a slot whose jobId does not match its name");
+  assert.ok(existsSync(slot), "and must not delete it");
+});
+
+test("vibe-261: a wrong-version slot planted after the read is refused inside rollForward", async () => {
+  // The other half of the identity check: right jobId, but the CONTENT's version disagrees with the
+  // version its pathname claims.
+  const ws = workspace();
+  await seed(ws);
+  const slot = path.join(jobsDir(ws), "job_test.v2.json");
+  await assert.rejects(
+    () => transact(ws, "job_test", plantOnce(slot, foreignRecord("job_test", 7))),  // says v7, named v2
+    /malformed|mismatch/i, "a slot whose content disagrees with its name is refused");
+  assert.ok(existsSync(slot), "and must not delete it");
+});
+
+test("vibe-261: a symlinked slot on a prunable job is reported and blocks BEFORE entombing", async () => {
+  // Sub-task 6 / finding 2. Two separate claims, asserted separately:
+  //   * reporting -- the foreign entry reaches `report.leftovers`, so an operator is told what is
+  //     in the way rather than being left with a job that silently will not go;
+  //   * ORDERING -- the blocked condition is checked BEFORE the tombstone is installed. `onStep`
+  //     is the seam that makes the order observable: if entombing ran first, "entombed" would be
+  //     announced for a job whose foreign slot was never removed.
+  const ws = workspace();
+  const id = "job_eeeeeeeeeeeeeeeeee61";
+  const clean = "job_eeeeeeeeeeeeeeeeee62";
+  await seedTerminal(ws, id);
+  await seedTerminal(ws, clean);          // the in-test positive control (see the assertion below)
+  const elsewhere = path.join(jobsDir(ws), ".vibe261-target.json");
+  writeFileSync(elsewhere, foreignRecord(id, 9), "utf8");
+  const link = path.join(jobsDir(ws), `${id}.v9.json`);
+  symlinkSync(elsewhere, link);
+
+  const steps = [];
+  const report = await pruneTerminalJobs(ws, {
+    olderThanMs: 0, onStep: (jobId, step) => { steps.push(`${jobId}:${step}`); },
+  });
+
+  // `report.pruned` holds {jobId, status, endedAt, files} entries, not bare ids -- comparing it
+  // against a string would pass no matter what the run did.
+  const prunedIds = report.pruned.map((entry) => entry.jobId);
+  assert.ok(report.leftovers.includes(`${id}.v9.json`), "the foreign entry is reported");
+  assert.ok(!prunedIds.includes(id), "and the job is not pruned out from under it");
+  // The job is accounted for in `invalid`, and the reason an operator reads is the repair message
+  // rather than a bare errno -- prune reports it, it does not silently keep it.
+  const entry = report.invalid.find((row) => row.jobId === id);
+  assert.ok(entry, "the job is accounted for, not dropped from the report");
+  assert.match(entry.reason, /NOT deleted automatically/, "with repair guidance, not a raw errno");
+  assert.ok(!steps.includes(`${id}:entombed`),
+    "the blocked condition is checked before entombing, not after");
+  // Without this control the assertion above is satisfied by a prune that entombs nothing at all.
+  // The clean twin proves the run really did reach entombing -- just not for the blocked job.
+  assert.ok(steps.includes(`${clean}:entombed`),
+    "control: an unobstructed job in the same run IS entombed");
+  assert.ok(prunedIds.includes(clean), "control: and is pruned");
+  assert.ok(lstatSync(link).isSymbolicLink(), "the foreign entry is left for the operator");
+  assert.ok(existsSync(recordPath(ws, id)), "and the record it blocks is still there");
+});
+
+test("vibe-261: a valid higher slot is still accepted, self-healed and compacted", async () => {
+  // The positive control. Without it every assertion above is satisfied by a store that reads
+  // nothing at all: it is a REGULAR file at a slot pathname, identical in every dimension to the
+  // symlink case in T1 except for being a symlink, so it isolates no-follow as the only refuser.
+  const ws = workspace();
+  await seed(ws);
+  await transact(ws, "job_test", (r) => ({ ...r, kind: "first" }));         // canonical -> v2
+  const lower = path.join(jobsDir(ws), "job_test.v2.json");
+  assert.ok(existsSync(lower), "precondition: the v2 slot exists to be compacted");
+  writeFileSync(path.join(jobsDir(ws), "job_test.v3.json"), foreignRecord("job_test", 3), "utf8");
+
+  const final = await readRecord(ws, "job_test");
+  assert.equal(final.version, 3, "the valid higher slot is read and self-healed over the canonical");
+  assert.equal(final.status, "completed", "and it is the planted terminal record that published");
+  // Compaction is the second half of acceptance: publishing a terminal record clears the history
+  // beneath it. Asserting only the version would pass against a store that self-heals and stops.
+  assert.ok(!existsSync(lower), "the owned lower slot is compacted away behind the terminal record");
+  assert.ok(existsSync(path.join(jobsDir(ws), "job_test.v3.json")), "the top slot is retained");
+});
+
+test("vibe-261: a refused higher slot does not self-heal, and does not compact", async () => {
+  // The refusal direction of the same control. Byte-identical content to the test above, reached
+  // through a symlink instead of a regular file -- so any difference in outcome is attributable to
+  // no-follow alone. Compaction must NOT run: a refusal must never destroy history.
+  const ws = workspace();
+  await seed(ws);
+  await transact(ws, "job_test", (r) => ({ ...r, kind: "first" }));         // canonical -> v2
+  const lower = path.join(jobsDir(ws), "job_test.v2.json");
+  const lowerBytes = readFileSync(lower, "utf8");
+  const canonical = recordPath(ws, "job_test");
+  const before = readFileSync(canonical, "utf8");
+
+  const outside = path.join(jobsDir(ws), "planted-valid.json");
+  writeFileSync(outside, foreignRecord("job_test", 3), "utf8");
+  symlinkSync(outside, path.join(jobsDir(ws), "job_test.v3.json"));
+
+  await assert.rejects(() => readRecord(ws, "job_test"), /unreadable|foreign|symlink/i);
+  assert.equal(readFileSync(canonical, "utf8"), before, "the canonical did not self-heal");
+  assert.equal(readFileSync(lower, "utf8"), lowerBytes, "and the lower slot was not compacted away");
+});
 
 test("an uncommitted version slot is rolled forward, not deleted", async () => {
   const ws = workspace();

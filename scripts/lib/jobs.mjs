@@ -97,7 +97,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstat, readdir, readFile } from "node:fs/promises";
 
 import {
-  assertInside, assertRoot, classify, ensureDirAt, publishDirAt, publishNew, readOwned,
+  assertInside, assertRoot, classify, ensureDirAt, publishDirAt, publishNew, readNoFollow, readOwned,
   removeEmptyDirAt, removeOwnedDirAt, secureDirAt, unlinkOwned, writeAtomic, openSinkAt,
   PRIVATE_FILE_MODE, STAMP_KEY,
 } from "./write.mjs";
@@ -388,6 +388,31 @@ function slotPattern(jobId) {
 }
 
 /**
+ * Read a slot pathname WITHOUT traversing a symlink (vibe-261).
+ *
+ * `highestSlot` chooses the authoritative slot by FILENAME, so the name is a claim anything able to
+ * write in the jobs directory can make. `readFile` follows links, which meant a link pointing at a
+ * valid, higher-version, correct-identity record passed every check the store had — and
+ * `readCanonical` then republished those bytes over the canonical. `O_NOFOLLOW` makes the pathname
+ * mean the entry AT that name.
+ *
+ * Scope, stated once: this is **no-follow only**. An unstamped REGULAR file still reads, because
+ * requiring the ownership stamp would reject every slot written before `554be10` and three existing
+ * positive fixtures — that migration is #302. Same-uid remains out of scope as a privilege boundary
+ * exactly as `write.mjs` and `fsafe.py` declare; Node has no `openat`, so the guarantee is "refuses
+ * the state observed", with the post-observation window still open.
+ *
+ * Errors are left in the shape callers already handle: `ENOENT` still means absent (so
+ * `rollForward`'s benign "someone completed it already" path is unchanged), and a symlink surfaces
+ * as `ELOOP`, which is distinct from absence and so cannot be mistaken for it.
+ */
+async function readSlotNoFollow(file) {
+  // Every slot pathname is `jobsDir(workspace)/<name>`, so its dirname IS the root the primitive
+  // resolves against; splitting here keeps the three call sites unchanged.
+  return readNoFollow(path.dirname(file), path.basename(file));
+}
+
+/**
  * The highest committed version slot, or null. A job's TOP slot is always retained (compaction
  * removes only what lies below it; prune removes the whole job), so this is the true high-water mark.
  */
@@ -439,7 +464,7 @@ async function readCanonical(workspace, jobId, { listing = null } = {}) {
   if (top === null || published.version >= top) return published;
   let slot;
   try {
-    slot = JSON.parse(await readFile(slotPath(workspace, jobId, top), "utf8"));
+    slot = JSON.parse(await readSlotNoFollow(slotPath(workspace, jobId, top)));
   } catch (error) {
     // Same posture as rollForward: an unreadable slot blocks visibly and is never deleted, because
     // turning a stall into a silent integrity error is the worse trade.
@@ -473,8 +498,18 @@ async function rollForward(workspace, jobId, version) {
   const slot = slotPath(workspace, jobId, version);
   let candidate;
   try {
-    candidate = JSON.parse(await readFile(slot, "utf8"));
+    candidate = JSON.parse(await readSlotNoFollow(slot));
   } catch (error) {
+    // vibe-261, boundary stated precisely. This function IS reached -- a regular file planted at
+    // the slot after the caller's initial read loses the CAS and lands on the identity check below,
+    // which the wrong-jobId and wrong-version tests pin. What is NOT reachable in-process is a
+    // SYMLINK arriving here: `publishNew` classifies the destination (write.mjs:257) before its
+    // `link` (:265), so a symlinked slot is refused by the publisher and never yields the EEXIST
+    // that routes a caller into recovery. O_NOFOLLOW on this read is therefore defence in depth for
+    // a genuine TOCTOU window -- the slot becoming a link between that classify and this read --
+    // and it has no deterministic test; the `readFile`-here mutant survives the suite by design.
+    // ENOENT keeps its benign meaning, and a dangling link raises ELOOP at `open` (measured), so
+    // the two can never be confused.
     if (error.code === "ENOENT") return;                       // someone completed it already
     throw new JobStoreError(
       `${slot}: uncommitted slot is unreadable (${error.message}). It is NOT deleted automatically. ` +
@@ -543,9 +578,18 @@ async function readCanonicalRaw(workspace, jobId) {
 async function commit(workspace, jobId, version, { expectedBytes = null } = {}) {
   let content = null;
   try {
-    content = await readFile(slotPath(workspace, jobId, version), "utf8");
+    content = await readSlotNoFollow(slotPath(workspace, jobId, version));
   } catch (error) {
-    if (error.code !== "ENOENT") throw error;
+    // vibe-261: only absence is benign here. A refused symlink (`ELOOP`, measured -- O_NOFOLLOW
+    // reports it at `open` for a dangling link too, so it can never be mistaken for the absent
+    // case below) and a directory (`EISDIR`, at the read) now reach this catch, and both take
+    // rollForward's posture: blocked visibly with repair guidance, never deleted, never a raw
+    // errno escaping the store's API.
+    if (error.code !== "ENOENT") {
+      throw new JobStoreError(
+        `${slotPath(workspace, jobId, version)}: slot is unreadable (${error.message}). It is NOT ` +
+        `deleted automatically. Repair: quiesce writers for this job, then move the slot aside.`);
+    }
   }
   const current = await readCanonicalRaw(workspace, jobId);
   // 1. Gone: no canonical, a tombstone, or a prune marker (the deletion is durable from the marker on).

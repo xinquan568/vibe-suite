@@ -1,5 +1,5 @@
 ---
-description: "Probe engine readiness — version, auth mode, exec smoke, and dynamic model discovery (never hardcoded) — and the local runtimes the suite shells to: python3, node and git. The  lane reports as pending while its contract gate is shut. No arguments."
+description: "Probe engine readiness — version, auth mode, exec smoke, and dynamic model discovery (never hardcoded) — and the local runtimes the suite shells to: python3, node and git. No arguments."
 argument-hint: "[--json]"
 ---
 

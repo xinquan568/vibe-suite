@@ -89,9 +89,22 @@ class TestFixerLanes(FixTestCase):
         self.assertRegex(self.norm, r"workspace-write explicitly|never .?read-only")
 
     def test_the_fixer_dispatches_the_codex_runner_directly(self):
-        # vibe-298: was "does not route through agy-audit-cli". The retired lane cannot be named,
-        # but the property — the fixer dispatches the runner itself — is asserted directly.
-        self.assertIn("scripts/codex-runner.mjs", self.norm)
+        """vibe-298: was "does not route through agy-audit-cli". The retired lane cannot be named,
+        so the property is asserted positively — but it must be asserted about the FIXER's own
+        dispatch, not anywhere in the document.
+
+        A bare `assertIn("scripts/codex-runner.mjs", self.norm)` passes even when every fixer-side
+        reference is rerouted, because the verifier section names the same runner. The row must
+        therefore be read out of the fixer's own lane table, which pairs the runner with
+        `workspace-write` — the sandbox the verifier's row (`read-only`) does not use.
+        """
+        rows = [ln for ln in self.text.splitlines()
+                if ln.strip().startswith("|") and "codex-runner.mjs" in ln
+                and "workspace-write" in ln]
+        self.assertTrue(rows, "the fixer lane must dispatch codex-runner.mjs at workspace-write")
+        for row in rows:
+            self.assertNotIn("read-only", row,
+                             "the fixer row must not carry the verifier's sandbox")
 
     def test_danger_full_access_is_not_reachable(self):
         self.assertRegex(self.norm, r"danger-full-access is not reachable")

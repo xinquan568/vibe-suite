@@ -271,6 +271,21 @@ test("R-ONE-LANE: the CLI probes and publishes exactly one engine row (vibe-298)
   // The runtime rows are untouched by this change and must survive it.
   assert.ok(Array.isArray(report.runtimes) && report.runtimes.length > 0,
     "the runtimes array is retained");
+
+  // Publishing nothing is NOT the same as probing nothing. A CLI that still invoked the retired
+  // binary and discarded its result would satisfy every assertion above, so the retired name is put
+  // on PATH as a RECORDING shim and its marker must stay absent — the lane must not be reached at
+  // all, in either output mode.
+  const spy = tempDir("preflight-spy-");
+  const marker = path.join(spy, "invoked");
+  writeFileSync(path.join(spy, "agy"),
+    `#!/bin/sh\nprintf 'x' > ${JSON.stringify(marker)}\nexit 0\n`);
+  chmodSync(path.join(spy, "agy"), 0o755);
+  const withSpy = `${spy}${path.delimiter}${controlledPath({ codexFixture: path.join(FIXTURES, "preflight-ok.mjs") })}`;
+  cli({ pathVar: withSpy, args: ["--json"] });
+  assert.ok(!existsSync(marker), "the retired probe must not be invoked in --json mode");
+  cli({ pathVar: withSpy });
+  assert.ok(!existsSync(marker), "nor in the human matrix mode");
 });
 
 test("R-NO-EXEMPT: exitCodeFor exempts no engine by name (vibe-298)", async () => {

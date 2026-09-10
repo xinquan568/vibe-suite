@@ -421,8 +421,8 @@ test("a real CLI's record write is contained by its workspace (vibe-298)", () =>
   const wsLinkedState = tmpWorkspace("runner-linked-state-");
   symlinkSync(outside, path.join(wsLinkedState, ".vibe-suite-state"));
   launch(wsLinkedState);
-  assert.ok(!readdirSync(outside).includes("jobs"),
-    "a symlinked state directory must not be published through");
+  assert.deepEqual(readdirSync(outside), [],
+    "a symlinked state directory must not be published through, and nothing may escape into it");
 
   // 2. `.vibe-suite-state` is real but its `jobs` child is a symlink out — an INTERMEDIATE
   //    symlinked component, which assertInside refuses even though the final name looks local.
@@ -430,8 +430,9 @@ test("a real CLI's record write is contained by its workspace (vibe-298)", () =>
   mkdirSync(path.join(wsLinkedJobs, ".vibe-suite-state"));
   symlinkSync(outside, path.join(wsLinkedJobs, ".vibe-suite-state", "jobs"));
   launch(wsLinkedJobs);
-  assert.ok(!readdirSync(outside).some((name) => name.endsWith(".json")),
-    "a symlinked jobs directory must not be written into");
+  assert.deepEqual(readdirSync(outside), [],
+    "a symlinked jobs directory must not be written into — and nothing else may escape either: "
+    + "a name-suffix check would pass on leaked temp files, logs or directories");
 
   // 3. THE POSITIVE CONTROL. Without it, a runner that had stopped writing — or that never started,
   //    which is what an invalid argv produces — passes both assertions above and reports a safety it

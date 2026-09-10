@@ -690,6 +690,68 @@ async function removeInside(dir, keep) {
 }
 
 /**
+ * Read a file's bytes WITHOUT traversing a symlink at its final component (vibe-261).
+ *
+ * The sibling of `readOwned` for callers that must not require an ownership stamp -- the jobs
+ * store's committed version slots predate stamping, and requiring one would reject every slot
+ * written before `554be10` (that migration is #302). It lives here rather than at the call site
+ * because `O_NOFOLLOW` needs a numeric flag, and raw `open` in a shipped module is exactly what
+ * `tests/node/no-raw-fs-writes.mjs` refuses: fs capabilities belong to this primitive.
+ *
+ * Unlike `readOwned` this does NOT collapse failures into `null`. The errno is the caller's
+ * evidence: `ENOENT` means absent, `ELOOP` means a link was refused (raised at `open`, so a
+ * DANGLING link is reported as a link and never as absence), and `EISDIR` means a directory sits
+ * at the name. A caller that cannot tell those apart cannot report them apart.
+ */
+/** An absent containment root is ABSENCE: callers' benign branches all key on `code`. */
+function absentRoot(root) {
+  const absent = new Error(`${root}: containment root is absent`);
+  absent.code = "ENOENT";
+  return absent;
+}
+
+export async function readNoFollow(root, rel) {
+  // The root is observed ONCE and that observation decides its kind (Step-9 finding 4). Classifying
+  // and then calling `assertRoot` observed it twice, so a root that vanished between the two came
+  // back as a WriteError carrying no `code` -- a benign disappearance dressed as a refusal, which
+  // callers then reported as an entry needing repair. Absence is absence; a symlinked or
+  // non-directory root is still refused.
+  const resolvedRoot = path.resolve(root);
+  const rootKind = await classify(resolvedRoot);
+  if (rootKind === "absent") throw absentRoot(root);
+  if (rootKind !== "dir") {
+    throw new WriteError(`${root}: containment root is not a directory (${rootKind})`);
+  }
+  const target = path.resolve(root, rel);
+  try {
+    await assertInside(root, target);
+  } catch (error) {
+    // Step-9 finding 6: the containment walk can fail BECAUSE the root vanished under it. Once
+    // `realpath(root)` has succeeded, a concurrent removal leaves the walk climbing past the gone
+    // directory to a surviving ancestor, and the relative path then points outside -- reported as
+    // "resolves outside", again with no `code`. That is a disappearance wearing an escape's
+    // clothes. Re-observing the root decides which it was: gone means absence; still present means
+    // a genuine escape, and that is refused exactly as before.
+    // The re-observation must decide all three ways, not just "absent or not". A root REPLACED by
+    // a dangling symlink makes `realpath` throw ENOENT, and rethrowing that unexamined would report
+    // a symlinked root as absence -- laundering a refusal into a benign branch (Step-9 finding 7).
+    const nowKind = await classify(resolvedRoot);
+    if (nowKind === "absent") throw absentRoot(root);
+    if (nowKind !== "dir") {
+      throw new WriteError(`${root}: containment root is not a directory (${nowKind})`);
+    }
+    throw error;                                   // the root is a directory: a genuine escape
+  }
+  let handle;
+  try {
+    handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+    return await handle.readFile("utf8");
+  } finally {
+    await handle?.close();
+  }
+}
+
+/**
  * Read a stamped file of ours (vibe-204): parsed JSON, or `null`. Opened `O_NOFOLLOW` and checked
  * to be a regular file THROUGH THE HANDLE, so a symlink at the path — even one whose target is a
  * perfectly valid file of ours — is `null`, as is a directory, an unparseable file, or a file

@@ -704,6 +704,16 @@ async function removeInside(dir, keep) {
  * at the name. A caller that cannot tell those apart cannot report them apart.
  */
 export async function readNoFollow(root, rel) {
+  // An ABSENT containment root is absence, not a refusal (Step-8 finding 2). `assertRoot` reports
+  // it as a WriteError carrying no `code`, which would push callers past their benign "the slot is
+  // simply not there" branches and make a vanished directory look like an entry needing repair.
+  // A symlinked or non-directory root is still a refusal -- only absence is translated.
+  const resolvedRoot = path.resolve(root);
+  if (await classify(resolvedRoot) === "absent") {
+    const absent = new Error(`${root}: containment root is absent`);
+    absent.code = "ENOENT";
+    throw absent;
+  }
   await assertRoot(root);
   const target = path.resolve(root, rel);
   await assertInside(root, target);

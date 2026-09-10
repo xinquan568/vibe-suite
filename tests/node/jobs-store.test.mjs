@@ -21,7 +21,7 @@ import {
   JobStoreError,
   PRUNE_TOMBSTONE_TTL_MS, REJECT, TEMP_REAP_MIN_AGE_MS,
 } from "../../scripts/lib/jobs.mjs";
-import { writeAtomic } from "../../scripts/lib/write.mjs";
+import { readNoFollow, writeAtomic } from "../../scripts/lib/write.mjs";
 
 function workspace() {
   return tmpWorkspace("jobs-store-");
@@ -253,6 +253,59 @@ test("vibe-261: a symlinked slot on a prunable job is reported and blocks BEFORE
   assert.ok(prunedIds.includes(clean), "control: and is pruned");
   assert.ok(lstatSync(link).isSymbolicLink(), "the foreign entry is left for the operator");
   assert.ok(existsSync(recordPath(ws, id)), "and the record it blocks is still there");
+});
+
+test("vibe-261: a slot swapped between the read and the self-heal refuses, and prune preserves", async () => {
+  // Step-8 finding 1. `readCanonical` reads the top slot, then republishes it through `commit`,
+  // which RE-READS the same pathname. A swap in that window is observed by `commit` and by nothing
+  // else -- and the self-heal used to swallow every failure, so the read returned a healthy-looking
+  // record and prune went on to entomb the canonical and the owned lower slots the refusal exists
+  // to protect. The fixture is a fully schema-valid terminal record so nothing but no-follow can
+  // refuse it.
+  const ws = workspace();
+  await seed(ws);
+  await transact(ws, "job_test", (r) => ({ ...r, kind: "first" }));      // owned lower slot: v2
+  const lower = path.join(jobsDir(ws), "job_test.v2.json");
+  const lowerBytes = readFileSync(lower, "utf8");
+  const canonical = recordPath(ws, "job_test");
+  const before = readFileSync(canonical, "utf8");
+
+  const slot = path.join(jobsDir(ws), "job_test.v3.json");
+  writeFileSync(slot, foreignRecord("job_test", 3), "utf8");             // valid, read successfully
+  const outside = path.join(jobsDir(ws), ".swapped.json");
+  writeFileSync(outside, foreignRecord("job_test", 3), "utf8");
+
+  await assert.rejects(() => readRecord(ws, "job_test", {
+    onSelfHeal: () => { unlinkSync(slot); symlinkSync(outside, slot); },  // swap before commit rereads
+  }), (error) => error instanceof JobStoreError && /NOT deleted automatically/.test(error.message),
+    "an observed refusal must reach the caller, not be swallowed by the self-heal");
+
+  // The point of propagating it: prune must not now treat the job as healthy and delete it.
+  const report = await pruneTerminalJobs(ws, { olderThanMs: 0 });
+  assert.equal(readFileSync(canonical, "utf8"), before, "the canonical survives the refusal");
+  assert.equal(readFileSync(lower, "utf8"), lowerBytes, "and so do the owned lower slots");
+  assert.ok(!report.pruned.map((e) => e.jobId).includes("job_test"), "the job is not pruned");
+});
+
+test("vibe-261: readNoFollow tells a refused link apart from absence, at both levels", async () => {
+  // Step-8 findings 2 and 3. Asserted against the PRIMITIVE, because every caller's benign branch
+  // keys on `code` -- and through `readCanonical` both errnos are wrapped as "unreadable", so a
+  // test that only checks the rejection message cannot tell them apart at all.
+  const ws = workspace();
+  await seed(ws);
+  const dir = jobsDir(ws);
+
+  const dangling = "job_test.dangling.json";
+  symlinkSync(path.join(dir, "no-such-target.json"), path.join(dir, dangling));
+  await assert.rejects(() => readNoFollow(dir, dangling), (e) => e.code === "ELOOP",
+    "a DANGLING link is a refused link, never absence");
+
+  await assert.rejects(() => readNoFollow(dir, "job_test.v99.json"), (e) => e.code === "ENOENT",
+    "a missing slot inside an existing directory is absence");
+
+  await assert.rejects(() => readNoFollow(path.join(dir, "no-such-dir"), "job_test.v1.json"),
+    (e) => e.code === "ENOENT",
+    "and so is a missing containment root -- callers' benign branches key on this code");
 });
 
 test("vibe-261: a valid higher slot is still accepted, self-healed and compacted", async () => {

@@ -449,7 +449,7 @@ async function highestSlot(workspace, jobId, { except = null, listing = null } =
  * writer's orphan, never a record to resurrect. An earlier revision rebuilt the canonical from the
  * highest slot here — exactly how a pruned job would have come back.
  */
-async function readCanonical(workspace, jobId, { listing = null } = {}) {
+async function readCanonical(workspace, jobId, { listing = null, onSelfHeal = null } = {}) {
   const published = await readPublished(workspace, jobId).catch((error) => {
     if (error.code === "ENOENT" || error.code === "EISDIR") return null;   // absent, or a prune tombstone
     throw error;
@@ -477,13 +477,22 @@ async function readCanonical(workspace, jobId, { listing = null } = {}) {
       `${slotPath(workspace, jobId, top)}: committed slot is malformed (version/jobId mismatch). ` +
       `It is NOT deleted automatically. Repair: quiesce writers for this job, then move it aside.`);
   }
-  // Self-heal: republish so external readers of the canonical path converge too.
-  await commit(workspace, jobId, top).catch(() => {});
+  // Self-heal: republish so external readers of the canonical path converge too. Best-effort by
+  // design -- losing to a concurrent publisher is normal and must not fail the read -- EXCEPT for a
+  // refusal, which means `commit` observed a foreign entry at the slot pathname in the window after
+  // our own read. Returning a healthy-looking record there is what allows a later prune to delete
+  // the canonical and the owned lower slots (Step-8 finding 1).
+  if (onSelfHeal) await onSelfHeal(jobId, top);
+  await commit(workspace, jobId, top).catch((error) => {
+    if (error?.refusal) throw error;
+  });
   return slot;
 }
 
-export async function readRecord(workspace, jobId) {
-  return readCanonical(workspace, jobId);
+export async function readRecord(workspace, jobId, { onSelfHeal = null } = {}) {
+  // `onSelfHeal` is a documented test seam, the species of `transact`'s `onWon`: it runs in the
+  // window between reading a higher slot and republishing it, which is where a swap lands.
+  return readCanonical(workspace, jobId, { onSelfHeal });
 }
 
 /**
@@ -586,9 +595,15 @@ async function commit(workspace, jobId, version, { expectedBytes = null } = {}) 
     // rollForward's posture: blocked visibly with repair guidance, never deleted, never a raw
     // errno escaping the store's API.
     if (error.code !== "ENOENT") {
-      throw new JobStoreError(
+      const refusal = new JobStoreError(
         `${slotPath(workspace, jobId, version)}: slot is unreadable (${error.message}). It is NOT ` +
         `deleted automatically. Repair: quiesce writers for this job, then move the slot aside.`);
+      // A REFUSAL is not a lost race. `readCanonical`'s self-heal swallows failures because a
+      // concurrent publisher legitimately makes one lose; a foreign entry it OBSERVED is different,
+      // and a caller that treats it as benign goes on to report the job as healthy -- which is what
+      // lets prune entomb the canonical and the owned lower slots this refusal exists to protect.
+      refusal.refusal = true;
+      throw refusal;
     }
   }
   const current = await readCanonicalRaw(workspace, jobId);

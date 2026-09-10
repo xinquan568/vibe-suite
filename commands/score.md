@@ -1,6 +1,6 @@
 ---
 description: "Score NL artifacts on the 100-point deterministic rubric (the suite's lint): dispatches the scorer and vague-scanner agents, computes every penalty through the deterministic scoring engine, renders a findings table with score bands, and appends a scope-tagged snapshot to the scanned project's history. Same input, same score. Optionally adds a cross-model second opinion on the same rubric, with disagreements listed. Arguments: an optional path, --changed to score only git-modified artifacts, and --engine to select the second-opinion lane."
-argument-hint: "[path] [--changed] [--engine claude|codex|agy|both]"
+argument-hint: "[path] [--changed] [--engine claude|codex|both]"
 ---
 
 # /vibe-suite:score — deterministic quality scoring
@@ -16,7 +16,7 @@ no agent may add or resize a deduction.
   Refuse a path that is not a readable directory or file.
 - `--changed` — restrict the target set to artifacts modified per `git status --porcelain`
   (requires the target to be inside a git repository; refuse otherwise).
-- `--engine claude|codex|agy|both` — whether to add a cross-model **second opinion** on the same
+- `--engine claude|codex|both` — whether to add a cross-model **second opinion** on the same
   rubric. Default `claude`. See § Engine lanes.
 
 ## Step 1 — discover and batch
@@ -94,14 +94,12 @@ reproducible baseline costs nothing.
 |---|---|---|---|
 | `claude` (default) | the deterministic engine | one score, labelled `computed` | on the computed score |
 | `codex` | the engine **and** a codex second opinion | both numbers, each labelled | on the **computed** score |
-| `agy` | pre-gate: **refuses**, naming the gate status and `docs/agy-flip-checklist.md`. post-gate: as `codex` | — | — |
 | `both` | as `codex`, **plus** the disagreement listing | both numbers + disagreements | on the **computed** score |
 
 Engine resolution is the seam's output — `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace "<abs-target>" resolve-engine --default claude
 ${ENGINE_ARG:+--engine "$ENGINE_ARG"}` — read `lanes` and `model`; [`commands/shared/model-selection.md`](shared/model-selection.md)
 holds the vocabulary and the staged cross-model default. This command never parses `.vibe-suite.md` itself. The cross-model lane dispatches
-`scripts/codex-runner.mjs --sandbox read-only` **directly**, never `scripts/agy-audit-cli.mjs`, which
-refuses before dispatching while the agy gate is shut. No model is named on any dispatch (P9), and the
+`scripts/codex-runner.mjs --sandbox read-only` **directly**. No model is named on any dispatch (P9), and the
 prompt opens with a provenance line (P4).
 
 **`computed` and `opinion` are never merged.** The deterministic engine remains the only penalty

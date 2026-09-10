@@ -88,9 +88,10 @@ class TestFixerLanes(FixTestCase):
     def test_the_fixer_lane_does_not_use_the_verifier_sandbox(self):
         self.assertRegex(self.norm, r"workspace-write explicitly|never .?read-only")
 
-    def test_the_fixer_does_not_route_through_the_gated_audit_cli(self):
-        self.assertRegex(self.norm, r"does not route through[^.]*agy-audit-cli|"
-                                    r"agy-audit-cli[^.]*refus")
+    def test_the_fixer_dispatches_the_codex_runner_directly(self):
+        # vibe-298: was "does not route through agy-audit-cli". The retired lane cannot be named,
+        # but the property — the fixer dispatches the runner itself — is asserted directly.
+        self.assertIn("scripts/codex-runner.mjs", self.norm)
 
     def test_danger_full_access_is_not_reachable(self):
         self.assertRegex(self.norm, r"danger-full-access is not reachable")

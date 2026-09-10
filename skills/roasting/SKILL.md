@@ -22,7 +22,7 @@ and the zero-findings rule. Every lane's findings render into it.
 ## The nine dimensions — `--full`
 
 Transcribed from the cc-suite source's full-audit prompt (`commands/audit.md:126-172`, cc-suite
-1.2.0). These are the dimensions the `codex` and `agy` lanes dispatch, and `docs/disposition.yaml`
+1.2.0). These are the dimensions the `codex` lane dispatches, and `docs/disposition.yaml`
 row `cc-suite:10` — "nine dimensions preserved" — is a claim about exactly this list.
 
 ### 1. Redundant & Low-Value Code
@@ -173,7 +173,7 @@ Both lanes run, then every finding takes one label:
 |---|---|
 | `both-agree` | the Claude lane and the cross-model lane both raised it |
 | `claude-only` | only the in-session specialists raised it |
-| `<engine>-only` | only the cross-model lane raised it — `codex-only` or `agy-only` |
+| `<engine>-only` | only the cross-model lane raised it — `codex-only` |
 
 Ordered `both-agree` first, then the two single-lane groups. **Two findings are the same finding when
 they name the same file, the same line or overlapping lines, and the same defect** — not when they

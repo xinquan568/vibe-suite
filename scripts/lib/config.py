@@ -64,14 +64,14 @@ class Row:
 
 
 SCHEMA = {
-    "engine":                   Row("enum",   "claude|codex|agy|both", None),
-    "cross_model_audit_engine": Row("enum",   "codex|agy",             "codex"),
+    "engine":                   Row("enum",   "claude|codex|both",     None),
+    "cross_model_audit_engine": Row("enum",   "codex",                 "codex"),
     "reviewer_backend":         Row("enum",   "codex",                 "codex"),
     "reviewer_model":           Row("string", "open",                  None),
     "effort":                   Row("enum",   "low|medium|high",       "medium"),
     "sandbox":                  Row("enum",   "read-only|workspace-write|danger-full-access", "read-only"),
     "audit_depth":              Row("enum",   "mini|full",             None),
-    "model_overrides":          Row("map",    "codex|agy",             {}),
+    "model_overrides":          Row("map",    "codex",                 {}),
     "skip_patterns":            Row("list",   "open",                  []),
     "focus_instructions":       Row("string", "open",                  ""),
     "project_instructions":     Row("string", "open",                  ""),
@@ -94,7 +94,7 @@ _RULE_ID = re.compile(r"R(?:0[1-9]|[1-4][0-9]|5[01])")
 CLOSED_MAPS = {
     "rule_overrides": {"R51": {**RULE_OVERRIDE_LEAVES, "vocabulary_skill": "string"}},
 }
-OPEN_MAPS = {"model_overrides": ("codex", "agy")}
+OPEN_MAPS = {"model_overrides": ("codex",)}
 PATH_VALUED = {("rule_overrides", "R51", "vocabulary_skill")}
 
 #: vibe-186 / grill S2 (B3): the three `gate.*` settings — `stop_review_gate`, `model`,

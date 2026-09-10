@@ -55,14 +55,14 @@ config = _load(CONFIG_PY, "vibe_config")
 # Hand-written specification fixture. Never regenerated from any artifact.
 
 EXPECTED_SCHEMA = {
-    "engine":                   ("enum",   "claude|codex|agy|both",                  "unset"),
-    "cross_model_audit_engine": ("enum",   "codex|agy",                              "codex"),
+    "engine":                   ("enum",   "claude|codex|both",                      "unset"),
+    "cross_model_audit_engine": ("enum",   "codex",                                  "codex"),
     "reviewer_backend":         ("enum",   "codex",                                  "codex"),
     "reviewer_model":           ("string", "open",                                   "unset"),
     "effort":                   ("enum",   "low|medium|high",                        "medium"),
     "sandbox":                  ("enum",   "read-only|workspace-write|danger-full-access", "read-only"),
     "audit_depth":              ("enum",   "mini|full",                              "unset"),
-    "model_overrides":          ("map",    "codex|agy",                              "empty-map"),
+    "model_overrides":          ("map",    "codex",                                  "empty-map"),
     "skip_patterns":            ("list",   "open",                                   "empty-list"),
     "focus_instructions":       ("string", "open",                                   "empty-string"),
     "project_instructions":     ("string", "open",                                   "empty-string"),
@@ -273,6 +273,42 @@ class TestAdversarialGrammar(unittest.TestCase):
                     write_config(root, bad)
                     with self.assertRaises(config.ConfigValueError):
                         config.load(root)
+
+
+class TestTheRetiredAgyLaneIsRefused(unittest.TestCase):
+    """vibe-298: `agy` left the schema, and the three surfaces that accepted it now refuse it.
+
+    Decision 2 of the Route B ruling (#297) accepts a GENERIC `ConfigValueError` — no migration path
+    and no bespoke "retired" wording — so these assert the exception and the offending key, never the
+    message text. Each of the three was a VALID configuration before this change, which is what makes
+    them a regression guard rather than a restatement of the schema.
+    """
+
+    def _refuses(self, text):
+        with tempfile.TemporaryDirectory() as root:
+            write_config(root, text)
+            with self.assertRaises(config.ConfigValueError):
+                config.load(root)
+
+    def test_engine_agy_is_refused(self):
+        self._refuses("engine: agy\n")
+
+    def test_cross_model_audit_engine_agy_is_refused(self):
+        self._refuses("cross_model_audit_engine: agy\n")
+
+    def test_a_model_overrides_agy_key_is_refused(self):
+        # OPEN_MAPS closes `model_overrides` to the engine names; `agy` is no longer one.
+        self._refuses("model_overrides:\n  agy: some-model\n")
+
+    def test_the_surviving_engine_values_still_load(self):
+        # The negative cases above would also pass if the reader had simply broken, so the
+        # positive control runs the values that must KEEP working.
+        for good in ("engine: codex\n", "engine: claude\n", "engine: both\n",
+                     "cross_model_audit_engine: codex\n", "model_overrides:\n  codex: m\n"):
+            with self.subTest(config=good):
+                with tempfile.TemporaryDirectory() as root:
+                    write_config(root, good)
+                    config.load(root)
 
 
 class TestCanonicalDefaultIsNotLossy(unittest.TestCase):

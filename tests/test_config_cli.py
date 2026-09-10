@@ -52,8 +52,8 @@ class TestAC9c(ConfigCase):
 
     def test_a_configured_engine_overrides_the_default_in_the_view(self):
         (self.ws / ".vibe-suite.md").write_text(
-            "---\ncross_model_audit_engine: agy\n---\n", encoding="utf-8")
-        self.assertEqual(self.show()["config"]["cross_model_audit_engine"], "agy")
+            "---\ncross_model_audit_engine: codex\n---\n", encoding="utf-8")
+        self.assertEqual(self.show()["config"]["cross_model_audit_engine"], "codex")
 
 
 class TestGateRoundTrip(ConfigCase):
@@ -221,7 +221,7 @@ class TestResolveEngine(ConfigCase):
                 r = self.run_cli("resolve-engine", *args)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
                 self.assertIn("error:", r.stderr)
-                self.assertIn("'bogus' is not one of claude, codex, agy, both", r.stderr)
+                self.assertIn("'bogus' is not one of claude, codex, both", r.stderr)
                 self.assertNotIn("unrecognized arguments", r.stderr)
                 self.assertEqual(r.stdout, "")
 

@@ -8,6 +8,15 @@ addons: [hidden-costs, principle-violations, assumptions-audit, compact-optimize
 agents: [recon, architecture, error-handling, security, testing]
 ---
 
+> **Historical record — superseded in part.**
+> This is a roast report preserved for traceability, not a live specification. Where it
+> disagrees with current configuration, current configuration wins.
+> Known divergence: this document describes a staged **agy** cross-model lane. That lane was
+> **retired** before `v0.0.1-alpha1` rather than graduated — its runner, audit CLI, contract
+> probe, gate resolver and fallback chain are deleted, and `engine`/`model_overrides` no longer
+> accept `agy` (ADR-0002, 2026-09-10). The lane is preserved on the locked branch
+> `staging/agy-lane` and the tag `retired/agy-lane`.
+
 # Grill Report — vibe-suite (v0.0.1, `main` @ `090b511`)
 
 All paths below are relative to `codes/vibe-suite/`. Every finding carries the agent that produced it (`[arch]`, `[eh]`, `[sec]`, `[test]`); where several agents hit the same defect the version with the strongest evidence was kept and the others are credited. Severity tags follow grill-core: `[CRITICAL]` security/data-loss/correctness, `[HIGH]` significant reliability/maintainability/perf, `[MEDIUM]` noticeable, `[LOW]` minor, `[GOOD]` worth keeping.

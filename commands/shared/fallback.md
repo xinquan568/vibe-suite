@@ -19,22 +19,15 @@ produces confidence nothing checked.
 
 ## Applicability — per edge, not per chain
 
-Only the **`agy` → `codex` edge** is graduation-gated. The `codex` → `manual` edge is **live today**
-and applies to every engine-dispatching command right now.
+The `codex` → `manual` edge is **live today** and applies to every engine-dispatching command.
 
 | Edge | Applies |
 |------|---------|
-| `agy` → `codex` | only after the agy adapter passes its graduation gate |
-| `codex` → `manual` | **today**, independently of agy's status |
+| `codex` → `manual` | **today** |
 
-**Before graduation, an `--engine agy` request does not enter this chain at all** — it is refused
-outright, with a pointer to the gate's status, by the adapter issue that owns that behaviour. A
-refusal and a degradation are different things: the first says *this is not available yet*, the
-second says *this ran, but not the way you asked*. Describing the pre-gate state as a fallback would
-tell a user their audit ran when it did not.
-
-Gating the whole chain would be the mirror error: it would read as though no fallback exists until
-agy graduates, when the codex → manual path is the one carrying every audit today.
+A refusal and a degradation are different things: the first says *this is not available yet*, the
+second says *this ran, but not the way you asked*. Describing a refusal as a fallback would tell a
+user their audit ran when it did not.
 
 ## Fallback chain
 
@@ -42,7 +35,6 @@ Ordered. Each hop fires only when the one before it is unavailable or returns no
 
 | From | To | Restoration guidance for the hop that failed |
 |------|----|---------------------------------------------|
-| `agy` | `codex` | Check the binary is on `PATH`; if absent, install the agy CLI; if present, check authentication and that a model is available to the account |
 | `codex` | `manual` | Check the binary is on `PATH`; if absent, `npm install -g @openai/codex`; if present, run `codex login` to refresh authentication |
 
 **`manual`** is the terminal hop and always succeeds. It is not "look at some files" — it has four

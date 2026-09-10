@@ -15,7 +15,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  agyRow, buildMatrix, AUTH_MODES, exitCodeFor, MODELS_CACHE_TTL_MS, probeAgy, probeCodex,
+  buildMatrix, AUTH_MODES, exitCodeFor, MODELS_CACHE_TTL_MS, probeCodex,
   readModelsCache, ROW_KEYS, SMOKE_RESULTS,
 } from "../../scripts/lib/preflight.mjs";
 
@@ -227,177 +227,25 @@ test("the CLI absent: available false, nothing else probed", async () => {
   assert.ok(row.detail.includes("not found"));
 });
 
-test("the agy slot and the codex row share ONE exact schema, down to nested keys and types", async () => {
+test("the codex row matches ONE exact schema, down to nested keys and types", async () => {
+  // vibe-298: this pinned codex and the agy slot against the same frozen shape. The lane is gone;
+  // the property is not — ROW_KEYS and the nested `models` contract still govern every row the
+  // matrix carries, and a row that quietly grew or lost a key is the defect this catches.
   const { env, now } = freshCacheEnv();
   const { run } = scriptedRun(OK_ANSWERS);
   const codex = await probeCodex({ run, env, now });
-  const agy = agyRow();
 
   const MODEL_STATUSES = new Set(["fresh", "stale", "missing", "malformed", "pending"]);
-  for (const row of [codex, agy]) {
-    assert.deepEqual(Object.keys(row), ROW_KEYS, "E1.7 fills values, never reshapes");
-    assert.ok(row.available === true || row.available === false || row.available === null);
-    assert.ok(row.version === null || typeof row.version === "string");
-    assert.ok(row.auth === null || AUTH_MODES.has(row.auth), `auth outside its enum: ${row.auth}`);
-    assert.ok(row.smoke === null || SMOKE_RESULTS.has(row.smoke), `smoke outside its enum: ${row.smoke}`);
-    assert.deepEqual(Object.keys(row.models), ["status", "slugs"], "the nested models shape is part of the contract");
-    assert.ok(MODEL_STATUSES.has(row.models.status));
-    assert.ok(Array.isArray(row.models.slugs) && row.models.slugs.every((s) => typeof s === "string"));
-    assert.equal(typeof row.detail, "string");
-  }
-  assert.equal(agy.available, null, "pending never counts as unavailable");
-  assert.deepEqual([agy.version, agy.auth, agy.smoke], [null, null, null],
-    "the slot claims nothing it has not probed");
-  assert.equal(agy.models.status, "pending");
-  assert.deepEqual(agy.models.slugs, []);
-  assert.ok(agy.detail.includes("probe pending"),
-    "agyRow() remains the pre-probe slot; probeAgy() is what E1.7 wired in");
+  assert.deepEqual(Object.keys(codex), ROW_KEYS, "values are filled, never reshaped");
+  assert.ok(codex.available === true || codex.available === false || codex.available === null);
+  assert.ok(codex.version === null || typeof codex.version === "string");
+  assert.ok(codex.auth === null || AUTH_MODES.has(codex.auth), `auth outside its enum: ${codex.auth}`);
+  assert.ok(codex.smoke === null || SMOKE_RESULTS.has(codex.smoke), `smoke outside its enum: ${codex.smoke}`);
+  assert.deepEqual(Object.keys(codex.models), ["status", "slugs"], "the nested models shape is part of the contract");
+  assert.ok(MODEL_STATUSES.has(codex.models.status));
+  assert.ok(Array.isArray(codex.models.slugs) && codex.models.slugs.every((s) => typeof s === "string"));
+  assert.equal(typeof codex.detail, "string");
 
-  const matrix = buildMatrix([codex, agy]);
-  assert.deepEqual(matrix.map((r) => r.engine), ["codex", "agy"]);
+  const matrix = buildMatrix([codex]);
+  assert.deepEqual(matrix.map((r) => r.engine), ["codex"], "one lane, and it is codex");
 });
-
-// ---------------------------------------------------------------------------------------------
-// The agy matrix (E1.7 / vibe-17 closes the assertion E1.3 deferred). The row keeps the frozen
-// schema and the frozen enums — a signed-out CLI is `not-authenticated`, not a new word — and the
-// gate decides `pending` versus `unavailable`, because an unverified lane is not a broken one.
-
-const GATE_OPEN = { passed: true };
-const GATE_SHUT = { passed: false, reason: "checks not verified" };
-
-function agyRun(answers) {
-  return async (args) => {
-    const key = args[0] === "models" ? "models" : args[0] === "--version" ? "--version" : "print";
-    return {
-      exitCode: 0, stdout: "", stderr: "", timedOut: false, spawnFailed: false, groupReaped: true,
-      ...(answers[key] ?? {}),
-    };
-  };
-}
-
-test("agy: a MISSING reap confirmation is not a confirmation, and it outranks other reasons", async () => {
-  const missing = await probeAgy({
-    run: agyRun({ ...HEALTHY, print: { stdout: "ok\n", groupReaped: undefined } }),
-    gate: GATE_OPEN, env: {},
-  });
-  assert.equal(missing.smoke, "reap-failed");
-  assert.equal(missing.available, false);
-
-  const masked = await probeAgy({
-    run: agyRun({ ...HEALTHY, print: { stdout: "Authentication required\n", groupReaped: false } }),
-    gate: GATE_OPEN, env: {},
-  });
-  assert.equal(masked.smoke, "reap-failed",
-    "an unreaped group must not hide behind a signed-out reading");
-});
-
-const HEALTHY = {
-  "--version": { stdout: "1.1.2\n" },
-  print: { stdout: "ok\n" },
-  models: { stdout: "gemini-a\ngemini-b\n" },
-};
-
-test("agy healthy under an OPEN gate: available, models discovered, frozen row shape", async () => {
-  const row = await probeAgy({ run: agyRun(HEALTHY), gate: GATE_OPEN, env: {} });
-  assert.deepEqual(Object.keys(row), ROW_KEYS);
-  assert.equal(row.available, true);
-  assert.equal(row.version, "1.1.2");
-  assert.ok(AUTH_MODES.has(row.auth), `auth outside the frozen enum: ${row.auth}`);
-  assert.equal(row.smoke, "ok");
-  assert.deepEqual(row.models, { status: "fresh", slugs: ["gemini-a", "gemini-b"] });
-});
-
-test("agy healthy but the gate is SHUT: pending, never counted against the exit code", async () => {
-  const row = await probeAgy({ run: agyRun(HEALTHY), gate: GATE_SHUT, env: {} });
-  assert.equal(row.available, null, "an unverified lane is pending, not unavailable");
-  assert.match(row.detail, /contract gate not passed/);
-  assert.match(row.detail, /agy-flip-checklist/);
-});
-
-test("agy signed out: the FROZEN not-authenticated enum, with the explanation in detail", async () => {
-  const row = await probeAgy({
-    run: agyRun({
-      ...HEALTHY,
-      print: { stdout: "Authentication required. Please visit the URL to log in:\n" },
-    }),
-    gate: GATE_OPEN, env: {},
-  });
-  assert.equal(row.auth, "not-authenticated", "the frozen enum, not a new vocabulary");
-  assert.ok(AUTH_MODES.has(row.auth));
-  assert.equal(row.available, false);
-  assert.equal(row.models.status, "missing", "`agy models` refuses when signed out");
-  assert.deepEqual(row.models.slugs, [], "an empty list must not read as 'no models exist'");
-  assert.match(row.detail, /blocks even with stdin closed/,
-    "the OAuth block is the fact a caller most needs");
-});
-
-test("agy absent: unavailable under an open gate, pending under a shut one", async () => {
-  const missing = agyRun({ "--version": { spawnFailed: true } });
-  const open = await probeAgy({ run: missing, gate: GATE_OPEN, env: {} });
-  assert.equal(open.available, false);
-  assert.match(open.detail, /not found on PATH/);
-
-  const shut = await probeAgy({ run: missing, gate: GATE_SHUT, env: {} });
-  assert.equal(shut.available, null);
-  assert.deepEqual(Object.keys(shut), ROW_KEYS, "the frozen shape holds on every path");
-});
-
-test("agy: an unconfirmed reap is not a healthy lane, and auth is never invented", async () => {
-  const reapFailed = await probeAgy({
-    run: agyRun({ ...HEALTHY, print: { stdout: "ok\n", groupReaped: false } }),
-    gate: GATE_OPEN, env: {},
-  });
-  assert.equal(reapFailed.smoke, "reap-failed");
-  assert.equal(reapFailed.available, false);
-
-  const healthy = await probeAgy({ run: agyRun(HEALTHY), gate: GATE_OPEN, env: {} });
-  assert.equal(healthy.auth, "unknown",
-    "agy exposes no auth mode — reporting `api-key` would be inventing an observation");
-});
-
-// --- vibe-210: the staged notice reaches preflight's detail, and NOTHING else moves ------------
-//
-// The row's non-detail fields are the load-bearing part. `available: null` under a shut gate is a
-// deliberate statement that the lane is UNVERIFIED, not broken, and `exitCodeFor` skips a null row
-// entirely — so a change that turned it into `false` would fail a preflight over a lane nobody is
-// allowed to use. `models.status` is likewise NOT a constant: it is `fresh` when slugs list,
-// `missing` when signed out, and `pending` only when the binary is absent. Asserting a blanket
-// `pending` here would be a test greenable only by breaking the row, which is why each case carries
-// its own expected value.
-
-const SIGNED_OUT = {
-  ...HEALTHY,
-  print: { stdout: "Authentication required. Please visit the URL to log in:\n" },
-};
-const ABSENT = { "--version": { spawnFailed: true } };
-
-const STAGED = /staged; unavailable in this release/;
-
-for (const [name, answers, expectedModels] of [
-  ["healthy", HEALTHY, "fresh"],
-  ["signed out", SIGNED_OUT, "missing"],
-  ["binary absent", ABSENT, "pending"],
-]) {
-  test(`vibe-210: gate shut / ${name} — the notice is in detail and the row is untouched`, async () => {
-    const shut = await probeAgy({ run: agyRun(answers), gate: GATE_SHUT, env: {} });
-    const open = await probeAgy({ run: agyRun(answers), gate: GATE_OPEN, env: {} });
-
-    assert.match(shut.detail, STAGED, "the gate-shut detail states the release status");
-    assert.match(shut.detail, /contract gate not passed/, "and still names the gate");
-    assert.match(shut.detail, /agy-flip-checklist/, "and still points at the checklist");
-
-    // Every non-detail field is what it was before this change.
-    assert.equal(shut.available, null, "unverified is pending, never unavailable");
-    assert.equal(shut.models.status, expectedModels, `${name} keeps its own models.status`);
-    assert.deepEqual(Object.keys(shut), ROW_KEYS, "the frozen row shape is unchanged");
-    assert.equal(shut.auth, open.auth, "auth is unaffected by the notice");
-    assert.equal(shut.version, open.version, "version is unaffected by the notice");
-
-    // The exit-code contract: a pending row never counts against preflight.
-    assert.equal(exitCodeFor([shut]), 0, "a shut-gate agy row must not fail preflight");
-
-    // The OPEN-gate row must not carry the notice at all — it describes a release decision about a
-    // staged lane, and a graduated lane is not staged.
-    assert.doesNotMatch(open.detail, STAGED, "an open gate is not 'staged'");
-  });
-}

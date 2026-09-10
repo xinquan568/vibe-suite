@@ -1164,25 +1164,7 @@ class TestPluginDiscoverBehaviour(unittest.TestCase):
 # Written here, not read back from the partials — the vibe-5 lesson. Deleting a row from a partial
 # must fail a test, not quietly remove the obligation.
 
-REQUIRED_LIFECYCLE = {"pre-gate default": "codex", "post-gate default": "agy"}
-REQUIRED_HOPS = [("agy", "codex"), ("codex", "manual")]
-
-
-class TestStagedDefault(unittest.TestCase):
-    def test_lifecycle_fields_match_the_independent_expectation(self):
-        fields = parse_lifecycle()
-        for key, want in REQUIRED_LIFECYCLE.items():
-            with self.subTest(key=key):
-                self.assertIn(want, fields[key])
-
-    def test_graduation_condition_names_the_contract_gate(self):
-        self.assertIn("contract", parse_lifecycle()["graduation condition"].lower())
-
-    def test_lifecycle_is_parsed_independently_of_the_vocabulary(self):
-        # A value set cannot distinguish a v1 default from a post-flip one, which is why this has
-        # its own table and its own parser.
-        self.assertNotEqual(parse_lifecycle()["pre-gate default"],
-                            parse_lifecycle()["post-gate default"])
+REQUIRED_HOPS = [("codex", "manual")]
 
 
 class TestEngineVocabulary(unittest.TestCase):
@@ -1214,25 +1196,20 @@ class TestFallbackChain(unittest.TestCase):
                 guidance = hop[2].lower()
                 self.assertTrue(any(k in guidance for k in ("path", "install", "auth")), guidance)
 
-    def test_gating_is_declared_per_edge_not_for_the_whole_chain(self):
-        """Both errors are available, in opposite directions, and the table is parsed per row.
-
-        An *unconditional* chain contradicts AC-9(b): the agy hop does not exist before graduation.
-        A *wholly gated* chain is the mirror error and the one shipped first — it reads as though no
-        fallback exists today, when codex → manual carries every audit right now.
-
-        An earlier version asserted `"today" in text` and `"graduation" in text`. Both words appear
-        elsewhere in the prose, so corrupting the table left the suite green.
+    def test_the_live_edge_is_declared_live_and_is_parsed_per_row(self):
+        """vibe-298: the graduation-gated hop left with its lane (ADR-0002), so the two-directional
+        form of this test — an unconditional chain versus a wholly gated one — no longer has two
+        edges to discriminate between. What survives is the half that always carried the weight:
+        codex → manual is declared LIVE, and it is read from the parsed table rather than from the
+        surrounding prose. An earlier version asserted `"today" in text`, which stayed green when the
+        table was corrupted because the word appears elsewhere.
         """
         rows = parse_applicability()
-        self.assertIn(("agy", "codex"), rows)
         self.assertIn(("codex", "manual"), rows)
-        self.assertIn("graduation", rows[("agy", "codex")],
-                      "the agy hop must be gated on graduation")
         self.assertIn("today", rows[("codex", "manual")],
                       "the codex hop must be declared live today")
         self.assertNotIn("graduation", rows[("codex", "manual")],
-                         "the codex hop must NOT be gated behind agy's graduation")
+                         "and must not be gated behind anything")
 
     def test_a_hop_fires_on_empty_output_not_only_on_unreachability(self):
         # The upstream fires the fallback on empty, erroring, or incomplete results; only the

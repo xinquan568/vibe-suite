@@ -1,6 +1,6 @@
 ---
 description: "Cross-model judgment audit of natural-language artifacts — the complement to the deterministic score. One typed command over six targets: skill, command, agent, rules, plugin (local analysis, no model call) and repo (whole-tree discovery across categories A–E with fifteen category check sets). Every type carries seven dimensions with mini/full depth membership. Arguments: --type, a path or scope, --full or --mini, --engine, and --background or --wait."
-argument-hint: "[--type skill|command|agent|rules|plugin|repo] [path|scope] [--full|--mini] [--engine claude|codex|agy|both] [--background|--wait]"
+argument-hint: "[--type skill|command|agent|rules|plugin|repo] [path|scope] [--full|--mini] [--engine claude|codex|both] [--background|--wait]"
 ---
 
 # /vibe-suite:nl-audit — cross-model NL-artifact audit
@@ -61,17 +61,13 @@ delegated to the `/vibe-suite:security-scan` pass). Engine resolution does not a
 
 ## Step 4 — dispatch
 
-The lane follows from the resolved engine and the agy contract gate. The gate matters: the audit-lane
-entry point refuses **before dispatching anything** while the gate is shut, so the default lane must
-not be routed through it.
+The lane follows from the resolved engine.
 
-| Resolved engine | Gate | Lane |
-|---|---|---|
-| `codex` (the v1 default) | any | `scripts/codex-runner.mjs`, directly |
-| `agy`, explicitly requested | not passed | **refuse**, naming the gate status |
-| `agy` (requested or defaulted) | passed | `scripts/agy-audit-cli.mjs` — the agy → codex → manual chain |
-| `claude` | any | in-session; no external process |
-| `both` | any | Claude plus the resolved cross-model engine, reconciled with disagreements listed |
+| Resolved engine | Lane |
+|---|---|
+| `codex` (the v1 default) | `scripts/codex-runner.mjs`, directly |
+| `claude` | in-session; no external process |
+| `both` | Claude plus the resolved cross-model engine, reconciled with disagreements listed |
 
 **Build the prompt file first — the whole lifecycle, in this order.** Artifact text is untrusted and
 often contains backticks, `$( )` and quotes, so it never touches a shell line:
@@ -96,19 +92,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --sandbox read-only --kind
 4. Remove the file when the run terminates, on every path including refusal and fallback:
    `rm -f "$NL_AUDIT_PROMPT_FILE"`.
 
-On the graduated agy lane, step 3 becomes
-`node "${CLAUDE_PLUGIN_ROOT}/scripts/agy-audit-cli.mjs" -- "$(cat "$NL_AUDIT_PROMPT_FILE")"`; steps
-1, 2 and 4 are unchanged.
-
-**A pre-gate `--engine agy` request is refused, not degraded** — `commands/shared/fallback.md` draws
-that distinction, and it matters: a refusal says *this is not available yet*, a degradation says
-*this ran, but not the way you asked*. Reporting the first as the second would tell a user their
-audit ran when it did not.
-
 `--wait` is the **default**: the run returns when the job finishes. `--background` returns a launch
-receipt and hands the job to `/vibe-suite:jobs`. `--background` is **refused on the agy lane** with a
-one-line reason, because `scripts/agy-audit-cli.mjs` neither accepts nor forwards it — a flag
-silently ignored is worse than a flag refused.
+receipt and hands the job to `/vibe-suite:jobs`.
 
 ## Step 5 — when the engine is unreachable
 

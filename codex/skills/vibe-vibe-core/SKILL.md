@@ -144,14 +144,14 @@ schema and the two will diverge.
 
 | Key | Type | Domain | Default |
 |-----|------|--------|---------|
-| `engine` | enum | `claude`\|`codex`\|`agy`\|`both` | unset |
-| `cross_model_audit_engine` | enum | `codex`\|`agy` | `codex` |
+| `engine` | enum | `claude`\|`codex`\|`both` | unset |
+| `cross_model_audit_engine` | enum | `codex` | `codex` |
 | `reviewer_backend` | enum | `codex` | `codex` |
 | `reviewer_model` | string | open | unset |
 | `effort` | enum | `low`\|`medium`\|`high` | `medium` |
 | `sandbox` | enum | `read-only`\|`workspace-write`\|`danger-full-access` | `read-only` |
 | `audit_depth` | enum | `mini`\|`full` | unset |
-| `model_overrides` | map | `codex`\|`agy` | empty |
+| `model_overrides` | map | `codex` | empty |
 | `skip_patterns` | list | open | empty |
 | `focus_instructions` | string | open | empty |
 | `project_instructions` | string | open | empty |
@@ -179,7 +179,7 @@ A `/` or `.` in it is rejected before any path is constructed.
 | Level | Openness | An unknown key |
 |-------|----------|----------------|
 | top level | open | warns; the load continues |
-| `model_overrides` | closed to `codex`, `agy` | errors |
+| `model_overrides` | closed to `codex` | errors |
 | `rule_overrides` (both levels) | closed | errors |
 | `gate` (store-only) | ignored | warns naming the rule; the load continues |
 

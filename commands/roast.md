@@ -1,6 +1,6 @@
 ---
-description: "Interrogate a codebase: a recon survey, then a parallel specialist fan-out or a cross-model dimension pass, then synthesis, an executive summary and a phased fixing plan written to a timestamped report. Six styles, eight add-ons, and four engine lanes — claude in-session, codex and agy cross-model, or both with reconciliation labels."
-argument-hint: "[target-path] [--engine claude|codex|agy|both] [--style 1-6] [--addons <a,b,...>] [--mini|--full] [--output <path>]"
+description: "Interrogate a codebase: a recon survey, then a parallel specialist fan-out or a cross-model dimension pass, or both with reconciliation labels."
+argument-hint: "[target-path] [--engine claude|codex|both] [--style 1-6] [--addons <a,b,...>] [--mini|--full] [--output <path>]"
 ---
 
 # /vibe-suite:roast — code interrogation
@@ -50,21 +50,13 @@ ${ENGINE_ARG:+--engine "$ENGINE_ARG"}` — read `lanes` and `model`; [`commands/
 holds the vocabulary and the staged cross-model default.
 **No model flag is ever passed** — the engine CLI picks its own best model (P9).
 
-| Resolved engine | Gate | Lane |
-|---|---|---|
-| `claude` (default) | any | in-session fan-out; no external process |
-| `codex` | any | `scripts/codex-runner.mjs`, directly |
-| `agy` | not passed | **refuse**, naming the gate status and `docs/agy-flip-checklist.md` |
-| `agy` | passed | `scripts/agy-audit-cli.mjs` — the agy → codex → manual chain |
-| `both` | any | `claude` plus the resolved cross-model engine, then step 6's reconciliation |
+| Resolved engine | Lane |
+|---|---|
+| `claude` (default) | in-session fan-out; no external process |
+| `codex` | `scripts/codex-runner.mjs`, directly |
+| `both` | `claude` plus the resolved cross-model engine, then step 6's reconciliation |
 
-The codex lane calls `codex-runner.mjs` **directly and never through `agy-audit-cli.mjs`**, which
-refuses before dispatching anything while the agy gate is shut — routing the default through it would
-make every cross-model roast fail closed while appearing configured.
-
-**A pre-gate `--engine agy` request is refused, not degraded.**
-[`commands/shared/fallback.md`](shared/fallback.md) draws that distinction: a refusal says *this is not
-available yet*, a degradation says *this ran, but not the way you asked*.
+The codex lane calls `codex-runner.mjs` **directly**.
 
 Build each prompt with the Write tool to a `mktemp` path — never interpolate source into a shell line
 — then dispatch, then remove the file on every path including refusal:

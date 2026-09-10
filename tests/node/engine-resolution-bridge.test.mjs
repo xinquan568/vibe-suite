@@ -22,21 +22,22 @@ function workspace(frontmatter) {
   if (frontmatter !== null) writeFileSync(path.join(dir, ".vibe-suite.md"), `---\n${frontmatter}---\n`);
   return dir;
 }
-const OVERRIDES = "model_overrides:\n  codex: project-codex\n  agy: project-agy\n";
+const OVERRIDES = "model_overrides:\n  codex: project-codex\n";
 
 test("the user's model wins over the project override, through the seam", () => {
   assert.equal(resolveModel(workspace(OVERRIDES), { engine: "codex", model: "user-model" }), "user-model");
 });
 
-test("each lane reads its own override — codex gets codex's, agy gets agy's", () => {
+test("a lane reads its own override, and a lane without one defers", () => {
   const dir = workspace(OVERRIDES);
   assert.equal(resolveModel(dir, { engine: "codex" }), "project-codex");
-  assert.equal(resolveModel(dir, { engine: "agy" }), "project-agy");
+  assert.equal(resolveModel(dir, { engine: "claude" }), null,
+    "an in-session lane has no model to name, whatever the map holds");
 });
 
 test("nothing configured → null (DEFER: no model flag; P9)", () => {
   assert.equal(resolveModel(workspace(null), { engine: "codex" }), null);
-  assert.equal(resolveModel(workspace("sandbox: read-only\n"), { engine: "agy" }), null);
+  assert.equal(resolveModel(workspace("sandbox: read-only\n"), { engine: "codex" }), null);
 });
 
 test("noModel short-circuits to null WITHOUT spawning the seam", () => {
@@ -115,7 +116,7 @@ test("resolveDefaults resolves sandbox and effort only — the model rule left w
 });
 
 test("source guard: no Node file states the model rule itself", () => {
-  for (const rel of ["scripts/lib/config-bridge.mjs", "scripts/codex-runner.mjs", "scripts/agy-runner.mjs"]) {
+  for (const rel of ["scripts/lib/config-bridge.mjs", "scripts/codex-runner.mjs"]) {
     const text = readFileSync(path.join(REPO_ROOT, rel), "utf8");
     assert.ok(!text.includes("model_overrides"), `${rel} reads model_overrides itself — a second statement of the rule`);
   }

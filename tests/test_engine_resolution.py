@@ -40,7 +40,7 @@ def resolve(cfg, **kw):
 
 class TestLadder(unittest.TestCase):
     def test_user_choice_wins(self):
-        self.assertEqual(resolve({"engine": "agy"}, engine="codex")["engine"], "codex")
+        self.assertEqual(resolve({"engine": "both"}, engine="codex")["engine"], "codex")
 
     def test_the_project_file_wins_when_the_user_says_nothing(self):
         self.assertEqual(resolve({"engine": "codex"})["engine"], "codex")
@@ -60,7 +60,7 @@ class TestLadder(unittest.TestCase):
             resolve({"engine": "bogus"})          # a bad value in the project file is refused too
 
     def test_cross_model_audit_engine_follows_the_reader(self):
-        self.assertEqual(resolve({"cross_model_audit_engine": "agy"})["cross_model_audit_engine"], "agy")
+        self.assertEqual(resolve({"cross_model_audit_engine": "codex"})["cross_model_audit_engine"], "codex")
         self.assertEqual(resolve({})["cross_model_audit_engine"], "codex")
 
 
@@ -69,14 +69,13 @@ class TestModel(unittest.TestCase):
         self.assertEqual(resolve({"engine": "codex", "model_overrides": {"codex": "cfg-model"}}, model="user-model")["model"], "user-model")
 
     def test_model_overrides_is_read_for_the_resolved_lane_only(self):
-        self.assertEqual(resolve({"engine": "codex", "model_overrides": {"codex": "c", "agy": "a"}})["model"], "c")
-        self.assertEqual(resolve({"engine": "agy", "model_overrides": {"codex": "c", "agy": "a"}})["model"], "a")
+        self.assertEqual(resolve({"engine": "codex", "model_overrides": {"codex": "c"}})["model"], "c")
 
     def test_defer_is_none(self):
         self.assertIsNone(resolve({"engine": "codex"})["model"])
 
     def test_the_in_session_engine_never_names_a_model(self):
-        self.assertIsNone(resolve({"engine": "claude", "model_overrides": {"codex": "c", "agy": "a"}})["model"])
+        self.assertIsNone(resolve({"engine": "claude", "model_overrides": {"codex": "c"}})["model"])
         self.assertIsNone(resolve({}, model="user-model")["model"], "claude has no model even when the user names one")
 
 
@@ -85,8 +84,8 @@ class TestBoth(unittest.TestCase):
         out = resolve({"engine": "both", "cross_model_audit_engine": "codex", "model_overrides": {"codex": "c"}})
         self.assertEqual(out["lanes"], ["claude", "codex"])
         self.assertEqual(out["model"], "c", "the one external constituent's model")
-        out = resolve({"engine": "both", "cross_model_audit_engine": "agy", "model_overrides": {"agy": "a"}})
-        self.assertEqual(out["lanes"], ["claude", "agy"]); self.assertEqual(out["model"], "a")
+        out = resolve({"engine": "both", "cross_model_audit_engine": "codex", "model_overrides": {"codex": "c"}})
+        self.assertEqual(out["lanes"], ["claude", "codex"]); self.assertEqual(out["model"], "c")
 
     def test_a_single_engine_is_its_own_lane(self):
         self.assertEqual(resolve({"engine": "codex"})["lanes"], ["codex"])
@@ -104,7 +103,7 @@ class TestVocabularyAgreesWithCode(unittest.TestCase):
         for value in ENGINES:
             with self.subTest(value=value):
                 self.assertIn(f"`{value}`", text)
-        self.assertEqual(len(ENGINES), 4)
+        self.assertEqual(len(ENGINES), 3)
 
     def test_the_four_documented_keys_are_in_the_reader_schema(self):
         # The partial's vocabulary table names these; the schema (config.SCHEMA) is where they are defined.

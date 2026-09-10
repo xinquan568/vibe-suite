@@ -1,5 +1,5 @@
 ---
-description: "Manage vibe-suite engine jobs — status, result, and cancel over the shared job store (codex jobs today; agy jobs join the same store after E1.7)."
+description: "Manage vibe-suite engine jobs — status, result, and cancel over the shared job store (codex jobs today; a second engine would join the same store after E1.7)."
 argument-hint: "[status [<job-id>] [--all] [--json] [--settle-abandoned] | result <job-id> | cancel [<job-id>] | prune [--older-than <n>d|h|m|s]]"
 ---
 
@@ -9,7 +9,7 @@ Every external-engine dispatch in the suite registers a job record in the store 
 `<workspace>/.vibe-suite-state/jobs/<jobId>.json` (one file per job; `<workspace>` is the directory
 the launching command ran in — the user's project, not the plugin). This command is the operator
 surface over those records. It is engine-agnostic: it reads the record schema, never the lane, so
-codex jobs work today and agy jobs (E1.7, #17) work the moment they register into the same store.
+codex jobs work today, and any future engine works the moment it registers into the same store.
 
 ## What to do
 

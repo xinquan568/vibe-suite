@@ -203,13 +203,11 @@ class TestCommandSurface(unittest.TestCase):
 
     def test_dispatch_branches_around_the_gate(self):
         """The defect the plan review caught: routing the v1 codex default through
-        `agy-audit-cli.mjs` would hit its pre-gate refusal and never reach codex."""
+        vibe-298: the retired lane's dispatcher is gone, so only the codex dispatch is named."""
         self.assertIn("scripts/codex-runner.mjs", self.text,
                       "the codex lane must dispatch codex-runner.mjs directly")
-        self.assertIn("scripts/agy-audit-cli.mjs", self.text,
-                      "the graduated agy lane must dispatch agy-audit-cli.mjs")
-        self.assertRegex(self.norm, r"(?i)refus\w*[^.]*agy|agy[^.]*refus\w*",
-                         "a pre-gate --engine agy request must be refused, not degraded")
+        self.assertNotIn("agy", self.text.lower(),
+                         "no retired lane may be named in the dispatch contract")
 
     def test_wait_is_the_default_and_background_is_specified(self):
         self.assertRegex(self.norm, r"(?i)--wait[^.]*default|default[^.]*--wait",
@@ -383,7 +381,7 @@ class TestNamespaceAndModelDiscipline(unittest.TestCase):
         if not COMMAND.is_file():
             self.skipTest("commands/nl-audit.md does not exist yet")
         for line in _read(COMMAND).splitlines():
-            if "codex-runner.mjs" in line or "agy-audit-cli.mjs" in line:
+            if "codex-runner.mjs" in line:
                 self.assertNotRegex(line, r"(?<![\w-])-m\s|\B--model\b",
                                     "dispatch names a model (P9): %s" % line.strip())
 

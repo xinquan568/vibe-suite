@@ -273,15 +273,15 @@
       "mirror": "codex/skills/vibe-roast/SKILL.md",
       "mirror_sha256": "14cf552edbde9ab3f19ac6a5b9e7d93677efa74699a5c97dd063bdb0c18f251f",
       "source": "commands/roast.md",
-      "source_sha256": "7a112d106426d3c2c1bf67f1bf7dd3324258e7e7a9f3d4de91569b92daf0dd3e",
+      "source_sha256": "997831e7d3bb7a43296df35f55b08212ce26fb9206ea91d0aff3c6c508a1c34c",
       "transform": "variant"
     },
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-roasting/SKILL.md",
-      "mirror_sha256": "65300f0643c5baef2773269396b73443649129e74c71aad523f5321f4a676f1d",
+      "mirror_sha256": "b42e3b6fe4b2834712f28ee1c8a9de4b2783dc3b5044dfe9ffd2903f78d978af",
       "source": "skills/roasting/SKILL.md",
-      "source_sha256": "7479df1cb1844f96c195fad32e87fbb1c3b36623b7a3946df8d2844881aba9ac",
+      "source_sha256": "4cbbb5fd49725d21675260df83ea4e8a2b3b8f2f77e7913aa4f7053f9c22d37a",
       "transform": "markdown"
     },
     {
@@ -327,9 +327,9 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-vibe-core/SKILL.md",
-      "mirror_sha256": "b47c255cef7ca4e6b8fbfe4adc4adce67315024cee67c695888a86af106ef46a",
+      "mirror_sha256": "b474896242cfb3c88a6bb01bfbce6d8316c98efeb1291becc2543697e2c558de",
       "source": "skills/vibe-core/SKILL.md",
-      "source_sha256": "01cb616aed987594d095dee2471b7b830a4f9237a48bcae72a65ef5fcf2debdb",
+      "source_sha256": "220177d46f7beaee85b1931207f8c8d91ee7432ff1a2d1988de311df83cf8a3d",
       "transform": "markdown"
     },
     {

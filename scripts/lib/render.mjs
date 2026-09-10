@@ -267,10 +267,10 @@ export function renderJson(payload) {
 }
 
 /**
- * Bounding `rawOutput` (vibe-274) — the Codex line-based lane. The agy character-boundary
- * allocator is #277's and is deliberately not here: Codex's atom is a `\n`-terminated line
- * selected by parseable events, agy's is a UTF-8 character with no events at all, and treating
- * them as one mechanism is what defeated six designs.
+ * Bounding `rawOutput` (vibe-274) — the Codex line-based lane. Its atom is a `\n`-terminated line
+ * selected by parseable events. A second, staged lane once needed a different allocator entirely
+ * (a UTF-8 character boundary, with no events at all); treating the two as one mechanism is what
+ * defeated six designs, and the lane was retired before v0.0.1-alpha1 (ADR-0002).
  *
  * The problem is a FIXED POINT, not a truncation: the marker announcing an elided region is itself
  * sized by how much was elided, so retaining more content shrinks the marker, which frees budget,

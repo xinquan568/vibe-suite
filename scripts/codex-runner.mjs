@@ -4,7 +4,7 @@
 //
 // Every external-engine call in the suite flows through here: `/vibe-suite:delegate`,
 // `/vibe-suite:bug-analyze`, `/vibe-suite:continue`, `/vibe-suite:jobs`, the stop-review gate, and
-// the agy runner, which mirrors this contract surface. Six consumers inherit whatever this file
+// this contract surface. Six consumers inherit whatever this file
 // decides, so the decisions are written down rather than left to be inferred.
 //
 // Canonical call:

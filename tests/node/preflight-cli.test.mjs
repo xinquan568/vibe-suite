@@ -69,15 +69,9 @@ function controlledPath({ codexFixture = null, includeNode = codexFixture !== nu
   return entries.join(path.delimiter);
 }
 
-function cli({ pathVar, seam = null, home = freshHome(), args = [], agy = null, gate = null }) {
-  const env = {
-    HOME: home, CODEX_HOME: home, PATH: pathVar,
-    // ALWAYS pinned: "no test invokes the real agy" must be enforced, not true by accident of this
-    // machine's PATH layout. A guaranteed-missing path is the default.
-    VIBE_SUITE_AGY_BIN: agy ?? "/nonexistent/definitely-not-installed-agy",
-  };
+function cli({ pathVar, seam = null, home = freshHome(), args = [] }) {
+  const env = { HOME: home, CODEX_HOME: home, PATH: pathVar };
   if (seam) env.VIBE_SUITE_CODEX_BIN = seam;
-  if (gate) env.VIBE_SUITE_AGY_GATE_FILE = gate;
   return spawnSync(process.execPath, [CLI, ...args], {
     cwd: tempDir("preflight-cwd-"), env, encoding: "utf8", timeout: 60_000,
   });
@@ -86,8 +80,7 @@ function cli({ pathVar, seam = null, home = freshHome(), args = [], agy = null, 
 test("PRESENT via PATH: an executable named codex on a controlled PATH yields the available matrix, exit 0", () => {
   const result = cli({ pathVar: controlledPath({ codexFixture: path.join(FIXTURES, "preflight-ok.mjs") }) });
   assert.equal(result.status, 0, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
-  for (const expected of ["codex", "available", "chatgpt", "codex-cli 0.0.7", "discovered-model-a",
-    "agy", "contract gate not passed"]) {
+  for (const expected of ["codex", "available", "chatgpt", "codex-cli 0.0.7", "discovered-model-a"]) {
     assert.ok(result.stdout.includes(expected), `missing '${expected}' in:\n${result.stdout}`);
   }
 });
@@ -96,18 +89,16 @@ test("ABSENT via PATH: a controlled PATH with no codex yields the absent matrix,
   const result = cli({ pathVar: controlledPath() });
   assert.equal(result.status, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
   assert.ok(result.stdout.includes("not found"), result.stdout);
-  assert.ok(result.stdout.includes("contract gate not passed"),
-    "the agy column must render regardless, and say why it is pending");
 });
 
-test("--json is one parseable document with both rows in the exact schema", () => {
+test("--json is one parseable document whose engine row matches the exact schema", () => {
   const result = cli({
     pathVar: controlledPath({ codexFixture: path.join(FIXTURES, "preflight-ok.mjs") }),
     args: ["--json"],
   });
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
-  assert.deepEqual(payload.engines.map((r) => r.engine), ["codex", "agy"]);
+  assert.deepEqual(payload.engines.map((r) => r.engine), ["codex"]);
   for (const row of payload.engines) {
     assert.deepEqual(Object.keys(row),
       ["engine", "available", "version", "auth", "smoke", "models", "detail"]);
@@ -115,10 +106,6 @@ test("--json is one parseable document with both rows in the exact schema", () =
       "the nested models shape is part of the schema contract");
     assert.ok(Array.isArray(row.models.slugs) && row.models.slugs.every((s) => typeof s === "string"));
   }
-  assert.equal(payload.engines[1].available, null);
-  assert.deepEqual(
-    [payload.engines[1].version, payload.engines[1].auth, payload.engines[1].smoke],
-    [null, null, null]);
 });
 
 test("authless lane: not-authenticated, exit 1, and the credential token never surfaces", () => {
@@ -152,74 +139,6 @@ test("usage errors exit 2", () => {
   const result = cli({ pathVar: controlledPath(), args: ["--frobnicate"] });
   assert.equal(result.status, 2, result.stdout + result.stderr);
 });
-
-// ---------------------------------------------------------------------------------------------
-// The agy column, end to end (E1.7 closes E1.3's deferred assertion). Both dimensions matter: what
-// the row says, and whether it may influence the exit code — which only a passed gate permits.
-
-function openGateFile() {
-  const dir = tmpWorkspace("preflight-gate-");
-  const file = path.join(dir, "gate-status.json");
-  const names = ["headless_invocation", "read_only_write_denied", "timeout_kill",
-    "failure_signature", "quota_signature"];
-  writeFileSync(file, JSON.stringify({
-    schema: 1, status: "passed", agy_version: "1.1.2", recorded_at: "2026-07-28T00:00:00Z",
-    checks: Object.fromEntries(names.map((n) => [n, { state: "passed", note: "simulated" }])),
-  }));
-  return file;
-}
-
-const AGY_FIXTURES = path.join(REPO_ROOT, "tests", "fixtures", "fake-agy");
-const codexOk = () => path.join(FIXTURES, "preflight-ok.mjs");
-
-test("agy matrix: healthy, signed-out and absent — under a SHUT gate, all stay pending", () => {
-  for (const [label, agy] of [
-    ["healthy", path.join(AGY_FIXTURES, "responder.mjs")],
-    ["signed out", path.join(AGY_FIXTURES, "auth-error.mjs")],
-    ["absent", "/nonexistent/definitely-not-installed-agy"],
-  ]) {
-    const result = cli({ pathVar: controlledPath({ includeNode: true }), seam: codexOk(), agy });
-    assert.equal(result.status, 0, `${label}: a shut gate must never fail the exit code
-${result.stdout}`);
-    assert.match(result.stdout, /agy\s+pending/, `${label}: ${result.stdout}`);
-    assert.match(result.stdout, /contract gate not passed/, label);
-  }
-});
-
-test("agy matrix under an OPEN gate: the row reports truthfully and contributes to the exit code", () => {
-  const gate = openGateFile();
-
-  const healthy = cli({
-    pathVar: controlledPath({ includeNode: true }), seam: codexOk(),
-    agy: path.join(AGY_FIXTURES, "responder.mjs"), gate, args: ["--json"],
-  });
-  const healthyRows = JSON.parse(healthy.stdout).engines;
-  const healthyAgy = healthyRows.find((row) => row.engine === "agy");
-  assert.equal(healthyAgy.available, true, healthy.stdout);
-  assert.equal(healthyAgy.auth, "unknown", "agy exposes no auth mode");
-  assert.deepEqual(healthyAgy.models.slugs, ["gemini-a", "gemini-b"]);
-  assert.equal(healthy.status, 0);
-
-  const signedOut = cli({
-    pathVar: controlledPath({ includeNode: true }), seam: codexOk(),
-    agy: path.join(AGY_FIXTURES, "auth-error.mjs"), gate, args: ["--json"],
-  });
-  const signedOutAgy = JSON.parse(signedOut.stdout).engines.find((row) => row.engine === "agy");
-  assert.equal(signedOutAgy.auth, "not-authenticated", "the frozen enum, not a new word");
-  assert.equal(signedOutAgy.models.status, "missing");
-  assert.equal(signedOut.status, 1, "an open gate lets an unavailable agy fail the exit code");
-
-  // The third leg of the matrix: absent under an OPEN gate is a genuine failure, not pending.
-  const absent = cli({
-    pathVar: controlledPath({ includeNode: true }), seam: codexOk(),
-    agy: "/nonexistent/definitely-not-installed-agy", gate, args: ["--json"],
-  });
-  const absentAgy = JSON.parse(absent.stdout).engines.find((row) => row.engine === "agy");
-  assert.equal(absentAgy.available, false, absent.stdout);
-  assert.match(absentAgy.detail, /not found on PATH/);
-  assert.equal(absent.status, 1, "under an open gate, a missing agy fails the preflight");
-});
-
 // === vibe-209 (grill P4) — runtime rows =============================================================
 //
 // The matrix probed AI engines only, so a missing `python3`, `node` or `git` first announced itself
@@ -333,6 +252,58 @@ test("R-AUTH: a runtime row reporting auth 'unknown' WOULD fail the exit code (v
   assert.equal(exitCodeFor([healthy]), 0, "auth null passes");
   assert.equal(exitCodeFor([{ ...healthy, auth: "unknown" }]), 1,
     "and 'unknown' does not — which is why the rows report null");
+});
+
+test("R-ONE-LANE: the CLI probes and publishes exactly one engine row (vibe-298)", () => {
+  // The third seam of the removal. `exitCodeFor` can be correct while `preflight-cli.mjs` still
+  // imports the retired probe and publishes its row, so R-NO-EXEMPT alone would pass over a
+  // half-removed lane.
+  const seam = path.join(FIXTURES, "preflight-ok.mjs");
+  const report = JSON.parse(cli({ seam, args: ["--json"] }).stdout);
+  assert.deepEqual(report.engines.map((row) => row.engine), ["codex"],
+    `exactly the codex row, no retired lane: ${JSON.stringify(report.engines.map((r) => r.engine))}`);
+
+  // The human matrix must agree with the JSON — a lane removed from one surface and left in the
+  // other is the defect this pins, not a formatting preference.
+  const human = cli({ seam }).stdout;
+  assert.ok(!/\bagy\b/i.test(human), `no retired row in the human matrix: ${human}`);
+
+  // The runtime rows are untouched by this change and must survive it.
+  assert.ok(Array.isArray(report.runtimes) && report.runtimes.length > 0,
+    "the runtimes array is retained");
+
+  // Publishing nothing is NOT the same as probing nothing. A CLI that still invoked the retired
+  // binary and discarded its result would satisfy every assertion above, so the retired name is put
+  // on PATH as a RECORDING shim and its marker must stay absent — the lane must not be reached at
+  // all, in either output mode.
+  const spy = tempDir("preflight-spy-");
+  const marker = path.join(spy, "invoked");
+  writeFileSync(path.join(spy, "agy"),
+    `#!/bin/sh\nprintf 'x' > ${JSON.stringify(marker)}\nexit 0\n`);
+  chmodSync(path.join(spy, "agy"), 0o755);
+  const withSpy = `${spy}${path.delimiter}${controlledPath({ codexFixture: path.join(FIXTURES, "preflight-ok.mjs") })}`;
+  cli({ pathVar: withSpy, args: ["--json"] });
+  assert.ok(!existsSync(marker), "the retired probe must not be invoked in --json mode");
+  cli({ pathVar: withSpy });
+  assert.ok(!existsSync(marker), "nor in the human matrix mode");
+});
+
+test("R-NO-EXEMPT: exitCodeFor exempts no engine by name (vibe-298)", async () => {
+  // `exitCodeFor` used to read `row.engine !== "agy" && row.auth === "unknown"` — an exception
+  // hard-coded to ONE engine name, because that engine exposed no auth MODE and `unknown` was its
+  // truthful terminal answer rather than a failed probe. Every engine that remains DOES expose one,
+  // so `unknown` now uniformly means "failed to learn something knowable" and must fail.
+  //
+  // SCOPE, stated rather than implied: these two cases pin the exemption that existed and its codex
+  // counterpart. They do NOT prove name-independence in general — a mutant exempting some other
+  // name would pass both. That would be separate coverage and is not claimed here.
+  const { exitCodeFor } = await import("../../scripts/lib/preflight.mjs");
+  const row = { engine: "codex", available: true, version: "codex-cli 0.1.0", auth: "unknown" };
+
+  assert.equal(exitCodeFor([{ ...row, engine: "agy" }]), 1,
+    "the formerly-exempt name is no longer exempt — before vibe-298 this returned 0");
+  assert.equal(exitCodeFor([row]), 1,
+    "and codex behaves as it always did, which is the regression guard on the change");
 });
 
 // --- version floors ------------------------------------------------------------------------------
@@ -694,9 +665,8 @@ test("R9: `engines` is untouched — same rows, same order, same positions (vibe
     seam: path.join(FIXTURES, "preflight-ok.mjs"), args: ["--json"],
   });
   const payload = JSON.parse(result.stdout);
-  assert.deepEqual(payload.engines.map((r) => r.engine), ["codex", "agy"],
+  assert.deepEqual(payload.engines.map((r) => r.engine), ["codex"],
     "the engines array keeps its exact contents and order");
-  assert.equal(payload.engines[1].engine, "agy", "and its positional reading");
   for (const row of payload.engines) {
     assert.ok(!("runtime" in row), "no runtime row may leak into engines");
   }

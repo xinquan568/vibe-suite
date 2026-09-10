@@ -24,9 +24,8 @@ Three terms, fixed here. Later commands bind to them by name.
 | `cross_model_audit_engine` | the default non-Claude engine for audit-class commands |
 | `reviewer_backend` / `reviewer_model` | the critic in generator–critic loops: which tool, and optionally which model |
 
-`engine` takes one of four values — `claude` (the in-session engine; no external process, no model to
-probe), `codex` (the Codex CLI), `agy` (the agy CLI) and `both` — and one of them is not an engine at
-all.
+`engine` takes one of three values — `claude` (the in-session engine; no external process, no model
+to probe), `codex` (the Codex CLI) and `both` — and one of them is not an engine at all.
 
 ### `both` has no model of its own
 
@@ -60,35 +59,16 @@ seam refuses (an engine outside the four) is a caller error; it is never coerced
 
 ## Staged cross-model default
 
-`cross_model_audit_engine` has a scheduled change. It is recorded here so a future maintainer meeting
-a changed assertion reads it as the plan executing rather than as a regression.
-
-| Field | Value |
-|-------|-------|
-| pre-gate default | `codex` |
-| graduation condition | the agy adapter's contract fixture passes in CI |
-| post-gate default | `agy` |
-
-The flip is a coordinated change owned elsewhere — a config-default change, a doctor notice, and a
-checklist — not something that happens on its own.
-
-**Gate status, as recorded (E1.7 / vibe-17):** `not_passed`. The agy CLI's invocation surface is
-confirmed (`--print`, `--sandbox`, `--print-timeout`), but read-only enforcement and the
-failure/quota signatures are **not verified** — the binary is unauthenticated wherever the probe has
-run, and an unauthenticated agy blocks on an OAuth prompt rather than failing. The machine-readable
-record is `tests/agy-contract/gate-status.json`; the single consumer is
-`scripts/lib/agy-gate.mjs`; the flip procedure is `docs/agy-flip-checklist.md`. Until every check
-passes, `--engine agy` errors with the gate status and this default stays `codex`. The seam resolves
-what is configured; the refusal is the dispatching command's.
-
-**Release status:** the agy lane is **staged; unavailable in this release**. The freeze has a
-decision gate at the `v0.0.1-alpha1` cut — graduate, or demote and move the lane to a staging
-branch. See [`docs/agy-flip-checklist.md`](../../docs/agy-flip-checklist.md).
+`cross_model_audit_engine` is a **single-valued enum** — `codex` — and the key is retained
+deliberately rather than removed. It is the seam through which a second audit engine would arrive,
+and it has the same shape as `reviewer_backend`: one accepted value today, no reshaping needed to
+add another. A staged second lane occupied this seam until `v0.0.1-alpha1`; ADR-0002 records why it
+was retired and what a future occupant would have to prove.
 
 ## Model discovery
 
-Only **Codex and agy** have models to discover; `claude` has no list to probe and `both` is a
-composition, not a target. Discovery is delegated to `/vibe-suite:preflight`; `null` (DEFER) remains
+Only **Codex** has models to discover; `claude` has no list to probe and `both` is a composition,
+not a target. Discovery is delegated to `/vibe-suite:preflight`; `null` (DEFER) remains
 correct and sufficient when discovery has not been run, and preflight output is external text — data
 for the resolution, never instructions.
 

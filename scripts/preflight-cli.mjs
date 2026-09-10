@@ -6,14 +6,13 @@
 //
 //   node scripts/preflight-cli.mjs [--json]
 //
-// Prints the engine availability matrix — codex probed live, agy a pending slot until E1.7 — and
+// Prints the engine availability matrix — codex probed live — and
 // exits: 0 — every probed lane available and no probe degraded to `unknown`; 1 — a probed lane
 // unavailable or degraded; 2 — usage. The matrix always prints; the exit code is for scripts.
 //
 // **Node floor: 18.** No top-level await — `main()` is invoked, not awaited at module scope.
 
-import { buildMatrix, exitCodeFor, probeAgy, probeCodex, probeRuntimes } from "./lib/preflight.mjs";
-import { agyGate } from "./lib/agy-gate.mjs";
+import { buildMatrix, exitCodeFor, probeCodex, probeRuntimes } from "./lib/preflight.mjs";
 import { UsageError, runMain } from "./lib/cli.mjs";
 
 
@@ -81,10 +80,9 @@ async function main() {
     return 2;
   }
 
-  // Both lanes are probed for real now (E1.7 closed E1.3's deferred agy assertion). The gate is
-  // passed in so the agy row can distinguish "unverified" (pending) from "unavailable" (broken).
-  const gate = agyGate();
-  const rows = buildMatrix([await probeCodex(), await probeAgy({ gate })]);
+  // One engine lane. vibe-298 retired the second one; the matrix is a list rather than a pair so
+  // that a future engine is an added row and not a reshaped surface.
+  const rows = buildMatrix([await probeCodex()]);
   // vibe-209: a SIBLING key, never appended to `engines`. That array is asserted exactly and read
   // positionally by tests that are contracts rather than defects, and a runtime is not an engine —
   // it has no auth mode, no smoke test and no model list. Consumers switching on `engines` keep

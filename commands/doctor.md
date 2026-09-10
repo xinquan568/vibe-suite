@@ -55,10 +55,9 @@ command.
 
 ## Connectivity
 
-Codex and agy connectivity belong to `/vibe-suite:preflight`, which already computes a normalised
-result for both lanes. Doctor cites it rather than probing again — a second opinion on the same
-question is worse than one. agy's `available` verdict stays **pending** behind its contract gate; the
-version, smoke and model probes still run there.
+Codex connectivity belongs to `/vibe-suite:preflight`, which already computes a normalised
+result for the engine lane. Doctor cites it rather than probing again — a second opinion on the
+same question is worse than one.
 
 ## Knowledge freshness
 

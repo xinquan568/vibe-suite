@@ -397,35 +397,55 @@ test("the latch signal is written 0600, and only inside an owned root", async ()
   await removeOwnedTree(owned);
 });
 
-test("the gate record refuses an out-of-root and a symlinked destination", async () => {
-  const { spawnSync: spawn } = await import("node:child_process");
-  const probe = path.join(REPO_ROOT, "scripts", "agy-contract-probe.mjs");
-  const outside = tmpWorkspace("gate-out-");
-  const target = path.join(outside, "gate-status.json");
+test("a real CLI's record write is contained by its workspace (vibe-298)", () => {
+  // Replaces the agy-contract-probe containment test, whose subject left with the lane (vibe-298).
+  // The value being preserved is SUBPROCESS-level: that a real CLI honours containment, which the
+  // in-process primitive tests above do not cover. The subject is the surviving writer —
+  // `codex-runner.mjs` creates the record (`prepareRecord` -> `createRecord`), and `jobs.mjs`
+  // anchors trust at the WORKSPACE (`ensureDirAt`/`secureDirAt` on `.vibe-suite-state` and its
+  // `jobs` child), which is therefore the destination seam.
+  //
+  // Invocation transcribed from tests/node/jobs-cli.test.mjs:35-46 with the emitter fixture it
+  // selects at :65, so the real engine is never called.
+  const RUNNER = path.join(REPO_ROOT, "scripts", "codex-runner.mjs");
+  const EMITTER = path.join(REPO_ROOT, "tests", "fixtures", "fake-codex", "emitter.mjs");
+  const launch = (ws) => spawnSync(process.execPath, [RUNNER,
+    "--kind", "review", "--effort", "low", "--sandbox", "read-only",
+    "--timeout-ms", "120000", "--background", "--", "fixture prompt",
+  ], { cwd: ws, encoding: "utf8", timeout: 60_000,
+       env: { ...process.env, VIBE_SUITE_CODEX_BIN: EMITTER } });
 
-  const run = (file) => spawn(process.execPath, [probe, "--write-record"], {
-    env: { ...process.env, VIBE_SUITE_AGY_GATE_FILE: file,
-      VIBE_SUITE_AGY_BIN: path.join(REPO_ROOT, "tests/fixtures/fake-codex/emitter.mjs") },
-    encoding: "utf8", timeout: 60_000,
-  });
+  const outside = tmpWorkspace("runner-outside-");
 
-  run(target);
-  assert.ok(!readdirSync(outside).includes("gate-status.json"),
-    "an out-of-root gate destination must be refused, not written");
+  // 1. `.vibe-suite-state` is a symlink OUT of the workspace — vibe-103's threat exactly.
+  const wsLinkedState = tmpWorkspace("runner-linked-state-");
+  symlinkSync(outside, path.join(wsLinkedState, ".vibe-suite-state"));
+  launch(wsLinkedState);
+  assert.deepEqual(readdirSync(outside), [],
+    "a symlinked state directory must not be published through, and nothing may escape into it");
 
-  const owned = await makeOwnedTempDir("gate-owned");
-  const linked = path.join(owned, "link.json");
-  symlinkSync(target, linked);
-  run(linked);
-  assert.ok(!readdirSync(outside).includes("gate-status.json"),
-    "a symlinked gate destination must not be followed");
+  // 2. `.vibe-suite-state` is real but its `jobs` child is a symlink out — an INTERMEDIATE
+  //    symlinked component, which assertInside refuses even though the final name looks local.
+  const wsLinkedJobs = tmpWorkspace("runner-linked-jobs-");
+  mkdirSync(path.join(wsLinkedJobs, ".vibe-suite-state"));
+  symlinkSync(outside, path.join(wsLinkedJobs, ".vibe-suite-state", "jobs"));
+  launch(wsLinkedJobs);
+  assert.deepEqual(readdirSync(outside), [],
+    "a symlinked jobs directory must not be written into — and nothing else may escape either: "
+    + "a name-suffix check would pass on leaked temp files, logs or directories");
 
-  // The positive control. Without it the two assertions above pass just as well when the probe
-  // never wrote anything at all — an absence-only test reports safety it did not establish.
-  run(path.join(owned, "gate-status.json"));
-  assert.ok(readdirSync(owned).includes("gate-status.json"),
-    "a permitted destination inside an owned root must still be written");
-  await removeOwnedTree(owned).catch(() => {});
+  // 3. THE POSITIVE CONTROL. Without it, a runner that had stopped writing — or that never started,
+  //    which is what an invalid argv produces — passes both assertions above and reports a safety it
+  //    never established. Exit status is asserted FIRST so a failed launch is distinguishable from a
+  //    correct refusal.
+  const ws = tmpWorkspace("runner-permitted-");
+  const ok = launch(ws);
+  assert.equal(ok.status, 0, `the runner must actually run: ${ok.stdout}\n${ok.stderr}`);
+  const receipt = JSON.parse(ok.stdout.trim().split("\n").at(-1));
+  assert.ok(receipt.jobId, `the receipt carries a job id: ${ok.stdout}`);
+  const record = path.join(ws, ".vibe-suite-state", "jobs", `${receipt.jobId}.json`);
+  assert.ok(existsSync(record), "a permitted workspace IS written to");
+  JSON.parse(readFileSync(record, "utf8"));
 });
 
 test("openSinkAt creates an exclusive 0600 append sink a child can inherit, and refuses an existing file, a symlink and an out-of-root path (vibe-182)", async () => {

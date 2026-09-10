@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: ISC
 """Cross-engine lane contracts for score and security-scan (E4.5 / vibe-39).
 
-F4.2 adds `--engine claude|codex|agy|both` to score; F5.1 adds a *requested* second opinion to
+F4.2 adds `--engine claude|codex|both` to score; F5.1 adds a *requested* second opinion to
 security-scan. Both lanes reuse machinery that already ships, so most of what this module asserts is
 that the two commands bind to it rather than re-implement it.
 
@@ -38,7 +38,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCORE = REPO_ROOT / "commands" / "score.md"
 SECURITY = REPO_ROOT / "commands" / "security-scan.md"
 ENGINE = REPO_ROOT / "scripts" / "score_engine.py"
-GATE_RECORD = REPO_ROOT / "tests" / "agy-contract" / "gate-status.json"
 
 #: The three identifiers that went missing across three review passes -- `frontmatter parse` to a
 #: rubric-only vocabulary, `valid syntax` and `valid JSON` to literal-only extraction. Redundant with
@@ -146,7 +145,7 @@ class TestScoreLanes(unittest.TestCase):
         block = self.text.split("---\n", 2)[1]
         hint = re.search(r"(?m)^argument-hint:\s*(.+)$", block).group(1)
         self.assertIn("--engine", hint)
-        for mode in ("claude", "codex", "agy", "both"):
+        for mode in ("claude", "codex", "both"):
             self.assertIn(mode, hint)
 
     def test_the_deterministic_engine_runs_in_every_mode(self):
@@ -239,20 +238,14 @@ class TestSharedLaneDiscipline(unittest.TestCase):
     def test_the_codex_lane_dispatches_the_runner_directly(self):
         for name, text in self._both():
             with self.subTest(command=name):
+                # vibe-298: this used to be phrased as "not through agy-audit-cli". The lane is
+                # gone; the property it protected is not — the codex lane must name its OWN
+                # dispatch and route through nothing else, so it is asserted positively.
                 self.assertIn("scripts/codex-runner.mjs", text)
-                self.assertRegex(norm(text), r"never scripts/agy-audit-cli\.mjs|"
-                                             r"agy-audit-cli\.mjs, which refuses")
+                self.assertRegex(norm(text), r"codex-runner\.mjs[^.]*directly|"
+                                             r"directly[^.]*codex-runner\.mjs")
 
-    def test_a_pre_gate_agy_request_refuses(self):
-        for name, text in self._both():
-            with self.subTest(command=name):
-                self.assertRegex(norm(text), r"refus\w+")
 
-    def test_the_gate_is_still_shut_so_the_refusal_is_the_live_path(self):
-        record = json.loads(GATE_RECORD.read_text(encoding="utf-8"))
-        self.assertNotEqual(record["status"], "passed",
-                            "the agy gate has flipped; the conditional acceptance clause now needs "
-                            "the lane exercised rather than refused")
 
     def test_provenance_is_disclosed(self):
         for name, text in self._both():

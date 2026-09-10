@@ -322,7 +322,7 @@ class GeneratorFixture(unittest.TestCase):
         text = self.read("codex/skills/vibe-roast/SKILL.md")
         for token in ("styles", "sequential", "scope", "trivial", "add-ons"):
             self.assertIn(token, text.lower())
-        for gone in ("--engine", "reconciliation", "agy"):
+        for gone in ("--engine", "reconciliation"):
             self.assertNotIn(gone, text.lower())
         # the fixture roster renders its own specialists line
         self.assertIn("$vibe-roast-gamma", text)
@@ -343,7 +343,7 @@ class GeneratorFixture(unittest.TestCase):
                       "500 files", "groups of 10", "coverage section",
                       "No changes detected in scope", "trivial"):
             self.assertIn(token, text)
-        for gone in ("--engine", "reconciliation", "agy"):
+        for gone in ("--engine", "reconciliation"):
             self.assertNotIn(gone, text.lower())
 
 

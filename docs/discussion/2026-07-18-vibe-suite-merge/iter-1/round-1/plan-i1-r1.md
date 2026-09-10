@@ -8,6 +8,11 @@
 > F9.1 assigns to it; **F4.4 (`bin/vibe-check`) does own it**, performed as fail-closed subset
 > checking against `schemas/audit-output.schema.json` within its stdlib-only constraint (ADR-0001,
 > 2026-07-28), which follows from the standard library having no JSON Schema implementation.
+> Known divergence: this document describes a staged **agy** cross-model lane. That lane was
+> **retired** before `v0.0.1-alpha1` rather than graduated — its runner, audit CLI, contract
+> probe, gate resolver and fallback chain are deleted, and `engine`/`model_overrides` no longer
+> accept `agy` (ADR-0002, 2026-09-10). The lane is preserved on the locked branch
+> `staging/agy-lane` and the tag `retired/agy-lane`.
 
 # vibe-suite — Unified Function Catalog & Merge Proposal
 

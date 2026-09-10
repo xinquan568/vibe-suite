@@ -43,7 +43,6 @@ Add `--json` for a machine-readable verdict.
 | `claude`, style 2 | `--engine claude --style 2` | four `## [Agent: vibe-suite:…] Findings` sections |
 | `claude`, style 6 | `--engine claude --style 6` | five sections — styles 5–6 add `edge-cases` |
 | `codex`, style 6 | `--engine codex --style 6` | all nine `## Dimension:` sections |
-| `agy`, style 6 | — | **skipped**: the E1.7 contract gate reads `not_passed`, so `--engine agy` errors with a pointer rather than running. Re-run this row after the gate flips. |
 
 Every lane additionally asserts the frontmatter keys, the executive summary, and a phased fixing plan
 whose every item cites a finding the report actually raised.
@@ -60,7 +59,7 @@ Merge-proposal line 628 is explicit that the assertions are **structural, not by
 judgement engine's prose differs run to run; what must not differ is that every dimension is
 represented, that the plan is phased, and that every planned action traces to a finding. Grading those
 properties is stable across runs and across engines, which is what makes the same fixture usable on
-the codex lane today and the agy lane after the flip — line 628 calls that the "engine-independent
+the codex lane — line 628 calls that the "engine-independent
 outcome contract".
 
 ## Do not commit a report into this tree

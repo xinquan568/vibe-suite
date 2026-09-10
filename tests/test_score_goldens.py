@@ -1018,7 +1018,7 @@ class TierClassification(unittest.TestCase):
                 ("hook-config", ".gemini/hooks.json"),
             ],
         )
-        claude_a, claude_b, codex_a, codex_b, agy = out["files"]
+        claude_a, claude_b, codex_a, codex_b, extra = out["files"]
         self.assertEqual([f["tier"] for f in out["files"]],
                          ["2-Claude", "2-Claude", "2-Codex", "2-Codex", "2-Antigravity"])
         # PreCompact: deducts on the Claude tier, clean on the Codex tier.
@@ -1034,11 +1034,11 @@ class TierClassification(unittest.TestCase):
             [(x["rule"], x["check"], x["penalty"]) for x in codex_b["findings"]],
             [("R27", "event names valid", -15)])
         # Antigravity: even a bogus event never deducts; the R27 rows surface as advisories.
-        self.assertEqual(agy["findings"], [])
-        self.assertEqual(agy["score"], 100)
-        agy_notes = [a["note"] for a in agy["advisories"] if a["rule"] == "R27"]
-        self.assertEqual(len(agy_notes), 2)
-        for note in agy_notes:
+        self.assertEqual(extra["findings"], [])
+        self.assertEqual(extra["score"], 100)
+        extra_notes = [a["note"] for a in extra["advisories"] if a["rule"] == "R27"]
+        self.assertEqual(len(extra_notes), 2)
+        for note in extra_notes:
             self.assertIn("advisory", note)
         # Tier-conditioned advisories on the tool tables.
         self.assertTrue(any("MCP matcher format" in a["note"]

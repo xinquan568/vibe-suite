@@ -2,7 +2,7 @@
 // The job record store (E1.1 / vibe-11).
 //
 // Records live at `<workspace>/.vibe-suite-state/jobs/<jobId>.json` — one file per job, beside the
-// toggle store's `state.json`, never inside it. `/vibe-suite:jobs` (#12) and the agy runner (#17)
+// toggle store's `state.json`, never inside it. `/vibe-suite:jobs` (#12)
 // both read this layout, so the schema below is a shared contract, not an implementation detail.
 //
 // ## Why there is no lock
@@ -1217,7 +1217,7 @@ export async function pruneTerminalJobs(workspace, {
 
 // ---------------------------------------------------------------------------------------------
 // Record validation + listing (E1.2 / vibe-12). `/vibe-suite:jobs` consumes records written by any
-// engine lane (codex today, agy after #17), so what it trusts is the SCHEMA, checked here — never
+// engine lane, so what it trusts is the SCHEMA, checked here — never
 // the lane, and never an unvalidated field. `pgid`/`workerPid` are control data: a forged or
 // malformed handle that reaches a kill(2) signals an arbitrary process group, which is why nothing
 // that fails this validator may be rendered as healthy, resolved, settled, or signalled.

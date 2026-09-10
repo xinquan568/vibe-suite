@@ -52,8 +52,11 @@ class TestAC9c(ConfigCase):
 
     def test_a_configured_engine_overrides_the_default_in_the_view(self):
         (self.ws / ".vibe-suite.md").write_text(
-            "---\ncross_model_audit_engine: agy\n---\n", encoding="utf-8")
-        self.assertEqual(self.show()["config"]["cross_model_audit_engine"], "agy")
+            "---\nengine: codex\n---\n", encoding="utf-8")
+        # vibe-298: `cross_model_audit_engine` is now single-valued, so configuring it to its own
+        # default would pass with no config file at all. `engine` defaults to unset, so asserting
+        # `codex` here still proves the view READS the file rather than echoing a default.
+        self.assertEqual(self.show()["config"]["engine"], "codex")
 
 
 class TestGateRoundTrip(ConfigCase):
@@ -221,7 +224,7 @@ class TestResolveEngine(ConfigCase):
                 r = self.run_cli("resolve-engine", *args)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
                 self.assertIn("error:", r.stderr)
-                self.assertIn("'bogus' is not one of claude, codex, agy, both", r.stderr)
+                self.assertIn("'bogus' is not one of claude, codex, both", r.stderr)
                 self.assertNotIn("unrecognized arguments", r.stderr)
                 self.assertEqual(r.stdout, "")
 

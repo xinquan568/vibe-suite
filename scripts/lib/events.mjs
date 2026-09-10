@@ -92,8 +92,8 @@ export function billableTokens(usage) {
 }
 
 // ---- M6 / vibe-218: the ONE quota/auth vocabulary and the predicates over it. Three consumers used to carry
-// three tables of three kinds (codex error codes + regexes over an event stream; agy's plain-text substrings;
-// agy-fallback's status-signature substrings). They live here now; each consumer keeps its matching policy.
+// three tables of three kinds (codex error codes + regexes over an event stream; plain-text substrings;
+// status-signature substrings). They live here now; each consumer keeps its matching policy.
 
 /** An exhausted allowance, or a substantive rejection?
  *
@@ -121,11 +121,11 @@ export function classifyFailure(events) {
   return QUOTA_PHRASES.some((pattern) => pattern.test(message)) ? "quota" : "failure";
 }
 
-/** agy's plain-text quota vocabulary, verbatim: `quota_exceeded` and `quotas exhausted` must keep matching. */
+/** Plain-text quota vocabulary for a lane that reports prose rather than a typed event stream. */
 export const QUOTA_TEXT_MARKERS = ["quota", "resource exhausted", "rate limit"];
 /** The runner's stdout auth markers — deliberately narrow: "auth" inside "author" is agent prose, not a failure. */
 export const AUTH_TEXT_MARKERS = ["authentication required", "please sign in"];
-/** agy-fallback's short status/error signature, where the bare substring is safe. */
+/** A short status/error signature, where the bare substring is safe. */
 export const AUTH_SIGNATURE_MARKERS = ["unauthenticated", "auth"];
 
 /** True when the lower-cased text contains any marker. */
@@ -134,7 +134,7 @@ export function mentionsAny(text, markers) {
   return markers.some((marker) => lowered.includes(marker));
 }
 
-/** True when text reads as a quota failure: agy's substrings OR codex's phrase regexes (the union preserves every pre-M6 match). */
+/** True when text reads as a quota failure: plain substrings OR codex's phrase regexes (the union preserves every pre-M6 match). */
 export function mentionsQuota(text) {
   const value = String(text ?? "");
   return mentionsAny(value, QUOTA_TEXT_MARKERS) || QUOTA_PHRASES.some((pattern) => pattern.test(value));

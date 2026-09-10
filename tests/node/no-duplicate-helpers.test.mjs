@@ -47,14 +47,9 @@ test("the quota/auth vocabularies are defined once, in lib/events.mjs, and no co
     assert.deepEqual(homes(new RegExp(`^\\s*(export\\s+)?const ${name}\\b`, "m"), files), ["lib/events.mjs"], name);
   }
   const text = Object.fromEntries(files);
-  for (const literal of ['includes("quota")', 'includes("resource exhausted")', 'includes("rate limit")', 'includes("authentication required")', 'includes("please sign in")']) {
-    assert.ok(!text["agy-runner.mjs"].includes(literal), `agy-runner still carries ${literal}`);
-  }
-  for (const literal of ['includes("quota")', 'includes("auth")']) {
-    assert.ok(!text["lib/agy-fallback.mjs"].includes(literal), `agy-fallback still carries ${literal}`);
-  }
-  assert.match(text["agy-runner.mjs"], /from "\.\/lib\/events\.mjs"/);
-  assert.match(text["lib/agy-fallback.mjs"], /from "\.\/events\.mjs"/);
+  // vibe-298: the two consumers this used to police — agy-runner and agy-fallback — were deleted
+  // with their lane (ADR-0002). The M6 property is unchanged and still worth checking: the tables
+  // have ONE home, and no surviving consumer re-implements the predicate as a literal.
   assert.ok(!/\bconst QUOTA_/.test(text["codex-runner.mjs"]), "codex-runner still defines a QUOTA_ table");
 });
 

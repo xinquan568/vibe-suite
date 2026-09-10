@@ -9,7 +9,6 @@ line 628 fixes four structural assertions and scopes two of them by lane:
     always          every fixing-plan item cites a finding id that exists in the report
     --engine claude one `## [Agent: <name>] Findings` section per dispatched agent
     --engine codex  all nine cc-suite audit dimensions represented
-    --engine agy    same as codex (conditional on the E1.7 gate, which is shut)
 
 **Why a tool rather than assertions inside the test module.** Producing a report needs a live engine,
 which CI has none of; *grading* one is arithmetic over two files. Separating them means the gate ships
@@ -19,7 +18,7 @@ watched fail is not a gate.
 
 Usage:
 
-    python3 tools/roast-acceptance.py <fixture-dir> --report <path> --lane claude|codex|agy [--json]
+    python3 tools/roast-acceptance.py <fixture-dir> --report <path> --lane claude|codex [--json]
 
 Exit codes are the contract:
 
@@ -195,7 +194,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Grade a roast report against a seeded fixture.")
     parser.add_argument("fixture")
     parser.add_argument("--report", required=True)
-    parser.add_argument("--lane", required=True, choices=("claude", "codex", "agy"))
+    parser.add_argument("--lane", required=True, choices=("claude", "codex"))
     parser.add_argument("--style", type=int, default=6)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)

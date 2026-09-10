@@ -3,7 +3,7 @@
 """Content contract for `/vibe-suite:roast` and the roasting skill (E4.3 / vibe-37).
 
 F3.1 merges two source commands under one name — grill's `roast` and cc-suite's `audit`, the latter
-surviving as `--engine codex|agy`. Most of what it fixes is a number, a threshold or an exact string,
+surviving as `--engine codex`. Most of what it fixes is a number, a threshold or an exact string,
 so most of it is checkable.
 
 Three things here exist because an earlier link of this chain shipped the defect they catch.
@@ -14,7 +14,7 @@ reader that splits on the first colon. That check now covers `agents/`; this mod
 `commands/`.
 
 **The dispatch branch.** vibe-35's plan review caught a command routing its default codex lane through
-`scripts/agy-audit-cli.mjs`, which refuses before dispatching while the agy contract gate is shut.
+`scripts/codex-runner.mjs` directly.
 Every cross-model run would have failed closed while appearing configured.
 
 **The version stamp is asserted negatively.** F3.1 requires it read from the plugin manifest at run
@@ -143,16 +143,13 @@ class TestEngineLanes(RoastTestCase):
         self.assertRegex(self.cmd_norm, r"claude[^|]*default")
 
     def test_the_codex_lane_dispatches_the_runner_directly(self):
-        """Not through agy-audit-cli.mjs, which refuses before dispatching while the gate is shut."""
+        """vibe-298: was "not through agy-audit-cli"; the lane is gone, so the property that the
+        codex lane dispatches its own runner is asserted directly."""
         self.assertIn("scripts/codex-runner.mjs", self.cmd)
         self.assertRegex(self.cmd_norm,
                          r"codex-runner\.mjs[^.]*(directly|never through)"
                          r"|(directly|never through)[^.]*codex-runner\.mjs")
 
-    def test_a_pre_gate_agy_request_is_refused_not_degraded(self):
-        self.assertRegex(self.cmd_norm, r"refus\w+[^.]*(not degraded|rather than degraded)"
-                                        r"|agy[^.]*refus\w+")
-        self.assertIn("agy-flip-checklist", self.cmd)
 
     def test_both_runs_two_lanes_and_labels_the_result(self):
         for label in RECONCILIATION:
@@ -161,7 +158,7 @@ class TestEngineLanes(RoastTestCase):
 
     def test_no_model_flag_on_any_dispatch(self):
         for line in self.cmd.splitlines():
-            if "codex-runner.mjs" in line or "agy-audit-cli.mjs" in line:
+            if "codex-runner.mjs" in line:
                 self.assertNotRegex(line, r"(?<![\w-])-m\s|\B--model\b",
                                     "dispatch names a model (P9): %s" % line.strip())
 

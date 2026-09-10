@@ -57,8 +57,8 @@ model stage's job, and doing it mechanically would do it badly.
 | `codex` | `scripts/codex-runner.mjs --sandbox workspace-write` |
 
 The codex lane passes `workspace-write` explicitly — implementation must write — and never
-`read-only`, which is the verifier's sandbox. It does not route through `scripts/agy-audit-cli.mjs`:
-that entry point refuses before dispatching while the agy contract gate is shut.
+`read-only`, which is the verifier's sandbox. The fixer dispatches `scripts/codex-runner.mjs`
+directly.
 
 Write the prompt to a `mktemp` path with the Write tool, dispatch, and remove it on every path. No
 model is named on any dispatch (P9); the codex lane's model comes from the seam — `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/config_cli.py" --workspace "<abs-target>" resolve-engine

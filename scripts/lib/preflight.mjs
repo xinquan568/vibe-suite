@@ -19,7 +19,6 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { runWithDeadline } from "./process.mjs";
-import { STAGED_NOTICE } from "./agy-gate.mjs";
 
 export const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const ROW_KEYS = ["engine", "available", "version", "auth", "smoke", "models", "detail"];
@@ -74,23 +73,6 @@ export function readModelsCache(env, { now = Date.now } = {}) {
   const status = nowMs - fetchedAt <= MODELS_CACHE_TTL_MS ? "fresh" : "stale";
   return { status, slugs };
 }
-
-/** The agy effect: same discipline, different binary and seam. */
-async function defaultAgyRun(args, timeoutMs, env) {
-  try {
-    return await runWithDeadline({
-      command: env.VIBE_SUITE_AGY_BIN ?? "agy",
-      args, env, timeoutMs,
-      detached: true,        // agy blocks on OAuth regardless of stdin: only a group kill bounds it
-    });
-  } catch (error) {
-    if (error?.code === "ENOENT" || error?.code === "EACCES") {
-      return { exitCode: null, stdout: "", stderr: "", timedOut: false, spawnFailed: true };
-    }
-    throw error;
-  }
-}
-
 /** The default effect: the codex binary (seam-overridable), detached, deadline-bounded. */
 async function defaultRun(args, timeoutMs, env) {
   try {
@@ -207,102 +189,6 @@ export async function probeCodex(deps = {}) {
 
   return { engine: "codex", available, version, auth, smoke, models, detail };
 }
-
-/**
- * The agy row (E1.7 / vibe-17 fills the slot E1.3 froze — same ROW_KEYS, same enums, values now
- * observed rather than pending).
- *
- * Two shapes of honesty live here. **While the contract gate is shut, `available` stays `null`**:
- * the lane is not unavailable, it is not yet permitted, and reporting `false` would read as "agy is
- * broken" when the truth is "agy has not been verified". And a **signed-out CLI is
- * `not-authenticated`** — the frozen enum, not a new word — with the explanation in `detail`, so
- * consumers that switch on `auth` keep working.
- */
-export async function probeAgy(deps = {}) {
-  const { env = process.env, now = Date.now, gate = null } = deps;
-  const run = deps.run ?? ((args, timeoutMs) => defaultAgyRun(args, timeoutMs, env));
-  void now;
-
-  const gateOpen = gate?.passed === true;
-
-  const versionOutcome = await run(["--version"], VERSION_TIMEOUT_MS);
-  if (versionOutcome.spawnFailed) {
-    return {
-      engine: "agy",
-      // Gate shut ⇒ pending even when the binary is missing: an unverified lane that nobody may
-      // use is not a broken dependency, and reporting `false` would fail an exit code over it.
-      available: gateOpen ? false : null,
-      version: null, auth: null, smoke: null,
-      models: { status: gateOpen ? "missing" : "pending", slugs: [] },
-      detail: gateOpen
-        ? "agy CLI not found on PATH"
-        : `agy CLI not found on PATH · ${STAGED_NOTICE} · contract gate not passed — `
-          + "see docs/agy-flip-checklist.md",
-    };
-  }
-  const version = boundToken((versionOutcome.stdout ?? "").trim().split("\n")[0] ?? "", 32) || "unknown";
-
-  const smokeOutcome = await run(["--sandbox", "--print", "reply with: ok"], SMOKE_TIMEOUT_MS);
-  const text = `${smokeOutcome.stdout ?? ""}\n${smokeOutcome.stderr ?? ""}`.toLowerCase();
-  const signedOut = text.includes("authentication required") || text.includes("please sign in");
-
-  let auth = "unknown";
-  let smoke = "turn-failed";
-  if (smokeOutcome.spawnFailed) {
-    smoke = "spawn-failed";
-  } else if (smokeOutcome.groupReaped !== true) {
-    // Confirmation first, and `=== true` only: an unreaped group is not a healthy lane whatever the
-    // output said, and a missing confirmation is not a confirmation.
-    smoke = "reap-failed";
-  } else if (signedOut) {
-    auth = "not-authenticated";
-    smoke = "turn-failed";                // set here, not in a trailing override that masked the reap
-  } else if (smokeOutcome.timedOut) {
-    smoke = "timeout";
-  } else if ((smokeOutcome.stdout ?? "").trim()) {
-    // The service answered, but agy exposes no auth MODE. Reporting `api-key` would be inventing an
-    // observation; `unknown` is the true one.
-    auth = "unknown";
-    smoke = "ok";
-  }
-
-  // `agy models` refuses when signed out. An empty list would read as "this engine has no models".
-  let models = { status: "missing", slugs: [] };
-  if (!signedOut) {
-    const listed = await run(["models"], VERSION_TIMEOUT_MS);
-    const slugs = String(listed.stdout ?? "").split("\n")
-      .map((line) => boundToken(line.trim()))
-      .filter((slug) => slug && !slug.toLowerCase().startsWith("error"))
-      .slice(0, SLUG_COUNT_CAP);
-    if (slugs.length > 0) models = { status: "fresh", slugs };
-  }
-
-  const detail = signedOut
-    ? "not authenticated: agy prints an OAuth prompt and blocks even with stdin closed; "
-      + "`agy models` is unavailable until you sign in"
-    : smoke === "ok" ? "ready" : `smoke failed (${smoke})`;
-
-  return {
-    engine: "agy",
-    // Gate shut ⇒ pending (null), never "unavailable": the lane is unverified, not broken.
-    available: gateOpen ? smoke === "ok" : null,
-    version, auth, smoke, models,
-    detail: gateOpen
-      ? detail
-      : `${detail} · ${STAGED_NOTICE} · contract gate not passed — see docs/agy-flip-checklist.md`,
-  };
-}
-
-/** The pre-E1.7 static slot, kept for callers that report before any probe runs. */
-export function agyRow() {
-  return {
-    engine: "agy", available: null, version: null, auth: null, smoke: null,
-    models: { status: "pending", slugs: [] },
-    detail: "probe pending — contract lands in E1.7 (#17)",
-  };
-}
-
-
 /**
  * The runtime rows (vibe-209 / grill P4).
  *
@@ -311,12 +197,11 @@ export function agyRow() {
  * Python `update` stage shells to `node`, and the Stop gate shells to `git`.
  *
  * **These rows are not engines, and the difference is load-bearing.** They carry `runtime` instead
- * of `engine`, and `auth: null` instead of `auth: "unknown"`. `exitCodeFor` ends with
- * `row.engine !== "agy" && row.auth === "unknown"` — an exception hard-coded to ONE engine name,
- * because agy exposes no auth mode and `"unknown"` is its truthful terminal answer rather than a
- * failed probe. `git` is in exactly that position and is not named there, so reporting the honest
- * `"unknown"` would fail preflight on a healthy machine. The schema already has the right word:
- * `null` means *there is nothing here to learn*, which is why `exitCodeFor` needs no change at all.
+ * of `engine`, and `auth: null` instead of `auth: "unknown"`. `exitCodeFor` fails any row reporting
+ * `auth: "unknown"`, because for an engine that is a failed probe. A runtime like `git` has no auth
+ * mode to read at all, so reporting the honest `"unknown"` would fail preflight on a healthy
+ * machine. The schema already has the right word: `null` means *there is nothing here to learn*,
+ * which is why `exitCodeFor` needs no exception for these rows.
  */
 
 /** Floors from the project's own prerequisites. `null` means "any version, just be present". */
@@ -483,12 +368,12 @@ export function exitCodeFor(rows) {
   for (const row of rows) {
     if (row.available === null) continue;              // pending never counts against
     if (row.available !== true) return 1;
-    // A degraded probe is one that FAILED TO LEARN something knowable. `auth: "unknown"` means that
-    // for codex, which exposes its auth mode — but agy exposes none, so `unknown` there is the
-    // truthful terminal answer, not a failure to look. Treating them alike would fail a preflight
-    // over a fact that cannot be discovered.
+    // A degraded probe is one that FAILED TO LEARN something knowable, and `auth: "unknown"` is
+    // exactly that for every engine that remains: each exposes its auth mode, so failing to read one
+    // is a failed probe rather than a truthful terminal answer. vibe-298 removed the one engine for
+    // which that was not so, and with it the name-keyed exception that carved it out here.
     if (row.version === "unknown") return 1;
-    if (row.engine !== "agy" && row.auth === "unknown") return 1;
+    if (row.auth === "unknown") return 1;
   }
   return 0;
 }

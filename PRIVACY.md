@@ -14,8 +14,8 @@ explicitly offline path — no network, vendored assets.
 
 - **Cross-model lanes.** Commands that dispatch to an external engine pass
   repository-derived prompts — file contents, diffs, findings — to the engine you configured
-  (Codex CLI today; an agy lane exists behind its gate). The dispatching surfaces:
-  `delegate`, `continue`, `bug-analyze`, `roast --engine codex|agy|both`,
+  (Codex CLI). The dispatching surfaces:
+  `delegate`, `continue`, `bug-analyze`, `roast --engine codex|both`,
   `fix --engine …`, `nl-audit` (cross-model audit lane), `score`/`security-scan` second
   opinions where an engine flag is passed, the `refine-proposal` and `issue2pr` workflow
   skills (their reviewer legs), and the **Stop-time review hook** — opt-in at setup, but

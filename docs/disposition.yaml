@@ -87,7 +87,7 @@ mappings:
     paths: [commands/audit.md]
     disposition: R
     target: F3.1
-    note: --engine codex|agy; nine dimensions preserved
+    note: --engine codex; nine dimensions preserved
   - row: cc-suite:11
     tree: cc-suite
     paths: [commands/audit-fix.md, commands/verify.md]

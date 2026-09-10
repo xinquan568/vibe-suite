@@ -136,8 +136,8 @@ holds these counts equal to the manifest and the files on disk). By group:
 - **Lifecycle & bridge** — `init`, `doctor`, `repair`, `update`, `config`, `bridge`,
   `unbridge`, `preflight`, `advisor`.
 - **Cross-model & jobs** — `delegate`, `continue`, `jobs`, `refresh-knowledge`.
-  The cross-model audit engine is **codex**; the `agy` lane is **staged; unavailable in this
-  release** and is gated shut — see [`docs/agy-flip-checklist.md`](docs/agy-flip-checklist.md).
+  The cross-model audit engine is **codex**. A second, staged lane was retired before
+  `v0.0.1-alpha1` — see [ADR-0002](docs/adr/0002-retire-the-agy-lane.md).
 - **Workflow loops** — `issue2pr`, `refine-proposal`, `runs-stats`, `ls`.
 
 ## Migrating from cc-suite / nlpm / grill

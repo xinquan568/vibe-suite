@@ -255,41 +255,51 @@ test("vibe-261: a symlinked slot on a prunable job is reported and blocks BEFORE
   assert.ok(existsSync(recordPath(ws, id)), "and the record it blocks is still there");
 });
 
-test("vibe-261: a slot swapped during the self-heal refuses, and prune preserves the job", async () => {
-  // Step-9 finding 5. The previous version of this test asserted prune preservation against
-  // `job_test` -- an id CANONICAL_NAME (/^job_[0-9a-f]{20}\.json$/, jobs.mjs:944) can NEVER match,
-  // so prune skipped the job and every preservation assertion passed vacuously. Two traps had to be
-  // cleared for the fixture to be genuinely prune-eligible, and both are load-bearing:
-  //   * the id must be canonical-format, or prune never considers the job;
-  //   * the planted higher slot must be built from the canonical's RAW BYTES, because `readRecord`
-  //     STRIPS the `_vibe-suite_owned` stamp -- and an unstamped slot makes `entomb` refuse the job
-  //     as not-ours, which would block prune for an unrelated reason and fake the pass again.
-  // The control test below is what proves neither trap is still active.
+test("vibe-261: a slot swapped during PRUNE's own self-heal refuses, and prune preserves", async () => {
+  // Step-9 finding 5, second pass. The previous version staged the swap in a SEPARATE `readRecord`
+  // before prune started, so prune met an already-present symlink on its initial slot read and the
+  // test never exercised refusal propagation from prune's own self-heal. The swap now happens
+  // inside prune, through the seam threaded to its resolve.
+  //
+  // Two eligibility traps had to stay cleared, and the control below is what proves they are:
+  //   * the id must be canonical-format (`CANONICAL_NAME`, jobs.mjs:944) or prune skips the job;
+  //   * the planted slot must come from the canonical's RAW bytes -- `readRecord` strips the
+  //     `_vibe-suite_owned` stamp, and an unstamped slot makes `entomb` refuse the job as not-ours.
   const ws = workspace();
   const id = "job_eeeeeeeeeeeeeeeeee63";
   await seedTerminal(ws, id);
   const canonical = recordPath(ws, id);
   const raw = JSON.parse(readFileSync(canonical, "utf8"));
+
+  // an OWNED lower slot, which a wrongly-completed prune would compact away
+  const lower = path.join(jobsDir(ws), `${id}.v${raw.version}.json`);
+  const lowerBytes = existsSync(lower) ? readFileSync(lower, "utf8") : null;
+  assert.ok(lowerBytes !== null, "precondition: the job has an owned lower slot to preserve");
+
   const slot = path.join(jobsDir(ws), `${id}.v${raw.version + 1}.json`);
   writeFileSync(slot, JSON.stringify({ ...raw, version: raw.version + 1 }, null, 2) + "\n", "utf8");
   const before = readFileSync(canonical, "utf8");
   const outside = path.join(jobsDir(ws), ".swapped.json");
   writeFileSync(outside, readFileSync(slot, "utf8"), "utf8");
 
-  // `readCanonical` reads the slot, then republishes it through `commit`, which RE-READS the same
-  // pathname. A swap in that window is observed by `commit` and by nothing else.
-  await assert.rejects(() => readRecord(ws, id, {
-    onSelfHeal: () => { unlinkSync(slot); symlinkSync(outside, slot); },
-  }), (error) => error instanceof JobStoreError && /NOT deleted automatically/.test(error.message),
-    "an observed refusal must reach the caller, not be swallowed by the self-heal");
+  let swapped = false;
+  const report = await pruneTerminalJobs(ws, {
+    olderThanMs: 0,
+    onSelfHeal: () => {                       // inside prune's own resolve
+      if (swapped) return;
+      swapped = true;
+      unlinkSync(slot);
+      symlinkSync(outside, slot);
+    },
+  });
+  assert.ok(swapped, "the seam fired: prune really did reach a self-heal");
 
-  // The point of propagating it: prune must not now treat the job as healthy and entomb it.
-  const report = await pruneTerminalJobs(ws, { olderThanMs: 0 });
   assert.ok(!report.pruned.map((entry) => entry.jobId).includes(id), "the job is NOT pruned");
   assert.ok(report.invalid.some((row) => row.jobId === id), "it is reported, not silently skipped");
   assert.equal(readFileSync(canonical, "utf8"), before,
     "the canonical is byte-unchanged -- not entombed behind a tombstone");
-  assert.ok(lstatSync(slot).isSymbolicLink(), "and the foreign entry is left for the operator");
+  assert.equal(readFileSync(lower, "utf8"), lowerBytes, "and the owned lower slot is not compacted");
+  assert.ok(lstatSync(slot).isSymbolicLink(), "the foreign entry is left for the operator");
 });
 
 test("vibe-261: control -- the same fixture without the swap IS prune-eligible and is deleted", async () => {

@@ -1103,7 +1103,7 @@ async function entomb(dir, jobId, names, { onStep = null, identity = null } = {}
  * what this store's write doctrine refuses. One bounded file per job.
  */
 export async function pruneTerminalJobs(workspace, {
-  olderThanMs = DEFAULT_PRUNE_OLDER_THAN_MS, now = Date.now(), onStep = null,
+  olderThanMs = DEFAULT_PRUNE_OLDER_THAN_MS, now = Date.now(), onStep = null, onSelfHeal = null,
 } = {}) {
   const dir = jobsDir(workspace);
   const report = {
@@ -1154,7 +1154,11 @@ export async function pruneTerminalJobs(workspace, {
   for (const jobId of ids) {
     let record;
     try {
-      record = await readRecord(workspace, jobId);
+      // `onSelfHeal` reaches prune's OWN read: this resolve may self-heal a higher slot, and the
+      // window between reading that slot and republishing it is where a swap lands. Threading the
+      // seam here is what lets a test exercise prune's refusal path rather than a refusal staged
+      // before prune ever started (Step-9 finding 5).
+      record = await readRecord(workspace, jobId, { onSelfHeal });
     } catch (error) {
       report.invalid.push({ jobId, reason: String(error?.message ?? error) });
       continue;

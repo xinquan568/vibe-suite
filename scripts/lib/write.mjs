@@ -703,27 +703,38 @@ async function removeInside(dir, keep) {
  * DANGLING link is reported as a link and never as absence), and `EISDIR` means a directory sits
  * at the name. A caller that cannot tell those apart cannot report them apart.
  */
+/** An absent containment root is ABSENCE: callers' benign branches all key on `code`. */
+function absentRoot(root) {
+  const absent = new Error(`${root}: containment root is absent`);
+  absent.code = "ENOENT";
+  return absent;
+}
+
 export async function readNoFollow(root, rel) {
-  // An ABSENT containment root is absence, not a refusal (Step-8 finding 2). `assertRoot` reports
-  // it as a WriteError carrying no `code`, which would push callers past their benign "the slot is
-  // simply not there" branches and make a vanished directory look like an entry needing repair.
-  // A symlinked or non-directory root is still a refusal -- only absence is translated.
-  // ONE observation of the root decides its kind (Step-9 finding 4). Classifying and then calling
-  // `assertRoot` observed it twice, so a root that vanished between the two came back as a
-  // WriteError carrying no `code` -- a benign disappearance dressed as a refusal, which callers
-  // then reported as an entry needing repair.
+  // The root is observed ONCE and that observation decides its kind (Step-9 finding 4). Classifying
+  // and then calling `assertRoot` observed it twice, so a root that vanished between the two came
+  // back as a WriteError carrying no `code` -- a benign disappearance dressed as a refusal, which
+  // callers then reported as an entry needing repair. Absence is absence; a symlinked or
+  // non-directory root is still refused.
   const resolvedRoot = path.resolve(root);
   const rootKind = await classify(resolvedRoot);
-  if (rootKind === "absent") {
-    const absent = new Error(`${root}: containment root is absent`);
-    absent.code = "ENOENT";
-    throw absent;
-  }
+  if (rootKind === "absent") throw absentRoot(root);
   if (rootKind !== "dir") {
     throw new WriteError(`${root}: containment root is not a directory (${rootKind})`);
   }
   const target = path.resolve(root, rel);
-  await assertInside(root, target);
+  try {
+    await assertInside(root, target);
+  } catch (error) {
+    // Step-9 finding 6: the containment walk can fail BECAUSE the root vanished under it. Once
+    // `realpath(root)` has succeeded, a concurrent removal leaves the walk climbing past the gone
+    // directory to a surviving ancestor, and the relative path then points outside -- reported as
+    // "resolves outside", again with no `code`. That is a disappearance wearing an escape's
+    // clothes. Re-observing the root decides which it was: gone means absence; still present means
+    // a genuine escape, and that is refused exactly as before.
+    if (await classify(resolvedRoot) === "absent") throw absentRoot(root);
+    throw error;
+  }
   let handle;
   try {
     handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);

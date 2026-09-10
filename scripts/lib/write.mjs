@@ -732,8 +732,15 @@ export async function readNoFollow(root, rel) {
     // "resolves outside", again with no `code`. That is a disappearance wearing an escape's
     // clothes. Re-observing the root decides which it was: gone means absence; still present means
     // a genuine escape, and that is refused exactly as before.
-    if (await classify(resolvedRoot) === "absent") throw absentRoot(root);
-    throw error;
+    // The re-observation must decide all three ways, not just "absent or not". A root REPLACED by
+    // a dangling symlink makes `realpath` throw ENOENT, and rethrowing that unexamined would report
+    // a symlinked root as absence -- laundering a refusal into a benign branch (Step-9 finding 7).
+    const nowKind = await classify(resolvedRoot);
+    if (nowKind === "absent") throw absentRoot(root);
+    if (nowKind !== "dir") {
+      throw new WriteError(`${root}: containment root is not a directory (${nowKind})`);
+    }
+    throw error;                                   // the root is a directory: a genuine escape
   }
   let handle;
   try {

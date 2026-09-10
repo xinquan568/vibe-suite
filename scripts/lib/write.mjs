@@ -708,13 +708,20 @@ export async function readNoFollow(root, rel) {
   // it as a WriteError carrying no `code`, which would push callers past their benign "the slot is
   // simply not there" branches and make a vanished directory look like an entry needing repair.
   // A symlinked or non-directory root is still a refusal -- only absence is translated.
+  // ONE observation of the root decides its kind (Step-9 finding 4). Classifying and then calling
+  // `assertRoot` observed it twice, so a root that vanished between the two came back as a
+  // WriteError carrying no `code` -- a benign disappearance dressed as a refusal, which callers
+  // then reported as an entry needing repair.
   const resolvedRoot = path.resolve(root);
-  if (await classify(resolvedRoot) === "absent") {
+  const rootKind = await classify(resolvedRoot);
+  if (rootKind === "absent") {
     const absent = new Error(`${root}: containment root is absent`);
     absent.code = "ENOENT";
     throw absent;
   }
-  await assertRoot(root);
+  if (rootKind !== "dir") {
+    throw new WriteError(`${root}: containment root is not a directory (${rootKind})`);
+  }
   const target = path.resolve(root, rel);
   await assertInside(root, target);
   let handle;

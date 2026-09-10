@@ -87,21 +87,34 @@ test("vibe-261: a root absent from the outset reports absence", async () => {
   });
 });
 
-test("vibe-261: a root REPLACED by a symlink is refused, never reported as absence", async () => {
-  // Finding 7. `realpath` on a dangling link throws ENOENT, so rethrowing the original error
-  // unexamined would report a symlinked root as absence -- laundering a refusal into a benign
-  // branch. The re-observation must decide all three ways, not merely "absent or not".
+test("vibe-261: a root REPLACED by a dangling symlink is refused, never reported as absence", async () => {
+  // Finding 7, reached by its real ordering (finding 9). Mocking `lstat` alone was not enough: the
+  // root still existed on disk, so `realpath` succeeded and the catch received an
+  // INTERMEDIATE-SYMLINK error that carries no `code` -- not the dangling-root `ENOENT` this is
+  // about. The branch then looked covered while a mutant guarding it with `error.code !== "ENOENT"`
+  // passed every test here and reproduced the original misclassification.
+  //
+  // The ordering that matters: the root classifies as a directory, is then replaced by a DANGLING
+  // link, so `realpath` throws ENOENT -- and rethrowing that unexamined would report a symlinked
+  // root as absence. Both observations are asserted, so neither can quietly stop happening.
   const root = jobsRoot();
   const realLstat = fs.lstat;
-  let calls = 0;
+  const realRealpath = fs.realpath;
+  const seen = { lstatRoot: 0, realpathRoot: 0 };
   fs.lstat = async (p, ...rest) => {
     const target = String(p);
     if (!isAtOrUnder(target, root)) return realLstat(target, ...rest);
-    calls += 1;
-    if (calls === 1) return realLstat(target, ...rest);          // still the real directory
-    if (target === root) return { isSymbolicLink: () => true, isDirectory: () => false, isFile: () => false };
-    const gone = new Error(`ENOENT: injected for ${target}`);
-    gone.code = "ENOENT";
+    seen.lstatRoot += 1;
+    if (seen.lstatRoot === 1) return realLstat(target, ...rest);      // still the real directory
+    // replaced: a link, and a dangling one
+    return { isSymbolicLink: () => true, isDirectory: () => false, isFile: () => false };
+  };
+  fs.realpath = async (p, ...rest) => {
+    const target = String(p);
+    if (!isAtOrUnder(target, root)) return realRealpath(target, ...rest);
+    seen.realpathRoot += 1;
+    const gone = new Error(`ENOENT: no such file or directory, realpath '${target}'`);
+    gone.code = "ENOENT";                                            // the link dangles
     throw gone;
   };
   try {
@@ -110,8 +123,11 @@ test("vibe-261: a root REPLACED by a symlink is refused, never reported as absen
       assert.match(error.message, /not a directory \(symlink\)/);
       return true;
     });
+    assert.ok(seen.realpathRoot > 0, "the ordering ran through realpath, where the ENOENT arises");
+    assert.ok(seen.lstatRoot > 1, "and the root was re-observed after its initial classification");
   } finally {
     fs.lstat = realLstat;
+    fs.realpath = realRealpath;
   }
 });
 

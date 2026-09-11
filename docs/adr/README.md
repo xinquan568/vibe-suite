@@ -25,3 +25,4 @@ that settles it. **An ADR is live: it is the current answer, not a record of a p
 |---|---|---|---|
 | [ADR-0001](0001-audit-report-schema-validation.md) | Audit-report schema validation belongs to `bin/vibe-check` | Accepted | 2026-07-28 |
 | [ADR-0002](0002-retire-the-agy-lane.md) | The agy cross-model lane is retired, not graduated | Accepted | 2026-09-10 |
+| [ADR-0003](0003-rawoutput-fidelity-boundary.md) | A capped `rawOutput` carries only what the engine emitted | Accepted | 2026-09-11 |

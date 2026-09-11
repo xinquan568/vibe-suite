@@ -75,7 +75,7 @@ time from a lossy copy. [#305](https://github.com/xinquan568/vibe-suite/issues/3
 It is deliberately not valid NDJSON, so it is never an event any reader can visit — it is a disclosure
 that bytes were removed, which is the opposite of synthesis.
 
-This answer **confirms** Decisions 8 and 13 and invariant I3. It does not revisit them, and it does
+This answer **confirms** Decisions 8 and 13 and invariants I1 and I3. It does not revisit them, and it does
 not settle the byte budget — `RAW_OUTPUT_BYTES` is justified by a file that no longer exists, which is
 [#306](https://github.com/xinquan568/vibe-suite/issues/306), deliberately left open here.
 
@@ -90,7 +90,8 @@ them looks complete and is not:
 | Artifact | What it holds |
 |---|---|
 | `scripts/lib/render.mjs:322`, `:331` | `isCompletedAgentMessage`, deliberately wider than `isControllingLine`, and the suppression-run boundary it draws |
-| invariant I3 + vibe-274 Decision 13 | byte-identical source provenance, and the elision marker as its single exemption |
+| invariant **I3** | no parseable completed `agent_message` survives suppression — whatever its `text` |
+| invariant **I1** + vibe-274 Decision 13 | byte-identical source provenance (`tests/node/raw-output-bound.test.mjs:363`, enforced at `:366`), with the elision marker as its single exemption |
 | `tests/node/raw-output-bound.test.mjs:286` | `S3: suppression never retains an earlier, stale controlling event (I3)` |
 | `tests/node/stop-gate.test.mjs:1073` | `vibe-274: an OVERSIZED controlling verdict leaves no parseable agent_message (bullet 3)` |
 

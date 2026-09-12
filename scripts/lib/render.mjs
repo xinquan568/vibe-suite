@@ -286,6 +286,43 @@ export function renderJson(payload) {
  * with no complete lines. `(empty, empty)` is the marker-only candidate and is always present, so
  * the fallback is structural rather than a special case.
  */
+/**
+ * The persisted-capture budget, and what it is for (vibe-306).
+ *
+ * The figure carried no in-tree reason until now. vibe-274's Decision 1 justified it by the
+ * `spawnSync` default of the lane's audit CLI, and #300 deleted that file — so the only statement of
+ * why 128 KiB rather than any other number went with it. What follows is what the budget actually
+ * protects today; **128 KiB is retained because nothing measured argues for moving it**, not because
+ * a measurement produced it.
+ *
+ * What it bounds:
+ *
+ *   * **Disk.** Compaction keeps a finished job's canonical record and its top slot, and both carry
+ *     the whole capture (see the prune note at `jobs.mjs:974`), so a capture is stored TWICE.
+ *   * **What an operator can read.** `renderDetail` fences `rawOutput` into the job detail view
+ *     (`:160` below), reached through `/vibe-suite:jobs status <job-id>` — `jobs-cli.mjs:40` lists the
+ *     five subcommands.
+ *   * **A standing compatibility contract.** A result line that lacks `verdictLine` falls back to
+ *     re-parsing this value (`events.mjs:73`). That branch is chosen by `Object.hasOwn` with **no age
+ *     check**, and `pruneTerminalJobs` runs only when an operator asks (`jobs.mjs:1122`), so records
+ *     written before vibe-305 can persist indefinitely. The fallback is permanent, not transitional.
+ *
+ * What it no longer bounds, **and for which results**: a result line carrying its own `verdictLine`
+ * — including an authoritative `null` — has its verdict read from that key and never from this value,
+ * so for those results the budget carries no correctness obligation. The legacy branch above is the
+ * exception, and for a record on it an over-budget `BLOCK` can still reach the gate as no verdict.
+ *
+ * What it does NOT bound, stated because each is a plausible reading that is false:
+ *
+ *   * **Capture memory.** `process.mjs:168` accumulates stdout chunks with no cap of its own, and
+ *     `codex-runner.mjs` parses the complete capture before this bound is applied.
+ *   * **Record size.** This bounds one UTF-8 value; JSON escaping makes the serialized record larger.
+ *   * **Anything derived from `OUTPUT_MAX_BUFFER`** (`stop-review-gate-hook.mjs:80`, 8 MiB). That is a
+ *     `spawnSync` ceiling on one child's output, not a persistence budget.
+ *   * **Anything derived from the 128 KiB at `stop-review-gate-hook.mjs:27`.** That is Linux's
+ *     `ARG_MAX`/`E2BIG` limit on a single argv string carrying the prompt. Same number, unrelated
+ *     constraint — and the most available way to rebuild the false justification this note replaces.
+ */
 export const RAW_OUTPUT_BYTES = 128 * 1024;
 
 const MARKER_PREFIX = "[vibe-274: ";

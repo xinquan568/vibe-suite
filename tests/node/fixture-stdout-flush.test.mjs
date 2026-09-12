@@ -27,22 +27,31 @@
 // this machine directly: it generates a throwaway writer — no argv, so any size — and checks whether
 // `process.exit` actually costs it bytes.
 //
-// What that probe has measured so far:
+// What that probe has measured, and it is not symmetric:
 //
-//   * macOS: a 65,569-byte writer is cut to 65,536. Every row here is a live regression probe.
-//   * Ubuntu (this repo's CI): a 65,569-byte writer arrives WHOLE — the buffer is larger than
-//     `preflight-hostile.mjs`'s entire payload — while 262,144 is truncated. So on CI the three
-//     `preflight-hostile` rows assert a true property (the payload arrives whole) but cannot catch a
-//     regression, and the probe says so in the run output rather than implying coverage.
+//   * macOS: 65,569 is cut to 65,536, and 130,000 likewise. Every row here is a live regression
+//     probe — revert any of the four fixtures and its rows go red.
+//   * Ubuntu (this repo's CI): 65,569 arrives WHOLE, 130,000 arrives WHOLE, 262,144 is truncated.
+//
+// **So on CI none of the seven differential rows can catch a regression, and that cannot be fixed by
+// choosing a bigger input.** Linux caps a SINGLE argv or environment string at `MAX_ARG_STRLEN` —
+// 32 pages, 131,072 bytes — independently of `ARG_MAX`, and `spawnSync` raises `E2BIG` past it. The
+// cap therefore sits BELOW the buffer threshold: no payload delivered through argv or the
+// environment can exceed what Linux absorbs. `preflight-hostile.mjs`'s 65,569 is a fixture constant
+// the issue's acceptance names by value, so it cannot be raised either.
+//
+// What the rows still do on such a platform is assert a true and useful property — the payload
+// arrives whole — which is worth having; they simply are not regression probes there. The probe
+// prints which rows are which on the running machine, every run, so the difference is never implied.
+//
+// The regression power that DOES survive on both platforms sits in the convention guards at the
+// bottom of this file: `gate-oversized.mjs` writes 289,943 bytes from a literal, above the 262,144
+// Linux truncates, so a `process.exit` reintroduced there goes red anywhere. Giving one of the four
+// subjects a payload route that is not argv-limited — a file, say — would extend that to them, and
+// is a fixture-design change deliberately left out of this issue.
 //
 // 262,144 is the size the probe ASSERTS, because both platforms truncate it; if that ever stops
 // holding, the oracle's premise is void and this test fails loudly instead of passing emptily.
-//
-// The input-driven rows cannot use that size. Linux caps a SINGLE argv or environment string at
-// `MAX_ARG_STRLEN` — 32 pages, 131,072 bytes — independently of `ARG_MAX`, and `spawnSync` fails
-// outright with `E2BIG`. macOS has no such per-string limit, so a 262,144-byte value worked locally
-// and broke only on CI. `BIG` is therefore sized under that ceiling, and whether it clears the
-// platform's buffer is reported by the probe rather than assumed.
 //
 // A SECOND, INDEPENDENT FAMILY. The differential cannot see a lost branch exit, only a lost tail:
 // with `process.exit(0)` replaced by `process.exitCode = 0` and nothing else, `preflight-hostile.mjs`

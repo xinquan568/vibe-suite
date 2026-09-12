@@ -22,15 +22,27 @@
 // byte-identical. That needs no payload arithmetic and pins no platform constant — it compares a
 // fixture against itself.
 //
-// NON-VACUITY IS MEASURED, NOT ASSUMED. A differential assertion goes green when both sides fit in
-// the buffer, so `the transport truncates a writer that exits` probes this platform directly: it
-// generates a throwaway writer at each payload size the rows rely on and checks whether
-// `process.exit` actually costs it bytes. The 256 KiB size is ASSERTED, because no plausible buffer
-// absorbs it. `preflight-hostile.mjs`'s payload is a fixture constant the issue's acceptance names
-// by value (65,569 bytes), so it cannot be enlarged to suit the test; where a platform's buffer
-// absorbs it, that probe reports the gap as a diagnostic instead of claiming coverage it does not
-// have. The rows still assert a true and useful property there — the payload arrives whole — they
-// just cannot catch a regression at that size on such a platform.
+// NON-VACUITY IS MEASURED, NOT ASSUMED, AND IT DIFFERS BY PLATFORM. A differential assertion goes
+// green when both sides fit in the buffer, so `the transport truncates a writer that exits` probes
+// this machine directly: it generates a throwaway writer — no argv, so any size — and checks whether
+// `process.exit` actually costs it bytes.
+//
+// What that probe has measured so far:
+//
+//   * macOS: a 65,569-byte writer is cut to 65,536. Every row here is a live regression probe.
+//   * Ubuntu (this repo's CI): a 65,569-byte writer arrives WHOLE — the buffer is larger than
+//     `preflight-hostile.mjs`'s entire payload — while 262,144 is truncated. So on CI the three
+//     `preflight-hostile` rows assert a true property (the payload arrives whole) but cannot catch a
+//     regression, and the probe says so in the run output rather than implying coverage.
+//
+// 262,144 is the size the probe ASSERTS, because both platforms truncate it; if that ever stops
+// holding, the oracle's premise is void and this test fails loudly instead of passing emptily.
+//
+// The input-driven rows cannot use that size. Linux caps a SINGLE argv or environment string at
+// `MAX_ARG_STRLEN` — 32 pages, 131,072 bytes — independently of `ARG_MAX`, and `spawnSync` fails
+// outright with `E2BIG`. macOS has no such per-string limit, so a 262,144-byte value worked locally
+// and broke only on CI. `BIG` is therefore sized under that ceiling, and whether it clears the
+// platform's buffer is reported by the probe rather than assumed.
 //
 // A SECOND, INDEPENDENT FAMILY. The differential cannot see a lost branch exit, only a lost tail:
 // with `process.exit(0)` replaced by `process.exitCode = 0` and nothing else, `preflight-hostile.mjs`
@@ -64,14 +76,17 @@ import { tmpWorkspace } from "./_tmp.mjs";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FIXTURES = path.join(REPO_ROOT, "tests", "fixtures");
 
-// Comfortably past any buffer a platform might grant a socketpair — four times the 64 KiB libuv
-// requests, twice a Linux-doubled 128 KiB — so the rows driven by an input are non-vacuous
-// everywhere rather than only where the buffer is small. It is also well under `ARG_MAX` (1 MiB
-// here, shared between argv and the environment), which one of these payloads travels through. A
-// 1,000,000-byte value was tried first and is NOT usable: `verdict-writer.mjs` then dies with
-// `RangeError: Maximum call stack size exceeded` and exit 7, somewhere above 600,000. The clean exit
-// `assertFlushed` demands is what surfaced that, rather than a confusing byte mismatch.
-const BIG = "y".repeat(262_144);
+// The payload the input-driven rows pass through argv or the environment. Bounded above by Linux's
+// `MAX_ARG_STRLEN` (131,072 bytes for one string; `spawnSync` raises `E2BIG` past it) with headroom,
+// and as far above a 64 KiB buffer as that ceiling allows. Two larger values were tried and are NOT
+// usable: 262,144 raises `E2BIG` on Linux, and 1,000,000 additionally kills `verdict-writer.mjs`
+// with `RangeError: Maximum call stack size exceeded` above roughly 600,000 bytes. The clean-exit
+// check in `assertFlushed` is what surfaced both, instead of a confusing byte mismatch.
+const BIG = "y".repeat(130_000);
+
+// The size both known platforms truncate, used for the probe's one hard assertion. It travels in a
+// generated script rather than argv, so no per-string limit applies to it.
+const BEYOND_ANY_BUFFER = 262_144;
 
 // `preflight-hostile.mjs`'s intended payload for `--version`: the header plus `64 * 1024` of noise.
 // The issue's acceptance names this number, so the fixture's size is fixed and the test adapts.
@@ -153,19 +168,26 @@ function truncationProbe(bytes) {
 // ---------------------------------------------------------------------------------------------
 
 test("the transport truncates a writer that exits, at the payload sizes these rows rely on", (t) => {
-  const big = truncationProbe(BIG.length);
-  assert.ok(big.truncated,
-    `a writer of ${big.bytes} bytes delivered all of them despite process.exit — no plausible ` +
-    "socket buffer absorbs that, so either the transport changed or this probe is wrong; the " +
-    "input-driven rows below would assert nothing");
+  // The one hard assertion: if the transport stops truncating even here, the differential oracle
+  // rests on nothing and every row above would be passing emptily.
+  const beyond = truncationProbe(BEYOND_ANY_BUFFER);
+  assert.ok(beyond.truncated,
+    `a writer of ${beyond.bytes} bytes delivered all of them despite process.exit — both platforms ` +
+    "this suite has run on truncate that, so either the transport changed or this probe is wrong; " +
+    "either way the rows above assert nothing about draining");
 
-  const hostile = truncationProbe(HOSTILE_VERSION_BYTES);
-  if (!hostile.truncated) {
-    t.diagnostic(
-      `this platform delivered all ${hostile.bytes} bytes despite process.exit, so its stdio buffer ` +
-      "is larger than preflight-hostile.mjs's payload. The three preflight-hostile rows still " +
-      "assert a true property here — the payload arrives whole — but cannot catch a regression at " +
-      "that size on this platform. The four input-driven rows cover the defect class regardless.");
+  // The rest is measurement, reported rather than asserted, because a platform with a buffer larger
+  // than a given payload is not a defect — it just means that row cannot catch a regression there.
+  for (const [bytes, rows] of [
+    [HOSTILE_VERSION_BYTES, "the three preflight-hostile rows"],
+    [BIG.length, "the four input-driven rows"],
+  ]) {
+    const probe = truncationProbe(bytes);
+    t.diagnostic(probe.truncated
+      ? `truncates at ${probe.bytes} bytes (delivered ${probe.delivered}) — ${rows} are live regression probes here`
+      : `delivers all ${probe.bytes} bytes despite process.exit, so this platform's stdio buffer exceeds `
+        + `that payload: ${rows} assert a true property here — the payload arrives whole — but cannot `
+        + "catch a regression at that size. Recorded so the gap is visible rather than implied.");
   }
 });
 

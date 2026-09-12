@@ -1012,3 +1012,207 @@ class ConflictsStampHasOneDefinition(unittest.TestCase):
                       "the writer must take the stamp from the shared definition")
         self.assertNotIn(self.LITERAL, text,
                          "a second copy of the stamp is what vibe-265 was; there must be exactly one")
+
+
+# ---------------------------------------------------------------------------------------------
+# vibe-273 — the deferred half of #271's criterion: the stamp is bound EXACTLY ONCE at module scope.
+#
+# THREAT MODEL (decided 2026-09-12). This defends against a rebind introduced by REFACTORING OR
+# INATTENTION. It does NOT defend against an author deliberately evading it, and cannot: Python
+# permits rebinding through `exec` of constructed source, through `globals().update` (inherited from
+# `dict`, so it never calls a subclass's `__setitem__`), and through `sys.modules[__name__].X = ...`
+# (which compiles to STORE_ATTR). Each leaves the persisted value correct while a closure captures a
+# differing one, and each evades the rule below. They are out of scope by decision, not by oversight —
+# #271 spent eight review rounds looking for a sound AND complete rule, and no such rule exists.
+#
+# The rule has two halves because a module-scope name is bound by two opcodes:
+#   * STORE_NAME (and IMPORT_STAR) go through PyObject_SetItem, so a dict subclass sees __setitem__;
+#   * STORE_GLOBAL uses the concrete PyDict_SetItem API, which no Python override can intercept, so
+#     it is found by scanning the compiled code object instead.
+# Neither half enumerates syntactic forms, which is what the nine-form list kept having to do.
+#
+# This is a CPython implementation property, not a language guarantee.
+
+_STAMP_PROBE = r"""
+import dis, json, sys, types
+from pathlib import Path
+NAME = "MIGRATION_CONFLICTS_STAMP"
+# argv[1] carries the (possibly mutated) SOURCE; argv[2] is the path the module must believe it lives
+# at. They differ on purpose: `bridge.py` resolves `_bootstrap.py` from `__file__`'s parent, so a copy
+# executed from a temp directory would fail to bootstrap and the case would fail for the wrong reason.
+src_path = Path(sys.argv[1])
+as_path = Path(sys.argv[2])
+code = compile(src_path.read_text(encoding="utf-8"), str(as_path), "exec")
+
+def _store_globals(c):
+    n = sum(1 for i in dis.get_instructions(c)
+            if i.opname == "STORE_GLOBAL" and i.argval == NAME)
+    for k in c.co_consts:
+        if isinstance(k, types.CodeType):
+            n += _store_globals(k)
+    return n
+
+class _Counting(dict):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.binds = 0
+    def __setitem__(self, key, value):
+        if key == NAME:
+            self.binds += 1
+        super().__setitem__(key, value)
+
+g = _Counting(__name__="_vibe273_probe", __file__=str(as_path), __builtins__=__builtins__)
+exec(code, g)
+# The bound value need not be a string: `def`/`class` forms bind a callable, which is not JSON
+# serialisable. Report facts about it rather than the object itself, so a case never fails on the
+# probe's own reporting.
+captured = g.get("captured")
+final = g.get(NAME)
+captured_value = captured() if callable(captured) else None
+print(json.dumps({
+    "total": g.binds + _store_globals(code),
+    "final": final if isinstance(final, str) else repr(final),
+    "exact_str": type(final) is str,
+    "captured": captured_value if isinstance(captured_value, str) else repr(captured_value),
+}))
+"""
+
+
+class StampBoundExactlyOnce(unittest.TestCase):
+    """#271's deferred criterion. See the threat model above: accidental rebinds, not evasion."""
+
+    SOURCE = REPO_ROOT / "scripts" / "lib" / "bridge.py"
+
+    def _measure(self, source_text):
+        """Bind count for `source_text`, measured in a SUBPROCESS.
+
+        A subprocess, not `importlib.reload`, for the reason `test_migrate.py` already records: reload
+        rebinds the module object and breaks identity assertions elsewhere in the suite. Executing the
+        module also runs `_bootstrap.py`, which mutates `sys.path`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            mutated = Path(tmp) / "bridge.py"
+            mutated.write_text(source_text, encoding="utf-8")
+            probe = Path(tmp) / "probe.py"
+            probe.write_text(_STAMP_PROBE, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-B", str(probe), str(mutated), str(self.SOURCE)],
+                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0,
+                         f"the probe must run cleanly, else the case fails for the wrong reason: {result.stderr}")
+        return json.loads(result.stdout)
+
+    def _mutate(self, extra):
+        return self.SOURCE.read_text(encoding="utf-8") + "\n" + extra
+
+    def test_the_unmodified_module_binds_the_stamp_exactly_once(self):
+        self.assertEqual(self._measure(self.SOURCE.read_text(encoding="utf-8"))["total"], 1)
+
+    def test_a_rebind_by_aug_assign_is_counted(self):
+        m = self._measure(self._mutate('MIGRATION_CONFLICTS_STAMP += ""\n'))
+        self.assertGreater(m["total"], 1,
+                           "aug_assign rebinds the module name and must be counted")
+    def test_a_rebind_by_ann_assign_valued_is_counted(self):
+        m = self._measure(self._mutate('MIGRATION_CONFLICTS_STAMP: str = "x"\n'))
+        self.assertGreater(m["total"], 1,
+                           "ann_assign_valued rebinds the module name and must be counted")
+    def test_a_rebind_by_named_expr_is_counted(self):
+        m = self._measure(self._mutate('(MIGRATION_CONFLICTS_STAMP := "x")\n'))
+        self.assertGreater(m["total"], 1,
+                           "named_expr rebinds the module name and must be counted")
+    def test_a_rebind_by_match_as_is_counted(self):
+        m = self._measure(self._mutate('match 1:\n    case MIGRATION_CONFLICTS_STAMP: pass\n'))
+        self.assertGreater(m["total"], 1,
+                           "match_as rebinds the module name and must be counted")
+    def test_a_rebind_by_except_handler_is_counted(self):
+        m = self._measure(self._mutate('try:\n    raise ValueError()\nexcept ValueError as MIGRATION_CONFLICTS_STAMP: pass\n'))
+        self.assertGreater(m["total"], 1,
+                           "except_handler rebinds the module name and must be counted")
+    def test_a_rebind_by_match_star_is_counted(self):
+        m = self._measure(self._mutate('match [1, 2]:\n    case [_, *MIGRATION_CONFLICTS_STAMP]: pass\n'))
+        self.assertGreater(m["total"], 1,
+                           "match_star rebinds the module name and must be counted")
+    def test_a_rebind_by_match_mapping_is_counted(self):
+        m = self._measure(self._mutate('match {"a": 1}:\n    case {**MIGRATION_CONFLICTS_STAMP}: pass\n'))
+        self.assertGreater(m["total"], 1,
+                           "match_mapping rebinds the module name and must be counted")
+    def test_a_rebind_by_from_import_is_counted(self):
+        m = self._measure(self._mutate('from os import sep as MIGRATION_CONFLICTS_STAMP\n'))
+        self.assertGreater(m["total"], 1,
+                           "from_import rebinds the module name and must be counted")
+    def test_a_rebind_by_function_def_is_counted(self):
+        m = self._measure(self._mutate('def MIGRATION_CONFLICTS_STAMP(): pass\n'))
+        self.assertGreater(m["total"], 1,
+                           "function_def rebinds the module name and must be counted")
+    def test_a_rebind_by_async_function_def_is_counted(self):
+        m = self._measure(self._mutate('async def MIGRATION_CONFLICTS_STAMP(): pass\n'))
+        self.assertGreater(m["total"], 1,
+                           "async_function_def rebinds the module name and must be counted")
+    def test_a_rebind_by_class_def_is_counted(self):
+        m = self._measure(self._mutate('class MIGRATION_CONFLICTS_STAMP: pass\n'))
+        self.assertGreater(m["total"], 1,
+                           "class_def rebinds the module name and must be counted")
+    def test_a_rebind_by_named_expr_in_comprehension_is_counted(self):
+        m = self._measure(self._mutate('[(MIGRATION_CONFLICTS_STAMP := _v) for _v in ["x"]]\n'))
+        self.assertGreater(m["total"], 1,
+                           "named_expr_in_comprehension rebinds the module name and must be counted")
+    def test_a_rebind_by_global_in_class_body_is_counted(self):
+        m = self._measure(self._mutate('class _C:\n    global MIGRATION_CONFLICTS_STAMP\n    MIGRATION_CONFLICTS_STAMP = "x"\n'))
+        self.assertGreater(m["total"], 1,
+                           "global_in_class_body rebinds the module name and must be counted")
+    def test_a_rebind_by_global_in_function_is_counted(self):
+        m = self._measure(self._mutate('def _f():\n    global MIGRATION_CONFLICTS_STAMP\n    MIGRATION_CONFLICTS_STAMP = "x"\n_f()\n'))
+        self.assertGreater(m["total"], 1,
+                           "global_in_function rebinds the module name and must be counted")
+    def test_ann_assign_no_value_does_not_rebind_the_module_name(self):
+        m = self._measure(self._mutate('MIGRATION_CONFLICTS_STAMP: str\n'))
+        self.assertEqual(m["total"], 1,
+                         "ann_assign_no_value binds no module-scope name and must stay green")
+    def test_comprehension_target_does_not_rebind_the_module_name(self):
+        m = self._measure(self._mutate('[MIGRATION_CONFLICTS_STAMP for MIGRATION_CONFLICTS_STAMP in ["x"]]\n'))
+        self.assertEqual(m["total"], 1,
+                         "comprehension_target binds no module-scope name and must stay green")
+    def test_assign_in_function_does_not_rebind_the_module_name(self):
+        m = self._measure(self._mutate('def _g():\n    MIGRATION_CONFLICTS_STAMP = "x"\n'))
+        self.assertEqual(m["total"], 1,
+                         "assign_in_function binds no module-scope name and must stay green")
+    def test_assign_in_class_body_does_not_rebind_the_module_name(self):
+        m = self._measure(self._mutate('class _D:\n    MIGRATION_CONFLICTS_STAMP = "x"\n'))
+        self.assertEqual(m["total"], 1,
+                         "assign_in_class_body binds no module-scope name and must stay green")
+    def test_a_rebind_by_star_import_is_counted(self):
+        """`from x import *` binds the name and is STATICALLY UNDECIDABLE in general.
+
+        Which names a star import binds follows from the exporting module's `__all__` or its global
+        namespace, either of which may be computed at runtime. An AST rule cannot answer that for an
+        arbitrary exporter; executing the module can.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            exporter = Path(tmp) / "_vibe273_exporter.py"
+            exporter.write_text('MIGRATION_CONFLICTS_STAMP = "x"\n__all__ = ["MIGRATION_CONFLICTS_STAMP"]\n', encoding="utf-8")
+            extra = (f"import sys as _s\n_s.path.insert(0, {tmp!r})\n"
+                     "from _vibe273_exporter import *\n")
+            m = self._measure(self._mutate(extra))
+        self.assertGreater(m["total"], 1, "a star import binds the name and must be counted")
+
+    def test_a_transient_rebind_that_restores_the_value_is_counted(self):
+        """THE case the criterion exists for — and the only one the shipped tests cannot see.
+
+        A mutation that leaves a DIFFERING final value already fails
+        `test_the_persisted_stamp_keeps_its_value_and_exact_type`, so it would go red for the wrong
+        reason and prove nothing about this rule. This one passes every shipped check: exactly one
+        top-level `ast.Assign` (so the one-literal rule is satisfied), and the persisted value and
+        exact type restored at the end. The restore uses `NamedExpr` deliberately — a second plain
+        assignment would trip the one-literal rule instead.
+
+        What is wrong with it is invisible to all of them: a closure captured a different value at
+        definition time.
+        """
+        extra = (f"def captured(x=(MIGRATION_CONFLICTS_STAMP := \"different\")):\n"
+                 "    return x\n"
+                 f"(MIGRATION_CONFLICTS_STAMP := \"persisted-restored\")\n")
+        m = self._measure(self._mutate(extra))
+        self.assertGreater(m["total"], 1, "the transient rebind must be counted")
+        self.assertEqual(m["captured"], "different",
+                         "the closure captured the differing value — the defect being detected")
+        self.assertTrue(m["exact_str"], "and the final value is still an exact str")

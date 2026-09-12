@@ -108,12 +108,18 @@ import { verdictLineOf } from "./events.mjs";
 
 export const STATE_DIRNAME = ".vibe-suite-state";
 
-/** The five keys of the one-line result contract, in contract order.
+/** The six keys of the one-line result contract, in contract order.
  *
- * `verdictState` was **appended** rather than inserted (vibe-46): four assertions compare
- * `Object.keys(...)` with `deepEqual`, so position is part of this contract, not a detail.
- * `verdictText` is deliberately absent — the event stream in `rawOutput` already carries the agent
- * message, and putting it here would ship the same content twice in one record.
+ * Keys are **appended** rather than inserted (vibe-46): assertions compare `Object.keys(...)` with
+ * `deepEqual`, so position is part of this contract, not a detail. `verdictState` was appended that
+ * way, and `verdictLine` after it (vibe-305).
+ *
+ * `verdictText` is deliberately absent, but **not for the reason this comment used to give**. It said
+ * the event stream in `rawOutput` already carried the agent message, so shipping it here would
+ * duplicate content. vibe-274 falsified that: once the capture is bounded, `rawOutput` no longer
+ * always carries it, which is exactly why vibe-305 added `verdictLine`. The real reason is narrower —
+ * `verdictText` is the agent MESSAGE and the gate needs the VERDICT, so the wire carries the verdict
+ * and `verdictState` says what the message was.
  */
 export const RESULT_KEYS = ["jobId", "status", "threadId", "rawOutput", "verdictState", "verdictLine"];
 
@@ -893,7 +899,7 @@ export function isAbandoned(record, { now = Date.now(), heartbeatMs = 30_000 } =
   return true;
 }
 
-/** The result line: exactly the five contract keys, in contract order. */
+/** The result line: exactly the `RESULT_KEYS` contract keys, in contract order. */
 export function resultLine(record) {
   return JSON.stringify(Object.fromEntries(RESULT_KEYS.map((key) =>
     [key, key === "verdictLine" ? verdictLineFor(record) : (record[key] ?? null)])));

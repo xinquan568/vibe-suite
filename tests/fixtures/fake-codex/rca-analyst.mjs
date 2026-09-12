@@ -27,7 +27,9 @@ async function main() {
     type: "turn.completed",
     usage: { input_tokens: 30, cached_input_tokens: 0, output_tokens: 12, reasoning_output_tokens: 0 },
   }) + "\n");
-  process.exit(0);
+  // NOT process.exit(0): the analysis line carries a path lifted out of the prompt, so this
+  // fixture can write more than a pipe buffer, and exit() does not wait for stdout to drain.
+  process.exitCode = 0;
 }
 
 main().catch((error) => {

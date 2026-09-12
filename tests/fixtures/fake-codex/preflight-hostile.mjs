@@ -16,14 +16,21 @@ function main() {
 
   if (argv[0] === "--version") {
     process.stdout.write(NOISE + "\n");
-    process.exit(0);
+    // NOT process.exit(0): this fixture writes more than a pipe buffer, and exit() does not
+    // wait for stdout to drain — the capture would be cut mid-line, so the pre-flight path
+    // would be handed a payload nobody chose. The `return` is load-bearing too: exit() was
+    // also leaving the branch, and dropping it lets --version fall through into the exec
+    // output (131,154 bytes measured, against an intended 65,569).
+    process.exitCode = 0;
+    return;
   }
   if (argv[0] === "login") {
-    process.stdout.write(`session state: ${NOISE}\n`);   // unrecognized wording, exit 0
-    process.exit(0);
+    process.stdout.write(`session state: ${NOISE}\n`);   // unrecognized wording, status 0
+    process.exitCode = 0;
+    return;
   }
   process.stdout.write(NOISE + "\nnot json at all\n");   // exec: no terminal event
-  process.exit(0);
+  process.exitCode = 0;
 }
 
 main();

@@ -1088,8 +1088,23 @@ test("vibe-274: an OVERSIZED controlling verdict leaves no parseable agent_messa
     assert.ok(!(ev?.type === "item.completed" && ev.item?.type === "agent_message"),
       "a parseable completed agent_message survived suppression — the gate could read a stale verdict");
   }
-  // Acceptance bullet 3 names the DECLARED no-verdict route, not merely "did not block".
-  assertFailOpen(result, "an unretainable controlling verdict must take the declared no-verdict route");
+  // vibe-305 supersedes vibe-274 Decision 8's OUTCOME clause (ADR-0003). Its CAPTURE clause is
+  // asserted immediately above and is unchanged: no parseable completed `agent_message` survives
+  // suppression, and `rawOutput` is byte-identical. What changes is what the gate DOES with that
+  // capture. The runner folded the untruncated stream once and carried the verdict on the result
+  // line, so the gate now reaches the ALLOW the engine actually gave instead of falling open.
+  //
+  // Decision 8's reasoning is preserved rather than overturned: the STALE verdict in this fixture is
+  // the earlier `BLOCK`, and it is still never surfaced. The carried value is the genuine last
+  // controlling message.
+  //
+  // Asserting "allowed" alone would pass BEFORE this change too -- fail-open also allows. The
+  // discriminator is the absence of the fail-open `systemMessage`.
+  const decision = decisionOf(result);
+  assert.ok(!(decision && typeof decision.systemMessage === "string"
+              && decision.systemMessage.includes("failing open")),
+    `the carried verdict must be used, not the fail-open route; got ${JSON.stringify(result.stdout)}`);
+  assert.notEqual(decision?.decision, "block", "the carried verdict was ALLOW, so this must not block");
 });
 
 test("vibe-274: an under-budget capture is stored byte-identical, with no marker", () => {

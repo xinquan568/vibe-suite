@@ -104,6 +104,8 @@ import {
 import { randomBytes as tombstoneNonce } from "node:crypto";
 import path from "node:path";
 
+import { verdictLineOf } from "./events.mjs";
+
 export const STATE_DIRNAME = ".vibe-suite-state";
 
 /** The five keys of the one-line result contract, in contract order.
@@ -113,7 +115,50 @@ export const STATE_DIRNAME = ".vibe-suite-state";
  * `verdictText` is deliberately absent — the event stream in `rawOutput` already carries the agent
  * message, and putting it here would ship the same content twice in one record.
  */
-export const RESULT_KEYS = ["jobId", "status", "threadId", "rawOutput", "verdictState"];
+export const RESULT_KEYS = ["jobId", "status", "threadId", "rawOutput", "verdictState", "verdictLine"];
+
+/** The whole `verdictLine` field: `"BLOCK: "` (7 bytes) plus the reason cap below. */
+export const VERDICT_LINE_BYTES = 1507;
+/** The reason cap, in BYTES: the worst-case UTF-8 expansion of `REASON_CAP`'s 500 UTF-16 code units
+ *  (3 bytes per unit for BMP characters; astral characters cost 2 units for 4 bytes, so they are
+ *  cheaper per unit). The gate discards anything past that cap anyway, so carrying more is useless. */
+const VERDICT_REASON_BYTES = 1500;
+
+/**
+ * A UTF-8 head clamp that never exceeds its cap and never emits U+FFFD (vibe-305).
+ *
+ * `stop-review-gate-hook.mjs`'s `clampBytes` does neither: `Buffer.subarray` splits a multibyte
+ * character and `toString` substitutes a **three-byte** replacement for the fragment, so 2,047 ASCII
+ * bytes plus one 3-byte character at cap 2,048 comes back as 2,050 bytes. That is a pre-existing
+ * defect at three call sites in the gate and is NOT fixed here -- this issue must not reuse it, and
+ * must not quietly repair it either. Backing off to a character boundary is what makes the cap real.
+ */
+function headClampUtf8(text, cap) {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= cap) return text;
+  let end = cap;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end -= 1;   // walk back off a continuation byte
+  return buf.subarray(0, end).toString("utf8");
+}
+
+/**
+ * The verdict the UNTRUNCATED stream carried, bounded for the wire -- or `null` when it carried none.
+ *
+ * Only a line that ALREADY matched is ever emitted (`verdictLineOf`), which is what makes bounding
+ * safe: a matched line contains no line terminator, so shortening its tail shortens the reason and
+ * can never turn a non-verdict into one. **Nothing is sanitised here.** `sanitiseReason` also slices
+ * and trims, so a pass at this end plus the gate's own pass is a double pass that changes results --
+ * measured: a reason of two controls then 600 `A`s yields 498 characters today and 500 after a
+ * pre-sanitising pass, and an ANSI-only reason becomes `""`, which is falsy and silently swaps in the
+ * gate's default reason text. The reason therefore travels raw.
+ */
+function verdictLineFor(record) {
+  const line = verdictLineOf(record.verdictText ?? null);
+  if (line === null) return null;
+  if (Buffer.byteLength(line, "utf8") <= VERDICT_LINE_BYTES) return line;
+  const cut = line.indexOf(":") + 1;                        // keep the whole `ALLOW:`/`BLOCK:` token
+  return line.slice(0, cut) + headClampUtf8(line.slice(cut), VERDICT_REASON_BYTES);
+}
 
 /** Terminal statuses. `cancelled` is reserved for #12, which signals via `pgid`. */
 export const TERMINAL_STATUSES = new Set(["completed", "failed", "timed_out", "cancelled"]);
@@ -850,7 +895,8 @@ export function isAbandoned(record, { now = Date.now(), heartbeatMs = 30_000 } =
 
 /** The result line: exactly the five contract keys, in contract order. */
 export function resultLine(record) {
-  return JSON.stringify(Object.fromEntries(RESULT_KEYS.map((key) => [key, record[key] ?? null])));
+  return JSON.stringify(Object.fromEntries(RESULT_KEYS.map((key) =>
+    [key, key === "verdictLine" ? verdictLineFor(record) : (record[key] ?? null)])));
 }
 
 /**

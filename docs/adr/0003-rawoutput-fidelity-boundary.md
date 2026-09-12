@@ -84,6 +84,28 @@ not settle the byte budget — `RAW_OUTPUT_BYTES` is justified by a file that no
 #264 is closed as unimplementable-as-written rather than re-scoped, and the gap it named is addressed
 out-of-band by #305.
 
+### Amendment, 2026-09-12 — Decision 8's OUTCOME clause is superseded by vibe-305
+
+The Context above records Decision 8 as settling two things: *the capture keeps no parseable completed
+`agent_message`*, **and** *the Stop gate takes its declared no-verdict route*. Those are separable, and
+**vibe-305 supersedes the second while leaving the first exactly as it stands.** The original text is
+left standing above, per `docs/adr/README.md:15`; this note records what changed rather than rewriting
+it.
+
+| Clause | After vibe-305 |
+|---|---|
+| **capture** — no parseable completed `agent_message` survives suppression | **unchanged.** No synthesized event; `rawOutput` byte-identical; invariants I3 and I1 and Decision 13 all stand. |
+| **outcome** — the gate takes its declared no-verdict route | **superseded.** The runner folds the untruncated stream once and carries the verdict on the result line as `verdictLine`; the gate uses it rather than falling open. |
+
+**Decision 8's reasoning is preserved, not overturned.** It held that *surfacing a stale earlier verdict
+is worse than surfacing none*. The stale verdict in the canonical fixture is the earlier `BLOCK`; what
+vibe-305 carries is the genuine last controlling `ALLOW` from the full stream. The change surfaces the
+true verdict and still never surfaces the stale one.
+
+**This ADR's own rule was followed.** The reopening procedure below requires a change to Decision 8 to
+be made in an issue that names it. #305 did not, and was amended to do so before any code was written —
+the procedure catching the issue that this ADR itself motivated.
+
 Reopening this decision means changing four artifacts **together**. A change touching only some of
 them looks complete and is not:
 

@@ -181,9 +181,63 @@ test("T9b: a job buried under a foreign directory is reported, never silently dr
 });
 
 // T10 -------------------------------------------------------------------------------------------
-test("T10: the record contract and the result line are untouched by this change", () => {
-  assert.deepEqual(RESULT_KEYS, ["jobId", "status", "threadId", "rawOutput", "verdictState"]);
+test("T10: the record contract and the result line are untouched by THIS change", () => {
+  // vibe-305 appended `verdictLine`; the arity here follows the contract rather than a frozen 5.
+  assert.deepEqual(RESULT_KEYS, ["jobId", "status", "threadId", "rawOutput", "verdictState", "verdictLine"]);
   const line = JSON.parse(resultLine(baseRecord(ID_A, { status: "done", rawOutput: "x" })));
   assert.deepEqual(Object.keys(line), RESULT_KEYS);
-  assert.equal(Object.keys(line).length, 5);
+  assert.equal(Object.keys(line).length, 6);
+});
+
+// vibe-305 -------------------------------------------------------------------------------------
+// The wire gains `verdictLine`: what the gate would have parsed from the UNTRUNCATED stream. The
+// record's `verdictText` is the agent MESSAGE and is unchanged; the two keys are orthogonal --
+// `verdictState` says what the message was, `verdictLine` says what the verdict was.
+
+test("vibe-305: the result line carries verdictLine, appended last", () => {
+  assert.deepEqual(RESULT_KEYS,
+    ["jobId", "status", "threadId", "rawOutput", "verdictState", "verdictLine"]);
+  const line = JSON.parse(resultLine(baseRecord(ID_A, { status: "done", rawOutput: "x" })));
+  assert.deepEqual(Object.keys(line), RESULT_KEYS);
+  assert.equal(Object.keys(line).length, 6);
+  // Appended, never inserted: the first five keys keep their positions (vibe-46).
+  assert.deepEqual(Object.keys(line).slice(0, 5),
+    ["jobId", "status", "threadId", "rawOutput", "verdictState"]);
+});
+
+test("vibe-305: verdictLine is the verdict, null whenever there is none", () => {
+  const project = (verdictText) =>
+    JSON.parse(resultLine(baseRecord(ID_A, { status: "done", verdictText }))).verdictLine;
+  assert.equal(project(null), null, "absent");
+  assert.equal(project(""), null, "empty -- the message existed, the verdict did not");
+  assert.equal(project("just thinking"), null, "present but not a verdict");
+  assert.equal(project("ALLOW: ok"), "ALLOW: ok", "a verdict travels");
+  assert.equal(project("\n  BLOCK: fix it  \nmore"), "BLOCK: fix it", "first non-empty line, trimmed");
+});
+
+test("vibe-305: a long reason is bounded on a UTF-8 boundary, head preserved, record untouched", () => {
+  const SENTINEL = "HEADMARK";
+  const reason = SENTINEL + "\u00e9".repeat(4000);   // 2-byte chars, well past the cap
+  const record = baseRecord(ID_A, { status: "done", verdictText: `BLOCK: ${reason}` });
+  const carried = JSON.parse(resultLine(record)).verdictLine;
+
+  assert.ok(Buffer.byteLength(carried, "utf8") <= 1507,
+    `whole field must fit 1507 bytes, got ${Buffer.byteLength(carried, "utf8")}`);
+  // A boundary-aware clamp never emits U+FFFD; `clampBytes` would, and would overshoot the cap too.
+  assert.ok(!carried.includes("\ufffd"), "no replacement char -- the cut respects UTF-8 boundaries");
+  // Head-anchored: a TAIL clamp keeps the ALLOW:/BLOCK: prefix as well, so the prefix alone proves
+  // nothing. The sentinel at the head of the reason is what distinguishes them.
+  assert.ok(carried.startsWith(`BLOCK: ${SENTINEL}`), "the head of the reason survives, not the tail");
+  // The record keeps the engine's full text; only the wire copy is bounded.
+  assert.equal(record.verdictText, `BLOCK: ${reason}`, "the record is untouched");
+});
+
+test("vibe-305: bounding cannot create a verdict, and the transport does not sanitise", () => {
+  const project = (verdictText) =>
+    JSON.parse(resultLine(baseRecord(ID_A, { status: "done", verdictText }))).verdictLine;
+  // A line carrying U+2028 does not parse; it must travel as null, never as a prefix that would.
+  assert.equal(project("ALLOW: ok\u2028then more"), null, "no verdict is manufactured by cutting");
+  // The reason travels RAW: the gate's single sanitising pass must remain the only one.
+  assert.equal(project("BLOCK:\u0001keep"), "BLOCK:\u0001keep",
+    "controls are not stripped here -- sanitising twice changes the gate's result");
 });

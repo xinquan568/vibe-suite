@@ -32,6 +32,47 @@ function parseLine(line) {
  * where `terminal` is
  * `"completed"`, `"failed"`, or `null` when no terminal event was seen at all.
  */
+/**
+ * The verdict line of an assistant message, or `null` when it carries none (vibe-305).
+ *
+ * ONE rule, two callers: the Stop gate parses a verdict out of a capture, and `resultLine` projects
+ * the same verdict onto the wire. Two copies of this rule would be a second derivation of one fact —
+ * exactly the defect vibe-305 exists to remove — so it lives here and both callers import it.
+ *
+ * The rule is the gate's, unchanged: the first line that is non-empty after trimming, kept only if it
+ * matches `VERDICT_RE`. `.` cannot cross a line terminator, so a line carrying U+2028/U+2029 does not
+ * match and is reported as no verdict — the same answer the gate gives today.
+ */
+export const VERDICT_RE = /^(ALLOW|BLOCK):\s*(.*)$/;
+
+export function verdictLineOf(text) {
+  if (text === null || text === undefined) return null;
+  const first = String(text).split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
+  return VERDICT_RE.test(first) ? first : null;
+}
+
+/** `{verdict, reason}` for a line that carries one, else `null`. Null-safe by design: the wire's
+ *  `verdictLine` is `null` whenever the untruncated stream carried no verdict. */
+export function parseVerdictLine(line) {
+  if (line === null || line === undefined) return null;
+  const match = VERDICT_RE.exec(String(line));
+  return match ? { verdict: match[1], reason: match[2] } : null;
+}
+
+/**
+ * The verdict a result line carries, preferring what the runner already derived (vibe-305).
+ *
+ * **Precedence is by property PRESENCE, not truthiness.** A line that HAS `verdictLine` is
+ * authoritative even when the value is `null` — `null` means "the untruncated stream carried no
+ * verdict", which is an answer, not a gap. Only a line written before this key existed lacks the
+ * property, and only that falls back to re-parsing the capture. A falsiness test would let an
+ * authoritative `null` resurrect a stale verdict out of a bounded `rawOutput`.
+ */
+export function verdictFromResult(result) {
+  if (result && Object.hasOwn(result, "verdictLine")) return parseVerdictLine(result.verdictLine);
+  return parseVerdictLine(verdictLineOf(readEventStream(result?.rawOutput).agentMessage));
+}
+
 export function readEventStream(raw) {
   let threadId = null;
   let terminal = null;

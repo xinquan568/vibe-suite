@@ -43,7 +43,7 @@ CHECKED_MJS = SHIPPED_MJS + sorted((REPO_ROOT / "tests" / "node").glob("*.mjs"))
     + sorted((REPO_ROOT / "tests" / "fixtures").rglob("*.mjs"))
 
 STATE_DIRNAME = ".vibe-suite-state"
-RESULT_KEYS = {"jobId", "status", "threadId", "rawOutput", "verdictState"}
+RESULT_KEYS = {"jobId", "status", "threadId", "rawOutput", "verdictState", "verdictLine"}
 
 
 class RunnerCase(unittest.TestCase):
@@ -268,8 +268,16 @@ class ResultContract(RunnerCase):
     def test_record_matches_result_line(self):
         parsed = self.result_line(self.run_runner(*self.base_args()))
         record = self.job_record(parsed["jobId"])
-        for key in RESULT_KEYS:
+        # vibe-305: `verdictLine` is DERIVED, not stored. The record keeps the agent MESSAGE
+        # (`verdictText`); the wire carries the VERDICT. Every other contract key is a direct field
+        # and must still agree byte for byte, which is what this test has always been for.
+        for key in RESULT_KEYS - {"verdictLine"}:
             self.assertEqual(record[key], parsed[key], f"record disagrees with result line on {key}")
+        self.assertNotIn("verdictLine", record,
+                         "verdictLine is a projection of the record, never a field on it")
+        line = parsed["verdictLine"]
+        self.assertTrue(line is None or line.startswith(("ALLOW:", "BLOCK:")),
+                        f"verdictLine is a verdict or nothing, got {line!r}")
 
 
 class Invocation(RunnerCase):
@@ -1407,7 +1415,11 @@ class OutputCaptureAndQuota(RunnerCase):
         """`verdictText` stays off the line because `rawOutput` already carries the event it came
         from — duplication, not size."""
         parsed = self.result_line(self.run_with())
+        # vibe-305: `verdictText` (the agent MESSAGE) is still not on the wire -- what was added is
+        # `verdictLine` (the VERDICT), which is a different fact. Both halves are asserted so the
+        # contract cannot drift into shipping the message by accident.
         self.assertNotIn("verdictText", parsed)
+        self.assertIn("verdictLine", parsed)
         self.assertIn("verdictState", parsed)
 
     def test_no_result_file_is_written_anywhere_under_the_workspace(self):

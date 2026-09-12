@@ -12,7 +12,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { AUTH_SIGNATURE_MARKERS, AUTH_TEXT_MARKERS, QUOTA_CODES, QUOTA_PHRASES, QUOTA_TEXT_MARKERS, billableTokens,
-  classifyFailure, mentionsAny, mentionsQuota, readEventStream } from "../../scripts/lib/events.mjs";
+  classifyFailure, mentionsAny, mentionsQuota, parseVerdictLine, readEventStream, verdictFromResult,
+  verdictLineOf } from "../../scripts/lib/events.mjs";
 
 const line = (value) => JSON.stringify(value) + "\n";
 const EMITTER = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "fake-codex", "emitter.mjs");
@@ -135,4 +136,36 @@ test("mentionsAny: the runner's narrow auth markers vs the fallback's signature 
   assert.equal(mentionsAny("the author wrote", AUTH_TEXT_MARKERS), false, "agent stdout containing 'author' is not an auth failure");
   assert.equal(mentionsAny("unauthorized", AUTH_SIGNATURE_MARKERS), true);
   assert.equal(mentionsAny("quota", AUTH_SIGNATURE_MARKERS), false);
+});
+
+// ---------------------------------------------------------------------------
+// vibe-305 — the verdict rule, and result-line precedence.
+// ---------------------------------------------------------------------------
+
+test("vibe-305: verdictLineOf keeps only a line that already carries a verdict", () => {
+  assert.equal(verdictLineOf(null), null, "absent");
+  assert.equal(verdictLineOf(""), null, "empty");
+  assert.equal(verdictLineOf("thinking out loud"), null, "present but not a verdict");
+  assert.equal(verdictLineOf("\n\n  ALLOW: ok  \ntrailing"), "ALLOW: ok", "first non-empty line, trimmed");
+  // `.` cannot cross a line terminator, so this does not match — and MUST NOT, or bounding it
+  // later could produce a verdict the engine never gave.
+  assert.equal(verdictLineOf("ALLOW: ok then more"), null, "U+2028 line is not a verdict");
+});
+
+test("vibe-305: precedence is by property PRESENCE, not truthiness", () => {
+  const capture = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "BLOCK: stale" } }) + "\n";
+
+  // legacy line — no `verdictLine` property at all — falls back to the capture
+  assert.deepEqual(verdictFromResult({ rawOutput: capture }), { verdict: "BLOCK", reason: "stale" });
+
+  // authoritative null must NOT resurrect the capture's verdict
+  assert.equal(verdictFromResult({ verdictLine: null, rawOutput: capture }), null,
+    "an authoritative null is an answer, not a gap");
+
+  // a carried verdict wins over a different parseable capture
+  assert.deepEqual(verdictFromResult({ verdictLine: "ALLOW: fresh", rawOutput: capture }),
+    { verdict: "ALLOW", reason: "fresh" }, "the carried verdict wins");
+
+  // neither source yields one
+  assert.equal(verdictFromResult({ verdictLine: null, rawOutput: "" }), null);
 });

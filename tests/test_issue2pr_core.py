@@ -1059,7 +1059,7 @@ class TestGoldenRuns(unittest.TestCase):
             with self.subTest(mode=mode):
                 result = json.loads(
                     (self.GOLDEN / mode / "reviewer-result.json").read_text(encoding="utf-8"))
-                self.assertEqual(set(result), {"jobId", "status", "threadId", "rawOutput", "verdictState"})
+                self.assertEqual(set(result), {"jobId", "status", "threadId", "rawOutput", "verdictState", "verdictLine"})
                 self.assertEqual(result["status"], "completed")
                 self.assertIn("verdict: approve", result["rawOutput"])
 

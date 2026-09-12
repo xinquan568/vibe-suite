@@ -38,7 +38,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 
 import { parseLastJsonLine } from "./lib/cli.mjs";
 import { emit } from "./lib/eventlog.mjs";
-import { readEventStream } from "./lib/events.mjs";
+import { verdictFromResult } from "./lib/events.mjs";
 import { ARGV_PROMPT_CAP } from "./lib/process.mjs";
 import { storedGateToggle } from "./lib/gate-toggle.mjs";
 import { frameExternal, sanitiseReason } from "./lib/reason-frame.mjs";
@@ -243,17 +243,20 @@ function collectDiff(cwd) {
   return parts.join("\n\n");
 }
 
-/** The last assistant message's first non-empty line, or null when there is no verdict to read. */
-function verdictFrom(rawOutput) {
-  // Only an assistant message can carry a verdict. Reasoning traces, tool events and the diff itself are
-  // all just text that might happen to contain the word BLOCK. `readEventStream` applies exactly that rule
-  // (malformed lines skipped, the LAST agent_message wins) — one reader for the stream (M6 / vibe-218).
-  const text = readEventStream(rawOutput).agentMessage;
-  if (text === null || text === undefined) return null;
-  const first = String(text).split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
-  const match = /^(ALLOW|BLOCK):\s*(.*)$/.exec(first);
-  return match ? { verdict: match[1], reason: match[2] } : null;
-}
+/**
+ * The verdict for a result line (vibe-305).
+ *
+ * The runner folds the engine's stream ONCE, on the untruncated capture, and carries what it found as
+ * `verdictLine`. Re-deriving it here from `rawOutput` meant reading the same fact twice, the second
+ * time from a copy vibe-274 deliberately bounds — so when the controlling message was too large to
+ * retain, this gate fell open for a verdict the runner had already read cleanly.
+ *
+ * Precedence is by property PRESENCE, not truthiness: a line that HAS `verdictLine` is authoritative
+ * even when the value is `null`, because `null` means "the untruncated stream carried no verdict",
+ * which is an answer. Only a line written before the key existed lacks it, and only that falls back.
+ * The rule itself lives in `lib/events.mjs` so this gate and `resultLine` cannot drift apart.
+ */
+const verdictFrom = (result) => verdictFromResult(result);
 
 /**
  * The effective gate, with the cause when it cannot be had (vibe-183 / grill H5).
@@ -404,7 +407,7 @@ async function main() {
     return applyFailPolicy(gate, `the review job did not complete (${result?.status ?? "no result"})`);
   }
 
-  const parsed = verdictFrom(result.rawOutput);
+  const parsed = verdictFrom(result);
   if (parsed === null) return applyFailPolicy(gate, "no parseable ALLOW/BLOCK verdict");
   if (parsed.verdict === "BLOCK") {
     return blockDecision(parsed.reason || "the review blocked this stop", { external: true });

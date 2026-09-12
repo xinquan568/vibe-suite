@@ -121,10 +121,10 @@ test("json mode round-trips records verbatim", () => {
   assert.deepEqual(parsed, JSON.parse(JSON.stringify(payload)));
 });
 
-test("the result line is jobs.mjs's resultLine — five keys, contract order", () => {
+test("the result line is jobs.mjs's resultLine — six keys, contract order", () => {
   const rec = record(ID_A, { status: "completed", rawOutput: "out", threadId: "thread_x" });
   const line = resultLine(rec);
-  assert.deepEqual(Object.keys(JSON.parse(line)), ["jobId", "status", "threadId", "rawOutput", "verdictState"]);
+  assert.deepEqual(Object.keys(JSON.parse(line)), ["jobId", "status", "threadId", "rawOutput", "verdictState", "verdictLine"]);
 });
 
 test("detail renders the pipesLeaked verdict in all three states (vibe-181)", () => {

@@ -333,9 +333,11 @@ jobs:
           # Code coverage is measured on ONE leg per shard (the ceiling: python 3.x + node lts) and
           # is strictly advisory — the authoritative pass/fail is ALWAYS a plain unittest run, so a
           # coverage-tooling failure can never turn a green suite red (issue: "upload first, gate later").
+          # Every setup command sits INSIDE the condition, as in the Node step: under `set -euo pipefail`
+          # one failing in the then-block would end this step before the plain fallback (vibe-280).
           if [ "${{ matrix.python }}" = "3.x" ] && [ "${{ matrix.node }}" = "lts/*" ] \
-               && python3 -m pip install --quiet coverage 2>/dev/null; then
-            mkdir -p "$RUNNER_TEMP/cov"
+               && python3 -m pip install --quiet coverage 2>/dev/null \
+               && mkdir -p "$RUNNER_TEMP/cov"; then
             if python3 -m coverage run --data-file "$RUNNER_TEMP/cov/.coverage.${{ matrix.shard }}" -m unittest -v "${mods[@]}"; then
               echo "shard ${{ matrix.shard }} passed under coverage"
             else

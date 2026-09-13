@@ -1,0 +1,14 @@
+# Code-coverage configuration for the CI test shards. Coverage there is advisory — see the
+# `test-shard` job in .github/workflows/ci.yml — so this file shapes what is measured, never the verdict.
+#
+# `source = .` measures the workspace's own code and nothing else (vibe-280). Several tests load a module
+# in-process from a temporary directory that is removed when the test finishes — test_release_gate,
+# test_auditor_scripts and test_auditor_findings_helpers among them. Without a source allowlist coverage
+# records those paths, and `coverage xml` then fails with "No source for code" once the directory is gone:
+# three of four shards published no coverage artifact while CI stayed green.
+#
+# An allowlist is used rather than an `omit` list of temporary directories because it states the intent
+# directly and does not have to track each platform's temp root (/tmp on Linux, /private/var/folders on
+# macOS, and whatever the next runner uses).
+[run]
+source = .

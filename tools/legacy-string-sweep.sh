@@ -39,8 +39,9 @@ hooks schemas scripts site skills templates"
 #   README.md CLAUDE.md PRIVACY.md LICENSE — root documentation (the migration table NAMES
 #                        the old commands by design)
 #   .gitignore .gitattributes — git configuration
+#   .coveragerc        — code-coverage configuration for the CI shards (vibe-280), not runtime text
 EXEMPT="docs tests tools .github README.md CLAUDE.md PRIVACY.md LICENSE .gitignore \
-.gitattributes"
+.gitattributes .coveragerc"
 
 # Per-FILE exception: the predicate module IS the enforcement data — the five literals are
 # its RETIRED tuple, not runtime output.

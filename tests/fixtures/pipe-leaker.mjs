@@ -27,5 +27,11 @@ if (mode === "immune") {
 } else if (mode === "linger") {
   setInterval(() => {}, 1000);        // default SIGTERM disposition: dies on the first TERM
 } else {
-  process.exit(0);
+  // NOT process.exit(0): the mode is echoed back in the line above, so this fixture can write
+  // more than a pipe buffer, and exit() does not wait for stdout to drain. The abrupt-exit
+  // behaviour this mode models is unaffected: `grandchild.unref()` above and the absence of a
+  // timer on THIS branch mean nothing survives the drain, so the process still ends at once
+  // while the grandchild keeps the inherited descriptors. `immune` and `linger` each hold an
+  // interval and are meant to be signalled, so neither is touched.
+  process.exitCode = 0;
 }

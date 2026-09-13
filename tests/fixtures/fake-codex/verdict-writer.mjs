@@ -42,4 +42,7 @@ if (process.env.VIBE_TEST_QUOTA === "1") {
   emit({ type: "turn.completed",
          usage: { input_tokens: 100, cached_input_tokens: 60, output_tokens: 20 } });
 }
-process.exit(0);
+// NOT process.exit(0): the verdict text and the quota message both arrive by environment, so this
+// fixture can write more than a pipe buffer, and exit() does not wait for stdout to drain — the
+// stream would be cut inside a JSON string and the reader would see an unparseable last line.
+process.exitCode = 0;

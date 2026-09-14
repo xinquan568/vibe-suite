@@ -16,7 +16,8 @@
 // goes, in a codebase that imports with ordinary syntax. It does not try to out-parse source contrived to read one way
 // to V8 and another way to a lexer. It meets that boundary by REFUSING, never by guessing: where reading a spelling
 // correctly would take a full parser, the file is refused and the suite fails, so the spelling gets rewritten plainly.
-// Refused: a `/` whose meaning depends on statement context (after a line break, `)`, `}`, `.`, `of`, `++` or `--`);
+// Refused: a `/` whose meaning depends on statement context (after a line break, an `if`/`while`/`for`/`with` head's
+// `)`, `}`, `.`, `of`, `++` or `--`);
 // any non-ASCII character outside a string, template, regex or comment; an escape outside those literals; anything
 // unterminated. A valid module that reads differently to `lex()` than to V8 WITHOUT tripping a refusal is outside
 // the boundary — the contract is ordinary syntax, and the refusals are how unusual syntax announces itself.
@@ -89,6 +90,25 @@ const EXPRESSION_KEYWORDS = new Set([
 
 const ambiguousSlash = (after) => new LexRefusal(`cannot decide whether \`/\` after ${after} is a regex or a division`);
 
+/** Whether the `)` ending `tokens` closes the head of `if`, `while`, `for` (including `for await`) or `with`. An
+ * unmatched `)` counts as a statement head: that is the answer that refuses. */
+function closesStatementHead(tokens) {
+  let depth = 0;
+  for (let k = tokens.length - 1; k >= 0; k -= 1) {
+    const t = tokens[k];
+    if (t.type !== "punct") continue;
+    if (t.value === ")") depth += 1;
+    else if (t.value === "(" && --depth === 0) {
+      let head = tokens[k - 1];
+      if (head?.type === "word" && head.value === "await" && tokens[k - 2]?.type === "word" && tokens[k - 2].value === "for") {
+        head = tokens[k - 2];
+      }
+      return head?.type === "word" && ["if", "while", "for", "with"].includes(head.value);
+    }
+  }
+  return true;
+}
+
 /** Whether a `/` (not `//` or `/*`) opens a regex, given the tokens before it. Throws where that needs a parser. */
 function slashOpensRegex(tokens, afterLineBreak) {
   const last = tokens[tokens.length - 1];
@@ -102,7 +122,13 @@ function slashOpensRegex(tokens, afterLineBreak) {
     return EXPRESSION_KEYWORDS.has(last.value);
   }
   if (last.type !== "punct") return false;                           // after a string, template or regex, `/` divides
-  if ([")", "}", "."].includes(last.value)) throw ambiguousSlash(`\`${last.value}\``);   // `if (x) /re/`; a block or an object; `1. / 2`
+  if (last.value === ")") {
+    // `)` ends an expression — `Date.now() / 1000`, `(a + b) / 2` — unless it closes a statement head, after which a
+    // statement (and so a regex) may begin: `if (x) /re/.test(s)`. Only that case needs a parser, so only it refuses.
+    if (closesStatementHead(tokens)) throw ambiguousSlash("`)` closing an `if`, `while`, `for` or `with` head");
+    return false;
+  }
+  if (["}", "."].includes(last.value)) throw ambiguousSlash(`\`${last.value}\``);   // a block or an object; `1. / 2`
   if (last.value === "]") return false;
   const before = tokens[tokens.length - 2];
   if ((last.value === "+" || last.value === "-") && before?.type === "punct" && before.value === last.value) {
@@ -395,6 +421,7 @@ test("declaredExports: the marker counts only on the line directly above the exp
 const EVENTS = '"./lib/events.mjs"';
 const REFUSED = (why) => [`the lexer refused the file: ${why}`];
 const AMBIGUOUS_SLASH = (after) => REFUSED(`cannot decide whether \`/\` after ${after} is a regex or a division`);
+const HEAD = "`)` closing an `if`, `while`, `for` or `with` head";
 const URL_SPELLED = (what) => [`${what} with a specifier spelled as a URL`];
 const GRAMMAR = [
   // -- the grammar
@@ -458,7 +485,12 @@ const GRAMMAR = [
   ["refused: `/` after a line break (a declaration)", `let x\n/[import { VERDICT_RE } from ${EVENTS};]/;`, [], AMBIGUOUS_SLASH("a line break")],
   ["refused: `/` after a line break (an import)", `import "node:fs"\n/[import { VERDICT_RE } from ${EVENTS};]/;`, [], AMBIGUOUS_SLASH("a line break")],
   ["refused: `/` after a block comment spanning lines", `let x /*\n*/ /[import { VERDICT_RE } from ${EVENTS};]/;`, [], AMBIGUOUS_SLASH("a line break")],
-  ["refused: `/` after `)`", `if (true) /[import { VERDICT_RE } from ${EVENTS};]/.test("");`, [], AMBIGUOUS_SLASH("`)`")],
+  ["refused: `/` after an `if` head's `)`", `if (true) /[import { VERDICT_RE } from ${EVENTS};]/.test("");`, [], AMBIGUOUS_SLASH(HEAD)],
+  ["refused: `/` after a `while` head's `)`", "while (x) /re/.test(s);", [], AMBIGUOUS_SLASH(HEAD)],
+  ["refused: `/` after a `for await` head's `)`", "for await (const x of xs) /re/.test(x);", [], AMBIGUOUS_SLASH(HEAD)],
+  ["control: `/` after a call's `)` divides", `const seconds = Date.now() / 1000;\nimport { VERDICT_RE } from ${EVENTS};`, ["VERDICT_RE"], []],
+  ["control: `/` after a grouping `)` divides", `const half = (1 + 2) / 2;\nimport { VERDICT_RE } from ${EVENTS};`, ["VERDICT_RE"], []],
+  ["control: a division after `)` does not hide a later import", `const q = f(x) / [import(${EVENTS})] / 2;`, [], ["dynamic import"]],
   ["control: `)` then an operator other than `/`", `const q = (1 + 2) * 3;\nimport { VERDICT_RE } from ${EVENTS};`, ["VERDICT_RE"], []],
   ["refused: `/` after `}`", 'function f() {} /re/.test("");', [], AMBIGUOUS_SLASH("`}`")],
   ["refused: `/` after `.` (a number ending in a dot)", `const x = 1. / [import(${EVENTS})] / 2;`, [], AMBIGUOUS_SLASH("`.`")],

@@ -41,15 +41,19 @@ test("the CLI tail main().then((code) …) exists in no CLI — runMain is the o
   assert.deepEqual(homes(/^main\(\)\.catch\(/m, files), ["session-lifecycle-hook.mjs"]);
 });
 
-test("the quota/auth vocabularies are defined once, in lib/events.mjs, and no consumer keeps a literal predicate", () => {
+test("the quota tables are defined once, in lib/events.mjs, and no consumer keeps a literal predicate", () => {
   const files = sources();
-  for (const name of ["QUOTA_CODES", "QUOTA_PHRASES", "QUOTA_TEXT_MARKERS", "AUTH_TEXT_MARKERS", "AUTH_SIGNATURE_MARKERS"]) {
+  for (const name of ["QUOTA_CODES", "QUOTA_PHRASES"]) {
     assert.deepEqual(homes(new RegExp(`^\\s*(export\\s+)?const ${name}\\b`, "m"), files), ["lib/events.mjs"], name);
   }
   const text = Object.fromEntries(files);
   // vibe-298: the two consumers this used to police — agy-runner and agy-fallback — were deleted
   // with their lane (ADR-0002). The M6 property is unchanged and still worth checking: the tables
   // have ONE home, and no surviving consumer re-implements the predicate as a literal.
+  // vibe-301: the three plain-text marker tables (QUOTA_TEXT_MARKERS, AUTH_TEXT_MARKERS,
+  // AUTH_SIGNATURE_MARKERS) were deleted with mentionsAny and mentionsQuota once nothing consumed them,
+  // so the two tables classifyFailure reads are all that remains to police. The lane, markers included,
+  // is preserved at tag retired/agy-lane.
   assert.ok(!/\bconst QUOTA_/.test(text["codex-runner.mjs"]), "codex-runner still defines a QUOTA_ table");
 });
 

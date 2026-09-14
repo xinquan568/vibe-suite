@@ -71,6 +71,7 @@ EXCLUDED = frozenset(
         ".github",
         ".gitattributes",  # root git configuration, same class as .gitignore (E6.2's CRLF fixture pin)
         ".gitignore",
+        ".coveragerc",  # CI code-coverage configuration (vibe-280) — tooling config, not shipped
         "LICENSE",
         "CLAUDE.md",  # root documentation (project memory) — same class as README.md (E7.3)
         "PRIVACY.md",  # root documentation — same class as README.md (E7.3)

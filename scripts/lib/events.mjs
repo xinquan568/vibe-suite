@@ -132,9 +132,9 @@ export function billableTokens(usage) {
   return Math.max(0, input - cached) + output;
 }
 
-// ---- M6 / vibe-218: the ONE quota/auth vocabulary and the predicates over it. Three consumers used to carry
-// three tables of three kinds (codex error codes + regexes over an event stream; plain-text substrings;
-// status-signature substrings). They live here now; each consumer keeps its matching policy.
+// ---- M6 / vibe-218: the one home for failure classification. QUOTA_CODES (machine-set error codes) and
+// QUOTA_PHRASES (a message fallback) feed classifyFailure, which codex-runner.mjs consumes. The plain-text and
+// status-signature vocabularies the retired agy lane used were deleted by vibe-301 (tag retired/agy-lane keeps them).
 
 /** An exhausted allowance, or a substantive rejection?
  *

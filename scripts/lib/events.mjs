@@ -43,7 +43,7 @@ function parseLine(line) {
  * matches `VERDICT_RE`. `.` cannot cross a line terminator, so a line carrying U+2028/U+2029 does not
  * match and is reported as no verdict — the same answer the gate gives today.
  */
-export const VERDICT_RE = /^(ALLOW|BLOCK):\s*(.*)$/;
+const VERDICT_RE = /^(ALLOW|BLOCK):\s*(.*)$/;
 
 export function verdictLineOf(text) {
   if (text === null || text === undefined) return null;
@@ -53,7 +53,7 @@ export function verdictLineOf(text) {
 
 /** `{verdict, reason}` for a line that carries one, else `null`. Null-safe by design: the wire's
  *  `verdictLine` is `null` whenever the untruncated stream carried no verdict. */
-export function parseVerdictLine(line) {
+function parseVerdictLine(line) {
   if (line === null || line === undefined) return null;
   const match = VERDICT_RE.exec(String(line));
   return match ? { verdict: match[1], reason: match[2] } : null;
@@ -146,10 +146,12 @@ export function billableTokens(usage) {
  * neither. Phrase matching is the fallback for backends that supply only a message, and it is a
  * table so a new variant is a data change.
  */
+// export-retained: production reaches it only via classifyFailure; events.test.mjs imports it to assert the table.
 export const QUOTA_CODES = new Set([
   "insufficient_quota", "quota_exceeded", "rate_limit_exceeded", "resource_exhausted",
   "usage_limit_reached", "too_many_requests",
 ]);
+// export-retained: production reaches it only via classifyFailure; events.test.mjs imports it to assert the table.
 export const QUOTA_PHRASES = [
   /\bquota\b/i, /\brate.?limit/i, /\busage (?:limit|cap)\b/i, /\bexceeded your\b/i,
   /\btoo many requests\b/i, /\bresource exhausted\b/i, /\bout of credits?\b/i,
@@ -160,23 +162,4 @@ export function classifyFailure(events) {
   if (code && QUOTA_CODES.has(code)) return "quota";
   const message = events.errorMessage ?? "";
   return QUOTA_PHRASES.some((pattern) => pattern.test(message)) ? "quota" : "failure";
-}
-
-/** Plain-text quota vocabulary for a lane that reports prose rather than a typed event stream. */
-export const QUOTA_TEXT_MARKERS = ["quota", "resource exhausted", "rate limit"];
-/** The runner's stdout auth markers — deliberately narrow: "auth" inside "author" is agent prose, not a failure. */
-export const AUTH_TEXT_MARKERS = ["authentication required", "please sign in"];
-/** A short status/error signature, where the bare substring is safe. */
-export const AUTH_SIGNATURE_MARKERS = ["unauthenticated", "auth"];
-
-/** True when the lower-cased text contains any marker. */
-export function mentionsAny(text, markers) {
-  const lowered = String(text ?? "").toLowerCase();
-  return markers.some((marker) => lowered.includes(marker));
-}
-
-/** True when text reads as a quota failure: plain substrings OR codex's phrase regexes (the union preserves every pre-M6 match). */
-export function mentionsQuota(text) {
-  const value = String(text ?? "");
-  return mentionsAny(value, QUOTA_TEXT_MARKERS) || QUOTA_PHRASES.some((pattern) => pattern.test(value));
 }

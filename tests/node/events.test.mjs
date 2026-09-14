@@ -11,8 +11,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { AUTH_SIGNATURE_MARKERS, AUTH_TEXT_MARKERS, QUOTA_CODES, QUOTA_PHRASES, QUOTA_TEXT_MARKERS, billableTokens,
-  classifyFailure, mentionsAny, mentionsQuota, parseVerdictLine, readEventStream, verdictFromResult,
+import { QUOTA_CODES, QUOTA_PHRASES, billableTokens, classifyFailure, readEventStream, verdictFromResult,
   verdictLineOf } from "../../scripts/lib/events.mjs";
 
 const line = (value) => JSON.stringify(value) + "\n";
@@ -113,7 +112,7 @@ test("the canonical emitter fixture DRIVES verdict capture (real agent_message i
 });
 
 
-// ---- M6 / vibe-218: the one quota/auth table and the predicates over it
+// ---- M6 / vibe-218: the one quota table and the classifier over it (vibe-301 deleted the plain-text markers)
 test("classifyFailure: an error code in QUOTA_CODES is quota; a phrase hit is quota; neither is failure", () => {
   assert.equal(classifyFailure({ errorCode: "insufficient_quota", errorMessage: "" }), "quota");
   assert.equal(classifyFailure({ errorCode: null, errorMessage: "You have exceeded your usage cap" }), "quota");
@@ -121,21 +120,27 @@ test("classifyFailure: an error code in QUOTA_CODES is quota; a phrase hit is qu
   assert.ok(QUOTA_CODES.has("rate_limit_exceeded")); assert.equal(QUOTA_PHRASES.length, 7);
 });
 
-test("mentionsQuota: agy's three substrings still match (quota_exceeded, quotas exhausted), and codex's phrases widen the net", () => {
-  for (const text of ["quota_exceeded", "quotas exhausted", "Resource exhausted", "rate limit hit", "usage limit reached",
-                      "you have exceeded your quota", "too many requests", "out of credits"]) {
-    assert.equal(mentionsQuota(text), true, text);
+test("QUOTA_PHRASES: every regex is the DECIDING match for some input, and each such input classifies as quota", () => {
+  // vibe-301 — coverage re-expressed, not deleted. `QUOTA_PHRASES.some(...)` stops at the FIRST match, so a regex is
+  // exercised only when it decides an input. The deleted mentionsQuota test reached some of these only through strings
+  // its plain markers caught first; two regexes (`quota`, `exceeded your`) decided no input anywhere. Each row below is
+  // decided by its own regex and classifies as `failure` with that regex removed, so no row can pass through another.
+  const decides = [
+    [0, "quota reached for this API key"],
+    [1, "rate-limited: retry after 30s"],
+    [2, "usage cap hit for the billing period"],
+    [3, "you have exceeded your monthly allowance"],
+    [4, "HTTP 429: Too Many Requests"],
+    [5, "resource exhausted on the shard"],
+    [6, "account is out of credit"],
+  ];
+  for (const [index, message] of decides) {
+    assert.equal(QUOTA_PHRASES.findIndex((pattern) => pattern.test(message)), index,
+      `"${message}" is not decided by QUOTA_PHRASES[${index}]`);
+    assert.equal(classifyFailure({ errorCode: null, errorMessage: message }), "quota", message);
   }
-  assert.equal(mentionsQuota("analysis complete"), false);
-  assert.deepEqual(QUOTA_TEXT_MARKERS, ["quota", "resource exhausted", "rate limit"]);
-});
-
-test("mentionsAny: the runner's narrow auth markers vs the fallback's signature markers", () => {
-  assert.equal(mentionsAny("Authentication required\n", AUTH_TEXT_MARKERS), true);
-  assert.equal(mentionsAny("please sign in", AUTH_TEXT_MARKERS), true);
-  assert.equal(mentionsAny("the author wrote", AUTH_TEXT_MARKERS), false, "agent stdout containing 'author' is not an auth failure");
-  assert.equal(mentionsAny("unauthorized", AUTH_SIGNATURE_MARKERS), true);
-  assert.equal(mentionsAny("quota", AUTH_SIGNATURE_MARKERS), false);
+  assert.deepEqual(decides.map(([index]) => index), QUOTA_PHRASES.map((_, index) => index),
+    "every regex in QUOTA_PHRASES needs a row that it decides");
 });
 
 // ---------------------------------------------------------------------------

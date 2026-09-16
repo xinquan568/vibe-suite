@@ -1137,3 +1137,42 @@ test("vibe-220: hooks.json's Stop timeout equals HOOK_BUDGET_MS — both of its 
   assert.equal(literal(cap), timeoutMs, "the env cap must equal hooks.json's Stop timeout");
   assert.equal(literal(fallback), timeoutMs, "the default budget must equal hooks.json's Stop timeout");
 });
+
+test("vibe-310: an ANSI-only reviewer reason yields the gate's default text, end to end", () => {
+  // Through the real runner and transport: the fixture's agent_message is `BLOCK: ` + two colour
+  // sequences and nothing else. The transport strips them before bounding, the wire carries an empty
+  // reason, and the hook's `parsed.reason || default` selects its own text. Pinned in #310 — before
+  // the strip, the raw sequences were truthy at the fallback and the operator saw an EMPTY payload.
+  const dir = repo({ enabled: true });
+  seedDefect(dir);
+  const result = runHook(dir, { fixture: "gate-ansi-only.mjs" });
+  assert.equal(result.status, 0, result.stderr);
+
+  const decision = decisionOf(result);
+  assert.ok(decision && decision.decision === "block", `expected a block: ${result.stdout}${result.stderr}`);
+  const lines = decision.reason.split("\n");
+  assert.equal(lines.length, 3, `open fence, payload, close fence: got ${lines.length} lines`);
+  assert.equal(lines[1], "the review blocked this stop",
+    "an ANSI-only reason is empty at the gate, and the gate's default text is what the operator reads");
+  assert.ok(!decision.reason.includes(String.fromCharCode(0x1b)), "no escape byte reaches Claude");
+});
+
+test("vibe-310: stripAnsi is a PURE strip — complete CSI sequences only; no slice, no trim, no control replacement", async () => {
+  const { stripAnsi } = await import("../../scripts/lib/reason-frame.mjs");
+  const ESC = String.fromCharCode(0x1b);
+  const cases = [
+    ["SGR", `${ESC}[31mred${ESC}[0m`, "red"],
+    ["parameters and private/intermediate bytes", `${ESC}[1;31m${ESC}[?25l${ESC}[0 qx`, "x"],
+    ["C0 controls are NOT ours", `a${String.fromCharCode(1)}${String.fromCharCode(7)}b`, `a${String.fromCharCode(1)}${String.fromCharCode(7)}b`],
+    ["whitespace is NOT trimmed", "   padded   ", "   padded   "],
+    ["nothing is sliced", "B".repeat(600), "B".repeat(600)],
+    ["an input-borne fragment is not a sequence", `${ESC}[31`, `${ESC}[31`],
+    ["a non-CSI escape is outside the pattern", `${ESC}]0;title${String.fromCharCode(7)}x`, `${ESC}]0;title${String.fromCharCode(7)}x`],
+  ];
+  for (const [label, input, expected] of cases) {
+    assert.equal(stripAnsi(input), expected, label);
+  }
+  // The shared pattern is stateless across calls (a global regex under `replace` resets lastIndex).
+  assert.equal(stripAnsi(`${ESC}[31mred`), "red");
+  assert.equal(stripAnsi(`${ESC}[31mred`), "red", "second call sees the same answer");
+});

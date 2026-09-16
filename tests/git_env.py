@@ -38,21 +38,29 @@ def quiet_git_env(base):
     """`base` plus the settings, appended after any GIT_CONFIG_* entries `base` already carries.
 
     git requires the indices 0..COUNT-1 to be contiguous, so existing entries keep their numbers
-    and ours follow. A `base` whose GIT_CONFIG_COUNT is not a non-negative integer is returned
-    unchanged: git would ignore the block anyway, and a helper must never raise at import.
-    Idempotent: settings already present (by key) are not appended twice.
+    and ours follow. An EMPTY count is zero, as git reads it; a count that is not a non-negative
+    integer leaves `base` unchanged (git would reject the block anyway, and a helper must never
+    raise at import). git applies repeated keys in order, later entries winning (measured on
+    2.36 and 2.50), so a setting is appended whenever the LAST existing entry for its key does not
+    already carry our value — an existing `maintenance.auto=true` is overridden, not preserved.
+    Idempotent: once our value is the last word for a key, nothing more is appended.
     """
     env = dict(base)
-    raw = env.get("GIT_CONFIG_COUNT", "0")
+    raw = env.get("GIT_CONFIG_COUNT", "0") or "0"
     if not raw.isdigit():
         return env
     count = int(raw)
-    present = {env.get(f"GIT_CONFIG_KEY_{i}") for i in range(count)}
+    last = {}
+    for i in range(count):
+        key = env.get(f"GIT_CONFIG_KEY_{i}")
+        if key is not None:
+            last[key] = env.get(f"GIT_CONFIG_VALUE_{i}")
     for key, value in SETTINGS:
-        if key in present:
+        if last.get(key) == value:
             continue
         env[f"GIT_CONFIG_KEY_{count}"] = key
         env[f"GIT_CONFIG_VALUE_{count}"] = value
+        last[key] = value
         count += 1
     env["GIT_CONFIG_COUNT"] = str(count)
     return env

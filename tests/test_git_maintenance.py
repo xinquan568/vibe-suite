@@ -277,6 +277,31 @@ class D_MergeRules(unittest.TestCase):
         once = quiet_git_env({})
         self.assertEqual(once, quiet_git_env(once))
 
+    def test_a_conflicting_existing_value_is_overridden_by_appending(self):
+        base = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "maintenance.auto", "GIT_CONFIG_VALUE_0": "true"}
+        env = quiet_git_env(base)
+        self.assertEqual(("maintenance.auto", "true"), (env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]), "existing pairs are preserved")
+        self.assertEqual(("maintenance.auto", "false"), (env["GIT_CONFIG_KEY_1"], env["GIT_CONFIG_VALUE_1"]), "ours is appended after it")
+        self.assertEqual("3", env["GIT_CONFIG_COUNT"])
+        self.assertEqual(env, quiet_git_env(env), "idempotent once false is the last word")
+        with tempfile.TemporaryDirectory(prefix="git-env-") as tmp:
+            subprocess.run(["git", "init", "-q", tmp], check=True, capture_output=True)
+            out = subprocess.run(["git", "-C", tmp, "config", "--get", "maintenance.auto"], env={**os.environ, **env}, capture_output=True, text=True)
+            self.assertEqual("false", out.stdout.strip(), "git reads the later duplicate as the effective value")
+
+    def test_duplicate_keys_use_the_last_value(self):
+        base = {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "gc.autoDetach", "GIT_CONFIG_VALUE_0": "false",
+                "GIT_CONFIG_KEY_1": "gc.autoDetach", "GIT_CONFIG_VALUE_1": "true"}
+        env = quiet_git_env(base)
+        self.assertEqual("gc.autoDetach", env["GIT_CONFIG_KEY_3"], "the last existing word was `true`, so false is appended")
+        self.assertEqual("4", env["GIT_CONFIG_COUNT"])
+
+    def test_an_empty_count_is_zero(self):
+        env = quiet_git_env({"GIT_CONFIG_COUNT": ""})
+        self.assertEqual("2", env["GIT_CONFIG_COUNT"])
+        self.assertEqual("maintenance.auto", env["GIT_CONFIG_KEY_0"])
+        self.assertEqual([], _maintenance_children(env), "both settings are installed and git honours them")
+
     def test_a_malformed_count_is_left_alone(self):
         base = {"GIT_CONFIG_COUNT": "many"}
         self.assertEqual(base, quiet_git_env(base))

@@ -17,6 +17,7 @@ import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import git_env  # noqa: E402,F401  (vibe-318: no auto-maintenance in test repositories)
 from auditor_helpers_support import NOOP, REPO, SCRIPTS, source_and_call  # noqa: E402
 from tmpdirs import TempDirMixin  # noqa: E402
 
@@ -837,7 +838,7 @@ class Test_commit_via_pr(TempDirMixin, unittest.TestCase):
         path = Path(self.mkdtemp()) / "helper.sh"
         path.write_text(script_text or self.HELPER.read_text(), encoding="utf-8")
         environ = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp"),
-                   "PAT_TOKEN": "tok"}
+                   "PAT_TOKEN": "tok", **git_env.GIT_NO_AUTO_MAINTENANCE}
         if env is not None:
             environ.update(env)
         return subprocess.run(["bash", str(path), *argv], capture_output=True, text=True,

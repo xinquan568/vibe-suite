@@ -27,6 +27,10 @@ import unittest
 from pathlib import Path
 
 from tests.test_auditor_state_machine import Sandbox, extract
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import git_env  # noqa: E402,F401  (vibe-318: no auto-maintenance in test repositories)
 
 WF = Path(__file__).resolve().parent.parent / "auditor" / "workflows" / "auditor-contribute.yml"
 RESERVATIONS = "ledgers/contact-reservations.jsonl"

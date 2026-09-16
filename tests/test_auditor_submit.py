@@ -27,6 +27,10 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import git_env  # noqa: E402,F401  (vibe-318: no auto-maintenance in test repositories)
 
 REPO = Path(__file__).resolve().parent.parent
 CONTRIBUTE = REPO / "auditor" / "workflows" / "auditor-contribute.yml"

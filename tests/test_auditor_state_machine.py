@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import git_env  # noqa: E402,F401  (vibe-318: no auto-maintenance in test repositories)
 from tmpdirs import TempDirMixin, scratch_dir  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -1277,6 +1278,7 @@ def run_isolated(sb, script, env):
         "FIXTURE": str(sb.root / "fixture.json"),
         "GITHUB_ENV": str(sb.root / "github.env"), "GITHUB_OUTPUT": str(sb.root / "github.out"),
         "FORCE_REWRITE": "false",
+        **git_env.GIT_NO_AUTO_MAINTENANCE,
     }
     base.update(env)
     sh = sb.root / "block.sh"

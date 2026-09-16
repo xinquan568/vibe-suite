@@ -22,6 +22,9 @@ SWEEP = REPO_ROOT / "tools" / "legacy-string-sweep.sh"
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import retired_names  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import git_env  # noqa: E402,F401  (vibe-318: no auto-maintenance in test repositories)
+
 
 def run_sweep(cwd, *args):
     return subprocess.run(["bash", str(SWEEP), *args],

@@ -38,6 +38,26 @@ export function frameExternal(payload) {
     + `${bar} END external reviewer text ${bar}`;
 }
 
+/** ANSI CSI: ESC `[` parameter bytes, intermediate bytes, one final byte. The one definition for the
+ *  transport/sanitiser pair; `lib/render.mjs` and `lib/preflight.mjs` carry their own copies inside
+ *  different chains (#321). Used only through `replace`, which resets `lastIndex`, so the shared global
+ *  regex is stateless across calls. */
+const ANSI_CSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+
+/**
+ * A PURE strip of complete ANSI CSI sequences — nothing else (vibe-310).
+ *
+ * No slice, no trim, no control replacement: every byte that is not part of a complete sequence
+ * travels untouched, an input-borne fragment (`ESC[31` with no final byte) included. That is what
+ * makes it safe to run BEFORE a bound and before `sanitiseReason` — the sanitiser's own first step
+ * is this same function, so a second pass over already-stripped text changes nothing. `sanitiseReason`
+ * (slice + trim) is NOT safe in that position; #305 measured why (498 vs 500, and an ANSI-only reason
+ * becoming a different branch), and #310 pinned the ANSI-only outcome that this strip produces.
+ */
+export function stripAnsi(text) {
+  return String(text).replace(ANSI_CSI, "");
+}
+
 /**
  * Make external reason text safe to show, then bound it.
  *
@@ -50,10 +70,13 @@ export function frameExternal(payload) {
  * parse at all and becomes indeterminate. They are flattened anyway because the hook's own
  * fail-policy messages interpolate error text from elsewhere, and because a rule that holds only
  * while a regex two functions away keeps a particular shape is not a rule.
+ *
+ * The ANSI step is `stripAnsi` above (vibe-310): the carried-verdict transport in `jobs.mjs` runs the
+ * same strip before bounding, and one definition for the pair is what keeps "what counts as ANSI"
+ * a single answer for the gate and the transport.
  */
 export function sanitiseReason(reason, cap) {
-  return String(reason)
-    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")     // ANSI SGR and friends
+  return stripAnsi(reason)
     .replace(/[\u2028\u2029]/g, " ")               // unicode line terminators
     .replace(/[\x00-\x1f\x7f-]/g, " ")            // C0 and C1 controls
     .slice(0, cap)

@@ -105,6 +105,7 @@ import { randomBytes as tombstoneNonce } from "node:crypto";
 import path from "node:path";
 
 import { verdictLineOf } from "./events.mjs";
+import { stripAnsi } from "./reason-frame.mjs";
 
 export const STATE_DIRNAME = ".vibe-suite-state";
 
@@ -152,18 +153,29 @@ function headClampUtf8(text, cap) {
  *
  * Only a line that ALREADY matched is ever emitted (`verdictLineOf`), which is what makes bounding
  * safe: a matched line contains no line terminator, so shortening its tail shortens the reason and
- * can never turn a non-verdict into one. **Nothing is sanitised here.** `sanitiseReason` also slices
- * and trims, so a pass at this end plus the gate's own pass is a double pass that changes results --
- * measured: a reason of two controls then 600 `A`s yields 498 characters today and 500 after a
- * pre-sanitising pass, and an ANSI-only reason becomes `""`, which is falsy and silently swaps in the
- * gate's default reason text. The reason therefore travels raw.
+ * can never turn a non-verdict into one.
+ *
+ * The reason travels raw, **except that complete ANSI CSI sequences are removed before bounding**
+ * (vibe-310) -- `stripAnsi`, the same first step the gate's sanitiser runs: a pure strip, no slice, no
+ * trim, no control replacement. So the gate's single sanitising pass stays the only one (a reason of
+ * two controls then 600 `A`s still yields 498 characters at the gate), and the budget is spent on
+ * meaningful bytes: 400 colour sequences in front of `the actual defect` used to carry `[31` debris,
+ * because the byte clamp landed inside a sequence. `sanitiseReason` itself is still NOT usable here;
+ * #305 measured why (498 vs 500). An ANSI-only reason therefore reaches the gate empty and takes the
+ * gate's default text -- the outcome #310 pinned. Controls and whitespace are the gate's to handle:
+ * whitespace that a LEADING sequence used to hide is consumed by the gate's verdict parser (`VERDICT_RE`'s
+ * `\s*`) once the sequence is gone, exactly as it is when no sequence was there -- so `ESC[31m` + two
+ * tabs + 600 `A` now reaches the gate as 500 characters, not 498 (#310, second pin). Non-whitespace
+ * controls (the #305 pin: BEL + BS) are still the sanitiser's and still count.
  */
 function verdictLineFor(record) {
   const line = verdictLineOf(record.verdictText ?? null);
   if (line === null) return null;
-  if (Buffer.byteLength(line, "utf8") <= VERDICT_LINE_BYTES) return line;
   const cut = line.indexOf(":") + 1;                        // keep the whole `ALLOW:`/`BLOCK:` token
-  return line.slice(0, cut) + headClampUtf8(line.slice(cut), VERDICT_REASON_BYTES);
+  const reason = stripAnsi(line.slice(cut));                // strip AFTER matching, BEFORE bounding
+  const stripped = line.slice(0, cut) + reason;
+  if (Buffer.byteLength(stripped, "utf8") <= VERDICT_LINE_BYTES) return stripped;
+  return line.slice(0, cut) + headClampUtf8(reason, VERDICT_REASON_BYTES);   // the clamp sees the STRIPPED reason
 }
 
 /** Terminal statuses. `cancelled` is reserved for #12, which signals via `pgid`. */

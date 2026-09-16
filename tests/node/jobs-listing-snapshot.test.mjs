@@ -232,12 +232,91 @@ test("vibe-305: a long reason is bounded on a UTF-8 boundary, head preserved, re
   assert.equal(record.verdictText, `BLOCK: ${reason}`, "the record is untouched");
 });
 
-test("vibe-305: bounding cannot create a verdict, and the transport does not sanitise", () => {
+test("vibe-305: bounding cannot create a verdict, and the transport does not sanitise (vibe-310: complete ANSI sequences are the one exception)", () => {
   const project = (verdictText) =>
     JSON.parse(resultLine(baseRecord(ID_A, { status: "done", verdictText }))).verdictLine;
   // A line carrying U+2028 does not parse; it must travel as null, never as a prefix that would.
   assert.equal(project("ALLOW: ok\u2028then more"), null, "no verdict is manufactured by cutting");
-  // The reason travels RAW: the gate's single sanitising pass must remain the only one.
+  // The reason travels RAW: the gate's single sanitising pass must remain the only one. vibe-310 added
+  // ONE exception -- complete ANSI CSI sequences are stripped before bounding -- and it is a pure strip,
+  // so this control byte still travels: no control replacement, no slice, no trim at this end.
   assert.equal(project("BLOCK:\u0001keep"), "BLOCK:\u0001keep",
     "controls are not stripped here -- sanitising twice changes the gate's result");
+});
+
+// ---------------------------------------------------------------------------------------------
+// vibe-310: complete ANSI CSI sequences are stripped BEFORE the reason is bounded — a pure strip, no
+// slice, no trim, no control replacement — so the budget is spent on meaningful bytes and a cut can
+// never land inside a sequence. The gate's single sanitising pass stays the only one.
+// ---------------------------------------------------------------------------------------------
+const ESC = String.fromCharCode(0x1b);
+const RED = `${ESC}[31m`;
+const projectVerdict = (verdictText) =>
+  JSON.parse(resultLine(baseRecord(ID_A, { status: "done", verdictText }))).verdictLine;
+
+test("vibe-310: 400 colour sequences no longer consume the reason budget", () => {
+  const carried = projectVerdict(`BLOCK: ${RED.repeat(400)}the actual defect`);
+  assert.equal(carried, "BLOCK: the actual defect",
+    "the operator sees the defect, not a clipped head and not escape-sequence debris");
+});
+
+test("vibe-310: no carried value contains an escape byte, at any count, for any CSI shape, within the cap", () => {
+  const shapes = [`${ESC}[31m`, `${ESC}[1;31m`, `${ESC}[?25l`, `${ESC}[0 q`];   // SGR · params · private · intermediate
+  for (const seq of shapes) {
+    for (const n of [1, 100, 299, 300, 301, 400, 1000]) {
+      const carried = projectVerdict(`BLOCK: ${seq.repeat(n)}the actual defect`);
+      assert.ok(!carried.includes(ESC), `an ESC byte survived (n=${n}, ${JSON.stringify(seq)}): ${carried.slice(-12)}`);
+      assert.ok(Buffer.byteLength(carried, "utf8") <= 1507, `cap exceeded at n=${n}`);
+      assert.equal(carried, "BLOCK: the actual defect", `n=${n}, ${JSON.stringify(seq)}`);
+    }
+  }
+});
+
+test("vibe-310: an ANSI-only reason reaches the gate EMPTY, which is what selects the gate's default text", async () => {
+  const { verdictFromResult } = await import("../../scripts/lib/events.mjs");
+  const carried = projectVerdict(`BLOCK: ${RED.repeat(3)}`);
+  assert.equal(carried, "BLOCK: ", "the verdict token travels; the reason is nothing");
+  const parsed = verdictFromResult({ verdictLine: carried });
+  assert.equal(parsed.verdict, "BLOCK", "bounding cannot lose the verdict");
+  assert.equal(parsed.reason, "", "falsy at the gate's `parsed.reason || default` — the pinned outcome (#310)");
+});
+
+test("vibe-310: the strip is PURE — controls and whitespace travel untouched, only complete sequences go", () => {
+  const SOH = String.fromCharCode(1);
+  // The two spaces sit INSIDE the matched line because a sequence follows them: verdictLineOf trims
+  // each candidate line before the transport sees it, and only the strip exposes the spaces.
+  const input = `BLOCK: ${RED}${SOH}keep  ${ESC}[0m`;
+  assert.equal(projectVerdict(input), `BLOCK: ${SOH}keep  `,
+    "no control replacement, no trim — the gate's pass is the only sanitising pass");
+  // A partial sequence in the INPUT is not a sequence; it travels as controls (the gate flattens it).
+  // The strip removes what it can prove complete; it never guesses.
+  assert.equal(projectVerdict(`BLOCK: ${ESC}[31`), `BLOCK: ${ESC}[31`, "input-borne fragment: not ours to cut");
+});
+
+test("vibe-310: over the cap, the clamp runs on the STRIPPED reason — head preserved, no escape, no U+FFFD", () => {
+  // 50 sequences (250 bytes) in front of a reason that is over the cap on its own. The reason slice
+  // starts right after the colon, so stripped it is ` HEADMARK` (9 bytes) + 4000 two-byte characters;
+  // clamped on a UTF-8 boundary at 1,500 bytes that is ` HEADMARK` + 745 of them — 1,499 bytes,
+  // exactly (measured with the real clamp; 746 would be 1,501). A clamp on the UNSTRIPPED reason
+  // keeps the sequences, moves the head and can cut inside one; this is the RED for that branch.
+  const carried = projectVerdict(`BLOCK: ${RED.repeat(50)}HEADMARK${"é".repeat(4000)}`);
+  assert.equal(carried, `BLOCK: HEADMARK${"é".repeat(745)}`, "the stripped reason, bounded on a boundary — 1,499 bytes");
+  assert.ok(!carried.includes(ESC), "no escape byte survives the over-cap branch");
+  assert.ok(!carried.includes("�"), "no replacement character");
+  assert.ok(Buffer.byteLength(carried, "utf8") <= 1507, `cap: ${Buffer.byteLength(carried, "utf8")}`);
+});
+
+test("vibe-310: whitespace behind a stripped LEADING sequence is the parser's to consume, as it always was without one", async () => {
+  // Second pin (#310, 2026-09-16). The transport strips the sequence and carries the tabs; the gate's
+  // VERDICT_RE consumes leading whitespace after the token, so the parsed reason starts at the first A.
+  // Before the strip the ESC shielded the tabs and the sanitiser counted them (498 at the gate); now the
+  // prefixed case agrees with the unprefixed one (500). Asserted at the wire here; end to end in stop-gate.
+  const { verdictFromResult } = await import("../../scripts/lib/events.mjs");
+  const TAB = String.fromCharCode(9);
+  const carried = projectVerdict(`BLOCK: ${RED}${TAB}${TAB}${"A".repeat(600)}${ESC}[0m`);
+  assert.equal(carried, `BLOCK: ${TAB}${TAB}${"A".repeat(600)}`, "the tabs travel; only the sequences go");
+  assert.equal(verdictFromResult({ verdictLine: carried }).reason, "A".repeat(600),
+    "the parser consumes the leading tabs — the same reason it would parse with no sequence in front");
+  assert.equal(verdictFromResult({ verdictLine: `BLOCK: ${TAB}${TAB}${"A".repeat(600)}` }).reason, "A".repeat(600),
+    "the unprefixed case, for the record: identical parsed reason");
 });

@@ -70,3 +70,27 @@ test("the 96,000-byte cap and DEFAULT_TIMEOUT_MS are defined once, in lib/proces
   assert.deepEqual(homes(/\b96_000\b|\b96000\b/, sources()), ["lib/process.mjs"]);
   assert.deepEqual(homes(/^\s*(export\s+)?const DEFAULT_TIMEOUT_MS\s*=/m, sources()), ["lib/process.mjs"]);
 });
+
+test("the ANSI CSI strip has one home for the transport/sanitiser pair — lib/reason-frame.mjs — and the transport imports it (vibe-310)", () => {
+  // Scoped to the PAIR by the owner's decision (2026-09-16): the transport (lib/jobs.mjs) strips before
+  // bounding with the same step the gate's sanitiser runs first, so one definition serves both and
+  // "what counts as ANSI" is a single answer for them. lib/render.mjs (stripControls) and
+  // lib/preflight.mjs (boundToken) carry their own copies of the CSI step inside different chains;
+  // they are pre-existing and are #321's business, so they are deliberately NOT read here.
+  const text = Object.fromEntries(sources());
+  const pair = { "lib/reason-frame.mjs": text["lib/reason-frame.mjs"], "lib/jobs.mjs": text["lib/jobs.mjs"] };
+  const CSI_SOURCE = /\\x1b\\\[\[0-9;\?\]\*\[ -\/\]\*\[@-~\]/g;
+  const occurrences = Object.fromEntries(Object.entries(pair).map(([rel, src]) => [rel, (src.match(CSI_SOURCE) ?? []).length]));
+  // OCCURRENCES, not files: an inline copy kept beside the shared constant is one file and two homes.
+  assert.deepEqual(occurrences, { "lib/reason-frame.mjs": 1, "lib/jobs.mjs": 0 }, "the pattern source appears once across the pair");
+  assert.equal((pair["lib/reason-frame.mjs"].match(/^\s*export function stripAnsi\b/mg) ?? []).length, 1, "stripAnsi is exported once");
+  // The sanitiser DELEGATES its first step: stripAnsi(reason) comes before any .replace( in its body.
+  const sanitiser = /export function sanitiseReason\([^)]*\)\s*\{([\s\S]*?)^\}/m.exec(pair["lib/reason-frame.mjs"]);
+  assert.ok(sanitiser, "sanitiseReason is present");
+  const body = sanitiser[1];
+  assert.ok(body.indexOf("stripAnsi(reason)") !== -1 && body.indexOf("stripAnsi(reason)") < body.indexOf(".replace("),
+    "sanitiseReason's chain starts with stripAnsi(reason)");
+  assert.match(pair["lib/jobs.mjs"], /^import \{[^}]*\bstripAnsi\b[^}]*\} from "\.\/reason-frame\.mjs";$/m,
+    "the transport imports the one strip rather than keeping a copy");
+  assert.match(pair["lib/jobs.mjs"], /stripAnsi\(line\.slice\(cut\)\)/, "and calls it on the reason, before bounding");
+});

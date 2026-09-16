@@ -143,3 +143,52 @@ test("vibe-261: a genuine escape is still refused, and is NOT reported as absenc
     return true;
   });
 });
+
+/**
+ * vibe-304: the refusal branch is `nowKind !== "dir"`, not `=== "symlink"`. A root replaced by a
+ * regular file — or by anything else `classify` reports as neither link, directory nor file — must
+ * be refused naming that kind, with NO `code`: not laundered into absence, and not the kernel's own
+ * `ENOTDIR` either. The ordering is the real one: `classify(root)` sees a directory, `realpath(root)`
+ * still succeeds (the file exists), and the walk's `lstat` of the CHILD fails with `ENOTDIR` — which
+ * is exactly the coded error the `=== "symlink"` mutant lets escape.
+ */
+async function withRootReplacedBy(root, stats, body) {
+  const realLstat = fs.lstat;
+  const seen = { lstatRoot: 0, childNotDir: 0 };
+  fs.lstat = async (p, ...rest) => {
+    const target = String(p);
+    if (!isAtOrUnder(target, root)) return realLstat(target, ...rest);
+    if (target === root) {
+      seen.lstatRoot += 1;
+      if (seen.lstatRoot === 1) return realLstat(target, ...rest);      // still the real directory
+      return stats;                                                    // replaced
+    }
+    seen.childNotDir += 1;                                             // a child of a non-directory
+    const err = new Error(`ENOTDIR: not a directory, lstat '${target}'`);
+    err.code = "ENOTDIR";
+    throw err;
+  };
+  try {
+    return await body(seen);
+  } finally {
+    fs.lstat = realLstat;
+  }
+}
+
+for (const [kind, stats] of [
+  ["file", { isSymbolicLink: () => false, isDirectory: () => false, isFile: () => true }],
+  ["other", { isSymbolicLink: () => false, isDirectory: () => false, isFile: () => false }],
+]) {
+  test(`vibe-304: a root REPLACED by a ${kind} is refused naming the kind, with no code`, async () => {
+    const root = jobsRoot();
+    await withRootReplacedBy(root, stats, async (seen) => {
+      await assert.rejects(() => readNoFollow(root, "job.v1.json"), (error) => {
+        assert.equal(error.code, undefined, `a ${kind} root is a refusal, not absence and not the kernel's ENOTDIR`);
+        assert.match(error.message, new RegExp(`not a directory \\(${kind}\\)`));
+        return true;
+      });
+      assert.ok(seen.childNotDir > 0, "the walk reached the child, where ENOTDIR arises");
+      assert.ok(seen.lstatRoot > 1, "and the root was re-observed after its initial classification");
+    });
+  });
+}

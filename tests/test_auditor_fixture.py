@@ -16,6 +16,10 @@ import unittest
 from pathlib import Path
 
 from tests.test_auditor_state_machine import extract
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import git_env  # noqa: E402,F401  (vibe-318: no auto-maintenance in test repositories)
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURE = REPO / "auditor" / "test-fixture"
@@ -27,7 +31,7 @@ def run_block(block, env, cwd):
     prepended strictness — every marker pair carries its own `set -euo pipefail`, so a
     block that lost it fails these tests rather than borrowing rigor from the harness."""
     import os
-    full = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", str(cwd))}
+    full = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", str(cwd)), **git_env.GIT_NO_AUTO_MAINTENANCE}
     full.update(env)
     return subprocess.run(["bash", "-c", block],
                           env=full, cwd=cwd, capture_output=True, text=True)

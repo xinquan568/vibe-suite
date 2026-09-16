@@ -39,6 +39,9 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import git_env  # noqa: E402,F401  (vibe-318: no auto-maintenance in test repositories)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LINT_PATH = REPO_ROOT / "tools" / "model-pin-lint.py"
 

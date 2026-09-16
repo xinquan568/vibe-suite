@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import git_env  # noqa: E402,F401  (vibe-318: no auto-maintenance in test repositories)
 from auditor_helpers_support import NOOP, REPO, SCRIPTS  # noqa: E402
 from tmpdirs import TempDirMixin  # noqa: E402
 
@@ -676,7 +677,7 @@ class Test_renderer_workflow_composition(TempDirMixin, unittest.TestCase):
             {"repo": "acme/widget", "rule_id": "R01", "confidence": "high",
              "file": "a.md", "line": 1}) + "\n", encoding="utf-8")
         env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp"),
-               "CODE_DIR": str(REPO), "DATA_DIR": str(d), "TARGET_REPO": "acme/widget"}
+               "CODE_DIR": str(REPO), "DATA_DIR": str(d), "TARGET_REPO": "acme/widget", **git_env.GIT_NO_AUTO_MAINTENANCE}
         r = subprocess.run(["bash", "-c", self._render_block()],
                            capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -699,7 +700,7 @@ class Test_renderer_workflow_composition(TempDirMixin, unittest.TestCase):
         """The property the removed `|| echo` destroyed: a broken render stops the run."""
         d = Path(self.mkdtemp())
         env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp"),
-               "CODE_DIR": str(REPO), "DATA_DIR": str(d), "TARGET_REPO": "acme/widget"}
+               "CODE_DIR": str(REPO), "DATA_DIR": str(d), "TARGET_REPO": "acme/widget", **git_env.GIT_NO_AUTO_MAINTENANCE}
         r = subprocess.run(["bash", "-c", self._render_block()],
                            capture_output=True, text=True, env=env)
         self.assertNotEqual(r.returncode, 0, "a missing registry must fail the step")

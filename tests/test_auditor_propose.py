@@ -17,6 +17,10 @@ import unittest
 from pathlib import Path
 
 from tests.test_auditor_state_machine import Sandbox, extract
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import git_env  # noqa: E402,F401  (vibe-318: no auto-maintenance in test repositories)
 
 WF = Path(__file__).resolve().parent.parent / "auditor" / "workflows" / "auditor-contribute.yml"
 
@@ -27,7 +31,7 @@ GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid",
 
 def git(*a, cwd, check=True):
     return subprocess.run(["git", *a], cwd=str(cwd), capture_output=True, text=True,
-                          check=check, env={"PATH": "/usr/bin:/bin:/usr/local/bin", **GIT_ENV})
+                          check=check, env={"PATH": "/usr/bin:/bin:/usr/local/bin", **GIT_ENV, **git_env.GIT_NO_AUTO_MAINTENANCE})
 
 
 @unittest.skipUnless(HAS_GIT, "git is required")

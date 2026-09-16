@@ -1176,3 +1176,22 @@ test("vibe-310: stripAnsi is a PURE strip — complete CSI sequences only; no sl
   assert.equal(stripAnsi(`${ESC}[31mred`), "red");
   assert.equal(stripAnsi(`${ESC}[31mred`), "red", "second call sees the same answer");
 });
+
+test("vibe-310: a colour sequence hiding leading whitespace no longer changes the gate's count — 500, like the unprefixed case", () => {
+  // Second pin (#310, 2026-09-16): ESC[31m + two tabs + 600 A + ESC[0m. The transport strips the sequences,
+  // the verdict parser consumes the exposed tabs, the sanitiser sees 600 A and clamps to 500. Before the strip
+  // the ESC shielded the tabs and the operator saw 498 — the number the #305 pin (BEL + BS, non-whitespace
+  // controls) still shows, because those are the sanitiser's, not the parser's.
+  const dir = repo({ enabled: true });
+  seedDefect(dir);
+  const result = runHook(dir, { fixture: "gate-ansi-tabs.mjs" });
+  assert.equal(result.status, 0, result.stderr);
+
+  const decision = decisionOf(result);
+  assert.ok(decision && decision.decision === "block", `expected a block: ${result.stdout}${result.stderr}`);
+  const lines = decision.reason.split("\n");
+  assert.equal(lines.length, 3, `open fence, payload, close fence: got ${lines.length} lines`);
+  assert.equal(lines[1], "A".repeat(500),
+    "the parser consumed the tabs the sequence used to hide; the sanitiser's cap then holds the full 500");
+  assert.ok(!decision.reason.includes(String.fromCharCode(0x1b)), "no escape byte reaches Claude");
+});

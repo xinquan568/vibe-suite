@@ -305,3 +305,18 @@ test("vibe-310: over the cap, the clamp runs on the STRIPPED reason — head pre
   assert.ok(!carried.includes("�"), "no replacement character");
   assert.ok(Buffer.byteLength(carried, "utf8") <= 1507, `cap: ${Buffer.byteLength(carried, "utf8")}`);
 });
+
+test("vibe-310: whitespace behind a stripped LEADING sequence is the parser's to consume, as it always was without one", async () => {
+  // Second pin (#310, 2026-09-16). The transport strips the sequence and carries the tabs; the gate's
+  // VERDICT_RE consumes leading whitespace after the token, so the parsed reason starts at the first A.
+  // Before the strip the ESC shielded the tabs and the sanitiser counted them (498 at the gate); now the
+  // prefixed case agrees with the unprefixed one (500). Asserted at the wire here; end to end in stop-gate.
+  const { verdictFromResult } = await import("../../scripts/lib/events.mjs");
+  const TAB = String.fromCharCode(9);
+  const carried = projectVerdict(`BLOCK: ${RED}${TAB}${TAB}${"A".repeat(600)}${ESC}[0m`);
+  assert.equal(carried, `BLOCK: ${TAB}${TAB}${"A".repeat(600)}`, "the tabs travel; only the sequences go");
+  assert.equal(verdictFromResult({ verdictLine: carried }).reason, "A".repeat(600),
+    "the parser consumes the leading tabs — the same reason it would parse with no sequence in front");
+  assert.equal(verdictFromResult({ verdictLine: `BLOCK: ${TAB}${TAB}${"A".repeat(600)}` }).reason, "A".repeat(600),
+    "the unprefixed case, for the record: identical parsed reason");
+});

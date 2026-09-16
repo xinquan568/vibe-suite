@@ -162,7 +162,11 @@ function headClampUtf8(text, cap) {
  * meaningful bytes: 400 colour sequences in front of `the actual defect` used to carry `[31` debris,
  * because the byte clamp landed inside a sequence. `sanitiseReason` itself is still NOT usable here;
  * #305 measured why (498 vs 500). An ANSI-only reason therefore reaches the gate empty and takes the
- * gate's default text -- the outcome #310 pinned. Controls and whitespace are the gate's to handle.
+ * gate's default text -- the outcome #310 pinned. Controls and whitespace are the gate's to handle:
+ * whitespace that a LEADING sequence used to hide is consumed by the gate's verdict parser (`VERDICT_RE`'s
+ * `\s*`) once the sequence is gone, exactly as it is when no sequence was there -- so `ESC[31m` + two
+ * tabs + 600 `A` now reaches the gate as 500 characters, not 498 (#310, second pin). Non-whitespace
+ * controls (the #305 pin: BEL + BS) are still the sanitiser's and still count.
  */
 function verdictLineFor(record) {
   const line = verdictLineOf(record.verdictText ?? null);

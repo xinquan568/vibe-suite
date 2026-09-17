@@ -360,6 +360,14 @@ async function execute(workspace, record, prompt) {
   // vibe-207: dispatch.finalise beside dispatch.start, for the same reason — this is the one place
   // both the foreground caller and the detached background worker pass through.
   await emitFinalise(workspace, settled);
+  // vibe-281: the finalise event above is the last write of the worker's AWAITED finalise path — it lands
+  // after the record went terminal, so a test that returns on the terminal record hands teardown a process
+  // still writing. `post-finalise` is the seam: signalled after that write, held only when a test asks (a
+  // pre-released latch returns at once). It is not quiescence: the heartbeat's `updateRecord` above is not
+  // awaited, so the harness also observes this process EXIT. Inert without VIBE_SUITE_TEST_LATCH_DIR,
+  // exactly like `pre-spawn`.
+  await signalLatch("post-finalise");
+  await awaitLatch("post-finalise");
   return settled;
 }
 
@@ -683,6 +691,8 @@ async function runWorker(workspace, jobId, handoffFd) {
       detail: { errorClass: "failure", message: String(error?.message ?? error) } });
     await emitFinalise(workspace, failed ?? { jobId, status: "failed", errorClass: "failure",
       startedAt: null, endedAt: null, exitCode: null, signal: null });
+    await signalLatch("post-finalise");      // vibe-281: the end of this path's awaited writes too
+    await awaitLatch("post-finalise");
     return 1;
   }
 }

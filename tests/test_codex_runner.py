@@ -60,6 +60,11 @@ class RunnerCase(unittest.TestCase):
         # setUp's fixture ledger are bound as arguments: tests that call setUp() again
         # must pair each reaper with its own directory, not whatever self.ws holds later.
         self._spawned_fixtures = []
+        # vibe-281: the latch dir (made lazily by `_ensure_latch`) is removed AFTER the reaper below — cleanups run
+        # LIFO, so this registration comes first. A worker parked at a latch whose directory has been removed can
+        # never see its release and blocks until the latch timeout; the reaper's drain would then fail loudly.
+        self.latch = None
+        self.addCleanup(self._remove_latch)
         self.addCleanup(self._reap_workspace_writers, self.ws, self._spawned_fixtures)
 
     def _group_members(self, groups):
@@ -198,11 +203,58 @@ class RunnerCase(unittest.TestCase):
                 "a worker whose fixture should terminate was still alive after the "
                 "drain window — reaped for hygiene, failing loudly (vibe-129)")
 
+    # vibe-281: every latch point the runner awaits. A RunnerCase test that launches a background job gets a
+    # latch dir with ALL of them pre-released, so the runtime path is unchanged in ordering and the only
+    # effect is the `post-finalise` SIGNAL the harness joins on. LifecycleRaces overrides the releases per test.
+    LATCH_POINTS = ("pre-spawn", "pre-claim", "pre-ack", "pre-kill", "post-finalise")
+
+    def _ensure_latch(self):
+        """An owned temp root for latch files (vibe-103: the runner writes signals only there), made ONCE per
+        test and obtained from the primitive so the harness never duplicates the ownership marker."""
+        if self.latch is not None:
+            return self.latch
+        made = subprocess.run(
+            ["node", "--input-type=module", "-e",
+             'const { pathToFileURL } = await import("node:url");'
+             ' const { makeOwnedTempDir } = await import(pathToFileURL(process.argv[1]).href);'
+             ' process.stdout.write(await makeOwnedTempDir("vibe-latch"));',
+             str(REPO_ROOT / "scripts" / "lib" / "write.mjs")],
+            capture_output=True, text=True, check=True)
+        self.latch = Path(made.stdout.strip())
+        return self.latch
+
+    def _remove_latch(self):
+        if self.latch is not None:
+            shutil.rmtree(self.latch, ignore_errors=True)
+
+    def release(self, name):
+        (self._ensure_latch() / f"{name}.release").write_text("1")
+
+    def _wait_pid_gone(self, pid, timeout=10.0):
+        """True once `pid` no longer exists (ESRCH); a zombie is reaped if it is ours and otherwise waited out."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+            time.sleep(0.05)
+        return False
+
     def run_runner(self, *args, fixture="emitter.mjs", timeout=30, expect_ok=True):
         self._spawned_fixtures.append(fixture)
         env = dict(os.environ)
         env["VIBE_SUITE_CODEX_BIN"] = str(FIXTURES / fixture)
         env["VIBE_TEST_PROBE"] = str(self.probe)
+        if "--background" in args:
+            # vibe-281: the detached worker signals `post-finalise` after its last write; wait_for_terminal joins it.
+            for name in self.LATCH_POINTS:
+                self.release(name)
+            env["VIBE_SUITE_TEST_LATCH_DIR"] = str(self.latch)
         result = subprocess.run(
             ["node", str(RUNNER), *args],
             cwd=self.ws, env=env, capture_output=True, text=True, timeout=timeout,
@@ -227,8 +279,14 @@ class RunnerCase(unittest.TestCase):
         self.assertTrue(path.exists(), f"no job record at {path}")
         return json.loads(path.read_text())
 
-    def wait_for_terminal(self, job_id, timeout=20):
+    def wait_for_terminal(self, job_id, timeout=20, join=True):
+        """The terminal record, and — for a background job launched with a latch dir — the worker's LAST write
+        too (vibe-281): `finaliseRecord` goes terminal before `emitFinalise` writes, so returning on the record
+        alone hands teardown a process still writing under the workspace. The join waits for the runtime's
+        `post-finalise` signal; if that never comes but the record carries a worker pid, the worker's exit is
+        the fallback; neither is silently skipped. `join=False` is for tests that hold the latch themselves."""
         deadline = time.monotonic() + timeout
+        record = None
         while time.monotonic() < deadline:
             try:
                 record = self.job_record(job_id)
@@ -236,9 +294,25 @@ class RunnerCase(unittest.TestCase):
                 time.sleep(0.05)
                 continue
             if record["status"] != "running":
-                return record
+                break
             time.sleep(0.05)
-        raise AssertionError(f"job {job_id} never reached a terminal status")
+        else:
+            raise AssertionError(f"job {job_id} never reached a terminal status")
+        if join and self.latch is not None and record.get("background") is True:
+            # Two observations, in order. The signal: the worker completed its AWAITED finalise path (the
+            # `dispatch.finalise` event is on disk). The exit: nothing of the worker's is still in flight — the
+            # heartbeat's `updateRecord` (codex-runner.mjs:309) is not awaited, so only the process ending covers
+            # it. Descendants are not covered; the tests that plant one reap it themselves.
+            signal_file = self.latch / "post-finalise.signal"
+            join_deadline = time.monotonic() + 10.0
+            while not signal_file.exists() and time.monotonic() < join_deadline:
+                time.sleep(0.02)
+            pid = record.get("workerPid")
+            if not signal_file.exists() and not isinstance(pid, int):
+                raise AssertionError(f"job {job_id} went terminal but its worker never signalled post-finalise and left no pid")
+            if isinstance(pid, int) and not self._wait_pid_gone(pid, timeout=10.0):
+                raise AssertionError(f"job {job_id} went terminal but its worker {pid} is still alive")
+        return record
 
     def base_args(self, *extra):
         return ["--kind", "review", "--effort", "low", "--sandbox", "read-only",
@@ -649,20 +723,33 @@ class LeakedPipes(RunnerCase):
         os.environ["VIBE_SUITE_HEARTBEAT_MS"] = "50"
         self.addCleanup(lambda: os.environ.pop("VIBE_SUITE_HEARTBEAT_MS", None)
                         if previous is None else os.environ.__setitem__("VIBE_SUITE_HEARTBEAT_MS", previous))
-        started = time.monotonic()
+        # vibe-281, symptom 2: baseline run 1 recorded `pipesLeaked` False — nothing held the pipes when the drain
+        # expired. Either the 600 ms deadline fired before the fixture had spawned its grandchild (a cold Node
+        # start under load) or the grandchild released the pipes early; the capture cannot tell them apart, and
+        # the probe assertion below names which next time. 3 s is the budget the repo already accepts for a cold
+        # start (vibe-209); the 60 s hold puts an early release outside the drain window. The second face — the old
+        # `elapsed < 8` ceiling failed at 8.03 s on a loaded machine (baseline run 4) — is replaced below by what it
+        # stood for, observed directly under a 60 s hold, with no clock.
+        previous_hold = os.environ.get("VIBE_TEST_LEAK_HOLD_MS")
+        os.environ["VIBE_TEST_LEAK_HOLD_MS"] = "60000"
+        self.addCleanup(lambda: os.environ.pop("VIBE_TEST_LEAK_HOLD_MS", None)
+                        if previous_hold is None else os.environ.__setitem__("VIBE_TEST_LEAK_HOLD_MS", previous_hold))
         parsed = self.result_line(self.run_runner(
             "--kind", "review", "--effort", "low", "--sandbox", "read-only",
-            "--timeout-ms", "600", "--background", "--", "p", fixture="leaker.mjs"))
+            "--timeout-ms", "3000", "--background", "--", "p", fixture="leaker.mjs"))
         self.assertEqual(parsed["status"], "running", "the launcher acknowledges before the deadline")
         try:
             record = self.wait_for_terminal(parsed["jobId"], timeout=20)
-            elapsed = time.monotonic() - started
             self.assertEqual(record["status"], "timed_out")
+            grandchild = self.read_probe().get("grandchild")
+            self.assertIsInstance(grandchild, int,
+                                  "the fixture never set up the leak before the deadline — a start-up race, not a runner defect")
             self.assertIs(record.get("pipesLeaked"), True, "the leak must be recorded on the job")
             self.assertIsNotNone(record["endedAt"])
-            # SIGTERM at 600 ms + the default 2 s drain; the grandchild holds for 10 s — settling
-            # anywhere near that is the defect. A ceiling, not a window (deadline tests flake on lows).
-            self.assertLess(elapsed, 8, f"the job settled only when the grandchild released the pipes ({elapsed:.1f}s)")
+            # The drain path, observed: the record is terminal and the grandchild is STILL holding the pipes (it
+            # holds for 60 s). A runner that settled only on `close` would reach this line with the grandchild
+            # gone — and with `pipesLeaked` False above.
+            os.kill(grandchild, 0)   # raises ProcessLookupError if the job waited the grandchild out
             # The heartbeat oracle that actually proves cessation: the detached worker must EXIT —
             # with the pipes still held by the grandchild, only a settled promise (interval cleared,
             # read ends destroyed) lets its event loop drain. An unchanged `heartbeatAt` alone would
@@ -1132,21 +1219,17 @@ class LifecycleRaces(RunnerCase):
         # primitive rather than hand-built here: duplicating the marker format in the harness would
         # make this file a second source of truth about what ownership means, and the two copies
         # would drift the first time the format changed.
-        made = subprocess.run(
-            ["node", "--input-type=module", "-e",
-             'const { pathToFileURL } = await import("node:url");'
-             ' const { makeOwnedTempDir } = await import(pathToFileURL(process.argv[1]).href);'
-             ' process.stdout.write(await makeOwnedTempDir("vibe-latch"));',
-             str(REPO_ROOT / "scripts" / "lib" / "write.mjs")],
-            capture_output=True, text=True, check=True)
-        self.latch = Path(made.stdout.strip())
-        self.addCleanup(shutil.rmtree, self.latch, ignore_errors=True)
+        self._ensure_latch()   # vibe-281: the same helper RunnerCase uses for its background launches
 
-    def run_latched(self, *args, fixture="emitter.mjs", timeout=60, hold_pre_spawn=False):
+    def run_latched(self, *args, fixture="emitter.mjs", timeout=60, hold_pre_spawn=False,
+                    hold_post_finalise=False):
         # vibe-182: the launcher pauses at `pre-spawn` (record exists, sink not yet opened) only for
         # the tests that ask; every other latched test has it released before the launch.
         if not hold_pre_spawn:
             self.release("pre-spawn")
+        # vibe-281: likewise `post-finalise` — held only by the test that observes the worker after its last write.
+        if not hold_post_finalise:
+            self.release("post-finalise")
         self._spawned_fixtures.append(fixture)
         env = dict(os.environ)
         env["VIBE_SUITE_CODEX_BIN"] = str(FIXTURES / fixture)
@@ -1165,8 +1248,36 @@ class LifecycleRaces(RunnerCase):
             time.sleep(0.02)
         raise AssertionError(f"latch '{name}' was never signalled")
 
-    def release(self, name):
-        (self.latch / f"{name}.release").write_text("1")
+    def test_a_terminal_record_precedes_the_workers_last_write_and_the_latch_joins_them(self):
+        """vibe-281, symptom 1: `finaliseRecord` makes the record terminal; `emitFinalise` writes AFTER it. A
+        test that returns on the terminal record hands teardown a worker still writing. The `post-finalise`
+        latch is signalled after that write (the last of the awaited finalise path — the unawaited heartbeat
+        beat is why quiescence is the worker's EXIT) and, held here, keeps the worker alive so the interleaving
+        is a fact: record terminal → finalise event on disk → signal → (release) → worker exit."""
+        for name in ("pre-claim", "pre-ack", "pre-kill"):
+            self.release(name)          # only `post-finalise` is under study here
+        proc = self.run_latched("--kind", "review", "--effort", "low", "--sandbox", "read-only",
+                                "--timeout-ms", "10000", "--background", "--", "p", hold_post_finalise=True)
+        out, _err = proc.communicate(timeout=60)
+        parsed = json.loads([line for line in out.splitlines() if line.strip()][-1])
+        try:
+            record = self.wait_for_terminal(parsed["jobId"], join=False)
+            self.assertEqual(record["status"], "completed", record)
+            # RED on main: no such signal exists, so this times out; GREEN: the worker signals after its last write.
+            self.wait_signal("post-finalise", timeout=20)
+            # The signal comes AFTER the finalise event: with the worker held here, the event is already on disk.
+            # (A mutant that signals before `emitFinalise` fails this line deterministically.)
+            log = (self.ws / STATE_DIRNAME / "events.log").read_text(encoding="utf-8")
+            finalised = [json.loads(line) for line in log.splitlines() if line.strip()]
+            finalised = [e for e in finalised if e.get("event") == "dispatch.finalise" and e.get("jobId") == parsed["jobId"]]
+            self.assertEqual(len(finalised), 1, "the finalise event precedes the post-finalise signal")
+            # And the worker is genuinely still alive at this point — that is the process teardown used to race.
+            self.assertIsInstance(record["workerPid"], int)
+            os.kill(record["workerPid"], 0)
+        finally:
+            self.release("post-finalise")
+        self.assertTrue(self._wait_pid_gone(record["workerPid"], timeout=10.0),
+                        "released at post-finalise, the worker exits — nothing is left writing")
 
     def test_the_worker_argv_carries_neither_the_prompt_nor_the_token_and_nothing_is_at_rest(self):
         """vibe-193 / grill S7+S15: `ps` is readable by every local user; the detached worker lives

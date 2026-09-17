@@ -8,15 +8,15 @@ Accepted.
 
 ## Context
 
-vibe-274 bounded the persisted `rawOutput` (`RAW_OUTPUT_BYTES`, `scripts/lib/render.mjs:289`). Its
+vibe-274 bounded the persisted `rawOutput` (`RAW_OUTPUT_BYTES`, `scripts/lib/render.mjs:326`). Its
 **Decision 8** settled what happens when the event carrying the verdict is itself too large to retain:
 the capture keeps no parseable completed `agent_message` at all, and the Stop gate takes its declared
 no-verdict route. The reasoning recorded there is that *surfacing a stale earlier verdict is worse
 than surfacing none*.
 
 That decision is load-bearing in code, not merely written down. `isCompletedAgentMessage`
-(`render.mjs:322`) matches a parseable completed `agent_message` **whatever its `text`**, and is
-deliberately wider than `isControllingLine` (`:331`), which matches only a message that would control
+(`render.mjs:359`) matches a parseable completed `agent_message` **whatever its `text`**, and is
+deliberately wider than `isControllingLine` (`:368`), which matches only a message that would control
 the verdict. The wider predicate is what draws suppression-run boundaries, so no completed
 `agent_message` — not even one with nullish text — survives inside a suppressed capture. Two tests
 pin it: `S3: suppression never retains an earlier, stale controlling event (I3)`
@@ -31,9 +31,12 @@ controlling message larger than the bound means the gate falls open for a verdic
 already read cleanly.
 
 It is nonetheless unbuildable, because the gate reads exactly one thing. `verdictFrom`
-(`scripts/stop-review-gate-hook.mjs:247`) delegates to `readEventStream`
-(`scripts/lib/events.mjs:35`) and takes its `agentMessage`. So **any projection the gate can see is a
-synthesized completed `agent_message` inside `rawOutput`** — precisely what Decision 8 and invariant
+(`scripts/stop-review-gate-hook.mjs:259`) delegates to `verdictFromResult` (`scripts/lib/events.mjs:71`),
+which takes the `verdictLine` the runner derived from the untruncated stream and, only for a result line
+written before that key existed, falls back to `readEventStream` (`scripts/lib/events.mjs:76`) and its
+`agentMessage` from `rawOutput`. So **any projection the gate can see is a synthesized completed
+`agent_message` inside `rawOutput`** — the fallback is the only reader of `rawOutput`, and the primary
+route is the out-of-band fact the Decision section permits — precisely what Decision 8 and invariant
 I3 forbid. The two requirements are the same bytes viewed from opposite ends; no encoding satisfies
 both.
 
@@ -57,7 +60,8 @@ Three grounds:
    auditor — can distinguish what the model said from what the runner decided it would have said.
    Truncation loses information; synthesis destroys the ability to tell that anything was lost.
 3. **A declared fail-open beats a fabricated answer.** `applyFailPolicy(gate, "no parseable
-   ALLOW/BLOCK verdict")` (`stop-review-gate-hook.mjs:408`, defined `:296`) is visible, configurable
+   ALLOW/BLOCK verdict")` (the call, `stop-review-gate-hook.mjs:411`; `applyFailPolicy` is defined at `:299`)
+   is visible, configurable
    and auditable. A synthesized verdict is none of those, and its fidelity cannot be checked
    afterwards by anyone.
 
@@ -71,7 +75,7 @@ regardless of its `text`.
 consumer adds no second reader and no synthesis — it stops one fact being derived twice, the second
 time from a lossy copy. [#305](https://github.com/xinquan568/vibe-suite/issues/305) is that work.
 
-**Sole exemption:** the elision marker (`MARKER_PREFIX`, `render.mjs:291`), per vibe-274 Decision 13.
+**Sole exemption:** the elision marker (`MARKER_PREFIX`, `render.mjs:328`), per vibe-274 Decision 13.
 It is deliberately not valid NDJSON, so it is never an event any reader can visit — it is a disclosure
 that bytes were removed, which is the opposite of synthesis.
 
@@ -89,8 +93,8 @@ out-of-band by #305.
 The Context above records Decision 8 as settling two things: *the capture keeps no parseable completed
 `agent_message`*, **and** *the Stop gate takes its declared no-verdict route*. Those are separable, and
 **vibe-305 supersedes the second while leaving the first exactly as it stands.** The original text is
-left standing above, per `docs/adr/README.md:15`; this note records what changed rather than rewriting
-it.
+left standing above, per the **Status** rule in `docs/adr/README.md:18` ("its body is left standing"); this
+note records what changed rather than rewriting it.
 
 | Clause | After vibe-305 |
 |---|---|
@@ -111,9 +115,9 @@ them looks complete and is not:
 
 | Artifact | What it holds |
 |---|---|
-| `scripts/lib/render.mjs:322`, `:331` | `isCompletedAgentMessage`, deliberately wider than `isControllingLine`, and the suppression-run boundary it draws |
+| `scripts/lib/render.mjs:359`, `:368` | `isCompletedAgentMessage`, deliberately wider than `isControllingLine`, and the suppression-run boundary it draws |
 | invariant **I3** | no parseable completed `agent_message` survives suppression — whatever its `text` |
-| invariant **I1** + vibe-274 Decision 13 | byte-identical source provenance (`tests/node/raw-output-bound.test.mjs:363`, enforced at `:366`), with the elision marker as its single exemption |
+| invariant **I1** + vibe-274 Decision 13 | byte-identical source provenance (`every retained line is complete and byte-identical, malformed included (bullet 6)`, `tests/node/raw-output-bound.test.mjs:366`), with the elision marker as its single exemption |
 | `tests/node/raw-output-bound.test.mjs:286` | `S3: suppression never retains an earlier, stale controlling event (I3)` |
 | `tests/node/stop-gate.test.mjs:1073` | `vibe-274: an OVERSIZED controlling verdict leaves no parseable agent_message (bullet 3)` |
 

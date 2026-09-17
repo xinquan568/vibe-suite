@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { runWithDeadline } from "./process.mjs";
+import { stripAnsi } from "./reason-frame.mjs";
 
 export const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const ROW_KEYS = ["engine", "available", "version", "auth", "smoke", "models", "detail"];
@@ -31,11 +32,11 @@ const SMOKE_TIMEOUT_MS = 60_000;
 const TOKEN_CAP = 64;
 const SLUG_COUNT_CAP = 50;
 
-/** Cap and clean a value destined for the matrix: printable, control-free, bounded. */
+/** Cap and clean a value destined for the matrix: printable, control-free, bounded. The CSI step is the
+ *  shared `stripAnsi` (vibe-321); the type guard, the control strip and the cap are this function's own. */
 function boundToken(value, cap = TOKEN_CAP) {
   if (typeof value !== "string") return null;
-  const clean = value
-    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+  const clean = stripAnsi(value)
     .replace(/[\x00-\x1f\x7f-\u009f]/g, "");
   return clean.length > cap ? clean.slice(0, cap) : clean;
 }

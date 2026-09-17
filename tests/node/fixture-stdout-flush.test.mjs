@@ -102,10 +102,14 @@ const BEYOND_ANY_BUFFER = 262_144;
 const HOSTILE_VERSION_BYTES = 65_569;
 
 // vibe-317: the FILE-BORNE payload. It reaches the subject through a file the fixture reads, so no argv or
-// environment limit applies to it, and it is sized at the transport's own truncation point: the probe's
-// hard assertion proves 262,144 bytes are cut on every platform this suite passes on, so the row that
-// carries this many is a live regression probe on Linux as well as macOS.
-const FILE_PAYLOAD_BYTES = BEYOND_ANY_BUFFER;
+// environment limit applies to it. It is deliberately far ABOVE the transport's truncation threshold: at
+// exactly 262,144 bytes the row was measured on CI's ubuntu jobs to fail a reintroduced `process.exit` on
+// 3 runs in 4 — the pipe occasionally drained the whole payload before exit returned — so the threshold is
+// where truncation STARTS under load, not a size the pipe can never drain. At 1 MiB the mutant was measured
+// to fail this row on every ubuntu shard-0 job and locally on macOS (the probe's hard assertion measures only
+// its own throwaway writer; a row's liveness is the mutation measurement, never inferred). The file capture
+// asserts the whole payload arrived, so the size cannot silently shrink.
+const FILE_PAYLOAD_BYTES = 1_048_576;
 
 // Placeholder for the per-run temp path a fixture's `-o` option receives.
 const OUT = "@OUT@";
@@ -254,8 +258,9 @@ test("rca-analyst.mjs delivers an analysis built from a long prompt line through
 
 test("rca-analyst.mjs delivers a FILE-BORNE payload through the harness — live on Linux too (vibe-317)", () => {
   // Payload from a file the fixture reads (`PAYLOAD-FILE:`), not from argv: no `MAX_ARG_STRLEN` bound, so
-  // the wire carries more than the 262,144 bytes the probe proves the transport cuts under `process.exit`.
-  // A reintroduced `process.exit(0)` in the fixture therefore fails this row on every platform.
+  // the wire carries four times the 262,144 bytes at which the probe proves the transport starts cutting
+  // under `process.exit`. A reintroduced `process.exit(0)` in the fixture therefore fails this row on every
+  // platform — measured on macOS locally and on every ubuntu shard-0 job in CI.
   const dir = tmpWorkspace("vibe-317-");
   const payloadFile = path.join(dir, "payload.txt");
   writeFileSync(payloadFile, "x".repeat(FILE_PAYLOAD_BYTES), "utf8");

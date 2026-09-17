@@ -41,7 +41,7 @@ async function main() {
   }) + "\n");
   // NOT process.exit(0): the analysis line carries a path lifted out of the prompt, so this
   // fixture can write more than a pipe buffer, and exit() does not wait for stdout to drain.
-  process.exitCode = 0;
+  process.exit(0);   // MEASUREMENT MUTANT — never merged (vibe-317)
 }
 
 main().catch((error) => {

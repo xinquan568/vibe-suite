@@ -101,6 +101,16 @@ const BEYOND_ANY_BUFFER = 262_144;
 // The issue's acceptance names this number, so the fixture's size is fixed and the test adapts.
 const HOSTILE_VERSION_BYTES = 65_569;
 
+// vibe-317: the FILE-BORNE payload. It reaches the subject through a file the fixture reads, so no argv or
+// environment limit applies to it. It is deliberately far ABOVE the transport's truncation threshold: at
+// exactly 262,144 bytes the row was measured on CI's ubuntu jobs to fail a reintroduced `process.exit` on
+// 3 runs in 4 — the pipe occasionally drained the whole payload before exit returned — so the threshold is
+// where truncation STARTS under load, not a size the pipe can never drain. At 1 MiB the mutant was measured
+// to fail this row on every ubuntu shard-0 job and locally on macOS (the probe's hard assertion measures only
+// its own throwaway writer; a row's liveness is the mutation measurement, never inferred). The file capture
+// asserts the whole payload arrived, so the size cannot silently shrink.
+const FILE_PAYLOAD_BYTES = 1_048_576;
+
 // Placeholder for the per-run temp path a fixture's `-o` option receives.
 const OUT = "@OUT@";
 
@@ -190,6 +200,7 @@ test("the transport truncates a writer that exits, at the payload sizes these ro
   for (const [bytes, rows] of [
     [HOSTILE_VERSION_BYTES, "the three preflight-hostile rows"],
     [BIG.length, "the four input-driven rows"],
+    [FILE_PAYLOAD_BYTES, "the file-borne rca-analyst row (vibe-317)"],
   ]) {
     const probe = truncationProbe(bytes);
     t.diagnostic(probe.truncated
@@ -243,6 +254,20 @@ test("rca-analyst.mjs delivers an analysis built from a long prompt line through
   // Payload from argv: the fixture lifts the first `FILE:` path out of its prompt and echoes it.
   assertFlushed("rca-analyst long FILE: line",
     captures("fake-codex/rca-analyst.mjs", ["exec", "-o", OUT, `FILE: ${BIG}`]));
+});
+
+test("rca-analyst.mjs delivers a FILE-BORNE payload through the harness — live on Linux too (vibe-317)", () => {
+  // Payload from a file the fixture reads (`PAYLOAD-FILE:`), not from argv: no `MAX_ARG_STRLEN` bound, so
+  // the wire carries four times the 262,144 bytes at which the probe proves the transport starts cutting
+  // under `process.exit`. A reintroduced `process.exit(0)` in the fixture therefore fails this row on every
+  // platform — measured on macOS locally and on every ubuntu shard-0 job in CI.
+  const dir = tmpWorkspace("vibe-317-");
+  const payloadFile = path.join(dir, "payload.txt");
+  writeFileSync(payloadFile, "x".repeat(FILE_PAYLOAD_BYTES), "utf8");
+  const capture = captures("fake-codex/rca-analyst.mjs", ["exec", "-o", OUT, `PAYLOAD-FILE: ${payloadFile}`]);
+  assert.ok(capture.file.length >= FILE_PAYLOAD_BYTES,
+    `the file capture must carry the whole payload: ${capture.file.length} bytes < ${FILE_PAYLOAD_BYTES}`);
+  assertFlushed("rca-analyst file-borne payload", capture);
 });
 
 test("pipe-leaker.mjs delivers its diagnostic line through the harness", () => {

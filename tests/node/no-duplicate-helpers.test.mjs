@@ -3,7 +3,7 @@
 // under scripts/. A grep-shaped assertion: the ONE home of each helper is named, everything else is a
 // duplicate. The two hooks' fail-open tails are asserted present by name — they are a contract, not a copy.
 import { strict as assert } from "node:assert";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -71,26 +71,40 @@ test("the 96,000-byte cap and DEFAULT_TIMEOUT_MS are defined once, in lib/proces
   assert.deepEqual(homes(/^\s*(export\s+)?const DEFAULT_TIMEOUT_MS\s*=/m, sources()), ["lib/process.mjs"]);
 });
 
-test("the ANSI CSI strip has one home for the transport/sanitiser pair — lib/reason-frame.mjs — and the transport imports it (vibe-310)", () => {
-  // Scoped to the PAIR by the owner's decision (2026-09-16): the transport (lib/jobs.mjs) strips before
-  // bounding with the same step the gate's sanitiser runs first, so one definition serves both and
-  // "what counts as ANSI" is a single answer for them. lib/render.mjs (stripControls) and
-  // lib/preflight.mjs (boundToken) carry their own copies of the CSI step inside different chains;
-  // they are pre-existing and are #321's business, so they are deliberately NOT read here.
-  const text = Object.fromEntries(sources());
-  const pair = { "lib/reason-frame.mjs": text["lib/reason-frame.mjs"], "lib/jobs.mjs": text["lib/jobs.mjs"] };
+// Every shipped .mjs under scripts/, RECURSIVELY — `sources()` above reads two directories, which is enough for the
+// named helpers it polices but not for a pattern that must have one home anywhere under scripts/ (vibe-321).
+function sourcesRecursive(dir = SCRIPTS, out = []) {
+  for (const name of readdirSync(dir)) {
+    const full = path.join(dir, name);
+    if (statSync(full).isDirectory()) { sourcesRecursive(full, out); continue; }
+    if (!name.endsWith(".mjs")) continue;
+    out.push([path.relative(SCRIPTS, full).split(path.sep).join("/"), readFileSync(full, "utf8")]);
+  }
+  return out;
+}
+
+test("the ANSI CSI pattern has ONE home under scripts/ — lib/reason-frame.mjs — and every consumer delegates to stripAnsi (vibe-310, vibe-321)", () => {
+  // The regex decides what attacker-controlled text can do to an operator's terminal (render), a preflight
+  // matrix cell (preflight) and the Stop gate's instruction field (the sanitiser and the verdict transport).
+  // Three literal copies drift silently; one definition, called by each chain as its first step, cannot.
+  // OCCURRENCES, not files: an inline copy kept beside the import is one file and two homes. RECURSIVE: a
+  // copy under a deeper path must not hide from the pin.
+  const files = sourcesRecursive();
+  const text = Object.fromEntries(files);
   const CSI_SOURCE = /\\x1b\\\[\[0-9;\?\]\*\[ -\/\]\*\[@-~\]/g;
-  const occurrences = Object.fromEntries(Object.entries(pair).map(([rel, src]) => [rel, (src.match(CSI_SOURCE) ?? []).length]));
-  // OCCURRENCES, not files: an inline copy kept beside the shared constant is one file and two homes.
-  assert.deepEqual(occurrences, { "lib/reason-frame.mjs": 1, "lib/jobs.mjs": 0 }, "the pattern source appears once across the pair");
-  assert.equal((pair["lib/reason-frame.mjs"].match(/^\s*export function stripAnsi\b/mg) ?? []).length, 1, "stripAnsi is exported once");
-  // The sanitiser DELEGATES its first step: stripAnsi(reason) comes before any .replace( in its body.
-  const sanitiser = /export function sanitiseReason\([^)]*\)\s*\{([\s\S]*?)^\}/m.exec(pair["lib/reason-frame.mjs"]);
-  assert.ok(sanitiser, "sanitiseReason is present");
-  const body = sanitiser[1];
-  assert.ok(body.indexOf("stripAnsi(reason)") !== -1 && body.indexOf("stripAnsi(reason)") < body.indexOf(".replace("),
+  const occurrences = Object.fromEntries(files.map(([rel, src]) => [rel, (src.match(CSI_SOURCE) ?? []).length]).filter(([, n]) => n > 0));
+  assert.deepEqual(occurrences, { "lib/reason-frame.mjs": 1 }, "the pattern source appears exactly once under scripts/, in lib/reason-frame.mjs");
+  assert.equal((text["lib/reason-frame.mjs"].match(/^\s*export function stripAnsi\b/mg) ?? []).length, 1, "stripAnsi is exported once");
+  // Delegation, per consumer: the CSI step is a call to stripAnsi, and it comes first in the chain.
+  const sanitiser = /export function sanitiseReason\([^)]*\)\s*\{([\s\S]*?)^\}/m.exec(text["lib/reason-frame.mjs"]);
+  assert.ok(sanitiser && sanitiser[1].indexOf("stripAnsi(reason)") !== -1 && sanitiser[1].indexOf("stripAnsi(reason)") < sanitiser[1].indexOf(".replace("),
     "sanitiseReason's chain starts with stripAnsi(reason)");
-  assert.match(pair["lib/jobs.mjs"], /^import \{[^}]*\bstripAnsi\b[^}]*\} from "\.\/reason-frame\.mjs";$/m,
-    "the transport imports the one strip rather than keeping a copy");
-  assert.match(pair["lib/jobs.mjs"], /stripAnsi\(line\.slice\(cut\)\)/, "and calls it on the reason, before bounding");
+  const IMPORT = /^import \{[^}]*\bstripAnsi\b[^}]*\} from "\.\/reason-frame\.mjs";$/m;
+  assert.match(text["lib/jobs.mjs"], IMPORT, "the transport imports stripAnsi");
+  assert.match(text["lib/jobs.mjs"], /stripAnsi\(line\.slice\(cut\)\)/, "and strips the reason before bounding");
+  assert.match(text["lib/render.mjs"], IMPORT, "the renderer imports stripAnsi");
+  const controls = /export function stripControls\([^)]*\)\s*\{([\s\S]*?)^\}/m.exec(text["lib/render.mjs"]);
+  assert.ok(controls && /^\s*return stripAnsi\(text\)/m.test(controls[1]), "stripControls's chain starts with stripAnsi(text)");
+  assert.match(text["lib/preflight.mjs"], IMPORT, "preflight imports stripAnsi");
+  assert.match(text["lib/preflight.mjs"], /const clean = stripAnsi\(value\)/, "boundToken's chain starts with stripAnsi(value)");
 });

@@ -7,6 +7,8 @@
 // line is deliberately NOT rendered here — callers print `resultLine` from jobs.mjs, so the
 // contract has exactly one producer.
 
+import { stripAnsi } from "./reason-frame.mjs";
+
 /** External text longer than this is cut, and the cut is announced — silent truncation reads as
  * "that was all of it". */
 export const RAW_TRUNCATE = 400;
@@ -15,10 +17,14 @@ export const RAW_TRUNCATE = 400;
  * Terminal-control sequences are removed, not displayed: ANSI escapes in external text can
  * restyle, overwrite, or spoof the operator's terminal. Newlines and tabs survive; every other
  * control character goes.
+ *
+ * The CSI step is `stripAnsi` (vibe-321): one definition for every consumer, so "what counts as a CSI
+ * sequence" has a single answer across the renderer, preflight and the Stop gate. The rest of this
+ * chain is this module's own. Input domain: strings (callers pass `String(...)` or `JSON.stringify(...)`);
+ * `stripAnsi` coerces, so a non-string no longer throws here — a documented difference, not a contract.
  */
 export function stripControls(text) {
-  return text
-    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")                  // CSI sequences
+  return stripAnsi(text)                                          // CSI sequences (vibe-321: shared step)
     .replace(/\x1b[@-_]/g, "")                                  // remaining two-byte escapes
     // Every control except \n and \t: C0 including \r (carriage return overwrites the line —
     // a spoofing primitive), DEL, and the C1 range (0x9b is a one-byte CSI).

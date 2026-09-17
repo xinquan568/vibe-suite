@@ -38,10 +38,11 @@ export function frameExternal(payload) {
     + `${bar} END external reviewer text ${bar}`;
 }
 
-/** ANSI CSI: ESC `[` parameter bytes, intermediate bytes, one final byte. The one definition for the
- *  transport/sanitiser pair; `lib/render.mjs` and `lib/preflight.mjs` carry their own copies inside
- *  different chains (#321). Used only through `replace`, which resets `lastIndex`, so the shared global
- *  regex is stateless across calls. */
+/** ANSI CSI: ESC `[` parameter bytes, intermediate bytes, one final byte. The ONE definition in this
+ *  repository (vibe-321): `sanitiseReason` here, the verdict transport (`lib/jobs.mjs`), the renderer
+ *  (`lib/render.mjs` `stripControls`) and preflight (`lib/preflight.mjs` `boundToken`) all take their CSI
+ *  step from `stripAnsi` below and keep their own chains after it. Used only through `replace`, which
+ *  resets `lastIndex`, so the shared global regex is stateless across calls. */
 const ANSI_CSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 /**
@@ -50,9 +51,12 @@ const ANSI_CSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
  * No slice, no trim, no control replacement: every byte that is not part of a complete sequence
  * travels untouched, an input-borne fragment (`ESC[31` with no final byte) included. That is what
  * makes it safe to run BEFORE a bound and before `sanitiseReason` — the sanitiser's own first step
- * is this same function, so a second pass over already-stripped text changes nothing. `sanitiseReason`
- * (slice + trim) is NOT safe in that position; #305 measured why (498 vs 500, and an ANSI-only reason
- * becoming a different branch), and #310 pinned the ANSI-only outcome that this strip produces.
+ * is this same function. It is NOT idempotent on nested input: `ESC[ESC[31m31m` loses its inner
+ * sequence on the first pass and the now-complete outer one on the second (vibe-321), so a caller
+ * that strips twice strips more; no consumer strips twice on purpose. `sanitiseReason` (slice + trim)
+ * is NOT safe before a bound; #305 measured why (498 vs 500, and an ANSI-only reason becoming a
+ * different branch), and #310 pinned the ANSI-only outcome that this strip produces. Input domain:
+ * strings; anything else is coerced with `String(...)`.
  */
 export function stripAnsi(text) {
   return String(text).replace(ANSI_CSI, "");

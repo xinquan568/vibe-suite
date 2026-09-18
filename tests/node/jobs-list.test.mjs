@@ -95,8 +95,9 @@ test("listRecords reports invalid records as errors instead of returning them", 
   const ws = workspace();
   const dir = jobsDir(ws);
   mkdirSync(dir, { recursive: true });
-  // Identity mismatch: the file wears ID_A, the record claims ID_B.
-  writeFileSync(path.join(dir, `${ID_A}.json`), JSON.stringify(baseRecord(ID_B)));
+  // Identity mismatch: the file wears ID_A, the record claims ID_B. vibe-302: stamped, so it is the
+  // identity check — not the stamp — that refuses it (asserted below).
+  writeCanonical(ws, ID_A, baseRecord(ID_B));
   // Unknown status.
   writeCanonical(ws, ID_B, baseRecord(ID_B, { status: "zombie" }));      // vibe-302: stamped — invalid means ours but broken
   await createRecord(ws, baseRecord(ID_C));
@@ -105,6 +106,8 @@ test("listRecords reports invalid records as errors instead of returning them", 
   assert.deepEqual(records.map((r) => r.jobId), [ID_C]);
   assert.deepEqual(invalid.map((entry) => entry.jobId).sort(), [ID_A, ID_B]);
   for (const entry of invalid) assert.equal(typeof entry.reason, "string");
+  assert.match(invalid.find((entry) => entry.jobId === ID_A).reason, /identity mismatch/,
+    "the stamped mismatch is refused for its identity, not for a missing stamp");
 });
 
 test("listRecords on a workspace with no store returns empty, not an error", async () => {

@@ -470,19 +470,46 @@ function slotPattern(jobId) {
  * as `write.mjs` and `fsafe.py` declare — the stamp is a marker, not a secret; Node has no `openat`,
  * so the guarantee is "refuses the state observed", with the post-observation window still open.
  *
- * Errors are left in the shape callers already handle: `ENOENT` still means absent (so
- * `rollForward`'s benign "someone completed it already" path is unchanged), and a symlink surfaces
- * as `ELOOP`, which is distinct from absence and so cannot be mistaken for it.
+ * What a failed read becomes: `ENOENT` still means absent (so `rollForward`'s benign "someone
+ * completed it already" path is unchanged) and `EISDIR` still means a prune tombstone; every other
+ * failure — a symlink's `ELOOP` included — is a named refusal carrying the procedure below, so it is
+ * distinct from absence and cannot be mistaken for it.
  */
 const REPAIR = "It is NOT deleted automatically. Repair: quiesce writers for this job, preserve the " +
   "canonical and every slot, then quarantine the job or recover it offline.";
 
 /**
+ * Does a valid prune marker stand for this job — asked on a READ path (vibe-302 round 2).
+ *
+ * `inspectMarker` rethrows any `lstat` failure but `ENOENT` raw (`classify`). On a read that raw error
+ * must neither replace a refusal already observed nor leave the store unflagged: `readCanonical`'s
+ * self-heal swallows every unflagged error from `commit`, and a swallowed one hands the caller a
+ * healthy-looking record. So a marker that cannot be inspected surfaces as `refusal` — the
+ * canonical's own, more specific cause — when there is one, and otherwise as a flagged refusal that
+ * names the marker, with the repair procedure. `listRecords` catches its own marker inspections per
+ * job and lets the job's read here report the failure. `createRecord` and prune inspect markers
+ * directly: a write or a prune that fails loudly on an `lstat` swallows nothing and is out of this scope.
+ */
+async function markerStands(workspace, jobId, refusal = null) {
+  try {
+    return (await inspectMarker(jobsDir(workspace), jobId)).state === "valid";
+  } catch (error) {
+    if (refusal !== null) throw refusal;
+    const wrapped = new JobStoreError(
+      `${path.join(jobsDir(workspace), markerName(jobId))}: prune marker could not be inspected ` +
+      `(${error.message}). ${REPAIR}`);
+    wrapped.refusal = true;
+    throw wrapped;
+  }
+}
+
+/**
  * ONE observation of an authoritative file — a slot or the canonical — proving on the same handle
  * that it is a regular file, parseable, and carries this store's stamp (vibe-302). Returns the raw
- * bytes (what `commit` publishes) and the parsed document. `ENOENT` propagates untouched, so every
- * benign absence branch keeps its meaning; `ELOOP`, `EISDIR` and `ENOTREG` propagate as they are, for
- * the callers' existing "unreadable" refusals; a parse failure is a plain refusal; a missing,
+ * bytes (what `commit` publishes) and the parsed document. `ENOENT` and `EISDIR` propagate untouched,
+ * so every benign absence branch and every tombstone check keeps its meaning; every other read failure
+ * (`ELOOP`, `ENOTREG`, a permission error) is a refusal naming the file with the repair procedure; a
+ * parse failure is a plain refusal; a missing,
  * wrong-kind or unsupported-schema stamp is a refusal marked `ownership: "foreign"` — what prune keys
  * on to report the job as BLOCKED (not ours to touch) rather than INVALID (ours but broken) — with
  * `path` naming the refused entry. A missing stamp is reported as missing: it does not prove a
@@ -575,14 +602,14 @@ async function readCanonical(workspace, jobId, { listing = null, onSelfHeal = nu
     if (error instanceof JobStoreError) { refused = error; return null; }
     throw error;
   });
-  if (refused !== null && (await inspectMarker(jobsDir(workspace), jobId)).state === "valid") {
+  if (refused !== null && await markerStands(workspace, jobId, refused)) {
     throw new JobStoreError(`${jobId}: no record (pruned)`);
   }
   if (refused !== null) throw refused;
   if (published === null) throw new JobStoreError(`${jobId}: no record (never created, or pruned)`);
   // vibe-204: a marked job is being deleted; from the marker on it is gone to readers as well as
   // writers, so a writer looping on a fresh read stops here instead of spinning on `commit`.
-  if ((await inspectMarker(jobsDir(workspace), jobId)).state === "valid") {
+  if (await markerStands(workspace, jobId)) {
     throw new JobStoreError(`${jobId}: no record (pruned)`);
   }
   const top = await highestSlot(workspace, jobId, { listing });
@@ -747,9 +774,11 @@ async function commit(workspace, jobId, version, { expectedBytes = null } = {}) 
   const current = await readCanonicalRaw(workspace, jobId);
   // 1. Gone: no canonical, a tombstone, or a prune marker (the deletion is durable from the marker on).
   if (current === null) return COMMIT.GONE;
-  if ((await inspectMarker(jobsDir(workspace), jobId)).state === "valid") return COMMIT.GONE;
   // vibe-302: never publish over a foreign canonical — and the marker is consulted FIRST, as in
-  // `readCanonical`: under a valid marker the job is gone whatever now sits at its path.
+  // `readCanonical`: under a valid marker the job is gone whatever now sits at its path. A marker that
+  // cannot be inspected surfaces the canonical's refusal (or its own, flagged) — never a raw error the
+  // self-heal would swallow (round 2).
+  if (await markerStands(workspace, jobId, current.refusal)) return COMMIT.GONE;
   if (current.refusal) throw current.refusal;
   // 2. Already: the ONLY proof of success is that the canonical holds the exact bytes — the winner's
   //    own candidate (`expectedBytes`), or the slot a recoverer is rolling forward. A canonical at or
@@ -1557,7 +1586,14 @@ export async function listRecords(workspace) {
   const listing = entries.map((entry) => entry.name);
   const marked = new Set();
   for (const id of names.map((name) => MARKER_NAME.exec(name)?.[1]).filter(Boolean)) {
-    if ((await inspectMarker(jobsDir(workspace), id)).state === "valid") marked.add(id);   // a foreign marker hides nothing
+    try {
+      if ((await inspectMarker(jobsDir(workspace), id)).state === "valid") marked.add(id);   // a foreign marker hides nothing
+    } catch {
+      // vibe-302: a marker that cannot be inspected hides nothing either, and it must not abort the
+      // listing — the failure is local to its job. The job stays unmarked, so its read below meets the
+      // same failure through `markerStands` and reports it as that job's own refusal (the canonical's,
+      // when that was refused too); every healthy neighbour still lists.
+    }
   }
   // A directory at a canonical path is skipped only when it is this store's tombstone; any other
   // directory there is reported — a job whose record is buried under a foreign directory would
@@ -1565,7 +1601,17 @@ export async function listRecords(workspace) {
   for (const entry of entries) {
     const match = CANONICAL_NAME.exec(entry.name);
     if (!match || !entry.isDirectory()) continue;
-    if (await inspectCanonicalPath(jobsDir(workspace), match[1]) !== "tombstone") {
+    let kind;
+    try {
+      kind = await inspectCanonicalPath(jobsDir(workspace), match[1]);
+    } catch (error) {
+      // vibe-302: like a marker, a directory at a canonical path that cannot be inspected is local to
+      // its job — one row with the procedure, never a raw error that aborts the whole listing.
+      invalid.push({ jobId: match[1], reason: `${path.join(jobsDir(workspace), entry.name)}: the directory at ` +
+        `the canonical path could not be inspected (${error.message}). ${REPAIR}` });
+      continue;
+    }
+    if (kind !== "tombstone") {
       invalid.push({ jobId: match[1], reason: "a directory that is not this store's tombstone occupies the canonical path" });
     }
   }

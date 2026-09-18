@@ -8,7 +8,7 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import {
-  existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, symlinkSync, unlinkSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, symlinkSync, unlinkSync,
   utimesSync, writeFileSync,
 } from "node:fs";
 
@@ -1978,4 +1978,22 @@ test("vibe-302 N18: a stamped slot whose identity is swapped after the claim is 
   }), /identity mismatch/);
   assert.equal(readFileSync(recordPath(ws, "job_test"), "utf8"), canonicalBefore, "nothing was published");
   assert.equal(readFileSync(slot, "utf8"), swapped, "the refused slot is left exactly as swapped");
+});
+
+test("vibe-302 N19: a jobs directory that cannot be searched is a named refusal with the guidance, never a bare errno",
+  { skip: process.getuid?.() === 0 && "permissions do not bind root" }, async () => {
+  // The canonical read fails first (wrapped by observeOwned) and the marker-first check then fails
+  // on the same `lstat`: the canonical's refusal is what must surface, not the marker's raw EACCES.
+  const ws = workspace();
+  await seed(ws);
+  const dir = jobsDir(ws);
+  chmodSync(dir, 0o000);
+  try {
+    await assert.rejects(() => readRecord(ws, "job_test"), (error) =>
+      error instanceof JobStoreError && /record is unreadable \(.*EACCES/.test(error.message)
+        && /preserve the canonical and every slot, then quarantine the job or recover it offline/.test(error.message));
+  } finally {
+    chmodSync(dir, 0o700);
+  }
+  assert.deepEqual(filesOf(ws, "job_test"), ["job_test.json"], "nothing was added or removed");
 });

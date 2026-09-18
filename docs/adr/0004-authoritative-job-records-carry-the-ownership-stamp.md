@@ -43,7 +43,10 @@ on 2026-09-18) and pinned on the issue.
    the CLI exits non-zero when a listing contains one. Prune reports a foreign record as **blocked** with the file in
    `leftovers` — the category it used before, when `entomb` refused the same file after the read — and keeps `invalid`
    for records that are ours but broken. A validly marked (mid-prune) job stays "no record (pruned)" to readers
-   whatever now sits at its path.
+   whatever now sits at its path. A prune marker that cannot be inspected on a read is itself a refusal with the
+   same guidance — the canonical's own refusal when one was already observed — never a raw error, never one
+   the self-heal can swallow, and in a listing only that job's row; so is a directory at a job's canonical path
+   that cannot be inspected.
 5. A refusal raised inside `commit` carries the refusal flag, so the best-effort self-heal in `readCanonical` cannot
    swallow it and hand a caller a healthy-looking record.
 

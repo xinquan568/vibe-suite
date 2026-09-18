@@ -8,7 +8,7 @@
 import { tmpWorkspace } from "./_tmp.mjs";
 import { strict as assert } from "node:assert";
 import {
-  existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, symlinkSync, unlinkSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, symlinkSync, unlinkSync,
   utimesSync, writeFileSync,
 } from "node:fs";
 
@@ -22,6 +22,7 @@ import {
   PRUNE_TOMBSTONE_TTL_MS, REJECT, TEMP_REAP_MIN_AGE_MS,
 } from "../../scripts/lib/jobs.mjs";
 import { readNoFollow, writeAtomic } from "../../scripts/lib/write.mjs";
+import { slotBytes, writeCanonical, writeSlot } from "./_stamp.mjs";
 
 function workspace() {
   return tmpWorkspace("jobs-store-");
@@ -70,8 +71,10 @@ const DAY = 24 * 60 * 60 * 1000;
 // Scope: NO-FOLLOW only. An unstamped REGULAR file still reads, because requiring the ownership
 // stamp would reject every pre-554be10 slot and three existing positive fixtures — that is #302.
 
+// vibe-302: planted vibe-261 fixtures carry a VALID stamp, so a refusal in those tests can only be the
+// no-follow or identity check under study — never the stamp masking it.
 const foreignRecord = (jobId, version) => JSON.stringify({
-  ...baseTerminal(jobId, version), [Symbol.iterator]: undefined,
+  ...baseTerminal(jobId, version), ...STAMP, [Symbol.iterator]: undefined,
 }, null, 2) + "\n";
 
 function baseTerminal(jobId, version) {
@@ -389,7 +392,7 @@ test("an uncommitted version slot is rolled forward, not deleted", async () => {
   // Simulate a writer that died between link and rename: the slot exists, canonical is still at 1.
   const slot = path.join(jobsDir(ws), "job_test.v2.json");
   const candidate = { ...(await readRecord(ws, "job_test")), version: 2, status: "completed" };
-  writeFileSync(slot, JSON.stringify(candidate, null, 2) + "\n", "utf8");
+  writeFileSync(slot, slotBytes(candidate, { pretty: true }), "utf8");            // vibe-302: stamped, as a dead writer's slot is
 
   // The next writer must complete that commit rather than block on EEXIST forever.
   await transact(ws, "job_test", (record) => ({ ...record, kind: "later" }));
@@ -461,9 +464,9 @@ test("the updater is re-run against the fresh record on contention", async () =>
     if (seen === 1) {
       // Change the canonical underneath ourselves, so the first attempt must lose and re-run.
       const bumped = { ...record, version: record.version + 1, kind: "raced" };
-      writeFileSync(recordPath(ws, "job_test"), JSON.stringify(bumped, null, 2) + "\n", "utf8");
-      writeFileSync(path.join(jobsDir(ws), `job_test.v${record.version + 1}.json`),
-        JSON.stringify(bumped, null, 2) + "\n", "utf8");
+      // vibe-302: the racing writer is this store, so its canonical and slot are stamped
+      writeFileSync(recordPath(ws, "job_test"), slotBytes(bumped, { pretty: true }), "utf8");
+      writeFileSync(path.join(jobsDir(ws), `job_test.v${record.version + 1}.json`), slotBytes(bumped, { pretty: true }), "utf8");
     }
     return { ...record, effort: "high" };
   });
@@ -1057,8 +1060,8 @@ test("prune leaves alone what it cannot vouch for: invalid records and unstamped
     status: "completed", endedAt: past, updatedAt: past,
   };
   writeFileSync(path.join(jobsDir(ws), `${foreign}.json`), JSON.stringify(looksTerminal), "utf8");   // no stamp
-  writeFileSync(path.join(jobsDir(ws), `${bad}.json`),
-    JSON.stringify({ jobId: bad, version: 1, status: "zombie" }), "utf8");
+  // vibe-302: `invalid` means OURS but broken — so the broken record is stamped; unstamped is `foreign` above
+  writeCanonical(ws, bad, { jobId: bad, version: 1, status: "zombie" });
 
   const report = await pruneTerminalJobs(ws, { olderThanMs: 0, now });
   assert.deepEqual(report.pruned, []);
@@ -1703,12 +1706,12 @@ test("a foreign slot beside a job that is NOT being pruned is reported every run
     assert.ok(report.leftovers.includes(`${id}.v7.json`), `run ${run}: the symlink is reported`);
     assert.equal(report.orphanSlots, 0, `run ${run}: nothing belonging to this job is swept`);
     assert.deepEqual(report.pruned, [], `run ${run}: and nothing is pruned`);
-    // The job itself is reported rather than silently dropped. It reads as INVALID here because the
-    // highest slot is chosen by NAME — the pre-existing read path this issue declares out of scope
-    // (#261) — so the foreign v9 is what a read resolves. That is the declared boundary, visible:
-    // the store reports what it met and deletes none of it.
-    assert.deepEqual(report.invalid.map((entry) => entry.jobId), [id],
-      `run ${run}: the job is accounted for, not dropped`);
+    // The job itself is reported rather than silently dropped. vibe-302 closed the boundary #261 declared:
+    // the highest slot is still chosen by NAME, but the read now proves the stamp, so the foreign v9 is
+    // REFUSED as not ours and the job is BLOCKED — the category prune uses for what it must not touch —
+    // rather than INVALID (ours but broken). The store reports what it met and deletes none of it.
+    assert.deepEqual(report.blocked, [id], `run ${run}: the job is accounted for as blocked, not dropped`);
+    assert.deepEqual(report.invalid, [], `run ${run}: and not misreported as ours-but-broken`);
     for (const own of [`${id}.v1.json`, `${id}.v2.json`]) {
       assert.ok(!report.leftovers.includes(own), `run ${run}: ${own} is ours and is not a leftover`);
     }
@@ -1738,4 +1741,259 @@ test("a job blocked by a foreign marker is reported as blocked, never as kept", 
   assert.deepEqual(report.pruned, []);
   assert.ok(report.leftovers.includes(`${running}.pruning`));
   assert.ok(report.leftovers.includes(`${terminal}.pruning`));
+});
+
+// --- vibe-302: authoritative reads prove the ownership stamp (ADR-0004) ------------------------
+//
+// Deletes have proven the stamp since vibe-103 (`unlinkOwned`); reads did not, so an unstamped file
+// with the right numbers was believed and never cleaned. Every authoritative read — the three slot
+// reads and the canonical — now refuses a record that is not a regular file carrying this store's
+// stamp: the cause is named, nothing is deleted, and a validly marked job stays gone to readers. A
+// pre-release cut over: a record written before 554be10 is refused, not migrated. Every negative here
+// asserts the refusal AND byte-identical preservation of every file of the job.
+const unstampedRecord = (jobId, version) => JSON.stringify(baseTerminal(jobId, version), null, 2) + "\n";
+const stampedAs = (jobId, version, stamp) =>
+  JSON.stringify({ ...baseTerminal(jobId, version), "_vibe-suite_owned": stamp }, null, 2) + "\n";
+const bytesOf = (ws, id) =>
+  Object.fromEntries(filesOf(ws, id).map((n) => [n, readFileSync(path.join(jobsDir(ws), n), "utf8")]));
+
+async function refusedAndPreserved(ws, id, plant, pattern) {
+  plant();
+  const before = bytesOf(ws, id);
+  assert.ok(Object.keys(before).length > 0, "precondition: the job has files to preserve");
+  await assert.rejects(() => readRecord(ws, id), pattern);
+  assert.deepEqual(bytesOf(ws, id), before, "every file of the job is byte-identical after the refusal");
+}
+
+test("vibe-302 N1: an unstamped top slot beside a running canonical is refused, not believed", async () => {
+  const ws = workspace();
+  await seed(ws);
+  await refusedAndPreserved(ws, "job_test",
+    () => writeFileSync(path.join(jobsDir(ws), "job_test.v2.json"), unstampedRecord("job_test", 2), "utf8"),
+    /no ownership stamp/);
+});
+
+test("vibe-302 N2: a slot stamped as another kind is refused by name of that kind", async () => {
+  const ws = workspace();
+  await seed(ws);
+  await refusedAndPreserved(ws, "job_test",
+    () => writeFileSync(path.join(jobsDir(ws), "job_test.v2.json"),
+      stampedAs("job_test", 2, { kind: "job-tombstone", schema: 1 }), "utf8"),
+    /stamp of kind "job-tombstone"/);
+});
+
+test("vibe-302 N3: a slot stamped with an unsupported schema is refused by number", async () => {
+  const ws = workspace();
+  await seed(ws);
+  await refusedAndPreserved(ws, "job_test",
+    () => writeFileSync(path.join(jobsDir(ws), "job_test.v2.json"),
+      stampedAs("job_test", 2, { kind: "job-scratch", schema: 2 }), "utf8"),
+    /stamp schema 2/);
+});
+
+test("vibe-302 N6: an unstamped slot planted after the read is refused inside rollForward", async () => {
+  const ws = workspace();
+  await seed(ws);
+  const slot = path.join(jobsDir(ws), "job_test.v2.json");
+  const before = bytesOf(ws, "job_test");
+  const planted = unstampedRecord("job_test", 2);
+  await assert.rejects(
+    () => transact(ws, "job_test", plantOnce(slot, planted)),
+    /no ownership stamp/, "rollForward refuses a slot this store did not write");
+  assert.deepEqual(bytesOf(ws, "job_test"), { ...before, "job_test.v2.json": planted },
+    "the canonical is byte-identical and the refused slot is left exactly as planted");
+});
+
+test("vibe-302 N7: an unstamped canonical with no slots is refused — a fully committed legacy job included", async () => {
+  const ws = workspace();
+  const id = "job_ffffffffffffffffff01";
+  mkdirSync(jobsDir(ws), { recursive: true });
+  await refusedAndPreserved(ws, id,
+    () => writeFileSync(recordPath(ws, id), unstampedRecord(id, 1), "utf8"),
+    /no ownership stamp/);
+  const { records, invalid } = await listRecords(ws);
+  assert.deepEqual(records, [], "a listing does not vouch for it either");
+  assert.equal(invalid.length, 1);
+  assert.match(invalid[0].reason, /no ownership stamp/);
+});
+
+test("vibe-302 N8: an unstamped canonical beside an equal-version stamped slot is refused — the canonical is the authority at equal version", async () => {
+  const ws = workspace();
+  const id = "job_ffffffffffffffffff02";
+  mkdirSync(jobsDir(ws), { recursive: true });
+  await refusedAndPreserved(ws, id, () => {
+    writeFileSync(recordPath(ws, id), unstampedRecord(id, 1), "utf8");
+    writeSlot(ws, id, 1, baseTerminal(id, 1), { pretty: true });
+  }, /no ownership stamp/);
+});
+
+test("vibe-302 N9: a slot that turns unstamped inside readCanonical's self-heal is refused by commit, and the refusal propagates", async () => {
+  // The seam threads the swap into the window between reading the higher slot and republishing it —
+  // the window vibe-261 pinned for symlinks. A stamp refusal from `commit` must carry the refusal
+  // flag, or the self-heal swallows it and the caller is handed a healthy-looking record.
+  const ws = workspace();
+  await seed(ws);
+  const slot = path.join(jobsDir(ws), "job_test.v2.json");
+  writeFileSync(slot, foreignRecord("job_test", 2), "utf8");                     // stamped: a valid higher slot
+  const before = bytesOf(ws, "job_test");                                        // the canonical and the stamped v2
+  const planted = unstampedRecord("job_test", 2);
+  let swapped = false;
+  await assert.rejects(() => readRecord(ws, "job_test", {
+    onSelfHeal: () => {
+      if (swapped) return;
+      swapped = true;
+      writeFileSync(slot, planted, "utf8");
+    },
+  }), /no ownership stamp/);
+  assert.ok(swapped, "the seam fired: the swap landed inside the self-heal window");
+  assert.deepEqual(bytesOf(ws, "job_test"), { ...before, "job_test.v2.json": planted },
+    "the canonical is byte-unchanged — nothing foreign was republished over it — and the refused slot is left exactly as swapped");
+});
+
+test("vibe-302 N10: a slot that turns unstamped inside PRUNE's own self-heal blocks the job — reported, nothing deleted", async () => {
+  const ws = workspace();
+  const id = "job_ffffffffffffffffff03";
+  await seedTerminal(ws, id);
+  const canonical = recordPath(ws, id);
+  const raw = JSON.parse(readFileSync(canonical, "utf8"));
+  const slot = path.join(jobsDir(ws), `${id}.v${raw.version + 1}.json`);
+  writeFileSync(slot, JSON.stringify({ ...raw, version: raw.version + 1 }, null, 2) + "\n", "utf8");   // stamped (raw bytes)
+  const before = bytesOf(ws, id);                     // the canonical, the owned lower slot, the stamped higher slot
+  const { "_vibe-suite_owned": _stamp, ...unstamped } = { ...raw, version: raw.version + 1 };
+  let swapped = false;
+  const report = await pruneTerminalJobs(ws, {
+    olderThanMs: 0,
+    onSelfHeal: () => {
+      if (swapped) return;
+      swapped = true;
+      writeFileSync(slot, JSON.stringify(unstamped, null, 2) + "\n", "utf8");
+    },
+  });
+  assert.ok(swapped, "the seam fired: prune really did reach a self-heal");
+  assert.ok(!report.pruned.map((entry) => entry.jobId).includes(id), "the job is NOT pruned");
+  assert.ok(report.blocked.includes(id), "not ours to touch: BLOCKED, not invalid");
+  assert.ok(report.leftovers.includes(path.basename(slot)), "the refused entry is named as a leftover");
+  assert.ok(!report.invalid.some((row) => row.jobId === id), "and not double-counted as invalid");
+  assert.deepEqual(bytesOf(ws, id), { ...before, [path.basename(slot)]: JSON.stringify(unstamped, null, 2) + "\n" },
+    "the canonical and the owned lower slot are byte-identical (nothing compacted); the refused slot is left exactly as swapped");
+});
+
+test("vibe-302 N14: a canonical replaced by a symlink is refused with the repair guidance; validly marked, the job is simply gone", async () => {
+  // The canonical is observed like a slot: O_NOFOLLOW at open, so a link is ELOOP — a refusal that
+  // names the file and carries the preservation procedure, never a raw errno. Under a valid prune
+  // marker the marker wins: the job is "no record (pruned)" whatever now sits at its path.
+  const ws = workspace();
+  await seed(ws);
+  const canonical = recordPath(ws, "job_test");
+  const elsewhere = path.join(ws, "elsewhere.json");
+  writeFileSync(elsewhere, readFileSync(canonical, "utf8"), "utf8");   // a stamped, valid TARGET: only the link is refused
+  unlinkSync(canonical);
+  symlinkSync(elsewhere, canonical);
+  await assert.rejects(() => readRecord(ws, "job_test"), (error) =>
+    error instanceof JobStoreError && /record is unreadable \(.*ELOOP/.test(error.message)
+      && /preserve the canonical and every slot, then quarantine the job or recover it offline/.test(error.message));
+  assert.ok(lstatSync(canonical).isSymbolicLink(), "the link is left in place for the operator");
+  assert.deepEqual(filesOf(ws, "job_test"), ["job_test.json"], "nothing was added or removed");
+  writeFileSync(path.join(jobsDir(ws), "job_test.pruning"), validMarker("job_test", "2026-01-01T00:00:00.000Z"), "utf8");
+  await assert.rejects(() => readRecord(ws, "job_test"), /no record \(pruned\)/, "marked: gone, not refused");
+  assert.ok(lstatSync(canonical).isSymbolicLink(), "still untouched");
+});
+
+test("vibe-302 N15: a writer whose commit meets a refused canonical under a valid prune marker sees the job gone, not the refusal", async () => {
+  // `commit` consults the marker before it surfaces the canonical's refusal, as `readCanonical` does:
+  // GONE withdraws the won slot and the next read reports the job pruned.
+  const ws = workspace();
+  const id = "job_ffffffffffffffffff04";
+  await seed(ws, {}, id);
+  const canonical = recordPath(ws, id);
+  const elsewhere = path.join(ws, "elsewhere.json");
+  await assert.rejects(() => transact(ws, id, (record) => ({ ...record, kind: "later" }), {
+    onWon: () => {
+      writeFileSync(path.join(jobsDir(ws), `${id}.pruning`), validMarker(id, "2026-01-01T00:00:00.000Z"), "utf8");
+      writeFileSync(elsewhere, readFileSync(canonical, "utf8"), "utf8");
+      unlinkSync(canonical);
+      symlinkSync(elsewhere, canonical);
+    },
+  }), /no record \(pruned\)/);
+  assert.ok(lstatSync(canonical).isSymbolicLink(), "nothing was published over the link");
+  assert.ok(!existsSync(path.join(jobsDir(ws), `${id}.v2.json`)), "the won slot was withdrawn: the job is gone");
+});
+
+test("vibe-302 N16: every slot refusal — unreadable or malformed, in readCanonical, rollForward and commit — carries the one preservation procedure", async () => {
+  const guidance = /It is NOT deleted automatically\. Repair: quiesce writers for this job, preserve the canonical and every slot, then quarantine the job or recover it offline\./;
+  const refusedWith = (head) => (error) => error instanceof JobStoreError && head.test(error.message) && guidance.test(error.message);
+  const wrongIdentity = stampedAs("job_other", 2, STAMP["_vibe-suite_owned"]);   // stamped, well-formed, another job's
+  // readCanonical: a directory at the top slot, then a stamped slot carrying another job's identity
+  let ws = workspace();
+  await seed(ws);
+  let slot = path.join(jobsDir(ws), "job_test.v2.json");
+  mkdirSync(slot);
+  await assert.rejects(() => readRecord(ws, "job_test"), refusedWith(/committed slot is unreadable/));
+  rmdirSync(slot);
+  writeFileSync(slot, wrongIdentity, "utf8");
+  await assert.rejects(() => readRecord(ws, "job_test"), refusedWith(/committed slot is malformed/));
+  // rollForward: the same two shapes planted after the read
+  ws = workspace();
+  await seed(ws);
+  slot = path.join(jobsDir(ws), "job_test.v2.json");
+  await assert.rejects(() => transact(ws, "job_test", plantOnce(slot, wrongIdentity)), refusedWith(/uncommitted slot is malformed/));
+  // rollForward's own "uncommitted slot is unreadable" refusal has no in-process route: the publisher
+  // refuses a directory at the slot before rollForward can be reached (measured: WriteError "is a
+  // dir — refusing to publish over it"), and every other read failure is already a wrapped refusal
+  // from observeOwned. It keeps the same guidance as defence in depth for the classify→read window
+  // the vibe-261 comment above it describes.
+  // commit: the won slot turned into a directory before its confirmation
+  ws = workspace();
+  await seed(ws);
+  slot = path.join(jobsDir(ws), "job_test.v2.json");
+  await assert.rejects(() => transact(ws, "job_test", (record) => ({ ...record, kind: "later" }), {
+    onWon: () => { unlinkSync(slot); mkdirSync(slot); },
+  }), refusedWith(/slot is unreadable/));
+});
+
+test("vibe-302 N17: a canonical that turns unstamped after the claim is refused at commit's own observation — never published over", async () => {
+  // Only `commit` sees this one: the read that won the claim saw a stamped canonical, so the refusal
+  // must come from commit's own observation of the canonical it is about to publish over.
+  const ws = workspace();
+  await seed(ws);
+  const canonical = recordPath(ws, "job_test");
+  const planted = unstampedRecord("job_test", 1);
+  await assert.rejects(() => transact(ws, "job_test", (record) => ({ ...record, kind: "later" }), {
+    onWon: () => writeFileSync(canonical, planted, "utf8"),
+  }), /no ownership stamp/);
+  assert.equal(readFileSync(canonical, "utf8"), planted, "the foreign canonical is byte-unchanged: nothing was published over it");
+  assert.ok(existsSync(path.join(jobsDir(ws), "job_test.v2.json")), "the won slot is left for the operator");
+});
+
+test("vibe-302 N18: a stamped slot whose identity is swapped after the claim is refused at commit's own observation", async () => {
+  // Likewise only `commit` sees this: the bytes it publishes are the bytes it observed, so their
+  // identity is validated there — a well-formed, STAMPED record of another job is still refused.
+  const ws = workspace();
+  await seed(ws);
+  const canonicalBefore = readFileSync(recordPath(ws, "job_test"), "utf8");
+  const slot = path.join(jobsDir(ws), "job_test.v2.json");
+  const swapped = stampedAs("job_other", 2, STAMP["_vibe-suite_owned"]);
+  await assert.rejects(() => transact(ws, "job_test", (record) => ({ ...record, kind: "later" }), {
+    onWon: () => writeFileSync(slot, swapped, "utf8"),
+  }), /identity mismatch/);
+  assert.equal(readFileSync(recordPath(ws, "job_test"), "utf8"), canonicalBefore, "nothing was published");
+  assert.equal(readFileSync(slot, "utf8"), swapped, "the refused slot is left exactly as swapped");
+});
+
+test("vibe-302 N19: a jobs directory that cannot be searched is a named refusal with the guidance, never a bare errno",
+  { skip: process.getuid?.() === 0 && "permissions do not bind root" }, async () => {
+  // The canonical read fails first (wrapped by observeOwned) and the marker-first check then fails
+  // on the same `lstat`: the canonical's refusal is what must surface, not the marker's raw EACCES.
+  const ws = workspace();
+  await seed(ws);
+  const dir = jobsDir(ws);
+  chmodSync(dir, 0o000);
+  try {
+    await assert.rejects(() => readRecord(ws, "job_test"), (error) =>
+      error instanceof JobStoreError && /record is unreadable \(.*EACCES/.test(error.message)
+        && /preserve the canonical and every slot, then quarantine the job or recover it offline/.test(error.message));
+  } finally {
+    chmodSync(dir, 0o700);
+  }
+  assert.deepEqual(filesOf(ws, "job_test"), ["job_test.json"], "nothing was added or removed");
 });

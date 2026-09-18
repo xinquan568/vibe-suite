@@ -1491,3 +1491,18 @@ test("write-invariant matrix: a malformed row fails the loader instead of being 
   assert.throws(() => loadWriteInvariants(renamed), /unknown/);
   assert.throws(() => loadWriteInvariants(tmpWorkspace("write-inv-empty-")), /no rows/);   // an empty directory is not a matrix
 });
+
+test("readFileNoFollow returns a regular file's bytes and refuses every other type by name (vibe-302)", async () => {
+  const { readFileNoFollow } = await import("../../scripts/lib/write.mjs");
+  const root = tmpWorkspace("read-file-no-follow-");
+  writeFileSync(path.join(root, "good.json"), "{\"a\":1}\n", "utf8");
+  mkdirSync(path.join(root, "dir"));
+  symlinkSync(path.join(root, "good.json"), path.join(root, "link.json"));
+  spawnSync("mkfifo", [path.join(root, "fifo")]);
+  assert.equal(await readFileNoFollow(root, "good.json"), "{\"a\":1}\n", "a regular file reads whole");
+  await assert.rejects(() => readFileNoFollow(root, "link.json"), (e) => e.code === "ELOOP", "a symlink is refused at open");
+  await assert.rejects(() => readFileNoFollow(root, "dir"), (e) => e.code === "EISDIR", "a directory is refused");
+  await assert.rejects(() => readFileNoFollow(root, "fifo"), (e) => e.code === "ENOTREG", "a FIFO is refused without being opened");
+  await assert.rejects(() => readFileNoFollow(root, "absent.json"), (e) => e.code === "ENOENT", "absence keeps its errno");
+  await assert.rejects(() => readFileNoFollow(root, "../escape.json"), /'\.\.' is not a usable path component|resolves outside/);
+});

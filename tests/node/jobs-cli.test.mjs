@@ -16,6 +16,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createRecord, jobsDir, newRecord, readRecord } from "../../scripts/lib/jobs.mjs";
+import { writeCanonical } from "./_stamp.mjs";
 import { generationName, EVENT_LOG_MAX_GENERATIONS, EVENT_LOG_ROTATE_BYTES, STATE_DIRNAME } from "../../scripts/lib/eventlog.mjs";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 
@@ -165,8 +166,8 @@ test("status-only flags are refused outside status, not silently ignored", () =>
 test("an invalid record in scope is rendered AND exits 1, in table and json modes", async () => {
   const ws = workspace();
   mkdirSync(jobsDir(ws), { recursive: true });
-  writeFileSync(path.join(jobsDir(ws), "job_deadbeefdeadbeefdead.json"),
-    JSON.stringify({ jobId: "job_deadbeefdeadbeefdead", version: 1, status: "zombie" }));
+  // vibe-302: `invalid` means OURS but broken, so the broken record is stamped (through the helper); unstamped is BLOCKED
+  writeCanonical(ws, "job_deadbeefdeadbeefdead", { jobId: "job_deadbeefdeadbeefdead", version: 1, status: "zombie" });
 
   const table = cli(ws, "status");
   assert.equal(table.status, 1, table.stdout + table.stderr);
@@ -283,8 +284,8 @@ test("prune usage errors exit 2: a bad or missing cutoff, the flag outside prune
 test("prune exits 1 when something in scope could not be vouched for or removed", async () => {
   const ws = workspace();
   mkdirSync(jobsDir(ws), { recursive: true });
-  writeFileSync(path.join(jobsDir(ws), "job_deadbeefdeadbeefdead.json"),
-    JSON.stringify({ jobId: "job_deadbeefdeadbeefdead", version: 1, status: "zombie" }));
+  // vibe-302: `invalid` means OURS but broken, so the broken record is stamped (through the helper); unstamped is BLOCKED
+  writeCanonical(ws, "job_deadbeefdeadbeefdead", { jobId: "job_deadbeefdeadbeefdead", version: 1, status: "zombie" });
   const out = cli(ws, "prune", "--older-than", "0");
   assert.equal(out.status, 1, out.stdout + out.stderr);
   assert.ok(out.stdout.includes("invalid record: job_deadbeefdeadbeefdead"), out.stdout);

@@ -8,6 +8,7 @@
 // finding 2).
 
 import { tmpWorkspace } from "./_tmp.mjs";
+import { writeCanonical, writeSlot } from "./_stamp.mjs";
 import { strict as assert } from "node:assert";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRecord as createRecordForTombstone } from "../../scripts/lib/jobs.mjs";
@@ -58,7 +59,7 @@ test("listRecords enumerates canonical records only and skips slots, temps and f
   await createRecord(ws, baseRecord(ID_B, { background: true }));
   const dir = jobsDir(ws);
   // Non-canonical residents the enumeration must ignore (slots/temps belong to the CAS protocol).
-  writeFileSync(path.join(dir, `${ID_A}.v2.json`), JSON.stringify(baseRecord(ID_A, { version: 2 })));
+  writeSlot(ws, ID_A, 2, baseRecord(ID_A, { version: 2 }));                              // vibe-302: stamped
   writeFileSync(path.join(dir, `${ID_C}.tmp.deadbeef.json`), "{}");
   writeFileSync(path.join(dir, "notes.txt"), "not a record");
   // vibe-204: a prune tombstone (a directory at a canonical path) and a VALID prune marker are
@@ -82,10 +83,7 @@ test("listRecords loads through the slot-aware path: a newer committed slot wins
   await createRecord(ws, baseRecord(ID_A, { status: "running" }));
   // A writer that died between link and rename leaves the newest state in a .vN slot. A raw read of
   // the canonical would report `running`; the store's own read path must surface `completed`.
-  writeFileSync(
-    path.join(jobsDir(ws), `${ID_A}.v2.json`),
-    JSON.stringify(baseRecord(ID_A, { version: 2, status: "completed", endedAt: new Date().toISOString() })),
-  );
+  writeSlot(ws, ID_A, 2, baseRecord(ID_A, { version: 2, status: "completed", endedAt: new Date().toISOString() }));   // vibe-302: stamped
 
   const { records } = await listRecords(ws);
   assert.equal(records.length, 1);
@@ -97,16 +95,19 @@ test("listRecords reports invalid records as errors instead of returning them", 
   const ws = workspace();
   const dir = jobsDir(ws);
   mkdirSync(dir, { recursive: true });
-  // Identity mismatch: the file wears ID_A, the record claims ID_B.
-  writeFileSync(path.join(dir, `${ID_A}.json`), JSON.stringify(baseRecord(ID_B)));
+  // Identity mismatch: the file wears ID_A, the record claims ID_B. vibe-302: stamped, so it is the
+  // identity check — not the stamp — that refuses it (asserted below).
+  writeCanonical(ws, ID_A, baseRecord(ID_B));
   // Unknown status.
-  writeFileSync(path.join(dir, `${ID_B}.json`), JSON.stringify(baseRecord(ID_B, { status: "zombie" })));
+  writeCanonical(ws, ID_B, baseRecord(ID_B, { status: "zombie" }));      // vibe-302: stamped — invalid means ours but broken
   await createRecord(ws, baseRecord(ID_C));
 
   const { records, invalid } = await listRecords(ws);
   assert.deepEqual(records.map((r) => r.jobId), [ID_C]);
   assert.deepEqual(invalid.map((entry) => entry.jobId).sort(), [ID_A, ID_B]);
   for (const entry of invalid) assert.equal(typeof entry.reason, "string");
+  assert.match(invalid.find((entry) => entry.jobId === ID_A).reason, /identity mismatch/,
+    "the stamped mismatch is refused for its identity, not for a missing stamp");
 });
 
 test("listRecords on a workspace with no store returns empty, not an error", async () => {
@@ -176,4 +177,16 @@ test("stderrTail, signal and malformedLines are declared at creation, typed, and
   const broken = baseRecord(ID_A);
   delete broken.rawOutput;                                    // any OTHER missing key is still corruption
   assert.equal(validateRecord(broken, ID_A).ok, false, "optionality must not leak to other keys");
+});
+
+test("vibe-302 N11: a legacy (unstamped) job is one invalid row with the stamp reason; a healthy job beside it still lists", async () => {
+  const ws = workspace();
+  await createRecord(ws, baseRecord(ID_A));
+  writeCanonical(ws, ID_B, baseRecord(ID_B, { status: "completed", endedAt: new Date().toISOString() }), { stamped: false });
+  const { records, invalid } = await listRecords(ws);
+  assert.deepEqual(records.map((r) => r.jobId), [ID_A], "the healthy job is listed");
+  assert.equal(invalid.length, 1);
+  assert.equal(invalid[0].jobId, ID_B);
+  assert.match(invalid[0].reason, /no ownership stamp/);
+  assert.match(invalid[0].reason, /NOT deleted automatically/);
 });

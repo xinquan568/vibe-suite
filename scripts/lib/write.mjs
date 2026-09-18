@@ -752,6 +752,60 @@ export async function readNoFollow(root, rel) {
 }
 
 /**
+ * The raw text of a REGULAR file under `root`, opened `O_NOFOLLOW` and typed through the handle
+ * (vibe-302). `readNoFollow` above refuses a symlink (`ELOOP`) and a directory (`EISDIR`) but proves
+ * nothing about any other type: a FIFO or a socket at a slot pathname would be read. Authoritative
+ * store reads need the type proven on the same handle they read from, and they need the raw bytes
+ * (a slot's bytes are what `commit` publishes), which `readOwned` does not return and whose `null`
+ * collapses absence, parse failure and refusal — three outcomes the store keeps apart. So: the same
+ * containment as `readNoFollow`, the same errno shapes for absence and links, and one more —
+ * `ENOTREG` — for a present entry that is not a regular file.
+ */
+export async function readFileNoFollow(root, rel) {
+  const resolvedRoot = path.resolve(root);
+  const rootKind = await classify(resolvedRoot);
+  if (rootKind === "absent") throw absentRoot(root);
+  if (rootKind !== "dir") {
+    throw new WriteError(`${root}: containment root is not a directory (${rootKind})`);
+  }
+  const target = path.resolve(root, rel);
+  try {
+    await assertInside(root, target);
+  } catch (error) {
+    const nowKind = await classify(resolvedRoot);
+    if (nowKind === "absent") throw absentRoot(root);
+    if (nowKind !== "dir") {
+      throw new WriteError(`${root}: containment root is not a directory (${nowKind})`);
+    }
+    throw error;
+  }
+  const refuse = (code, what) => {
+    const error = new WriteError(`${rel}: ${what}`);
+    error.code = code;
+    return error;
+  };
+  // Typed BEFORE the open as well as through the handle. Before: `open(O_RDONLY)` on a FIFO blocks
+  // until a writer arrives, so a pipe planted at a record's pathname must be refused without being
+  // opened; and a directory keeps the `EISDIR` that `readFile` used to raise, because callers key the
+  // prune tombstone (a 0700 directory at the canonical path) on that code. After: the handle `stat`
+  // is the same-handle proof for the entry actually read — a swap between the two observations lands
+  // on the handle, not on the name. A symlink keeps its `ELOOP` from `open`.
+  const kind = await classify(target);
+  if (kind === "dir") throw refuse("EISDIR", "is a directory");
+  if (kind === "other") throw refuse("ENOTREG", "not a regular file");
+  let handle;
+  try {
+    handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const info = await handle.stat();
+    if (info.isDirectory()) throw refuse("EISDIR", "is a directory");
+    if (!info.isFile()) throw refuse("ENOTREG", "not a regular file");
+    return await handle.readFile("utf8");
+  } finally {
+    await handle?.close();
+  }
+}
+
+/**
  * Read a stamped file of ours (vibe-204): parsed JSON, or `null`. Opened `O_NOFOLLOW` and checked
  * to be a regular file THROUGH THE HANDLE, so a symlink at the path — even one whose target is a
  * perfectly valid file of ours — is `null`, as is a directory, an unparseable file, or a file

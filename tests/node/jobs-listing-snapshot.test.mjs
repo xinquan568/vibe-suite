@@ -56,6 +56,7 @@ const { tmpWorkspace } = await import("./_tmp.mjs");
 const {
   createRecord, jobsDir, listRecords, newRecord, readRecord, RESULT_KEYS, resultLine,
 } = await import("../../scripts/lib/jobs.mjs");
+const { slotBytes } = await import("./_stamp.mjs");   // vibe-302: after the instrumentation, like the store itself
 
 const ID_A = "job_aaaaaaaaaaaaaaaaaaaa";
 const ID_B = "job_bbbbbbbbbbbbbbbbbbbb";
@@ -75,11 +76,8 @@ function scansOf(dir) {
   return readdirLog.filter((seen) => seen === dir).length;
 }
 
-function slotFile(ws, jobId, version, record) {
-  writeFileSync(
-    path.join(jobsDir(ws), `${jobId}.v${version}.json`),
-    JSON.stringify({ ...record, version }),
-  );
+function slotFile(ws, jobId, version, record, opts = {}) {   // vibe-302: stamped unless `{ stamped: false }` — the explicit twin
+  writeFileSync(path.join(jobsDir(ws), `${jobId}.v${version}.json`), slotBytes({ ...record, version }, opts));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -319,4 +317,17 @@ test("vibe-310: whitespace behind a stripped LEADING sequence is the parser's to
     "the parser consumes the leading tabs — the same reason it would parse with no sequence in front");
   assert.equal(verdictFromResult({ verdictLine: `BLOCK: ${TAB}${TAB}${"A".repeat(600)}` }).reason, "A".repeat(600),
     "the unprefixed case, for the record: identical parsed reason");
+});
+
+test("T7c: an unstamped twin of a planted slot is refused and reported; its stamped neighbour still lists (vibe-302)", async () => {
+  const ws = tmpWorkspace("jobs-snapshot-t7c-");
+  await createRecord(ws, baseRecord(ID_A));
+  slotFile(ws, ID_A, 2, baseRecord(ID_A));                                  // stamped: the positive
+  await createRecord(ws, baseRecord(ID_B));
+  slotFile(ws, ID_B, 2, baseRecord(ID_B), { stamped: false });               // its explicit twin
+  const { records, invalid } = await listRecords(ws);
+  assert.deepEqual(records.map((r) => r.jobId), [ID_A]);
+  assert.equal(invalid.length, 1);
+  assert.equal(invalid[0].jobId, ID_B);
+  assert.match(invalid[0].reason, /no ownership stamp/);
 });

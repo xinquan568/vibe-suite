@@ -125,6 +125,25 @@ claude plugin install vibe-suite@vibe-suite
 claude plugin list        # Status: enabled
 ```
 
+### Upgrading a workspace that predates the ownership stamp
+
+Since `554be10` (2026-08-05) every job record the store creates carries an ownership stamp, and since vibe-302
+([ADR-0004](docs/adr/0004-authoritative-job-records-carry-the-ownership-stamp.md)) every read of a job record requires
+it. A workspace whose `.vibe-suite-state/jobs/` still holds records from before that date — or canonicals that a later
+recovery republished from such records, which carry no stamp whatever their date — will see those jobs refused:
+
+```
+<workspace>/.vibe-suite-state/jobs/job_….json: record carries no ownership stamp — not written by this store, or
+written before the stamp existed. It is NOT deleted automatically. Repair: quiesce writers for this job, preserve the
+canonical and every slot, then quarantine the job or recover it offline.
+```
+
+`/vibe-suite:jobs` lists every healthy job and reports the refused ones with that reason, and exits non-zero while any
+remain; prune reports them as blocked and leaves their files alone. Nothing is deleted or rewritten on your behalf. To
+clear them, stop any running job for that id, move the job's canonical file and every `job_….vN.json` slot beside it
+out of the directory together (quarantine), or read them offline if you need their history. This is a deliberate
+pre-release cut over at `0.0.1`; there is no in-place migration.
+
 ## Command catalog
 
 The manifest registers **29 commands, 14 agents, 24 skills** (the exact lists live in

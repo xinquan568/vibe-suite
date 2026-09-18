@@ -37,6 +37,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNNER = REPO_ROOT / "scripts" / "codex-runner.mjs"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "fake-codex"
 SHIPPED_MJS = sorted((REPO_ROOT / "scripts").rglob("*.mjs"))
+# vibe-302: every authoritative read of a job record now requires the store's ownership stamp (ADR-0004), so a
+# record a test plants by hand carries the exact stamp `scripts/lib/write.mjs` writes (STAMP_KEY / STAMP_SCHEMA).
+STAMP = {"_vibe-suite_owned": {"kind": "job-scratch", "schema": 1}}
 # The ISC-header rule covers test and fixture .mjs too (E1.2 / vibe-12, round-1 review finding 5) —
 # a rule checked only where it was first applied is a rule that stops being followed.
 CHECKED_MJS = SHIPPED_MJS + sorted((REPO_ROOT / "tests" / "node").glob("*.mjs")) \
@@ -441,7 +444,7 @@ class Invocation(RunnerCase):
             "heartbeatAt": None, "timeoutMs": 5000, "exitCode": 0, "rawOutput": "", "error": None,
             "tokens": None, "verdictText": None, "verdictState": "absent", "errorClass": None,
         }
-        (jobs / f"{prior['jobId']}.json").write_text(json.dumps(prior))
+        (jobs / f"{prior['jobId']}.json").write_text(json.dumps({**prior, **STAMP}))   # vibe-302: stamped
         before = sorted(p.name for p in jobs.iterdir())
         completed = self.run_runner("--kind", "review", "--timeout-ms", "10000",
                                     "--resume", prior["jobId"], "--", "again", expect_ok=False)
@@ -956,7 +959,7 @@ class ClaimToken(RunnerCase):
             "exitCode": None, "rawOutput": None, "error": None, "tokens": None,
         }
         record.update(overrides)
-        (jobs / f"{record['jobId']}.json").write_text(json.dumps(record))
+        (jobs / f"{record['jobId']}.json").write_text(json.dumps({**record, **STAMP}))   # vibe-302: stamped
         return record
 
     def test_worker_without_token_refuses_to_spawn(self):
@@ -1169,7 +1172,7 @@ class ReaperContract(TempDirMixin, RunnerCase):
         jobs = ws / STATE_DIRNAME / "jobs"
         jobs.mkdir(parents=True)
         for name, data in records.items():
-            (jobs / name).write_text(json.dumps(data))
+            (jobs / name).write_text(json.dumps({**data, **STAMP}))   # vibe-302: planted records are ours
         return ws
 
     def test_historical_running_slot_is_never_signalled(self):

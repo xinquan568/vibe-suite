@@ -9,6 +9,7 @@
 // floor), so these tests pass a recording stub and never touch a real process.
 
 import { tmpWorkspace } from "./_tmp.mjs";
+import { writeCanonical } from "./_stamp.mjs";
 import { strict as assert } from "node:assert";
 import { existsSync } from "node:fs";
 
@@ -150,7 +151,13 @@ test("a record corrupted AFTER resolve never reaches signalGroup — the claim i
     ["unknown status", patch({ status: "zombie" })],
     ["background flag corrupted", patch({ background: "yes" })],
     ["unparseable timestamp", patch({ createdAt: "yesterday-ish" })],
-    ["identity mismatch", patch({ jobId: ID_B })],
+    ["identity mismatch", async (ws) => {
+      // vibe-302: `commit` refuses an identity mismatch at publish time, so this corruption can no
+      // longer land through the CAS. It is planted on the canonical directly — stamped, so it is
+      // OURS but broken — and the claim's own validator is what refuses it.
+      const current = await readRecord(ws, ID_A);
+      writeCanonical(ws, ID_A, { ...current, jobId: ID_B });
+    }],
     ["missing contract key", async (ws) => {
       await transact(ws, ID_A, (fresh) => {
         const mutilated = { ...fresh };

@@ -97,9 +97,9 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstat, readdir, readFile } from "node:fs/promises";
 
 import {
-  assertInside, assertRoot, classify, ensureDirAt, publishDirAt, publishNew, readNoFollow, readOwned,
+  assertInside, assertRoot, classify, ensureDirAt, publishDirAt, publishNew, readFileNoFollow, readNoFollow, readOwned,
   removeEmptyDirAt, removeOwnedDirAt, secureDirAt, unlinkOwned, writeAtomic, openSinkAt,
-  PRIVATE_FILE_MODE, STAMP_KEY,
+  PRIVATE_FILE_MODE, STAMP_KEY, STAMP_SCHEMA,
 } from "./write.mjs";
 import { randomBytes as tombstoneNonce } from "node:crypto";
 import path from "node:path";
@@ -435,8 +435,10 @@ export function newRecord({ jobId, kind, sandbox, effort, model, background, tim
 }
 
 async function readPublished(workspace, jobId) {
-  const raw = await readFile(recordPath(workspace, jobId), "utf8");
-  const parsed = JSON.parse(raw);
+  // vibe-302: the canonical is an authoritative read too — `readCanonical` returns it whenever no
+  // slot exists or its version reaches the top — so it proves the stamp like a slot does. A
+  // `readFile` here used to follow links and accept any JSON with a version.
+  const { parsed } = await observeOwned(recordPath(workspace, jobId));
   // The stamp is provenance for the reaper, not part of the record contract every consumer reads.
   delete parsed[STAMP_KEY];
   if (typeof parsed?.version !== "number") {
@@ -459,20 +461,71 @@ function slotPattern(jobId) {
  * `readCanonical` then republished those bytes over the canonical. `O_NOFOLLOW` makes the pathname
  * mean the entry AT that name.
  *
- * Scope, stated once: this is **no-follow only**. An unstamped REGULAR file still reads, because
- * requiring the ownership stamp would reject every slot written before `554be10` and three existing
- * positive fixtures — that migration is #302. Same-uid remains out of scope as a privilege boundary
- * exactly as `write.mjs` and `fsafe.py` declare; Node has no `openat`, so the guarantee is "refuses
- * the state observed", with the post-observation window still open.
+ * Scope, stated once. #261 made these reads **no-follow**. vibe-302 (ADR-0004) made them **owned**:
+ * the entry at the name must be a regular file carrying this store's stamp (`job-scratch`, the
+ * current schema), or the read refuses — with the cause named and nothing deleted. That is a
+ * pre-release cut over: a record written before `554be10` is refused, not migrated. It closes the
+ * asymmetry where deletes already proved the stamp (`unlinkOwned`) and reads did not, so an unstamped
+ * file was believed and never cleaned. Same-uid remains out of scope as a privilege boundary exactly
+ * as `write.mjs` and `fsafe.py` declare — the stamp is a marker, not a secret; Node has no `openat`,
+ * so the guarantee is "refuses the state observed", with the post-observation window still open.
  *
  * Errors are left in the shape callers already handle: `ENOENT` still means absent (so
  * `rollForward`'s benign "someone completed it already" path is unchanged), and a symlink surfaces
  * as `ELOOP`, which is distinct from absence and so cannot be mistaken for it.
  */
-async function readSlotNoFollow(file) {
-  // Every slot pathname is `jobsDir(workspace)/<name>`, so its dirname IS the root the primitive
-  // resolves against; splitting here keeps the three call sites unchanged.
-  return readNoFollow(path.dirname(file), path.basename(file));
+const REPAIR = "It is NOT deleted automatically. Repair: quiesce writers for this job, preserve the " +
+  "canonical and every slot, then quarantine the job or recover it offline.";
+
+/**
+ * ONE observation of an authoritative file — a slot or the canonical — proving on the same handle
+ * that it is a regular file, parseable, and carries this store's stamp (vibe-302). Returns the raw
+ * bytes (what `commit` publishes) and the parsed document. `ENOENT` propagates untouched, so every
+ * benign absence branch keeps its meaning; `ELOOP`, `EISDIR` and `ENOTREG` propagate as they are, for
+ * the callers' existing "unreadable" refusals; a parse failure is a plain refusal; a missing,
+ * wrong-kind or unsupported-schema stamp is a refusal marked `ownership: "foreign"` — what prune keys
+ * on to report the job as BLOCKED (not ours to touch) rather than INVALID (ours but broken) — with
+ * `path` naming the refused entry. A missing stamp is reported as missing: it does not prove a
+ * pre-`554be10` origin, only that this store did not write it. `readOwned` is not used here: it
+ * collapses these outcomes into `null`.
+ */
+async function observeOwned(file) {
+  // Every authoritative pathname is `jobsDir(workspace)/<name>`, so its dirname IS the root the
+  // primitive resolves against.
+  let raw;
+  try {
+    raw = await readFileNoFollow(path.dirname(file), path.basename(file));
+  } catch (error) {
+    // Absence and a directory keep their meanings for the callers (never created or pruned; a prune
+    // tombstone). Everything else — a symlink (ELOOP), a FIFO or a device (ENOTREG), a permission
+    // failure — is a refusal that names the file and carries the procedure, never a raw errno
+    // escaping the store's API.
+    if (error.code === "ENOENT" || error.code === "EISDIR") throw error;
+    throw new JobStoreError(`${file}: record is unreadable (${error.message}). ${REPAIR}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new JobStoreError(`${file}: record is unparseable (${error.message}). ${REPAIR}`);
+  }
+  const stamp = parsed?.[STAMP_KEY];
+  const foreign = (why) => {
+    const error = new JobStoreError(`${file}: ${why} ${REPAIR}`);
+    error.ownership = "foreign";
+    error.path = file;
+    return error;
+  };
+  if (stamp === undefined || stamp === null) {
+    throw foreign("record carries no ownership stamp — not written by this store, or written before the stamp existed.");
+  }
+  if (stamp.kind !== SCRATCH_KIND) {
+    throw foreign(`record carries a stamp of kind ${JSON.stringify(stamp.kind)}, not a job record.`);
+  }
+  if (stamp.schema !== STAMP_SCHEMA) {
+    throw foreign(`record carries stamp schema ${JSON.stringify(stamp.schema)}; this store reads schema ${STAMP_SCHEMA}.`);
+  }
+  return { raw, parsed };
 }
 
 /**
@@ -513,10 +566,19 @@ async function highestSlot(workspace, jobId, { except = null, listing = null } =
  * highest slot here — exactly how a pruned job would have come back.
  */
 async function readCanonical(workspace, jobId, { listing = null, onSelfHeal = null } = {}) {
+  let refused = null;
   const published = await readPublished(workspace, jobId).catch((error) => {
     if (error.code === "ENOENT" || error.code === "EISDIR") return null;   // absent, or a prune tombstone
+    // vibe-302: a canonical that is not ours is a refusal — but a validly MARKED job is gone to readers
+    // whatever now sits at its path (a prune crashed after unlinking and something refilled the name),
+    // so the marker is consulted before the refusal surfaces.
+    if (error instanceof JobStoreError) { refused = error; return null; }
     throw error;
   });
+  if (refused !== null && (await inspectMarker(jobsDir(workspace), jobId)).state === "valid") {
+    throw new JobStoreError(`${jobId}: no record (pruned)`);
+  }
+  if (refused !== null) throw refused;
   if (published === null) throw new JobStoreError(`${jobId}: no record (never created, or pruned)`);
   // vibe-204: a marked job is being deleted; from the marker on it is gone to readers as well as
   // writers, so a writer looping on a fresh read stops here instead of spinning on `commit`.
@@ -527,18 +589,17 @@ async function readCanonical(workspace, jobId, { listing = null, onSelfHeal = nu
   if (top === null || published.version >= top) return published;
   let slot;
   try {
-    slot = JSON.parse(await readSlotNoFollow(slotPath(workspace, jobId, top)));
+    slot = (await observeOwned(slotPath(workspace, jobId, top))).parsed;
   } catch (error) {
+    if (error instanceof JobStoreError) throw error;          // vibe-302: a named refusal, as is
     // Same posture as rollForward: an unreadable slot blocks visibly and is never deleted, because
     // turning a stall into a silent integrity error is the worse trade.
     throw new JobStoreError(
-      `${slotPath(workspace, jobId, top)}: committed slot is unreadable (${error.message}). ` +
-      `It is NOT deleted automatically. Repair: quiesce writers for this job, then move it aside.`);
+      `${slotPath(workspace, jobId, top)}: committed slot is unreadable (${error.message}). ${REPAIR}`);
   }
   if (slot?.version !== top || slot?.jobId !== jobId) {
     throw new JobStoreError(
-      `${slotPath(workspace, jobId, top)}: committed slot is malformed (version/jobId mismatch). ` +
-      `It is NOT deleted automatically. Repair: quiesce writers for this job, then move it aside.`);
+      `${slotPath(workspace, jobId, top)}: committed slot is malformed (version/jobId mismatch). ${REPAIR}`);
   }
   // Self-heal: republish so external readers of the canonical path converge too. Best-effort by
   // design -- losing to a concurrent publisher is normal and must not fail the read -- EXCEPT for a
@@ -570,8 +631,9 @@ async function rollForward(workspace, jobId, version) {
   const slot = slotPath(workspace, jobId, version);
   let candidate;
   try {
-    candidate = JSON.parse(await readSlotNoFollow(slot));
+    candidate = (await observeOwned(slot)).parsed;
   } catch (error) {
+    if (error instanceof JobStoreError) throw error;          // vibe-302: a named refusal, as is
     // vibe-261, boundary stated precisely. This function IS reached -- a regular file planted at
     // the slot after the caller's initial read loses the CAS and lands on the identity check below,
     // which the wrong-jobId and wrong-version tests pin. What is NOT reachable in-process is a
@@ -584,13 +646,11 @@ async function rollForward(workspace, jobId, version) {
     // the two can never be confused.
     if (error.code === "ENOENT") return;                       // someone completed it already
     throw new JobStoreError(
-      `${slot}: uncommitted slot is unreadable (${error.message}). It is NOT deleted automatically. ` +
-      `Repair: quiesce writers for this job, then move the slot aside.`);
+      `${slot}: uncommitted slot is unreadable (${error.message}). ${REPAIR}`);
   }
   if (candidate?.version !== version || candidate?.jobId !== jobId) {
     throw new JobStoreError(
-      `${slot}: uncommitted slot is malformed (version/jobId mismatch). It is NOT deleted ` +
-      `automatically. Repair: quiesce writers for this job, then move the slot aside.`);
+      `${slot}: uncommitted slot is malformed (version/jobId mismatch). ${REPAIR}`);
   }
   await commit(workspace, jobId, version);
 }
@@ -608,18 +668,19 @@ const COMMIT = Object.freeze({
  * with `record` null when the file is unreadable — corruption, which publishing repairs.
  */
 async function readCanonicalRaw(workspace, jobId) {
-  let raw;
+  // vibe-302: the canonical `commit` confirms against is observed the same way as a slot. Absence
+  // and a tombstone keep their meaning (null). A present entry that is not a regular stamped record
+  // of ours comes back with the refusal attached — `commit` must throw it, because publishing over
+  // a foreign canonical is the resurrection this store exists to prevent.
   try {
-    raw = await readFile(recordPath(workspace, jobId), "utf8");
+    const { raw, parsed } = await observeOwned(recordPath(workspace, jobId));
+    return { raw, record: typeof parsed?.version === "number" ? parsed : null, refusal: null };
   } catch (error) {
     if (error.code === "ENOENT" || error.code === "EISDIR") return null;   // absent, or a prune tombstone
-    return { raw: null, record: null };
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    return { raw, record: typeof parsed?.version === "number" ? parsed : null };
-  } catch {
-    return { raw, record: null };
+    const refusal = error instanceof JobStoreError ? error
+      : new JobStoreError(`${recordPath(workspace, jobId)}: canonical is unreadable (${error.message}). ${REPAIR}`);
+    refusal.refusal = true;
+    return { raw: null, record: null, refusal };
   }
 }
 
@@ -650,8 +711,23 @@ async function readCanonicalRaw(workspace, jobId) {
 async function commit(workspace, jobId, version, { expectedBytes = null } = {}) {
   let content = null;
   try {
-    content = await readSlotNoFollow(slotPath(workspace, jobId, version));
+    const observed = await observeOwned(slotPath(workspace, jobId, version));
+    // vibe-302: the identity of the slot THIS observation saw, not a caller's earlier read — `commit`
+    // publishes these exact bytes, so it validates these exact bytes.
+    if (observed.parsed?.version !== version || observed.parsed?.jobId !== jobId) {
+      const refusal = new JobStoreError(
+        `${slotPath(workspace, jobId, version)}: slot is malformed (identity mismatch: its version/jobId disagree with its name). ${REPAIR}`);
+      refusal.refusal = true;
+      throw refusal;
+    }
+    content = observed.raw;
   } catch (error) {
+    if (error instanceof JobStoreError) {
+      // vibe-302: a named refusal (unparseable, unstamped, wrong kind or schema, wrong identity) is
+      // a refusal here too — flagged, so readCanonical's self-heal cannot swallow it.
+      error.refusal = true;
+      throw error;
+    }
     // vibe-261: only absence is benign here. A refused symlink (`ELOOP`, measured -- O_NOFOLLOW
     // reports it at `open` for a dangling link too, so it can never be mistaken for the absent
     // case below) and a directory (`EISDIR`, at the read) now reach this catch, and both take
@@ -659,8 +735,7 @@ async function commit(workspace, jobId, version, { expectedBytes = null } = {}) 
     // errno escaping the store's API.
     if (error.code !== "ENOENT") {
       const refusal = new JobStoreError(
-        `${slotPath(workspace, jobId, version)}: slot is unreadable (${error.message}). It is NOT ` +
-        `deleted automatically. Repair: quiesce writers for this job, then move the slot aside.`);
+        `${slotPath(workspace, jobId, version)}: slot is unreadable (${error.message}). ${REPAIR}`);
       // A REFUSAL is not a lost race. `readCanonical`'s self-heal swallows failures because a
       // concurrent publisher legitimately makes one lose; a foreign entry it OBSERVED is different,
       // and a caller that treats it as benign goes on to report the job as healthy -- which is what
@@ -673,6 +748,9 @@ async function commit(workspace, jobId, version, { expectedBytes = null } = {}) 
   // 1. Gone: no canonical, a tombstone, or a prune marker (the deletion is durable from the marker on).
   if (current === null) return COMMIT.GONE;
   if ((await inspectMarker(jobsDir(workspace), jobId)).state === "valid") return COMMIT.GONE;
+  // vibe-302: never publish over a foreign canonical — and the marker is consulted FIRST, as in
+  // `readCanonical`: under a valid marker the job is gone whatever now sits at its path.
+  if (current.refusal) throw current.refusal;
   // 2. Already: the ONLY proof of success is that the canonical holds the exact bytes — the winner's
   //    own candidate (`expectedBytes`), or the slot a recoverer is rolling forward. A canonical at or
   //    past this version proves nothing: the version may have been freed and taken by someone else.
@@ -1224,6 +1302,17 @@ export async function pruneTerminalJobs(workspace, {
       // before prune ever started (Step-9 finding 5).
       record = await readRecord(workspace, jobId, { onSelfHeal });
     } catch (error) {
+      if (error?.ownership === "foreign") {
+        // vibe-302: the read refused a record that is not ours. Before the stamp was proven on reads
+        // this job was read, judged eligible, and then refused by `entomb` as not-ours — BLOCKED, with
+        // the file in leftovers. The category is kept: `invalid` means ours but broken.
+        // The canonical is named here; a refused SLOT is the orphan sweep's to name (it reports every
+        // unowned slot-shaped entry beside a blocked job), so it is not counted twice.
+        if (error.path === recordPath(workspace, jobId)) report.leftovers.push(path.basename(error.path));
+        report.blocked.push(jobId);
+        blockedIds.add(jobId);
+        continue;
+      }
       report.invalid.push({ jobId, reason: String(error?.message ?? error) });
       continue;
     }

@@ -2,7 +2,7 @@
 // The job store under real contention and a real crash (vibe-225 / grill M26).
 //
 // `jobs-store.test.mjs` stages its races by hand: it writes the slot a dead writer would have left, or
-// plants an entry through a seam. These tests make the races happen. In one process, 32 `transact`
+// plants an entry through a seam. These tests make the races happen. In one process, sixteen `transact`
 // calls are in flight at once. Across processes, four writers contend for one record, and one of them
 // holds its won, unconfirmed slot while the other three must build on it — so the cross-process path
 // is exercised by construction, not by luck. And a writer is killed for real (`SIGKILL`, through the

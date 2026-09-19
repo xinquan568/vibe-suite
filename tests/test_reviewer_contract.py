@@ -28,6 +28,7 @@ inverted here: a definition marker fails wherever it appears, and the single car
 deterministically located `## Round bounds` block whose values are then checked for equality.
 """
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -54,10 +55,18 @@ DOMAINS = {
 CAP_KEY = "max_review_rounds"
 CAP_FLAG = "--max-review-rounds"
 
-MATRIX_DIMENSIONS = ("dispatch", "read-only guard", "output capture",
-                     "token accounting", "pre-flight", "quota signature")
-CLOSURE_STATES = ("open", "fixed", "declined", "accepted_decline", "challenged_once", "final_decline")
-REVIEW_MODES = ("none", "single", "full")
+def _declared(marker):
+    """A vocabulary the contract DECLARES in a named ```json block (vibe-226) — read, not restated here."""
+    text = (Path(__file__).resolve().parent.parent / "skills" / "vibe-core" / "references"
+            / "reviewer-contract.md").read_text(encoding="utf-8")
+    match = re.search(r"(?s)<!--\s*%s\s*-->\s*```json\s*(.*?)```" % re.escape(marker), text)
+    return tuple(json.loads(match.group(1))) if match else ()
+
+
+MATRIX_OBLIGATIONS = _declared("matrix-obligations")          # as the matrix writes them, e.g. "Read-only guard"
+MATRIX_DIMENSIONS = tuple(name.lower() for name in MATRIX_OBLIGATIONS)
+CLOSURE_STATES = _declared("closure-states")
+REVIEW_MODES = _declared("review-modes")
 
 #: Terms distinctive enough that seeing one is evidence the contract is the subject.
 DISTINCTIVE_TERMS = (CAP_KEY, CAP_FLAG, "read-only guard", "output capture", "token accounting",
@@ -300,6 +309,27 @@ class TestContractContent(unittest.TestCase):
     def setUpClass(cls):
         cls.text = CONTRACT.read_text(encoding="utf-8")
         cls.norm = norm(cls.text)
+
+    def test_the_declared_vocabularies_are_present(self):
+        """vibe-226: the three vocabularies are declared in the contract. An absent block is an empty tuple, which
+        would silently empty every check below — so their presence and sizes are asserted first."""
+        self.assertEqual(len(MATRIX_OBLIGATIONS), 6)
+        self.assertEqual(len(CLOSURE_STATES), 6)
+        self.assertEqual(len(REVIEW_MODES), 3)
+
+    def test_the_matrix_rows_are_the_declared_obligations_in_order(self):
+        rows = re.findall(r"(?m)^\| \*\*(.+?)\*\* \|", self.text)
+        self.assertEqual(tuple(rows), MATRIX_OBLIGATIONS)
+
+    def test_the_review_mode_table_rows_are_the_declared_modes(self):
+        body = self.text.split("## Review modes", 1)[1].split("\n## ", 1)[0]
+        rows = re.findall(r"(?m)^\| `([a-z]+)` \|", body)
+        self.assertEqual(tuple(rows), REVIEW_MODES)
+
+    def test_the_closure_machine_diagram_uses_exactly_the_declared_states(self):
+        body = self.text.split("## The closure machine", 1)[1].split("\n## ", 1)[0]
+        diagram = re.search(r"(?s)```\n(.*?)```", body).group(1)
+        self.assertEqual(set(re.findall(r"[a-z_]+", diagram)), set(CLOSURE_STATES))
 
     def test_the_six_matrix_dimensions_are_named(self):
         for dimension in MATRIX_DIMENSIONS:

@@ -41,8 +41,11 @@ class ReadmeCounts(unittest.TestCase):
         # skills/*/SKILL.md directories.
         text = README.read_text(encoding="utf-8")
         m = manifest()
-        stated = re.search(r"\*\*(\d+) commands, (\d+) agents, (\d+) skills\*\*", text)
-        self.assertIsNotNone(stated, "README lacks the counts sentence")
+        # vibe-226: the sentence is found after its marker, not anywhere in the README — the wording around the
+        # counts is free to change; the marker and the three numbers are what is held.
+        stated = re.search(r"<!--\s*counts\s*-->\s*\n[^\n]*?\*\*(\d+) commands, (\d+) agents, (\d+) skills\*\*",
+                           text)
+        self.assertIsNotNone(stated, "README lacks the counts sentence directly after <!-- counts -->")
         c, a, s = (int(stated.group(i)) for i in (1, 2, 3))
         self.assertEqual((c, a, s),
                          (len(m["commands"]), len(m["agents"]), len(m["skills"])),
@@ -167,16 +170,12 @@ class ReadmeAuditorStatus(unittest.TestCase):
         self.assertNotIn("has not shipped", text,
                          "README still says stage S8 'has not shipped'")
 
-    def test_status_states_implemented_tested_and_points_to_auditor_readme(self):
+    def test_status_points_to_auditor_readme(self):
+        """A dead link is a defect. The status sentence's wording is not pinned (vibe-226): it may say what the auditor
+        is in any words, and the two negatives above keep it from saying the stale thing."""
         text = README.read_text(encoding="utf-8")
         self.assertIn("[`auditor/README.md`](auditor/README.md)", text,
                       "README status does not point to auditor/README.md")
-        self.assertRegex(text, r"implemented and tested",
-                         "README status does not state the auditor is implemented and tested")
-        self.assertIn("wiring it into", text,
-                      "README status does not frame the remaining work as deployment wiring")
-        self.assertIn(".github/workflows", text,
-                      "README status does not name .github/workflows as the deployment target")
 
 
 class FastTestTier(unittest.TestCase):
@@ -221,9 +220,6 @@ class FastTestTier(unittest.TestCase):
     def test_every_manifest_member_exists_on_disk(self):
         missing = sorted(n for n in self.AUDITOR_TIER if not (self.TESTS / n).is_file())
         self.assertFalse(missing, f"AUDITOR_TIER names modules absent from disk: {missing}")
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class E85ExecutionRecord(unittest.TestCase):
@@ -295,3 +291,7 @@ class E85ExecutionRecord(unittest.TestCase):
             self.assertRegex(rec, outcome,
                              f"the rollback record lost the '{outcome}' branch — all three "
                              f"outcomes must be durable")
+
+
+if __name__ == "__main__":
+    unittest.main()

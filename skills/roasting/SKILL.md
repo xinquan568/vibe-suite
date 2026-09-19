@@ -25,6 +25,32 @@ Transcribed from the cc-suite source's full-audit prompt (`commands/audit.md:126
 1.2.0). These are the dimensions the `codex` lane dispatches, and `docs/disposition.yaml`
 row `cc-suite:10` — "nine dimensions preserved" — is a claim about exactly this list.
 
+Both lists are declared once, here; the headings below and the `--mini` list follow them.
+
+<!-- roast-dimensions -->
+```json
+{
+  "full": [
+    "Redundant & Low-Value Code",
+    "Security & Risk Management",
+    "Code Correctness & Reliability",
+    "Compliance & Standards",
+    "Maintainability & Readability",
+    "Performance & Efficiency",
+    "Testing & Validation",
+    "Dependency & Environment Safety",
+    "Documentation & Knowledge Transfer"
+  ],
+  "mini": [
+    "Logic & Correctness",
+    "Duplication",
+    "Dead Code",
+    "Refactoring Debt",
+    "Shortcuts & Patches"
+  ]
+}
+```
+
 ### 1. Redundant & Low-Value Code
 
 - **Dead code** — unreachable paths, unused functions and imports, commented-out blocks.

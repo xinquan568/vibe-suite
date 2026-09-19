@@ -50,17 +50,37 @@ async function main() {
   writeProbe({ stdin, fixture: "issue2pr-stub", mode });
 
   process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "thread_i2p_0001" }) + "\n");
+  // vibe-224: `VIBE_TEST_STUB_PAD_BYTES` emits that many bytes of command-output events before the
+  // verdict — the shape of a real review, whose stream runs to hundreds of KB — so a test can push the
+  // capture past the record's byte cap and prove the verdict is read from the record, not the wire.
+  let pad = Number(process.env.VIBE_TEST_STUB_PAD_BYTES || 0);
+  const chunk = "x".repeat(4096);
+  while (pad > 0) {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed", item: { type: "command_execution", aggregated_output: chunk },
+    }) + "\n");
+    pad -= chunk.length;
+  }
+  // vibe-224: the verdict travels as the engine sends it — an `agent_message` item. The runner reads
+  // only that shape (`events.mjs`); the earlier top-level `text` field was invisible to it once the
+  // verdict stopped coming from a `-o` file (vibe-137), so a dispatch through this stub recorded
+  // `verdictState: "absent"`.
   process.stdout.write(JSON.stringify({
     type: "item.completed",
-    text: "Reviewed.\n\n```yaml\n"
-      + (mode === "malformed" ? MALFORMED : (VERDICTS[mode] ?? VERDICTS.approve))
-      + "\n```",
+    item: {
+      type: "agent_message",
+      text: "Reviewed.\n\n```yaml\n"
+        + (mode === "malformed" ? MALFORMED : (VERDICTS[mode] ?? VERDICTS.approve))
+        + "\n```",
+    },
   }) + "\n");
   process.stdout.write(JSON.stringify({
     type: "turn.completed",
     usage: { input_tokens: 100, cached_input_tokens: 40, output_tokens: 20, reasoning_output_tokens: 5 },
   }) + "\n");
-  process.exit(0);
+  // vibe-224: an exit code, not `process.exit()` — writes to a pipe are asynchronous, and exiting at once
+  // drops whatever has not drained, which with a padded stream is the usage event and the verdict.
+  process.exitCode = 0;
 }
 
 main().catch((error) => {

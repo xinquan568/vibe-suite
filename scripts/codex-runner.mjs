@@ -20,10 +20,11 @@
 // (cc-suite W7 class). `tests/node/no-top-level-await.mjs` enforces that with a checker that reports
 // or refuses on any ambiguity, because `node --check` accepts top-level await and is not an oracle.
 //
-// **The result contract is one line of JSON with exactly five keys** — `jobId`, `status`, `threadId`,
-// `rawOutput`, `verdictState` — in every mode. A background launch returns the same shape with `status: "running"`
-// and nulls: the acknowledgement is a *launch receipt*, so a worker that finished early cannot make
-// it lie about the shape. Callers branch on `status`, never on shape.
+// **The result contract is one line of JSON with exactly six keys** — `jobId`, `status`, `threadId`,
+// `rawOutput`, `verdictState`, `verdictLine` (appended by vibe-305; `jobs.mjs` `RESULT_KEYS`) — in every
+// mode. A background launch returns the same shape with `status: "running"` and nulls: the
+// acknowledgement is a *launch receipt*, so a worker that finished early cannot make it lie about the
+// shape. Callers branch on `status`, never on shape.
 //
 // **Success is decided by the event stream, never the exit code.** codex-cli 0.144.6 exits 0 on an
 // upstream failure while emitting `turn.failed`.

@@ -29,7 +29,7 @@ new backend adds a column rather than a rewrite.
 
 | Obligation | What it means | `codex` |
 |---|---|---|
-| **Dispatch** | A non-interactive invocation that terminates without a human. | `codex exec … < /dev/null`. The redirect is load-bearing: without it the CLI waits on stdin forever, and a review that never returns looks exactly like a slow one. |
+| **Dispatch** | A non-interactive invocation that terminates without a human. | Through `scripts/codex-runner.mjs`, never a bare engine call: the runner spawns the engine with stdin at `/dev/null` — load-bearing, because without it the CLI waits on stdin forever and a review that never returns looks exactly like a slow one — and adds what a host cannot promise from memory: a deadline, a job record, and a failure classification. A loop states its own invocation once (issue2pr: `skills/issue2pr/SKILL.md` § Reviewer dispatch). |
 | **Read-only guard** | The reviewer cannot modify what it reviews. | `-s read-only`. |
 | **Output capture** | The verdict is retrievable, and a run that produced none is distinguishable from one that produced an empty one. | `--json`. The verdict is the last `agent_message` item in the stream: no such item is *absent*, one carrying no non-whitespace text is *empty*. **The exit code is not a success signal** — an upstream outage has been observed exiting 0 with a `turn.failed` event and no verdict in the stream. A completed-turn event is the only positive confirmation. |
 | **Token accounting** | Cost is attributable to the round that incurred it. | Read from the completed-turn event's usage. Bill uncached input plus output. |

@@ -1,8 +1,8 @@
 {
-  "jobId": "job_67058323631e4ed583b9",
+  "jobId": "job_745b3b8712aa445890f5",
   "status": "completed",
   "threadId": "thread_i2p_0001",
-  "rawOutput": "{\"type\":\"thread.started\",\"thread_id\":\"thread_i2p_0001\"}\n{\"type\":\"item.completed\",\"text\":\"Reviewed.\\n\\n```yaml\\nverdict: approve\\nfindings: []\\n```\"}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":40,\"output_tokens\":20,\"reasoning_output_tokens\":5}}\n",
+  "rawOutput": "{\"type\":\"thread.started\",\"thread_id\":\"thread_i2p_0001\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Reviewed.\\n\\n```yaml\\nverdict: approve\\nfindings: []\\n```\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":40,\"output_tokens\":20,\"reasoning_output_tokens\":5}}\n",
   "verdictState": "present",
   "verdictLine": null
 }

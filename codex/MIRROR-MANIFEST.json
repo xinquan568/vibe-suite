@@ -335,9 +335,9 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-vibe-core/references/reviewer-contract.md",
-      "mirror_sha256": "c3b78ca278f4b113c061520aff235727460d69c7615df3b39713ebd0afe52441",
+      "mirror_sha256": "5572bc03207135d83f82bcc8454b694f344fcec56d5b761aa39a0fc0fae15fae",
       "source": "skills/vibe-core/references/reviewer-contract.md",
-      "source_sha256": "00dbd82dd3139a067bfb71490cd06dbe77379a2443ca9361fbfecfe340b9cf86",
+      "source_sha256": "28ad847ce826566aa925dfd7b49abacd68fb916c82e83e946052d107c5ae7f10",
       "transform": "markdown"
     },
     {

@@ -115,6 +115,64 @@ Two consequences specific to this pipeline:
   otherwise resolves the **effective cap** for the round about to run, by the rule under
   [Round bounds](#round-bounds).
 
+## Reviewer dispatch
+
+Every review — steps 2, 5 and 8, and the verify side of 3, 6 and 9 — is one dispatch through the suite's
+engine, never a bare engine call. The engine is what owns the guarantees a review needs and a host cannot
+promise from memory: a **deadline**, a **job record**, a **failure classification** that tells an
+exhausted quota from any other failure, and success decided by the event stream rather than the exit code.
+
+Write the prompt with the Write tool to a file — never interpolate it into a shell line — and dispatch from
+the workspace that holds the run folders, so the record lands beside them:
+
+<!-- canonical-dispatch -->
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-runner.mjs" --kind review --sandbox read-only --timeout-ms "${ISSUE2PR_REVIEW_TIMEOUT_MS:-1200000}" --wait --prompt-file "$ISSUE2PR_PROMPT_FILE"
+```
+
+- **No model and no effort are named** — the engine resolves configuration and the tool's own default
+  ([Model resolution](../vibe-core/references/reviewer-contract.md#model-resolution)). An explicit per-run
+  override the operator passed is appended as `--model`, and is never written into a shipped file.
+- **The deadline is 20 minutes** unless `$ISSUE2PR_REVIEW_TIMEOUT_MS` says otherwise for this run. It is set
+  well above the longest review observed, because a deadline that fires on a slow review stops a round
+  that was about to succeed.
+- A host whose tool calls are capped below the deadline dispatches with `--background` instead and reads
+  the finished job with `jobs-cli.mjs result <jobId>`; the branch below is the same.
+
+The dispatch prints one result line. **The verdict is not on it**: the line's `rawOutput` is bounded, and a
+review's stream routinely exceeds the bound. The verdict is read from the record the store vouches for,
+which the step keeps as its `job.json` — written after **every** dispatch, whatever its status, because it is
+also the step's record of what the reviewer did:
+
+<!-- canonical-verdict -->
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/jobs-cli.mjs" status "$ISSUE2PR_JOB_ID" --json > "$ISSUE2PR_STEP_DIR/job.json"
+```
+
+The verdict is `records[0].verdictText`, parsed as
+[Verdict parsing](../vibe-core/references/reviewer-contract.md#verdict-parsing) says.
+
+**Branch on the result line's `status`, and — when it is `failed` — on the record's `errorClass`** (in
+`job.json`; the result line does not carry it):
+
+<!-- dispatch-outcome -->
+```json
+{
+  "completed": "verdict",
+  "failed:quota": "quota_paused",
+  "failed:failure": "quota_paused",
+  "timed_out": "quota_paused",
+  "cancelled": "quota_paused"
+}
+```
+
+`verdict` reads the verdict as above; an `empty` or `absent` `verdictState`, or a block that will not parse,
+takes the contract's parsing path — re-ask once, then record the round as failed and continue. Every other
+outcome is a reviewer that did not answer, which says nothing about the work: the run pauses as
+`quota_paused`, the run-status enum's one resumable state, and `resume` re-runs the step from scratch. The
+step's `job.json` keeps the job's `status` and `errorClass`, so an exhausted quota stays distinguishable from
+any other failure — and from a rejection, which is always a `completed` dispatch carrying findings.
+
 ## Durable state
 
 Every run owns a folder. The pipeline is resumable because the folder, not the session, is the record.

@@ -80,6 +80,18 @@ def read(path):
     return path.read_text(encoding="utf-8")
 
 
+def json_block(text, marker):
+    """A named ```json declaration block, parsed — vibe-226 moved the dimension lists into one."""
+    match = re.search(r"(?s)<!--\s*%s\s*-->\s*```json\s*(.*?)```" % re.escape(marker), text)
+    return json.loads(match.group(1)) if match else None
+
+
+def section(text, heading_prefix):
+    """The body of the `## <heading_prefix>…` section, up to the next `## `."""
+    match = re.search(r"(?sm)^## %s[^\n]*\n(.*?)(?=^## |\Z)" % re.escape(heading_prefix), text)
+    return match.group(1) if match else ""
+
+
 def norm(text):
     """Phrase-assertion view: emphasis stripped, whitespace collapsed, lowercased.
 
@@ -181,21 +193,33 @@ class TestReconFirst(RoastTestCase):
 
 
 class TestDimensionsAndDepth(RoastTestCase):
-    def test_all_nine_dimensions_are_named_in_the_skill(self):
-        for dim in NINE:
-            with self.subTest(dimension=dim):
-                self.assertIn(dim, self.skill)
+    """vibe-226: the dimensions are DECLARED once, in the skill's `<!-- roast-dimensions -->` block. The tests read
+    the block and hold the prose's structure to it; `NINE` / `MINI_FIVE` survive only as the fidelity oracle."""
 
-    def test_all_five_mini_dimensions_are_named(self):
-        for dim in MINI_FIVE:
-            with self.subTest(dimension=dim):
-                self.assertIn(dim, self.skill)
+    def setUp(self):
+        super().setUp()
+        self.block = json_block(self.skill, "roast-dimensions")
+        self.assertIsNotNone(self.block, "the skill declares no <!-- roast-dimensions --> block")
+
+    def test_the_block_is_the_transcribed_source(self):
+        """The one fidelity check: the declaration equals what was transcribed from the reference."""
+        self.assertEqual(self.block, {"full": list(NINE), "mini": list(MINI_FIVE)})
+
+    def test_the_full_headings_are_the_declared_nine_in_order(self):
+        body = section(self.skill, "The nine dimensions")
+        headings = re.findall(r"(?m)^### \d+\. (.+?)\s*$", body)
+        self.assertEqual(headings, self.block["full"])
+
+    def test_the_mini_list_is_the_declared_five_in_order(self):
+        body = section(self.skill, "The five dimensions")
+        items = re.findall(r"(?m)^\d+\. \*\*(.+?)\*\*\s*$", body)
+        self.assertEqual(items, self.block["mini"])
 
     def test_the_two_sets_are_disjoint(self):
         """The source calls them non-overlapping. Asserted on the NAME sets, which is the only form
         that is decidable -- 'Dead Code' and 'Redundant & Low-Value Code' are related in subject and
         distinct as names."""
-        self.assertEqual(set(NINE) & set(MINI_FIVE), set())
+        self.assertEqual(set(self.block["full"]) & set(self.block["mini"]), set())
 
     def test_the_skill_states_mini_is_not_a_subset(self):
         self.assertRegex(self.skill_norm, r"mini is a separate list|not a subset")

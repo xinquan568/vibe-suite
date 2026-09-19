@@ -146,6 +146,7 @@ pre-release cut over at `0.0.1`; there is no in-place migration.
 
 ## Command catalog
 
+<!-- counts -->
 The manifest registers **29 commands, 14 agents, 24 skills** (the exact lists live in
 [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json); `tests/test_doc_accuracy.py`
 holds these counts equal to the manifest and the files on disk). By group:

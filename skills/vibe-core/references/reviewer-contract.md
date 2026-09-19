@@ -25,7 +25,12 @@ never listed it.
 ### The contract matrix
 
 Six obligations. The left column is what **any** backend must supply — the row is the interface, and a
-new backend adds a column rather than a rewrite.
+new backend adds a column rather than a rewrite. They are declared once, in the order the matrix gives them:
+
+<!-- matrix-obligations -->
+```json
+["Dispatch", "Read-only guard", "Output capture", "Token accounting", "Pre-flight", "Quota signature"]
+```
 
 | Obligation | What it means | `codex` |
 |---|---|---|
@@ -52,6 +57,11 @@ produces output, and that output carries the authority of a review it never had.
 below for the one authorised exception and the mark it must leave.
 
 ## Review modes
+
+<!-- review-modes -->
+```json
+["none", "single", "full"]
+```
 
 | Mode | Reviewer dispatched | Update pass | Bounded loop | Cap flag |
 |---|---|---|---|---|
@@ -126,6 +136,13 @@ status for such a loop would invert the verdicts' meaning.
 
 ```
 open → fixed | declined → accepted_decline | challenged_once → final_decline
+```
+
+The states, declared once:
+
+<!-- closure-states -->
+```json
+["open", "fixed", "declined", "accepted_decline", "challenged_once", "final_decline"]
 ```
 
 A finding carries a **stable id** across rounds, so a challenge refers to the same finding it answers.

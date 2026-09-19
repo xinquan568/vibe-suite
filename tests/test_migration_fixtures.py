@@ -213,9 +213,19 @@ class Row09AuditorData(unittest.TestCase):
     """Owned by E0.8. Asserted as wired, not re-implemented."""
 
     def test_the_auditor_data_row_has_a_live_owner(self):
-        owner = REPO_ROOT / "tests" / "test_migrate_auditor_data.py"
-        self.assertTrue(owner.is_file(), "row 9's owning fixture has gone missing")
-        self.assertIn("def test_", owner.read_text())
+        """Loaded as a test module, not read as text (vibe-226): the owner must import and yield tests."""
+        suite = unittest.defaultTestLoader.loadTestsFromName("tests.test_migrate_auditor_data")
+        cases = []
+        stack = [suite]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, unittest.TestSuite):
+                stack.extend(item)
+            else:
+                cases.append(item)
+        failed = [c for c in cases if type(c).__name__ == "_FailedTest"]
+        self.assertEqual(failed, [], "row 9's owning module did not load")
+        self.assertGreater(len(cases), 0, "row 9's owning module yields no tests")
 
     def test_the_migration_tool_still_ships(self):
         self.assertTrue((REPO_ROOT / "tools" / "migrate-auditor-data.sh").is_file()

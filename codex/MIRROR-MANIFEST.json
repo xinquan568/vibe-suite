@@ -279,9 +279,9 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-roasting/SKILL.md",
-      "mirror_sha256": "b42e3b6fe4b2834712f28ee1c8a9de4b2783dc3b5044dfe9ffd2903f78d978af",
+      "mirror_sha256": "7ac48c4e9092b277c5d82e41d23117faa1d819553429393893ba86ada43be47b",
       "source": "skills/roasting/SKILL.md",
-      "source_sha256": "4cbbb5fd49725d21675260df83ea4e8a2b3b8f2f77e7913aa4f7053f9c22d37a",
+      "source_sha256": "5354ad18fe507ec13fdb536f31abe7ab778bdfe492a2e318670964f7ea56d1b6",
       "transform": "markdown"
     },
     {
@@ -335,9 +335,9 @@
     {
       "dropped_keys": [],
       "mirror": "codex/skills/vibe-vibe-core/references/reviewer-contract.md",
-      "mirror_sha256": "5572bc03207135d83f82bcc8454b694f344fcec56d5b761aa39a0fc0fae15fae",
+      "mirror_sha256": "d7f08d2783bc4525cebb2cf380f91df6893157356d60808f887d1c970b5358f7",
       "source": "skills/vibe-core/references/reviewer-contract.md",
-      "source_sha256": "28ad847ce826566aa925dfd7b49abacd68fb916c82e83e946052d107c5ae7f10",
+      "source_sha256": "9bd6651c0ffc767a1d3d8f0b1d4e72d116c5f0ad5c69ce78c960bcab19536c8e",
       "transform": "markdown"
     },
     {

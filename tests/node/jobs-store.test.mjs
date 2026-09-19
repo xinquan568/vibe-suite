@@ -1997,3 +1997,122 @@ test("vibe-302 N19: a jobs directory that cannot be searched is a named refusal 
   }
   assert.deepEqual(filesOf(ws, "job_test"), ["job_test.json"], "nothing was added or removed");
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// vibe-225: a winner whose slot is completed and built on by another writer before it confirms. `commit` used to
+// call that SUPERSEDED, and `transact` re-ran the updater — the update landed twice, and a claim-shaped updater was
+// told its claim failed although the record named it. The rule: the winner's exact bytes still at its slot, and a
+// NON-TERMINAL top slot above them, prove the write is in the history (compaction, the only thing that frees a
+// version, runs only at a terminal commit). A terminal top stays SUPERSEDED — that is the vibe-204 reclaim case.
+
+const bump = (record) => ({ ...record, contended: (record.contended ?? 0) + 1 });
+
+/** Start a `transact` that stops inside `onWon` — its slot linked, not yet confirmed — until released. */
+async function heldWinner(ws, id, updater, options = {}) {
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  let signalWon;
+  const won = new Promise((resolve) => { signalWon = resolve; });
+  const promise = transact(ws, id, updater, {
+    ...options,
+    onWon: async (jobId, target) => {
+      if (options.onWon) await options.onWon(jobId, target);
+      signalWon(target);
+      await held;
+    },
+  });
+  const target = await won;
+  return { promise, release, target };
+}
+
+test("vibe-225: a winner whose slot was built on before it confirmed is not re-applied", async () => {
+  const ws = workspace();
+  await seed(ws);
+  const holder = await heldWinner(ws, "job_test", bump);
+  assert.equal(holder.target, 2);
+  for (let i = 0; i < 3; i += 1) await transact(ws, "job_test", bump);   // they complete v2 and build v3..v5 on it
+  holder.release();
+  const mine = await holder.promise;
+  assert.equal(mine.version, 2, "the winner's update landed at v2 — it must be told so, not re-applied");
+  const final = await readRecord(ws, "job_test");
+  assert.equal(final.version, 5);
+  assert.equal(final.contended, 4, "four transacts, four increments");
+});
+
+test("vibe-225: an updater that refuses to re-apply is told its write landed", async () => {
+  const ws = workspace();
+  await seed(ws);
+  const mark = (record) => (record.marked ? REJECT : { ...record, marked: true });   // claim-shaped
+  const holder = await heldWinner(ws, "job_test", mark);
+  for (let i = 0; i < 2; i += 1) await transact(ws, "job_test", bump);
+  holder.release();
+  const mine = await holder.promise;
+  assert.notEqual(mine, null, "the mark is in the history — a null here is a claimer told it lost");
+  assert.equal(mine.version, 2);
+  assert.equal(mine.marked, true);
+  assert.equal((await readRecord(ws, "job_test")).marked, true);
+});
+
+test("vibe-225: a winner built on and then finalised above is told null, never re-applied (the declared boundary)", async () => {
+  const ws = workspace();
+  await seed(ws);
+  const holder = await heldWinner(ws, "job_test", bump);
+  await transact(ws, "job_test", bump);
+  await transact(ws, "job_test", bump);
+  await finaliseRecord(ws, "job_test", { status: "completed" });          // terminal top; compaction frees v2
+  holder.release();
+  assert.equal(await holder.promise, null,
+    "beneath a terminal top the win cannot be told from a reclaim, so it stays SUPERSEDED");
+  const final = await readRecord(ws, "job_test");
+  assert.equal(final.status, "completed");
+  assert.equal(final.contended, 3, "the holder's increment is in the history exactly once");
+});
+
+test("vibe-225: a slot at the won version holding other bytes is not confirmed", async () => {
+  const ws = workspace();
+  await seed(ws);
+  const holder = await heldWinner(ws, "job_test", bump, {
+    onWon: (jobId, target) => {
+      if (target !== 2) return;                                          // plant once, at the first win only
+      // Someone else's v2 at our pathname, and a non-terminal v3 built on it.
+      const base = JSON.parse(readFileSync(recordPath(ws, jobId), "utf8"));
+      const other = { ...base, kind: "other" };
+      delete other["_vibe-suite_owned"];
+      writeSlot(ws, jobId, target, other, { pretty: true });
+      writeSlot(ws, jobId, target + 1, other, { pretty: true });
+    },
+  });
+  holder.release();
+  const mine = await holder.promise;
+  assert.equal(mine.version, 4, "not confirmed: the updater re-ran on v3");
+  const final = await readRecord(ws, "job_test");
+  assert.equal(final.kind, "other");
+  assert.equal(final.contended, 1, "applied once, on top of the other writer's history");
+  const v2 = JSON.parse(readFileSync(path.join(jobsDir(ws), "job_test.v2.json"), "utf8"));
+  assert.equal(v2.contended, undefined, "the v2 in the history is the other writer's, not ours");
+});
+
+test("vibe-225: a refused top slot is surfaced by the new witness read, never taken as non-terminal", async () => {
+  const ws = workspace();
+  await seed(ws);
+  let before;
+  const holder = await heldWinner(ws, "job_test", bump, {
+    attempts: 1,
+    onWon: (jobId, target) => {
+      if (target !== 2) return;                                          // one attempt: never reached twice
+      const base = JSON.parse(readFileSync(recordPath(ws, jobId), "utf8"));
+      delete base["_vibe-suite_owned"];
+      writeSlot(ws, jobId, target + 1, base, { stamped: false, pretty: true });   // unstamped: not ours
+      before = { v2: readFileSync(path.join(jobsDir(ws), `${jobId}.v${target}.json`)),
+                 v3: readFileSync(path.join(jobsDir(ws), `${jobId}.v${target + 1}.json`)) };
+    },
+  });
+  holder.release();
+  // One attempt: there is no second read, so only the witness read inside `commit` can raise the refusal.
+  const error = await holder.promise.then(() => null, (e) => e);
+  assert.ok(error, "the winner must not be told its write landed over a slot the store refuses");
+  assert.match(error.message, /no ownership stamp/);
+  assert.doesNotMatch(error.message, /gave up after/);
+  assert.deepEqual(readFileSync(path.join(jobsDir(ws), "job_test.v2.json")), before.v2);
+  assert.deepEqual(readFileSync(path.join(jobsDir(ws), "job_test.v3.json")), before.v3, "the refused slot is preserved");
+});

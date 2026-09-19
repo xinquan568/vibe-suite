@@ -685,7 +685,7 @@ async function rollForward(workspace, jobId, version) {
 /** What `commit` found when it went to publish a slot. */
 const COMMIT = Object.freeze({
   PUBLISHED: "published",      // we published it
-  ALREADY: "already",          // our exact bytes were already published (a recoverer rolled us forward)
+  ALREADY: "already",          // our exact bytes are committed history (a recoverer rolled us forward, maybe built on us)
   GONE: "gone",                // no canonical: the job was pruned under us
   SUPERSEDED: "superseded",    // the canonical is past this version, or at it with different bytes
 });
@@ -728,9 +728,15 @@ async function readCanonicalRaw(workspace, jobId) {
  *
  * In order: a missing canonical, a tombstone or a prune marker means the job is gone (`GONE`);
  * the canonical holding the exact bytes — the winner's own candidate, or the slot being rolled
- * forward — is the one proof of success (`ALREADY`); a retained slot above this version, or a
- * canonical at or past it with other bytes, means the version had been freed and taken
- * (`SUPERSEDED`). Only then is the slot published. A slot that vanished with nothing above it is an
+ * forward — is proof of success (`ALREADY`); a retained slot above this version means the version
+ * had been freed and taken (`SUPERSEDED`) — **unless** the caller is the winner, its slot still holds
+ * its exact bytes, and the top slot is NON-terminal: compaction, the only thing that frees a version,
+ * runs only at a terminal commit, so under a non-terminal top nothing was ever freed, and a version
+ * above ours was built by a writer that read ours. That winner's write is committed history
+ * (`ALREADY`, vibe-225); calling it superseded made `transact` apply it a second time. The top slot,
+ * never the canonical, is the witness (a paused publisher can lower the canonical), and a top that
+ * cannot be observed is refused, not guessed. A canonical at or past this version with other bytes is
+ * `SUPERSEDED`. Only then is the slot published. A slot that vanished with nothing above it is an
  * error, not a success. Publication is temp + `rename`, atomic and idempotent by content; a prune
  * tombstone makes it fail (`EISDIR`) instead of recreating the job. Publishing a terminal record
  * compacts the job's history behind it.
@@ -788,7 +794,25 @@ async function commit(workspace, jobId, version, { expectedBytes = null } = {}) 
   // 3. Superseded: a retained slot above this version is the authority (a paused publisher can lower
   //    the canonical at any time, so the canonical alone is never trusted) …
   const others = await highestSlot(workspace, jobId, { except: version });
-  if (others !== null && others > version) return COMMIT.SUPERSEDED;
+  if (others !== null && others > version) {
+    // vibe-225: a winner whose exact bytes still hold its slot, under a NON-terminal top, was committed and
+    // built on (see the doc comment). The top is observed the way every authoritative read observes a slot.
+    if (expectedBytes !== null && content === expectedBytes) {
+      let top;
+      try {
+        top = (await observeOwned(slotPath(workspace, jobId, others))).parsed;
+      } catch (error) {
+        if (error instanceof JobStoreError) { error.refusal = true; throw error; }
+        if (error.code === "ENOENT") return COMMIT.SUPERSEDED;         // vanished: the next read decides
+        const refusal = new JobStoreError(
+          `${slotPath(workspace, jobId, others)}: slot is unreadable (${error.message}). ${REPAIR}`);
+        refusal.refusal = true;
+        throw refusal;
+      }
+      if (top?.version === others && top?.jobId === jobId && !isTerminal(top)) return COMMIT.ALREADY;
+    }
+    return COMMIT.SUPERSEDED;
+  }
   // … and so is a canonical at or past this version with other bytes.
   if (current.record !== null && current.record.version >= version) return COMMIT.SUPERSEDED;
   // 4. A slot that vanished with nothing above it and a canonical below it was deleted by something
@@ -869,7 +893,7 @@ export async function transact(workspace, jobId, updater, { attempts = 50, onWon
     // and that its cleanup proves ownership rather than trusting the path.
     const bytes = JSON.stringify(stamped(candidate), null, 2) + "\n";
     const won = await publishNew(jobsDir(workspace), slotPath(workspace, jobId, target), bytes,
-      { mode: PRIVATE_FILE_MODE });
+      { mode: PRIVATE_FILE_MODE, testSeam: "link" });
 
     if (won) {
       // `onWon` is a documented test seam (the species of `cancelJob`'s `onResolved`): it runs in
@@ -909,7 +933,7 @@ export async function createRecord(workspace, record, { onPublished = null } = {
     throw new JobStoreError(`${record.jobId}: id is pruned (marker or tombstone present)`);
   }
   const created = await publishNew(dir, recordPath(workspace, record.jobId),
-    JSON.stringify(stamped(record), null, 2) + "\n", { mode: PRIVATE_FILE_MODE });
+    JSON.stringify(stamped(record), null, 2) + "\n", { mode: PRIVATE_FILE_MODE, testSeam: "link" });
   if (!created) throw new JobStoreError(`${record.jobId}: record already exists`);
   // The linearisation point against a concurrent prune is the MARKER, not this check: a prune that
   // published its marker before this publication landed owns the id, and this record is behind a

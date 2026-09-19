@@ -48,13 +48,19 @@ def rollup_tickets(runs):
 # ----------------------------------------------------------------------------- aggregates
 
 
+def reviewer_total(rt):
+    """Input + output, plus the reviews whose record kept only a billable total (vibe-224). Absent on runs
+    discovered before that key existed, so it reads as 0 and every earlier total is unchanged."""
+    return rt["input_total"] + rt["output"] + rt.get("billable_only", 0)
+
+
 def aggregate(runs, tz="UTC"):
     def bump(d, k):
         d[k] = d.get(k, 0) + 1
 
     status_dist, scenario_dist, repo_dist, backend_dist, mode_dist = {}, {}, {}, {}, {}
     priority_dist, fixver_dist = {}, {}
-    rev_tot = {"input_total": 0, "input_cached": 0, "output": 0, "reasoning_output": 0}
+    rev_tot = {"input_total": 0, "input_cached": 0, "output": 0, "reasoning_output": 0, "billable_only": 0}
     worker_tot = {"input_total": 0, "output": 0}
     tool_calls = 0
     findings = 0
@@ -115,7 +121,7 @@ def aggregate(runs, tz="UTC"):
         if day:
             d = per_day.setdefault(day, {"runs": 0, "reviewer_tokens": 0})
             d["runs"] += 1
-            d["reviewer_tokens"] += r["reviewer_tokens"]["input_total"] + r["reviewer_tokens"]["output"]
+            d["reviewer_tokens"] += reviewer_total(r["reviewer_tokens"])
 
     return {
         "status_dist": status_dist, "scenario_dist": scenario_dist, "repo_dist": repo_dist,
@@ -198,7 +204,7 @@ def bucket_signature(runs_subset):
     for r in sorted(runs_subset, key=lambda x: x["id"]):
         rt = r["reviewer_tokens"]
         parts.append("|".join(str(x) for x in [
-            r["id"], rt["input_total"] + rt["output"], r["n_rounds"], r["status_cat"],
+            r["id"], reviewer_total(rt), r["n_rounds"], r["status_cat"],
             r["timing"].get("active_seconds"), r["findings_caught"], len(r["commits"]),
             r["timing"].get("run_started_at"),
         ]))
@@ -213,7 +219,7 @@ def kpis_summary(ticket_rows, runs, aggr):
         "tasks": len(ticket_rows), "runs": len(runs),
         "success": sd.get("success", 0), "stopped": sd.get("stopped", 0),
         "failed": sd.get("failed", 0),
-        "reviewer_tokens": rt["input_total"] + rt["output"],
+        "reviewer_tokens": reviewer_total(rt),
         "worker_tokens_est": wt["input_total"] + wt["output"],
         "active_seconds": aggr["active_total"], "prs": len(aggr["prs"]),
         "findings": aggr["findings"], "commits": aggr["commits"],

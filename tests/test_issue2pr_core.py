@@ -1063,6 +1063,20 @@ class TestGoldenRuns(unittest.TestCase):
                 self.assertEqual(result["status"], "completed")
                 self.assertIn("verdict: approve", result["rawOutput"])
 
+    def test_the_golden_job_records_match_their_result_lines(self):
+        """vibe-224: the verdict is read from the record the store vouches for, so each reviewed golden
+        carries that record — from the same dispatch as its result line, or the pair proves nothing."""
+        for mode in ("single", "full"):
+            with self.subTest(mode=mode):
+                result = json.loads(
+                    (self.GOLDEN / mode / "reviewer-result.json").read_text(encoding="utf-8"))
+                payload = json.loads((self.GOLDEN / mode / "job.json").read_text(encoding="utf-8"))
+                self.assertEqual(len(payload["records"]), 1)
+                record = payload["records"][0]
+                self.assertEqual(record["jobId"], result["jobId"])
+                self.assertEqual((record["kind"], record["sandbox"]), ("review", "read-only"))
+                self.assertIn("verdict: approve", record["verdictText"])
+
     def test_every_driver_call_names_a_declared_operation(self):
         """The goldens exercise the seam, not just the folder layout.
 

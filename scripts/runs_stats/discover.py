@@ -160,26 +160,36 @@ def tokens_from_log(log):
 
 def usage_from_event_stream(path, warnings):
     """Parse a codex JSONL stream -> (token_block, tool_call_count). Accurate reviewer tokens."""
-    usage = None
-    tool_calls = 0
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except Exception:
-                    continue
-                t = ev.get("type")
-                if t in ("command_execution", "item.completed", "item.started"):
-                    tool_calls += 1
-                elif t == "turn.completed" and isinstance(ev.get("usage"), dict):
-                    usage = ev["usage"]
+            return _usage_from_lines(fh, path, warnings)
     except Exception as exc:
         warnings.append(f"stream-error: {path} :: {exc}")
         return None, 0
+
+
+def _usage_from_lines(lines, path, warnings):
+    """The stream reader's rules, over any iterable of lines — a file, or a job record's capture (vibe-224).
+
+    Unparseable lines are skipped, which is also what makes a bounded capture's elision markers harmless:
+    they are deliberately not JSON."""
+    usage = None
+    tool_calls = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        t = ev.get("type")
+        if t in ("command_execution", "item.completed", "item.started"):
+            tool_calls += 1
+        elif t == "turn.completed" and isinstance(ev.get("usage"), dict):
+            usage = ev["usage"]
     if not usage:
         return None, tool_calls
 
@@ -200,6 +210,33 @@ def usage_from_event_stream(path, warnings):
     }
     nb["input_uncached"] = max(nb["input_total"] - nb["input_cached"], 0)
     return nb, tool_calls
+
+
+def job_record_from(path, warnings):
+    """A step's `job.json` (vibe-224): the store's `jobs-cli status <id> --json` payload -> its one record.
+
+    Malformed is one warning and `None`, never an abort — the rule every data file here follows."""
+    payload = load_json(path, warnings)
+    if payload is None:
+        return None
+    records = payload.get("records") if isinstance(payload, dict) else None
+    record = records[0] if isinstance(records, list) and len(records) == 1 else None
+    if not isinstance(record, dict) or not isinstance(record.get("rawOutput"), (str, type(None))):
+        warnings.append(f"shape-error: {os.path.relpath(path)} :: not a one-record jobs-cli status payload")
+        return None
+    return record
+
+
+def tokens_from_job(record, path, warnings):
+    """-> (token_block, tool_calls). The split when the capture kept the usage event; otherwise the record's
+    billable total, carried as exactly that — never written into input/cached/output, which it cannot split."""
+    nb, calls = _usage_from_lines((record.get("rawOutput") or "").splitlines(), path, warnings)
+    if nb:
+        return nb, calls
+    billable = record.get("tokens")
+    if isinstance(billable, int) and not isinstance(billable, bool):
+        return {"billable_only": billable, "method": "runner-billable", "accuracy": "billable-only"}, calls
+    return None, calls
 
 
 # ----------------------------------------------------------------------------- unit discovery
@@ -239,7 +276,8 @@ def collect_units(run_dir, warnings):
             continue
         has_log = "log.json" in filenames
         stream_name = next((f for f in ("codex.jsonl", "reviewer.json") if f in filenames), None)
-        if not has_log and not stream_name:
+        has_job = "job.json" in filenames
+        if not has_log and not stream_name and not has_job:
             continue
         info = parse_unit_path(parts)
         unit = {"path": rel, **info, "tokens": None, "tool_calls": 0,
@@ -273,6 +311,20 @@ def collect_units(run_dir, warnings):
             unit["tool_calls"] = tc
             if nb:  # event stream wins for tokens (accurate)
                 unit["tokens"] = nb
+        elif has_job:  # vibe-224: the runner's record, which a stream in the same folder outranks
+            job_path = os.path.join(dirpath, "job.json")
+            record = job_record_from(job_path, warnings)
+            if record is not None:
+                nb, tc = tokens_from_job(record, job_path, warnings)
+                unit["tool_calls"] = tc
+                if nb and (nb["accuracy"] == "accurate" or not unit["tokens"]):
+                    unit["tokens"] = nb
+                unit["start"] = unit["start"] or parse_iso(record.get("startedAt"))
+                unit["end"] = unit["end"] or parse_iso(record.get("endedAt"))
+                if unit["duration"] is None and unit["start"] and unit["end"]:
+                    unit["duration"] = (unit["end"] - unit["start"]).total_seconds()
+                if unit["outcome"] is None and isinstance(record.get("status"), str):
+                    unit["outcome"] = record["status"]
         units.append(unit)
     return units
 
@@ -396,7 +448,7 @@ def normalize_status(raw, outcome, stop_reason):
         return "stopped", (stop_reason or raw_l or "stopped")
     if raw_l in ("failed",) or "timeout" in raw_l or raw_l == "watchdog_timeout":
         return "failed", (stop_reason or raw_l)
-    if raw_l in ("in_progress",) or raw_l.startswith("running"):
+    if raw_l in ("in_progress", "quota_paused") or raw_l.startswith("running"):
         return "in_progress", raw_l
     if raw_l in ("pending", "draft"):
         return "pending", raw_l
@@ -579,7 +631,9 @@ def build_execution_run(run_dir, rtype, parent_id, warnings):
     timing = compute_timing(units, state, meta)
 
     # token totals (reviewer accurate = event streams; worker estimate = estimate logs w/o stream)
-    rev = {"input_total": 0, "input_cached": 0, "output": 0, "reasoning_output": 0}
+    # `billable_only` (vibe-224): reviews whose record kept a total but no split. Never folded into the split.
+    rev = {"input_total": 0, "input_cached": 0, "output": 0, "reasoning_output": 0, "billable_only": 0}
+    billable_only_units = 0
     worker_est = {"input_total": 0, "output": 0}
     tool_calls = 0
     # mark step-level summary units that have token-bearing children
@@ -599,6 +653,9 @@ def build_execution_run(run_dir, rtype, parent_id, warnings):
         if tb["accuracy"] == "accurate":
             for k in rev:
                 rev[k] += tb.get(k, 0)
+        elif tb["accuracy"] == "billable-only":
+            rev["billable_only"] += tb["billable_only"]
+            billable_only_units += 1
         elif tb["accuracy"] == "estimate":
             worker_est["input_total"] += tb.get("input_total", 0)
             worker_est["output"] += tb.get("output", 0)
@@ -675,6 +732,7 @@ def build_execution_run(run_dir, rtype, parent_id, warnings):
         "pr_urls": pr_urls,
         "timing": timing,
         "reviewer_tokens": rev,
+        "reviewer_billable_only_units": billable_only_units,
         "worker_tokens_est": worker_est,
         "tool_calls": tool_calls,
         "findings_caught": findings_caught,

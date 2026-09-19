@@ -1,0 +1,39 @@
+{
+  "records": [
+    {
+      "jobId": "job_745b3b8712aa445890f5",
+      "incarnation": "5054cc0d6f9624287268c0bd4fbc873c",
+      "version": 3,
+      "kind": "review",
+      "status": "completed",
+      "sandbox": "read-only",
+      "effort": "medium",
+      "model": null,
+      "background": false,
+      "threadId": "thread_i2p_0001",
+      "verdictText": "Reviewed.\n\n```yaml\nverdict: approve\nfindings: []\n```",
+      "verdictState": "present",
+      "errorClass": null,
+      "workerPid": 40409,
+      "pgid": null,
+      "claimDigest": null,
+      "createdAt": "2026-09-19T02:32:27.955Z",
+      "startedAt": "2026-09-19T02:32:27.973Z",
+      "endedAt": "2026-09-19T02:32:28.074Z",
+      "updatedAt": "2026-09-19T02:32:28.074Z",
+      "heartbeatAt": null,
+      "timeoutMs": 1200000,
+      "exitCode": 0,
+      "rawOutput": "{\"type\":\"thread.started\",\"thread_id\":\"thread_i2p_0001\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Reviewed.\\n\\n```yaml\\nverdict: approve\\nfindings: []\\n```\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":100,\"cached_input_tokens\":40,\"output_tokens\":20,\"reasoning_output_tokens\":5}}\n",
+      "error": null,
+      "tokens": 80,
+      "pipesLeaked": false,
+      "stderrTail": "",
+      "signal": null,
+      "malformedLines": 0
+    }
+  ],
+  "invalid": [],
+  "abandoned": [],
+  "settled": []
+}

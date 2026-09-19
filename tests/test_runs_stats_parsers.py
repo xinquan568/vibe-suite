@@ -180,6 +180,7 @@ class TestNormalizeStatus(unittest.TestCase):
             (("failed", None, None), ("failed", "failed")),
             (("watchdog_timeout", None, None), ("failed", "watchdog_timeout")),
             (("running_step_4", None, None), ("in_progress", "running_step_4")),
+            (("quota_paused", None, None), ("in_progress", "quota_paused")),      # vibe-224: resumable pause
             (("pending", None, None), ("pending", "pending")),
             ((None, None, None), ("unknown", "(none)")),
             (("weird", None, None), ("unknown", "weird")),
@@ -409,6 +410,106 @@ class TestMainInProcess(unittest.TestCase):                                 # T2
                                    "--tz", "Asia/Shanghai", "--id-pattern", r"^vibe-(\d+)$"])
             self.assertIn(rc, (None, 0))
             self.assertRegex(out.getvalue(), r"parse warnings: 3")   # three runs, each timeline read fails once
+
+
+# ----------------------------------------------------------------------------- vibe-224: job records
+
+
+def job_payload(record):
+    """What `jobs-cli status <id> --json` writes: the store's payload, one record."""
+    return {"records": [record], "invalid": [], "abandoned": [], "settled": []}
+
+
+def job_record(raw_output, tokens=None, status="completed"):
+    return {"jobId": "job_0123456789abcdef0123", "kind": "review", "status": status,
+            "startedAt": "2026-09-19T02:00:00.000Z", "endedAt": "2026-09-19T02:05:00.000Z",
+            "rawOutput": raw_output, "tokens": tokens, "verdictText": "```yaml\nverdict: approve\nfindings: []\n```",
+            "verdictState": "present"}
+
+
+def stream(*events):
+    return "".join(json.dumps(e) + "\n" for e in events)
+
+
+SPLIT = stream({"type": "thread.started", "thread_id": "t"},
+               {"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": "x"}},
+               {"type": "item.completed", "item": {"type": "agent_message", "text": "v"}},
+               {"type": "turn.completed", "usage": {"input_tokens": 1000, "cached_input_tokens": 400,
+                                                    "output_tokens": 50, "reasoning_output_tokens": 0}})
+#: A bounded capture that kept the verdict and lost the usage event (the marker is deliberately not JSON).
+BOUNDED = ("[vibe-274: 900000 bytes elided to fit the record byte cap]\n"
+           + stream({"type": "item.completed", "item": {"type": "agent_message", "text": "v"}}))
+
+
+class TestJobRecordUnits(unittest.TestCase):                                  # vibe-224 T7
+    """A step folder holding the store's `job.json` is a runs-stats unit."""
+
+    def units(self, files):
+        with tempfile.TemporaryDirectory() as td:
+            step = Path(td) / "round-1" / "phase-1-analyze" / "step-2-review"
+            step.mkdir(parents=True)
+            for name, body in files.items():
+                (step / name).write_text(body if isinstance(body, str) else json.dumps(body))
+            w = []
+            return discover.collect_units(td, w), w
+
+    def test_a_split_usage_in_the_capture_is_accurate(self):
+        (unit,), w = self.units({"job.json": job_payload(job_record(SPLIT, tokens=650))})
+        tb = unit["tokens"]
+        self.assertEqual((tb["input_total"], tb["input_cached"], tb["output"], tb["method"], tb["accuracy"]),
+                         (1000, 400, 50, "codex-reported", "accurate"))
+        self.assertEqual(w, [])
+
+    def test_a_lost_usage_event_is_billable_only_and_claims_no_split(self):
+        (unit,), _ = self.units({"job.json": job_payload(job_record(BOUNDED, tokens=700))})
+        self.assertEqual(unit["tokens"], {"billable_only": 700, "method": "runner-billable",
+                                          "accuracy": "billable-only"})
+
+    def test_times_outcome_and_tool_calls_come_from_the_record(self):
+        (unit,), _ = self.units({"job.json": job_payload(job_record(SPLIT, tokens=650, status="timed_out"))})
+        self.assertEqual(unit["start"], dt(2026, 9, 19, 2, 0, 0))
+        self.assertEqual(unit["end"], dt(2026, 9, 19, 2, 5, 0))
+        self.assertEqual(unit["outcome"], "timed_out")
+        self.assertEqual(unit["tool_calls"], 2, "the same event types the stream reader counts")
+
+    def test_a_stream_beside_it_still_wins(self):
+        legacy = stream({"type": "turn.completed", "usage": {"input_tokens": 9, "output_tokens": 1}})
+        (unit,), _ = self.units({"job.json": job_payload(job_record(SPLIT, tokens=650)), "reviewer.json": legacy})
+        self.assertEqual((unit["tokens"]["input_total"], unit["tokens"]["output"]), (9, 1))
+
+    def test_a_malformed_job_json_warns_and_does_not_raise(self):
+        for body in ("{not json", json.dumps({"records": "nope"}), json.dumps({"records": [{"rawOutput": 5}]})):
+            with self.subTest(body=body):
+                units, w = self.units({"job.json": body})
+                self.assertEqual(len(units), 1)
+                self.assertIsNone(units[0]["tokens"])
+                self.assertEqual(len(w), 1, w)
+
+
+class TestJobRecordRollup(unittest.TestCase):                                 # vibe-224 T7b
+    """End to end through discover -> aggregate: a billable-only total is counted once and never split."""
+
+    def test_billable_only_reaches_the_kpi_total_and_nothing_else(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = Path(td) / "runs" / "vibe-224-rollup"
+            run.mkdir(parents=True)
+            (run / "00-meta.json").write_text(json.dumps({"source_id": "vibe-224",
+                                                          "created_at": "2026-09-19T01:59:00+00:00"}))
+            (run / "state.json").write_text(json.dumps({"status": "completed"}))
+            for step, body in (("step-2-review", job_record(SPLIT, tokens=650)),
+                               ("step-5-review", job_record(BOUNDED, tokens=700))):
+                d = run / "round-1" / "phase-x" / step
+                d.mkdir(parents=True)
+                (d / "job.json").write_text(json.dumps(job_payload(body)))
+            discover.configure(Path(td) / "runs", r"^vibe-(\d+)$")
+            w = []
+            r = discover.build_execution_run(str(run), "direct", None, w)
+        self.assertEqual(r["reviewer_tokens"], {"input_total": 1000, "input_cached": 400, "output": 50,
+                                                "reasoning_output": 0, "billable_only": 700})
+        self.assertEqual(r["reviewer_billable_only_units"], 1)
+        aggr = aggregate.aggregate([r])
+        self.assertEqual(aggr["reviewer_tokens"]["billable_only"], 700)
+        self.assertEqual(aggregate.kpis_summary([], [r], aggr)["reviewer_tokens"], 1000 + 50 + 700)
 
 
 if __name__ == "__main__":

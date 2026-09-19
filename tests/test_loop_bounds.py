@@ -218,9 +218,10 @@ class StubCase(TempDirMixin, unittest.TestCase):
                 # deliberately not JSON so the Stop gate's verdict fold cannot mistake one for an
                 # event. Skipping unparseable lines is the same rule that fold applies.
                 continue
-            if event.get("type") == "item.completed":
-                return event["text"]
-        raise AssertionError("no item.completed event")
+            # vibe-224: the verdict is an `agent_message` item, as the engine sends it.
+            if event.get("type") == "item.completed" and (event.get("item") or {}).get("type") == "agent_message":
+                return event["item"]["text"]
+        raise AssertionError("no agent_message item")
 
     def verdict_block(self, text):
         """The last fenced block — **`yaml`-tagged and ending the message**, as the contract requires.
@@ -244,7 +245,7 @@ class TestMarkerTolerance(StubCase):
 
     @staticmethod
     def event(text="the answer"):
-        return json.dumps({"type": "item.completed", "text": text})
+        return json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}})
 
     def test_answer_skips_a_marker_that_precedes_the_event(self):
         raw = self.MARKER + "\n" + self.event() + "\n"

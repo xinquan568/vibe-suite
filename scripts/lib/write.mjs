@@ -251,7 +251,7 @@ export async function writeAtomic(root, dest, content, { mode } = {}) {
  * not a loss: "something else is there" and "someone else got there first" are different answers,
  * and returning `false` for both would let a caller learn "it exists" by having clobbered it.
  */
-export async function publishNew(root, dest, content, { mode = DEFAULT_FILE_MODE } = {}) {
+export async function publishNew(root, dest, content, { mode = DEFAULT_FILE_MODE, testSeam = null } = {}) {
   await assertRoot(root);
   await assertInside(root, dest);
   const kind = await classify(dest);
@@ -262,6 +262,11 @@ export async function publishNew(root, dest, content, { mode = DEFAULT_FILE_MODE
   const staged = await stage(dir, path.basename(dest), content, mode);
   try {
     await fs.link(staged, dest);
+    // vibe-225: a crash seam for tests — a hard kill right after the link, before the scratch is removed or
+    // anything confirms the publication, which is exactly what a crash there leaves. It does nothing unless a
+    // caller opts in (`testSeam: "link"`: only the job store's record and version-slot publishes do) AND
+    // VIBE_TEST_FAIL_AFTER is exactly "link". SIGKILL, not process.exit: no `finally`, no exit handler runs.
+    if (testSeam === "link" && process.env.VIBE_TEST_FAIL_AFTER === "link") process.kill(process.pid, "SIGKILL");
   } catch (error) {
     if (error.code === "EEXIST") return false;
     throw error;

@@ -603,15 +603,56 @@ class Test_state_policy_cross_alignment(unittest.TestCase):
     classifier — constants AND behavior, both directions."""
 
     def _load(self, name, module_name):
+        """Import a helper from `auditor/scripts/` **without leaving bytecode behind**.
+
+        `exec_module` writes `auditor/scripts/__pycache__`, and that directory is policed: the
+        inventory tests require `auditor/scripts/` to hold exactly the thirty declared helpers and
+        deliberately count a stray DIRECTORY as undeclared content
+        (`test_auditor_workflows.py:1374-1380`, `:2638-2643`). So this module was quietly making
+        those assertions depend on run order — they pass when they run first and fail when they run
+        after it, in the same process or in a contract-tier subprocess spawned later by
+        `tests/test_tiers.py`. Which of those happens is decided by CI's `i % 4` shard partition,
+        so adding a single test module anywhere in `tests/` can move it. vibe-228 did exactly that.
+
+        The fix belongs here rather than in the inventory: "a stray `__pycache__` is undeclared
+        content" is the assertion working as intended, not a false positive to filter out.
+        `tests/test_auditor_findings_helpers.py` already uses this guard for the same reason.
+        """
         import importlib.util
         spec = importlib.util.spec_from_file_location(module_name, SCRIPTS / name)
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            sys.dont_write_bytecode = previous
         return mod
 
     def setUp(self):
         self.health = self._load("rule-health.py", "rule_health_under_test")
         self.refine = self._load("prepare-refinement-input.py", "refine_under_test")
+
+    def test_loading_a_helper_writes_no_bytecode_into_the_policed_directory(self):
+        """`setUp` has already loaded two helpers by the time this runs, so the check is on the
+        state they left: `auditor/scripts/` must hold no `__pycache__`.
+
+        Without the guard in `_load` this fails here **and** makes
+        `test_auditor_workflows`' inventory assertions depend on shard ordering — they police this
+        directory for undeclared entries and count a stray directory as one. That coupling is
+        invisible until a shard puts this module beside `tests/test_tiers.py`, whose guarded
+        contract run executes the inventory in a subprocess; CI's `i % 4` partition decides
+        whether it does, so adding any test module to `tests/` can flip it.
+        """
+        cache = SCRIPTS / "__pycache__"
+        self.assertFalse(cache.exists(),
+                         f"{cache} exists — loading an auditor helper left bytecode in a "
+                         "directory whose contents are asserted to be exactly the declared "
+                         "helpers")
+        self._load("rule-health.py", "rule_health_bytecode_probe")
+        self.assertFalse(cache.exists(),
+                         f"{cache} appeared while loading a helper; sys.dont_write_bytecode "
+                         "must be set around exec_module")
 
     def test_the_threshold_constants_are_identical(self):
         for name in ("MIN_HITS", "NOISY_FP_RATE", "DISPUTED_ACCEPTANCE"):

@@ -10,8 +10,8 @@ extension; it never stays in core because nobody wrote it down.
 
 **Three tiers, named before anything claims coverage** — the split link 2 arrived at:
 
-- **Executable** — `profile_lint.py`, `profile_manifest.py`, `watch_pr.py` are real programs and are
-  driven as subprocesses here.
+- **Executable** — `profile_lint.py` and `profile_manifest.py` are real programs and are driven as
+  subprocesses here; the third, `watch_pr.py`, is driven in `test_issue2pr_modes.py` (vibe-226: one home).
 - **Contract** — what the core *states*: nine citations, `## Round bounds`, the schemas, mode
   semantics, the refusal, zero project literals.
 - **Operator** — that a host session *reading the markdown* performs the nine steps. `VIBE_SUITE_CODEX_BIN`
@@ -798,38 +798,6 @@ class TestNoPinnedModel(unittest.TestCase):
                 hits = [l for l in path.read_text(encoding="utf-8").splitlines()
                         if MODEL_PIN.search(l) and "never" not in l.lower()]
                 self.assertEqual(hits, [], f"P9/D6: pinned model id in {path.name}: {hits}")
-
-
-class TestWatcherIsDriven(unittest.TestCase):
-    """The third Executable-tier program, actually run.
-
-    This module's docstring has named `watch_pr.py` as "driven as subprocesses here" since the port.
-    It was not — the file did not exist, and nothing invoked it. A tier claimed and not exercised is
-    the defect vibe-127 exists to correct, so the claim is discharged here rather than reworded.
-
-    Behaviour lives in `test_issue2pr_modes.py`, which drives the poll loop in-process against an
-    injected `gh` and clock. What belongs *here* is the tier's own claim: it is a program, and it
-    answers as one.
-    """
-
-    def watch(self, *args):
-        return subprocess.run([sys.executable, str(WATCH), *args],
-                              capture_output=True, text=True, timeout=60)
-
-    def test_it_answers_help(self):
-        result = self.watch("--help")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--merge-when-green", result.stdout)
-
-    def test_a_usage_error_exits_one_and_not_argparses_two(self):
-        """Exit 2 already means "closed without merge". A typo reporting that code would make a
-        chain mark the link `closed_unmerged` and pause."""
-        self.assertEqual(self.watch("owner/repo").returncode, 1)
-
-    def test_it_carries_no_repository_of_its_own(self):
-        """The repo is an argument. A watcher with a default target is a project literal with a
-        control flow attached."""
-        self.assertIn("repo", self.watch("--help").stdout)
 
 
 class LintCase(unittest.TestCase):

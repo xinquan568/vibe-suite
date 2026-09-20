@@ -38,7 +38,6 @@ SKILL = REPO_ROOT / "skills" / "issue2pr" / "SKILL.md"
 MODES_REF = REPO_ROOT / "skills" / "issue2pr" / "references" / "operational-modes.md"
 DRIVER_CONTRACT = REPO_ROOT / "skills" / "issue2pr" / "references" / "driver-contract.md"
 COMMAND = REPO_ROOT / "commands" / "issue2pr.md"
-CORE_TEST = REPO_ROOT / "tests" / "test_issue2pr_core.py"
 WATCH = REPO_ROOT / "scripts" / "watch_pr.py"
 
 #: Every mode the core defines. This began as four with manifest deliberately absent — #130 was the
@@ -89,7 +88,7 @@ def load_watcher():
 
 
 class TestModeSurfaceIsFrozen(unittest.TestCase):
-    """The structural checks below are drift detection. This one is the guarantee.
+    """The structural checks below are drift detection. This one freezes what is declared.
 
     A verifier hollowed this reference twice — first by blanking every field, then, once substance
     was required, by filling the unpinned cells with `alpha beta gamma delta` and keeping only the
@@ -102,18 +101,26 @@ class TestModeSurfaceIsFrozen(unittest.TestCase):
     resolution was a frozen golden plus an honest statement of scope, not a ninth check. This is the
     same shape, so it takes the same answer rather than re-running the experiment.
 
-    A hollowing is now a golden diff. The cost is that editing the reference means updating the
-    golden deliberately — which is the point: a specification should not erode quietly.
+    **What is frozen changed in vibe-226 (grill M30).** The golden used to be the whole document, so every
+    prose edit was a golden edit. It is now the eight parsed declaration blocks — what
+    `scripts/issue2pr_mode_driver.py` and these tests actually read — and the exact list of their markers, so
+    a block cannot be dropped, renamed or altered without a reviewed golden diff. The prose between them is
+    guarded only by the structural checks, which is the trade the issue asked for: the hollowing described
+    above would again pass here, and is caught only if it touches a declaration.
     """
 
-    GOLDEN = REPO_ROOT / "tests" / "fixtures" / "issue2pr" / "goldens" / "operational-modes.md"
+    GOLDEN = REPO_ROOT / "tests" / "fixtures" / "issue2pr" / "goldens" / "operational-modes.blocks.json"
 
-    def test_the_reference_matches_its_golden_byte_for_byte(self):
-        self.assertTrue(self.GOLDEN.is_file(), "the golden is missing")
-        self.assertEqual(
-            read(MODES_REF), self.GOLDEN.read_text(encoding="utf-8"),
-            "operational-modes.md differs from its golden. If the change is deliberate, copy it "
-            "over the golden in the same commit so the diff is reviewed rather than absorbed.")
+    def test_the_declarations_match_their_golden(self):
+        self.assertTrue(self.GOLDEN.is_file(), "the blocks golden is missing")
+        golden = json.loads(self.GOLDEN.read_text(encoding="utf-8"))
+        text = read(MODES_REF)
+        markers = re.findall(r"<!--\s*([a-z0-9-]+)\s*-->\s*```json", text)
+        self.assertEqual(markers, list(golden),
+                         "the declaration blocks are not exactly the golden's, in its order")
+        self.assertEqual({marker: json_block(text, marker) for marker in markers}, golden,
+                         "a declaration differs from its golden. If the change is deliberate, regenerate "
+                         "the golden in the same commit so the diff is reviewed rather than absorbed.")
 
 
 class TestModeSurfaceExists(unittest.TestCase):
@@ -514,21 +521,11 @@ class TestNoDocumentAssertsAnUndefinedCapability(unittest.TestCase):
         self.assertIn("operational-modes.md", read(DRIVER_CONTRACT),
                       "the driver contract's chain claims must cite the definition")
 
-    def test_the_core_suite_drives_the_third_executable_it_names(self):
-        """`test_issue2pr_core.py`'s docstring names three programs 'driven as subprocesses here'.
-        Two were. The Executable tier is enforced only when the third actually runs."""
-        text = read(CORE_TEST)
-        self.assertIn("watch_pr", text, "the core suite names watch_pr.py but never drives it")
-        # `WATCH` and `subprocess.run` both appearing somewhere in the file is not evidence: a
-        # cross-file regex matched that pair the moment S0 added the constant, and passed while
-        # nothing ran the program. The invocation itself must name it.
-        self.assertRegex(text, r"subprocess\.run\(\s*\[[^\]]*\bWATCH\b",
-                         "naming the watcher is not driving it — no subprocess call passes WATCH")
 
 
 class TestWatcherIsAProgram(unittest.TestCase):
-    def test_it_exists(self):
-        self.assertTrue(WATCH.is_file(), "scripts/watch_pr.py is missing")
+    """The one home for `scripts/watch_pr.py` as a program (vibe-226): it compiles, carries the header, and
+    answers as a subprocess. Its existence is `test_issue2pr_core`'s deliverables check."""
 
     def test_it_compiles(self):
         self.assertTrue(WATCH.is_file(), "scripts/watch_pr.py is missing")
@@ -553,6 +550,13 @@ class TestWatcherIsAProgram(unittest.TestCase):
         self.assertEqual(result.returncode, 1, "a usage error exits 1, before the loop")
         self.assertEqual(result.stdout, "", "a usage error writes no activity line — it exits "
                                             "before a Watcher exists (vibe-188)")
+
+    def test_it_carries_no_repository_of_its_own(self):
+        """The repo is an argument. A watcher with a default target is a project literal with a
+        control flow attached."""
+        result = subprocess.run([sys.executable, str(WATCH), "--help"],
+                                capture_output=True, text=True, timeout=30)
+        self.assertIn("repo", result.stdout)
 
 
 class WatcherCase(unittest.TestCase):

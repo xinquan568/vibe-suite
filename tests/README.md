@@ -34,10 +34,24 @@ assert on it (the **contract** tier). The rest run a process or call repository 
 one tier from the repo root:
 
     python3 tests/tiers.py behaviour     # or: contract, all; add -v / -f as for unittest
-    python3 tests/tiers.py list          # every test class and its tier (--json for tools)
+    python3 tests/tiers.py list          # every test class and its tier (--json for tools, --why for the reason)
 
-The tier is **computed from the test source, not tagged**: a class is contract when neither it nor anything it reaches
-in its module uses a subprocess, a module load, `exec`, or a non-stdlib import other than the pure test helpers. A class
-may set `tier = "behaviour"` or `tier = "contract"` to override. The module set is exactly CI's (every top-level
-`tests/test_*.py`), and `tests/test_tiers.py` holds that the two tiers partition it. **CI still runs both tiers** —
-everything.
+The tier is **computed from the test source, not tagged**, and the rule is an **allowlist**: a class is contract only
+when everything it references resolves to something known not to execute — a listed builtin, a listed standard-library
+module (`os`, `sys` and `unittest` judged per attribute, so `os.path` is fine and `os.system` is not), a test helper
+imported from the module that defines it, a method of its own class, or a listed method of a value. Anything the rule
+cannot resolve — an unlisted name, a wildcard import, reflection, a computed `getattr`, a string-driven load, a
+`mock.patch` of a string target — makes the class behaviour. A class may set `tier = "behaviour"` to force the safe
+side; there is no way to force *contract*, because an allowlist a class can opt out of is not one. To widen the rule,
+extend the lists at the top of `tests/tiers.py`: an omission only costs inner-loop speed, never a skipped test.
+
+The contract tier runs **under a guard**, so a class the rule gets wrong fails loudly instead of being skipped quietly:
+while `contract` runs, an audit hook refuses every process start and records every load of repository code, and on
+Python 3.12+ `sys.monitoring` records every call into repository code outside `tests/`. Installing a profiler, a tracer,
+another monitoring tool or an audit hook during that run is itself a violation, because each one suspends the guard's
+view. Any violation prints a table and the command exits 1. On Python 3.11 there is no `sys.monitoring`, so calls into
+already-loaded repository code are not detected and the command says so. `behaviour` and `all` run unguarded, which is
+where a test that must profile or trace belongs.
+
+The module set is exactly CI's (every top-level `tests/test_*.py`), and `tests/test_tiers.py` holds that the two tiers
+partition it. **CI still runs both tiers** — everything.

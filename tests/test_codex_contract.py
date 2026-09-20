@@ -126,6 +126,11 @@ class Expired(Exception):
     """The probe's single deadline ran out. Raised by whichever phase noticed."""
 
 
+class CleanupUnconfirmed(Exception):
+    """A helper overran and its process group could not be confirmed gone. Never a timeout: a timeout is weather,
+    an unreaped group is a defect in the probe."""
+
+
 def _remaining(deadline):
     """Seconds left on the probe's deadline. An exhausted deadline is exhausted — no phase gets a fresh grant."""
     left = deadline - time.monotonic()
@@ -136,6 +141,7 @@ def _remaining(deadline):
 
 def _run_bounded(argv, deadline, group_alive, **kwargs):
     """Run a helper under the probe's deadline, in its own process group, and reap that group if it overruns."""
+    _remaining(deadline)                       # nothing is launched on an exhausted budget
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                start_new_session=True, **kwargs)
     try:
@@ -145,8 +151,11 @@ def _run_bounded(argv, deadline, group_alive, **kwargs):
     try:
         out, err = process.communicate(timeout=_remaining(deadline))
     except (subprocess.TimeoutExpired, Expired):
-        reaped = _reap(process, pgid, group_alive)
-        raise Expired() from None if reaped else RuntimeError(f"cleanup unconfirmed for {argv[0]}")
+        # Two different outcomes, and the first draft collapsed them: `raise X from A if c else B` raises X either
+        # way and only picks its *cause*, so a group that survived was reported as an ordinary timeout.
+        if _reap(process, pgid, group_alive):
+            raise Expired() from None
+        raise CleanupUnconfirmed(f"cleanup unconfirmed: {Path(argv[0]).name}'s process group outlived SIGKILL")
     return process.returncode, out, err
 
 
@@ -197,6 +206,28 @@ def _discover(raw, drop=()):
         warnings = []
         block, tool_calls = discover.usage_from_event_stream(str(path), warnings)
         return block, tool_calls, warnings
+
+
+def _bounded_call(function, deadline):
+    """Run pure work under the probe's deadline. It cannot be interrupted, so the thread is a daemon: if it never
+    finishes, the probe still returns and the process still exits."""
+    left = _remaining(deadline)
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = function()
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(left)
+    if "error" in outcome:
+        raise outcome["error"]
+    if "value" not in outcome:
+        raise Expired()
+    return outcome["value"]
 
 
 def _check_optional(raw, usage):
@@ -275,7 +306,8 @@ def _reap(process, pgid, group_alive):
     return not group_alive(pgid)
 
 
-def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None, node_bin="node"):
+def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None, node_bin="node",
+          optional_check=None):
     """Run the installed binary once and report whether the event contract still holds.
 
     Skips carry a named environmental cause; anything unexplained is a failure, because a stream with no recognised
@@ -290,6 +322,7 @@ def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None, node_bi
         return Verdict("skip", f"binary absent: {binary or 'codex'} not found")
     timeout_ms = timeout_ms or int(os.environ.get("VIBE_SUITE_PROBE_TIMEOUT_MS", DEFAULT_TIMEOUT_MS))
     group_alive = group_alive or _group_is_alive
+    optional_check = optional_check or _check_optional
 
     argv = [str(binary), "exec", "--json", "-s", "read-only", "--skip-git-repo-check", PROMPT]
     deadline = time.monotonic() + timeout_ms / 1000          # one deadline for the whole probe, not per step
@@ -313,6 +346,8 @@ def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None, node_bi
         parsed = read_stream(raw, deadline, group_alive, node_bin=node_bin)
     except Expired:
         return Verdict("skip", f"timed out after {timeout_ms} ms (parsing the stream)", {"group_reaped": True})
+    except CleanupUnconfirmed as exc:
+        return Verdict("fail", str(exc), {"group_reaped": False})
     except RuntimeError as exc:
         return Verdict("fail", str(exc), {"group_reaped": False})
     said = "\n".join(part for part in (failure_text(raw), err) if part)
@@ -333,19 +368,19 @@ def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None, node_bi
 
     if not missing:
         try:
-            _remaining(deadline)          # the optional checks are inside the deadline too
+            detail, complaint = _bounded_call(lambda: optional_check(raw, usage), deadline)
         except Expired:
             return Verdict("skip", f"timed out after {timeout_ms} ms (validating the stream)",
                            {"group_reaped": True})
-        detail, complaint = _check_optional(raw, usage)
         if complaint:
             return Verdict("fail", complaint)
         detail["billable"] = parsed.get("billable")
         try:
             version = _run_bounded([str(binary), "--version"], deadline, group_alive)[1].strip()
-        except (Expired, RuntimeError):
-            version = ""          # diagnostic only: a slow version read never decides the contract, but its
-                                  # process group is reaped by _run_bounded before we move on
+        except Expired:
+            version = ""          # diagnostic only: a slow version read never decides the contract
+        except CleanupUnconfirmed as exc:
+            return Verdict("fail", str(exc), {"group_reaped": False})   # an unreaped group is not diagnostic
         detail["version"] = version
         return Verdict("pass", f"the event vocabulary matches ({version or 'version unreported'})", detail)
 
@@ -385,7 +420,7 @@ class FakeBinary(TempDirMixin):
     """Writes an executable stand-in for `codex` and records the argv it was called with."""
 
     def fake(self, out="", err="", code=0, sleep=0.0, spawn_child=False, ignore_sigterm=False, pids_file=None,
-             leader_exits=False, version_sleep=0.0):
+             leader_exits=False, version_sleep=0.0, version_child=False):
         root = Path(self.mkdtemp())
         argv_log = root / "argv.json"
         script = root / "fake-codex"
@@ -399,6 +434,12 @@ class FakeBinary(TempDirMixin):
             with open({str(argv_log)!r}, "a") as log:
                 log.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd()}}) + "\\n")
             if sys.argv[1:2] == ["--version"]:
+                if {version_child!r}:
+                    kid = os.fork()
+                    if kid > 0:
+                        json.dump([os.getpid(), kid], open({str(pids_file)!r}, "w"))
+                    else:
+                        time.sleep(300)
                 if {version_sleep!r}:
                     time.sleep({version_sleep!r})
                 sys.stdout.write("codex-cli 9.9.9-fake\\n")
@@ -726,6 +767,77 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
         verdict = outcome["verdict"]
         self.assertEqual(verdict.kind, "pass", verdict.reason)
         self.assertEqual(verdict.detail.get("version"), "")
+
+    def test_a_stalled_optional_check_times_out(self):
+        """The optional phase is pure computation, so it is bounded by a joined worker rather than left to run."""
+        script, _ = self.fake(out=stream(HEALTHY))
+
+        def slow(raw, usage):
+            time.sleep(60)
+            return {}, None
+
+        outcome = self.run_with_deadline(
+            lambda: self.probe(script, timeout_ms=1500, optional_check=slow), seconds=60)
+        self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
+        verdict = outcome["verdict"]
+        self.assertEqual(verdict.kind, "skip", verdict.reason)
+        self.assertIn("validating", verdict.reason)
+
+    def test_a_parser_group_that_survives_fails_rather_than_skipping(self):
+        """D4's distinction, for the helper: a timeout is weather, an unreaped group is a defect."""
+        pids_file = Path(self.mkdtemp()) / "node-pid.json"
+        script, _ = self.fake(out=stream(HEALTHY))
+        slow = self.stalling_node(pids_file)
+        try:
+            outcome = self.run_with_deadline(
+                lambda: self.probe(script, timeout_ms=1500, node_bin=str(slow), group_alive=lambda pgid: True),
+                seconds=60)
+            self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
+            verdict = outcome["verdict"]
+            self.assertEqual(verdict.kind, "fail", verdict.reason)
+            self.assertIn("cleanup unconfirmed", verdict.reason)
+            self.assertFalse(verdict.detail.get("group_reaped", True))
+        finally:
+            _kill_all(_recorded_pids(pids_file))
+
+    def test_a_version_group_that_survives_fails_rather_than_passing(self):
+        """A slow version read is diagnostic; a version group that outlives SIGKILL is not."""
+        script, _ = self.fake(out=stream(HEALTHY), version_sleep=30)
+        outcome = self.run_with_deadline(
+            lambda: self.probe(script, timeout_ms=3000, group_alive=lambda pgid: True), seconds=60)
+        self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
+        verdict = outcome["verdict"]
+        self.assertEqual(verdict.kind, "fail", verdict.reason)
+        self.assertIn("cleanup unconfirmed", verdict.reason)
+
+    def test_a_version_descendant_is_reaped(self):
+        """The version helper's whole group goes, not just the process the probe launched."""
+        pids_file = Path(self.mkdtemp()) / "version-pids.json"
+        script, _ = self.fake(out=stream(HEALTHY), version_sleep=30, version_child=True, pids_file=pids_file)
+        try:
+            outcome = self.run_with_deadline(lambda: self.probe(script, timeout_ms=3000), seconds=60)
+            self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
+            self.assertEqual(outcome["verdict"].kind, "pass", outcome["verdict"].reason)
+            recorded = _recorded_pids(pids_file)
+            self.assertEqual(len(recorded), 2, f"the fake did not report both version processes: {recorded}")
+            for pid in recorded:
+                with self.subTest(pid=pid):
+                    self.assertFalse(_process_is_alive(pid), "a version-helper process outlived the probe")
+        finally:
+            _kill_all(_recorded_pids(pids_file))
+
+    def test_no_helper_is_launched_on_an_exhausted_budget(self):
+        """An exhausted deadline stops work rather than starting another process.
+
+        The binary does not exist, which is what makes this deterministic: if the deadline is checked first that
+        never matters and `Expired` is raised, and if a process is launched anyway the launch itself fails with
+        `FileNotFoundError`. Watching for a log file instead raced — a helper can be reaped before it writes one,
+        so the assertion passed either way.
+        """
+        from tests import test_codex_contract as module
+        missing = str(Path(self.mkdtemp()) / "not-a-real-binary")
+        with self.assertRaises(module.Expired):
+            module._run_bounded([missing, "--version"], time.monotonic() - 1, lambda pgid: False)
 
     def test_an_unreapable_group_fails(self):
         """T9b — SIGKILL cannot be ignored, so the seam is how this branch is reachable."""

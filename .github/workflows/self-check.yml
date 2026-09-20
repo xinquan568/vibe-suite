@@ -1,6 +1,6 @@
 # Scheduled self-check (E8.4 / vibe-61).
 #
-# The suite auditing itself, on a schedule and on demand. Three jobs:
+# The suite auditing itself, on a schedule and on demand. Four jobs:
 #
 #   badge      refreshes the shields.io endpoint payload from the score history via
 #              `bin/vibe-badge`. The tool writes no files by design — the caller redirects —
@@ -12,11 +12,14 @@
 #              hand-edited `codex/` file is caught here even if no PR touched it. Mirror
 #              staleness is a drift defect: it appears with time, not with a commit, which is
 #              exactly what a scheduled run is for.
+#   codex-contract
+#              runs the opt-in real-CLI event-vocabulary probe once a week, and is a sequence of
+#              skipped steps when the OPENAI_API_KEY secret is absent (tests/test_codex_contract.py).
 #   macos      runs the Python and Node suites on macos-latest, exercising the documented
 #              POSIX/macOS support (README) on the weekly schedule — a compatibility smoke,
 #              off the PR path.
 #
-# All three jobs hold `contents: read` alone. This workflow reports; it changes nothing.
+# All four jobs hold `contents: read` alone. This workflow reports; it changes nothing.
 #
 # No model identifiers appear in this workflow (principle P9) — every tool uses its own
 # default.
@@ -143,21 +146,27 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    env:
+      # `secrets` is not readable from a step-level `if:` — only `env` is. So the credential's PRESENCE becomes an
+      # ordinary environment value here, and every step below tests that. Without the secret the whole job is a
+      # sequence of skipped steps: green, and visibly skipped. That is the documented skip path.
+      HAS_CREDENTIAL: ${{ secrets.OPENAI_API_KEY != '' && 'yes' || 'no' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        if: env.HAS_CREDENTIAL == 'yes'
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        if: env.HAS_CREDENTIAL == 'yes'
         with:
           python-version: '3.x'
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        if: env.HAS_CREDENTIAL == 'yes'
         with:
           node-version: 'lts/*'
 
-      # Every step below is skipped when the credential is absent, so a fork or a repository without the secret
-      # still sees a green, visibly-skipped job rather than a failure. That is the documented skip path.
       - name: Install the CLI
-        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        if: env.HAS_CREDENTIAL == 'yes'
         run: |
           set -euo pipefail
           npm install -g @openai/codex
@@ -166,7 +175,7 @@ jobs:
       - name: Probe the event vocabulary
         # One real turn a week. A drifted vocabulary fails here; a named environmental cause (quota, an
         # authentication refusal, a timeout) skips with its reason printed. See tests/test_codex_contract.py.
-        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        if: env.HAS_CREDENTIAL == 'yes'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           VIBE_SUITE_REAL_CODEX: '1'

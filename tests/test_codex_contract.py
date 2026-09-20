@@ -29,6 +29,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import textwrap
 import time
 import unittest
@@ -74,7 +75,7 @@ AUTH_PATTERNS = (
     r"\b401\b[^\n]{0,40}\b(unauthorized|forbidden|invalid)\b",
     r"\b(missing|invalid|no)\s+(openai[ _])?api[ _]key\b",
     r"\b(OPENAI_API_KEY|api[ _]key)\b[^\n]{0,24}\b(is\s+)?(missing|invalid|not set|unset)\b",
-    r"\b(OPENAI_API_KEY|api[ _]key)\b[^\n]{0,24}\b(is\s+)?(?<!not )(?<!n.t )(?<!no longer )required\b",
+    r"\b(OPENAI_API_KEY|api[ _]key)\b[^\n]{0,24}\b(is\s+)?(?<!not )(?<!n't )(?<!no longer )required\b",
 )
 
 
@@ -96,7 +97,6 @@ def failure_text(raw):
     authentication decision needs those words, so it reads them here: the string itself, or the object's message,
     code and type, or the event's own top-level message.
     """
-    said = []
     for line in raw.splitlines():
         try:
             event = json.loads(line)
@@ -104,6 +104,9 @@ def failure_text(raw):
             continue
         if not isinstance(event, dict) or event.get("type") != "turn.failed":
             continue
+        # The FIRST terminal event decides, as it does in events.mjs ("a stream cannot un-fail"). Reading every
+        # failure would let a later authentication refusal excuse an earlier unexplained one.
+        said = []
         error = event.get("error")
         if isinstance(error, str):
             said.append(error)
@@ -111,14 +114,20 @@ def failure_text(raw):
             said.extend(str(error.get(key)) for key in ("message", "code", "type") if error.get(key))
         if event.get("message"):
             said.append(str(event["message"]))
-    return "\n".join(said)
+        return "\n".join(said)
+    return ""
 
 
 def _reads_like_a_refusal(text):
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in AUTH_PATTERNS)
 
 
-def read_stream(raw):
+def _remaining(deadline):
+    """Seconds left on the probe's single deadline, never zero or negative."""
+    return max(0.5, deadline - time.monotonic())
+
+
+def read_stream(raw, deadline=None):
     """Parse the stream with the module production uses, and report what it extracted.
 
     Nothing here knows the event vocabulary: `scripts/lib/events.mjs` does, and that is the point of the probe.
@@ -135,8 +144,8 @@ def read_stream(raw):
             "const failure = events.terminal === 'failed' ? classifyFailure(events) : null;\n"
             "process.stdout.write(JSON.stringify({ ...events, failure, billable: billableTokens(events.usage) }));\n",
             encoding="utf-8")
-        result = subprocess.run(["node", str(reader), str(work / "stream.jsonl")],
-                                capture_output=True, text=True, timeout=60)
+        result = subprocess.run(["node", str(reader), str(work / "stream.jsonl")], capture_output=True, text=True,
+                                timeout=_remaining(deadline) if deadline else 60)
         if result.returncode != 0:
             raise RuntimeError(f"the production parser could not be run: {result.stderr.strip()}")
         return json.loads(result.stdout)
@@ -203,24 +212,29 @@ def _type_of(line):
 
 
 def _group_is_alive(pgid):
+    """True when the group still has a member we must not leave behind.
+
+    `EPERM` means the group exists and we may not signal it — that is *not* proof of absence, and reading it as
+    absence is how an unreaped descendant gets reported as a clean exit.
+    """
     try:
         os.killpg(pgid, 0)
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
     return True
 
 
-def _reap(process, group_alive):
+def _reap(process, pgid, group_alive):
     """SIGTERM the group, then SIGKILL it, then say whether it is confirmed gone.
 
-    Two details the first draft got wrong, both found by the tests: a group whose only member is a zombie cannot be
-    signalled at all (macOS answers EPERM), and the child has to be waited on before the group can empty — otherwise
-    the probe reports its own unreaped zombie as a group that survived SIGKILL.
+    `pgid` is captured when the child is launched, not looked up here: a process group outlives its leader, so a
+    leader that has already exited says nothing about the descendants still holding the pipe. Two details the first
+    draft also got wrong, both found by the tests: a group whose only member is a zombie cannot be signalled at all
+    (macOS answers EPERM), and the child has to be waited on before the group can empty — otherwise the probe reports
+    its own unreaped zombie as a group that survived SIGKILL.
     """
-    try:
-        pgid = os.getpgid(process.pid)
-    except ProcessLookupError:
-        return True
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pgid, sig)
@@ -230,8 +244,8 @@ def _reap(process, group_alive):
             process.wait(timeout=REAP_GRACE_S)
         except Exception:
             pass
-        deadline = time.monotonic() + REAP_GRACE_S
-        while time.monotonic() < deadline:
+        until = time.monotonic() + REAP_GRACE_S
+        while time.monotonic() < until:
             if not group_alive(pgid):
                 return True
             time.sleep(0.05)
@@ -255,19 +269,27 @@ def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None):
     group_alive = group_alive or _group_is_alive
 
     argv = [str(binary), "exec", "--json", "-s", "read-only", "--skip-git-repo-check", PROMPT]
+    deadline = time.monotonic() + timeout_ms / 1000          # one deadline for the whole probe, not per step
     with tempfile.TemporaryDirectory() as work:
         process = subprocess.Popen(argv, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    text=True, start_new_session=True)
         try:
-            raw, err = process.communicate(timeout=timeout_ms / 1000)
+            pgid = os.getpgid(process.pid)                   # captured now: a group outlives its leader
+        except ProcessLookupError:
+            pgid = process.pid
+        try:
+            raw, err = process.communicate(timeout=_remaining(deadline))
         except subprocess.TimeoutExpired:
-            reaped = _reap(process, group_alive)
+            reaped = _reap(process, pgid, group_alive)
             if not reaped:
                 return Verdict("fail", f"cleanup unconfirmed: the process group outlived SIGKILL "
                                        f"after timing out at {timeout_ms} ms", {"group_reaped": False})
             return Verdict("skip", f"timed out after {timeout_ms} ms", {"group_reaped": True})
 
-    parsed = read_stream(raw)
+    try:
+        parsed = read_stream(raw, deadline)
+    except subprocess.TimeoutExpired:
+        return Verdict("skip", f"timed out after {timeout_ms} ms (parsing the stream)", {"group_reaped": True})
     said = "\n".join(part for part in (failure_text(raw), err) if part)
     usage = parsed.get("usage") or {}
 
@@ -289,8 +311,11 @@ def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None):
         if complaint:
             return Verdict("fail", complaint)
         detail["billable"] = parsed.get("billable")
-        version = subprocess.run([str(binary), "--version"], capture_output=True, text=True,
-                                 timeout=30).stdout.strip()
+        try:
+            version = subprocess.run([str(binary), "--version"], capture_output=True, text=True,
+                                     timeout=_remaining(deadline)).stdout.strip()
+        except subprocess.TimeoutExpired:
+            version = ""          # diagnostic only: a slow version read never decides the contract
         detail["version"] = version
         return Verdict("pass", f"the event vocabulary matches ({version or 'version unreported'})", detail)
 
@@ -301,10 +326,28 @@ def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None):
     return Verdict("fail", "the event contract no longer holds: " + "; ".join(missing))
 
 
+def _process_is_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _recorded_pids(path):
+    try:
+        return [int(pid) for pid in json.loads(path.read_text())]
+    except Exception:
+        return []
+
+
 class FakeBinary(TempDirMixin):
     """Writes an executable stand-in for `codex` and records the argv it was called with."""
 
-    def fake(self, out="", err="", code=0, sleep=0.0, spawn_child=False, ignore_sigterm=False):
+    def fake(self, out="", err="", code=0, sleep=0.0, spawn_child=False, ignore_sigterm=False, pids_file=None,
+             leader_exits=False):
         root = Path(self.mkdtemp())
         argv_log = root / "argv.json"
         script = root / "fake-codex"
@@ -322,7 +365,12 @@ class FakeBinary(TempDirMixin):
                 sys.exit(0)
             if {spawn_child!r}:
                 # A descendant that holds the output pipe: killing only the parent would leave it running.
-                if os.fork() > 0:
+                child = os.fork()
+                if {str(pids_file)!r} != "None" and child > 0:
+                    json.dump([os.getpid(), child], open({str(pids_file)!r}, "w"))
+                if child > 0:
+                    if {leader_exits!r}:
+                        sys.exit(0)          # the leader goes at once; the descendant keeps the pipe open
                     time.sleep({sleep!r} or 30)
                     sys.exit({code!r})
                 os.setpgid(0, os.getpgid(os.getppid()))
@@ -394,13 +442,14 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
 
     def test_a_non_integral_usage_value_fails(self):
         """T18 — present but not a number is drift too."""
-        for value in ("many", None):
-            with self.subTest(value=value):
-                usage = dict(HEALTHY[2]["usage"], output_tokens=value)
-                events = HEALTHY[:2] + [{"type": "turn.completed", "usage": usage}]
-                verdict = self.probe(self.fake(out=stream(events))[0])
-                self.assertEqual(verdict.kind, "fail")
-                self.assertIn("output_tokens", verdict.reason)
+        for field in ("input_tokens", "cached_input_tokens", "output_tokens"):
+            for value in ("many", None, True):
+                with self.subTest(field=field, value=value):
+                    usage = dict(HEALTHY[2]["usage"], **{field: value})
+                    events = HEALTHY[:2] + [{"type": "turn.completed", "usage": usage}]
+                    verdict = self.probe(self.fake(out=stream(events))[0])
+                    self.assertEqual(verdict.kind, "fail", verdict.reason)
+                    self.assertIn(field, verdict.reason)
 
     def test_a_quota_failure_skips(self):
         """T5 — the repository's own classifier decides this one."""
@@ -446,6 +495,8 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
             "key is required": ([], "OPENAI_API_KEY is required\n"),
             "api key required": ([], "API key required. Please authenticate.\n"),
             "missing api key": ([], "missing API key\n"),
+            # Exclusive to the 401 pattern: no other declared pattern matches this text.
+            "401 forbidden": ([], "HTTP 401 forbidden by the gateway\n"),
         }
         for name, (events, err) in cases.items():
             with self.subTest(refusal=name):
@@ -473,6 +524,14 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
             events = [HEALTHY[0], HEALTHY[2]]          # completed, but no agent message
             script, _ = self.fake(out=stream(events), err="Not logged in.\n")
             self.assertEqual(self.probe(script).kind, "fail")
+
+    def test_a_later_refusal_cannot_excuse_the_first_failure(self):
+        """F5's regression — the first terminal event decides, as it does in events.mjs."""
+        events = [HEALTHY[0],
+                  {"type": "turn.failed", "error": {"code": "teapot", "message": "short and stout"}},
+                  {"type": "turn.failed", "error": "401 unauthorized"}]
+        verdict = self.probe(self.fake(out=stream(events))[0])
+        self.assertEqual(verdict.kind, "fail", verdict.reason)
 
     def test_optional_observations_are_checked_only_when_present(self):
         """T11 — absence is never a failure; a present value is checked through the consumer that reads it."""
@@ -502,14 +561,61 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
         self.assertEqual(verdict.detail["tool_events"], {"item.started": 1, "command_execution": 1})
 
     def test_a_timeout_skips_and_reaps_the_group(self):
-        """T9 — a descendant holds the pipe; both must be gone when the probe returns."""
-        script, _ = self.fake(out=stream(HEALTHY), spawn_child=True, sleep=30, ignore_sigterm=True)
+        """T9 — a descendant holds the pipe; both must be gone when the probe returns.
+
+        The probe's own `group_reaped` flag is not evidence: this test records the pids the fake reports and checks
+        them itself, under a watchdog that fires whatever the probe does, and kills whatever is left in `finally`.
+        """
+        pids_file = Path(self.mkdtemp()) / "pids.json"
+        script, _ = self.fake(out=stream(HEALTHY), spawn_child=True, sleep=30, ignore_sigterm=True,
+                              pids_file=pids_file)
+        result = {}
+        watchdog = threading.Timer(60.0, lambda: result.setdefault("hung", True))
+        watchdog.start()
         started = time.monotonic()
-        verdict = self.probe(script, timeout_ms=1500)
+        try:
+            verdict = self.probe(script, timeout_ms=1500)
+            elapsed = time.monotonic() - started
+        finally:
+            watchdog.cancel()
+            for pid in _recorded_pids(pids_file):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        self.assertNotIn("hung", result, "the probe did not return within the watchdog's window")
         self.assertEqual(verdict.kind, "skip", verdict.reason)
         self.assertIn("timed out", verdict.reason)
-        self.assertLess(time.monotonic() - started, 30, "the probe outlived its own deadline")
-        self.assertTrue(verdict.detail["group_reaped"])
+        self.assertLess(elapsed, 30, "the probe outlived its own deadline")
+        recorded = _recorded_pids(pids_file)
+        self.assertEqual(len(recorded), 2, f"the fake did not report both processes: {recorded}")
+        for pid in recorded:
+            with self.subTest(pid=pid):
+                self.assertFalse(_process_is_alive(pid), "a process the probe launched is still running")
+
+    def test_group_liveness_treats_permission_denial_as_presence(self):
+        """A group we may not signal still exists — reading EPERM as absence is how a survivor gets reported clean."""
+        from tests import test_codex_contract as module
+        self.assertTrue(module._group_is_alive(1), "an unsignalable group was reported gone")
+        self.assertFalse(module._group_is_alive(2 ** 22 - 1), "a non-existent group was reported alive")
+
+    def test_a_descendant_outliving_its_leader_is_still_reaped(self):
+        """A process group outlives its leader, so the group id must be captured at launch, not looked up during
+        cleanup — by then there may be nothing to look it up from."""
+        pids_file = Path(self.mkdtemp()) / "pids.json"
+        script, _ = self.fake(out=stream(HEALTHY), spawn_child=True, leader_exits=True, pids_file=pids_file)
+        try:
+            verdict = self.probe(script, timeout_ms=1500)
+        finally:
+            for pid in _recorded_pids(pids_file):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        self.assertEqual(verdict.kind, "skip", verdict.reason)
+        recorded = _recorded_pids(pids_file)
+        self.assertEqual(len(recorded), 2, f"the fake did not report both processes: {recorded}")
+        self.assertFalse(_process_is_alive(recorded[1]), "the descendant outlived the probe")
 
     def test_an_unreapable_group_fails(self):
         """T9b — SIGKILL cannot be ignored, so the seam is how this branch is reachable."""
@@ -534,12 +640,21 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
         self.assertFalse(str(REPO_ROOT) in recorded["cwd"], "the probe ran inside this checkout")
 
     def test_the_parser_is_the_production_one(self):
-        """T12 — the verdict comes from scripts/lib/events.mjs, not a second implementation."""
-        from tests import test_codex_contract as module
-        source = Path(module.__file__).read_text(encoding="utf-8")
-        self.assertIn("scripts/lib/events.mjs", source)
-        self.assertNotIn('"thread.started"', source.split("HEALTHY")[-1].split("class ")[0],
-                         "the probe re-implements the vocabulary instead of reading it through events.mjs")
+        """T12 — behaviour, not source-grepping: only `events.mjs` knows these fallback spellings.
+
+        `readEventStream` accepts `threadId` beside `thread_id` and `turn.usage` beside `usage`. A second parser
+        written for this test would not, so a stream spelled that way passes here and fails anything else — which is
+        what makes M1 (the Node evaluation replaced by a Python re-parse) detectable.
+        """
+        fallbacks = [
+            {"type": "thread.started", "threadId": "camel_case_thread"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
+            {"type": "turn.completed", "turn": {"usage": {"input_tokens": 5, "cached_input_tokens": 1,
+                                                          "output_tokens": 2}}},
+        ]
+        verdict = self.probe(self.fake(out=stream(fallbacks))[0])
+        self.assertEqual(verdict.kind, "pass", verdict.reason)
+        self.assertEqual(verdict.detail["billable"], 5 - 1 + 2)
 
 
 class TheWeeklyJob(unittest.TestCase):
@@ -553,16 +668,20 @@ class TheWeeklyJob(unittest.TestCase):
         self.assertRegex(body, r"permissions:")
         self.assertIn("VIBE_SUITE_REAL_CODEX", body)
         self.assertIn("tests.test_codex_contract.RealCodexContract", body)
-        # Every step that does work must be guarded, not just one of them: the documented skip path is "a
-        # repository without the secret sees a green, visibly-skipped job", and one unguarded step breaks it.
-        steps = [chunk for chunk in re.split(r"\n      - ", body) if "run:" in chunk or "uses:" in chunk]
-        self.assertGreaterEqual(len(steps), 2, body)
-        working = [chunk for chunk in steps if "run:" in chunk]
-        self.assertTrue(working, body)
-        for chunk in working:
-            with self.subTest(step=chunk.splitlines()[0].strip()):
-                self.assertRegex(chunk, r"if:\s*\$\{\{\s*.*secrets\.",
-                                 "a step that does work is not guarded by the secret")
+        # The credential's presence reaches the steps through job-level env, because `secrets` is not a context a
+        # step-level `if:` may read. The job must therefore declare it once...
+        self.assertRegex(body, r"env:\n(?:\s*#[^\n]*\n)*\s*HAS_CREDENTIAL:\s*\$\{\{[^\n]*secrets\.OPENAI_API_KEY",
+                         "the job does not derive the credential's presence into env")
+        self.assertNotRegex(body, r"if:[^\n]*secrets\.",
+                            "a step-level `if:` reads `secrets`, which GitHub does not evaluate there")
+        # ...and EVERY step must test it: the documented skip path is "a repository without the secret sees a
+        # green, visibly-skipped job", and one unguarded step breaks it.
+        steps = [chunk for chunk in re.split(r"\n      - ", body)[1:] if chunk.strip()]
+        self.assertGreaterEqual(len(steps), 5, body)
+        for chunk in steps:
+            with self.subTest(step=chunk.splitlines()[0].strip()[:40]):
+                self.assertRegex(chunk, r"if:\s*env\.HAS_CREDENTIAL == 'yes'",
+                                 "a step of the weekly job is not guarded by the credential")
 
     def test_the_workflow_adds_no_trigger(self):
         text = WORKFLOW.read_text(encoding="utf-8")

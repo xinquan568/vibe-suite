@@ -27,6 +27,38 @@ auditor tier against a reviewed manifest (`FastTestTier.AUDITOR_TIER`) and requi
 `test_auditor_*.py` set to equal it, so a non-auditor module cannot silently acquire the prefix
 (and be skipped) and a new auditor module cannot be added without a deliberate manifest update.
 
+## The real-codex contract probe (opt in; one call)
+
+Every other test drives a **fake** codex, which is why the suite is fast and free — and why the real event vocabulary
+is otherwise unverified. `tests/test_codex_contract.py` runs the installed binary **once** and asserts that the stream
+still carries what `scripts/lib/events.mjs` extracts from it, **through that module** rather than through a second
+parser:
+
+    VIBE_SUITE_REAL_CODEX=1 python3 -m unittest tests.test_codex_contract.RealCodexContract -v
+
+Without that variable it skips immediately, so an ordinary `unittest discover` — and every CI shard — spends nothing.
+`VIBE_SUITE_CODEX_BIN` points at another binary; `VIBE_SUITE_PROBE_TIMEOUT_MS` moves the deadline (120000 by default).
+The weekly `codex-contract` job in `.github/workflows/self-check.yml` runs the same command, with each step guarded by
+the `OPENAI_API_KEY` secret: a repository without it sees a green, visibly-skipped job.
+
+**A failure means the contract drifted; only a named cause skips.**
+
+| Outcome | Verdict |
+|---|---|
+| the opt-in is unset, or the binary is absent | skip |
+| the deadline passes and the process group is confirmed gone | skip |
+| a `turn.failed` the repository's own classifier calls a quota | skip |
+| the turn did not complete **and** the failure or stderr says it was refused for authentication | skip |
+| a completed turn missing any mandatory observation, or output that explains nothing | **fail** |
+| the process group outlives `SIGKILL` | **fail** ("cleanup unconfirmed") |
+
+The mandatory observations are a terminal `turn.completed`, a thread id, an agent message, and the three usage fields
+`billableTokens` subtracts. `reasoning_output_tokens` and the tool events (`item.started`, `command_execution`) are
+**optional**: absent they prove nothing, present they are checked through `scripts/runs_stats/discover.py`, the
+consumer that reads them. A renamed *optional* event is indistinguishable from an absent one; what catches a real
+vocabulary change is the mandatory set. An upstream outage will turn the weekly job red — the safe direction, since a
+red job is investigated and a silent green is not.
+
 ## Behaviour-only inner loop (the contract tier)
 
 A separate axis: about a quarter of the Python tests execute nothing — they read markdown, JSON or source text and

@@ -136,3 +136,40 @@ jobs:
           if [ ${#files[@]} -eq 0 ]; then echo "no Node tests found under tests/node/"; exit 0; fi
           printf 'discovered %d Node test file(s)\n' "${#files[@]}"
           node --test "${files[@]}"
+
+  codex-contract:
+    name: codex event contract (weekly, opt-in)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.x'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: 'lts/*'
+
+      # Every step below is skipped when the credential is absent, so a fork or a repository without the secret
+      # still sees a green, visibly-skipped job rather than a failure. That is the documented skip path.
+      - name: Install the CLI
+        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        run: |
+          set -euo pipefail
+          npm install -g @openai/codex
+          codex --version
+
+      - name: Probe the event vocabulary
+        # One real turn a week. A drifted vocabulary fails here; a named environmental cause (quota, an
+        # authentication refusal, a timeout) skips with its reason printed. See tests/test_codex_contract.py.
+        if: ${{ secrets.OPENAI_API_KEY != '' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          VIBE_SUITE_REAL_CODEX: '1'
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_codex_contract.RealCodexContract -v

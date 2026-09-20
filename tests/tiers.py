@@ -521,7 +521,7 @@ class Guard:
     """While active, records (test id, event, detail) for every process start, every load of code from a file in the
     repository, and every call into repository code outside tests/."""
 
-    def __init__(self, root, monitor=MONITOR, ambient=None):
+    def __init__(self, root, monitor=MONITOR, ambient=None, install=None):
         self.root = str(Path(root).resolve()) + "/"
         self.tests = self.root + "tests/"
         self.current = None
@@ -538,7 +538,10 @@ class Guard:
         self.monitor = monitor
         self.available = monitor is not None
         self._ambient = ambient if ambient is not None else self._installed_instrumentation
-        sys.addaudithook(self.observe)
+        self._closed = False
+        # An audit hook can never be uninstalled, so who installs it is a seam: a test that is not about the hook
+        # itself passes an installer that does nothing, and leaves this interpreter as it found it.
+        (install or sys.addaudithook)(self.observe)
         if self.available:
             tool = self.monitor.PROFILER_ID
             if self.monitor.get_tool(tool) is None:
@@ -603,7 +606,10 @@ class Guard:
         self.violations.append((self.current, event, detail))
 
     def observe(self, event, args):
-        """The audit hook, and the seam a unit test drives directly."""
+        """The audit hook, and the seam a unit test drives directly. A closed guard ignores everything: its hook
+        cannot be removed from the interpreter, so this is how it stops having an opinion."""
+        if self._closed:
+            return
         if event == "exec" and args and isinstance(args[0], types.CodeType):
             where = self._remember(args[0])   # active or not: the origin is fixed the first time the code is loaded
             if self.current is not None and where in ("repo", "tests"):
@@ -676,6 +682,14 @@ class Guard:
         self.check_ownership()
         self.check_instrumentation()
         self.current = None
+
+    def close(self):
+        """Retire the guard: its audit hook stays installed, as every audit hook must, but records nothing more."""
+        self.current = None
+        self._closed = True
+        if self.available and self.monitor.get_tool(self.monitor.PROFILER_ID) == TOOL_NAME:
+            self.monitor.set_events(self.monitor.PROFILER_ID, 0)
+            self.monitor.free_tool_id(self.monitor.PROFILER_ID)
 
 
 class GuardedResult(unittest.TextTestResult):

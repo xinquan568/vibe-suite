@@ -521,17 +521,22 @@ class TestGuardUnit(TempDirMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()
         self.tiers = load_tiers()
+        self.hooks = []                      # audit hooks the guard would have installed, collected instead
         self.root = Path(self.mkdtemp())
         (self.root / "tests").mkdir()
         (self.root / "scripts").mkdir()
         (self.root / "scripts" / "mod.py").write_text("def work():\n    return 1\n", encoding="utf-8")
 
     def guard(self, monitor=None, ambient=list):
-        """A guard whose view of the interpreter is supplied, so a coverage run's tracer is not mistaken for the
-        subject of the test. `ambient` returns what else is installed; the default here is nothing."""
-        guard = self.tiers.Guard(self.root, monitor=monitor or FakeMonitor(), ambient=ambient)
-        self.addCleanup(guard.stop)          # the hook stays installed for this process; stopping makes it inert
-        guard.start("t")
+        """A guard that installs nothing in this interpreter: its audit hook goes to a sink, its monitoring is a
+        fake, and its view of what else is installed is supplied. Nothing here outlives the test."""
+        return self.retired(self.tiers.Guard(self.root, monitor=monitor or FakeMonitor(), ambient=ambient,
+                                             install=self.hooks.append), start=True)
+
+    def retired(self, guard, start=False):
+        self.addCleanup(guard.close)
+        if start:
+            guard.start("t")
         return guard
 
     def test_a_process_start_is_recorded_and_refused(self):
@@ -558,8 +563,8 @@ class TestGuardUnit(TempDirMixin, unittest.TestCase):
 
     def test_instrumentation_installed_before_the_run_is_reported_when_it_starts(self):
         """T26 - held while inactive, reported at the boundary, so the guard never runs with a suspended view."""
-        guard = self.tiers.Guard(self.root, monitor=FakeMonitor(), ambient=list)
-        self.addCleanup(guard.stop)
+        guard = self.retired(self.tiers.Guard(self.root, monitor=FakeMonitor(), ambient=list,
+                                              install=self.hooks.append))
         guard.observe("sys.settrace", ())
         self.assertEqual(guard.violations, [])
         guard.start("t")
@@ -573,8 +578,8 @@ class TestGuardUnit(TempDirMixin, unittest.TestCase):
     def test_another_monitoring_tool_is_a_violation(self):
         """T26 - a tool registered while the guard was inactive is found by the boundary scan."""
         monitor = FakeMonitor()
-        guard = self.tiers.Guard(self.root, monitor=monitor)   # the real scan, over a monitor under test control
-        self.addCleanup(guard.stop)
+        guard = self.retired(self.tiers.Guard(self.root, monitor=monitor,   # the real scan, over a fake monitor
+                                              install=self.hooks.append))
         monitor.use_tool_id(4, "observer")
         guard.start("t")
         self.assertIn("instrumentation", [v[1] for v in guard.violations])
@@ -582,16 +587,31 @@ class TestGuardUnit(TempDirMixin, unittest.TestCase):
     def test_a_displaced_tool_is_a_violation(self):
         """T26 - the guard owns its tool id for the whole run."""
         monitor = FakeMonitor()
-        guard = self.tiers.Guard(self.root, monitor=monitor, ambient=list)
-        self.addCleanup(guard.stop)
+        guard = self.retired(self.tiers.Guard(self.root, monitor=monitor, ambient=list,
+                                              install=self.hooks.append))
         monitor.tools[monitor.PROFILER_ID] = "someone-else"
         guard.start("t")
         self.assertIn("guard displaced", [v[1] for v in guard.violations])
 
+    def test_a_retired_guard_records_nothing(self):
+        """A guard's audit hook cannot be uninstalled, so closing it must make it inert — otherwise every guard a
+        test builds keeps judging the rest of the process."""
+        guard = self.guard()
+        guard.close()
+        guard.observe("subprocess.Popen", (["true"],))          # no refusal, no record
+        guard.observe("sys.settrace", ())
+        self.assertEqual(guard.violations, [])
+        self.assertEqual(guard.pending, [])
+
+    def test_the_guard_installs_its_hook_through_the_seam(self):
+        """The production path installs exactly one audit hook; these tests collect it instead."""
+        self.guard()
+        self.assertEqual(len(self.hooks), 1)
+
     def test_call_monitoring_is_a_capability(self):
         """T27 - without sys.monitoring the guard still refuses processes and records loads, and says so."""
-        guard = self.tiers.Guard(self.root, monitor=None, ambient=list)
-        self.addCleanup(guard.stop)
+        guard = self.retired(self.tiers.Guard(self.root, monitor=None, ambient=list,
+                                              install=self.hooks.append))
         self.assertFalse(guard.available)
         guard.start("t")
         with self.assertRaises(PermissionError):
@@ -893,13 +913,13 @@ class TestGuardInAProcess(TempDirMixin, unittest.TestCase):
         with contextlib.redirect_stdout(printed):
             exit_code = tiers.main(["contract", "--root", str(root)], monitor=None,
                                    guard_factory=lambda r, monitor=None: self._stopped(
-                                       tiers.Guard(r, monitor=monitor, ambient=list)))
+                                       tiers.Guard(r, monitor=monitor, ambient=list, install=lambda hook: None)))
         self.assertEqual(exit_code, 0, printed.getvalue())
         self.assertIn("call monitoring unavailable", printed.getvalue())
         self.assertIn("still enforced by the audit hook", printed.getvalue())
 
     def _stopped(self, guard):
-        self.addCleanup(guard.stop)
+        self.addCleanup(guard.close)
         return guard
 
     @unittest.skipUnless(getattr(sys, "monitoring", None), "call monitoring needs sys.monitoring (3.12+)")
@@ -952,9 +972,9 @@ class TestGuardInAProcess(TempDirMixin, unittest.TestCase):
 
         def factory(root_arg, monitor=None):
             seen["modules"] = [name for name in sys.modules if "test_guard_ordering_fixture" in name]
-            guard = tiers.Guard(root_arg, monitor=monitor, ambient=list)
+            guard = tiers.Guard(root_arg, monitor=monitor, ambient=list, install=lambda hook: None)
             seen["guard"] = guard
-            self.addCleanup(guard.stop)
+            self.addCleanup(guard.close)
             return guard
 
         exit_code = tiers.main(["contract", "--root", str(root)], monitor=None, guard_factory=factory)

@@ -122,12 +122,35 @@ def _reads_like_a_refusal(text):
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in AUTH_PATTERNS)
 
 
+class Expired(Exception):
+    """The probe's single deadline ran out. Raised by whichever phase noticed."""
+
+
 def _remaining(deadline):
-    """Seconds left on the probe's single deadline, never zero or negative."""
-    return max(0.5, deadline - time.monotonic())
+    """Seconds left on the probe's deadline. An exhausted deadline is exhausted — no phase gets a fresh grant."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise Expired()
+    return left
 
 
-def read_stream(raw, deadline=None):
+def _run_bounded(argv, deadline, group_alive, **kwargs):
+    """Run a helper under the probe's deadline, in its own process group, and reap that group if it overruns."""
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                               start_new_session=True, **kwargs)
+    try:
+        pgid = os.getpgid(process.pid)
+    except ProcessLookupError:
+        pgid = process.pid
+    try:
+        out, err = process.communicate(timeout=_remaining(deadline))
+    except (subprocess.TimeoutExpired, Expired):
+        reaped = _reap(process, pgid, group_alive)
+        raise Expired() from None if reaped else RuntimeError(f"cleanup unconfirmed for {argv[0]}")
+    return process.returncode, out, err
+
+
+def read_stream(raw, deadline, group_alive, node_bin="node"):
     """Parse the stream with the module production uses, and report what it extracted.
 
     Nothing here knows the event vocabulary: `scripts/lib/events.mjs` does, and that is the point of the probe.
@@ -144,11 +167,10 @@ def read_stream(raw, deadline=None):
             "const failure = events.terminal === 'failed' ? classifyFailure(events) : null;\n"
             "process.stdout.write(JSON.stringify({ ...events, failure, billable: billableTokens(events.usage) }));\n",
             encoding="utf-8")
-        result = subprocess.run(["node", str(reader), str(work / "stream.jsonl")], capture_output=True, text=True,
-                                timeout=_remaining(deadline) if deadline else 60)
-        if result.returncode != 0:
-            raise RuntimeError(f"the production parser could not be run: {result.stderr.strip()}")
-        return json.loads(result.stdout)
+        code, out, err = _run_bounded([node_bin, str(reader), str(work / "stream.jsonl")], deadline, group_alive)
+        if code != 0:
+            raise RuntimeError(f"the production parser could not be run: {err.strip()}")
+        return json.loads(out)
 
 
 def _discover(raw, drop=()):
@@ -211,14 +233,15 @@ def _type_of(line):
     return event.get("type") if isinstance(event, dict) else None
 
 
-def _group_is_alive(pgid):
+def _group_is_alive(pgid, killpg=os.killpg):
     """True when the group still has a member we must not leave behind.
 
     `EPERM` means the group exists and we may not signal it — that is *not* proof of absence, and reading it as
-    absence is how an unreaped descendant gets reported as a clean exit.
+    absence is how an unreaped descendant gets reported as a clean exit. `killpg` is a seam so a test can supply
+    each error deterministically instead of hoping the platform produces one.
     """
     try:
-        os.killpg(pgid, 0)
+        killpg(pgid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -252,7 +275,7 @@ def _reap(process, pgid, group_alive):
     return not group_alive(pgid)
 
 
-def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None):
+def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None, node_bin="node"):
     """Run the installed binary once and report whether the event contract still holds.
 
     Skips carry a named environmental cause; anything unexplained is a failure, because a stream with no recognised
@@ -279,7 +302,7 @@ def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None):
             pgid = process.pid
         try:
             raw, err = process.communicate(timeout=_remaining(deadline))
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, Expired):
             reaped = _reap(process, pgid, group_alive)
             if not reaped:
                 return Verdict("fail", f"cleanup unconfirmed: the process group outlived SIGKILL "
@@ -287,9 +310,11 @@ def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None):
             return Verdict("skip", f"timed out after {timeout_ms} ms", {"group_reaped": True})
 
     try:
-        parsed = read_stream(raw, deadline)
-    except subprocess.TimeoutExpired:
+        parsed = read_stream(raw, deadline, group_alive, node_bin=node_bin)
+    except Expired:
         return Verdict("skip", f"timed out after {timeout_ms} ms (parsing the stream)", {"group_reaped": True})
+    except RuntimeError as exc:
+        return Verdict("fail", str(exc), {"group_reaped": False})
     said = "\n".join(part for part in (failure_text(raw), err) if part)
     usage = parsed.get("usage") or {}
 
@@ -307,15 +332,20 @@ def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None):
             missing.append(f"usage.{field} is not an integer ({usage[field]!r})")
 
     if not missing:
+        try:
+            _remaining(deadline)          # the optional checks are inside the deadline too
+        except Expired:
+            return Verdict("skip", f"timed out after {timeout_ms} ms (validating the stream)",
+                           {"group_reaped": True})
         detail, complaint = _check_optional(raw, usage)
         if complaint:
             return Verdict("fail", complaint)
         detail["billable"] = parsed.get("billable")
         try:
-            version = subprocess.run([str(binary), "--version"], capture_output=True, text=True,
-                                     timeout=_remaining(deadline)).stdout.strip()
-        except subprocess.TimeoutExpired:
-            version = ""          # diagnostic only: a slow version read never decides the contract
+            version = _run_bounded([str(binary), "--version"], deadline, group_alive)[1].strip()
+        except (Expired, RuntimeError):
+            version = ""          # diagnostic only: a slow version read never decides the contract, but its
+                                  # process group is reaped by _run_bounded before we move on
         detail["version"] = version
         return Verdict("pass", f"the event vocabulary matches ({version or 'version unreported'})", detail)
 
@@ -324,6 +354,14 @@ def probe(binary=None, opted_in=None, timeout_ms=None, group_alive=None):
     if parsed.get("terminal") != "completed" and _reads_like_a_refusal(said):
         return Verdict("skip", f"not authenticated: {said.strip().splitlines()[0] if said.strip() else 'refused'}")
     return Verdict("fail", "the event contract no longer holds: " + "; ".join(missing))
+
+
+def _kill_all(pids):
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 def _process_is_alive(pid):
@@ -347,7 +385,7 @@ class FakeBinary(TempDirMixin):
     """Writes an executable stand-in for `codex` and records the argv it was called with."""
 
     def fake(self, out="", err="", code=0, sleep=0.0, spawn_child=False, ignore_sigterm=False, pids_file=None,
-             leader_exits=False):
+             leader_exits=False, version_sleep=0.0):
         root = Path(self.mkdtemp())
         argv_log = root / "argv.json"
         script = root / "fake-codex"
@@ -361,6 +399,8 @@ class FakeBinary(TempDirMixin):
             with open({str(argv_log)!r}, "a") as log:
                 log.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd()}}) + "\\n")
             if sys.argv[1:2] == ["--version"]:
+                if {version_sleep!r}:
+                    time.sleep({version_sleep!r})
                 sys.stdout.write("codex-cli 9.9.9-fake\\n")
                 sys.exit(0)
             if {spawn_child!r}:
@@ -373,7 +413,8 @@ class FakeBinary(TempDirMixin):
                         sys.exit(0)          # the leader goes at once; the descendant keeps the pipe open
                     time.sleep({sleep!r} or 30)
                     sys.exit({code!r})
-                os.setpgid(0, os.getpgid(os.getppid()))
+                # The fork already inherits this group; looking it up through getppid() after the leader may
+                # have exited is a race that can land the child in the adopter's group instead.
                 time.sleep(120)
                 sys.exit(0)
             sys.stderr.write({err!r})
@@ -389,6 +430,27 @@ class FakeBinary(TempDirMixin):
 
 class ProbeVerdicts(FakeBinary, unittest.TestCase):
     """T1-T18 — the probe's own behaviour, driven by fakes. No real call is ever spent here."""
+
+    def run_with_deadline(self, call, seconds):
+        """Run `call` on a worker thread and give up on it after `seconds`, so a hang fails this test rather than
+        stalling the suite. The thread is a daemon: if it never returns, it cannot keep the runner alive."""
+        outcome = {}
+        started = time.monotonic()
+
+        def run():
+            try:
+                outcome["verdict"] = call()
+            except BaseException as exc:                     # reported, never swallowed
+                outcome["error"] = exc
+            finally:
+                outcome["elapsed"] = time.monotonic() - started
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(seconds)
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome
 
     def probe(self, script, **kwargs):
         from tests import test_codex_contract as module
@@ -569,35 +631,38 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
         pids_file = Path(self.mkdtemp()) / "pids.json"
         script, _ = self.fake(out=stream(HEALTHY), spawn_child=True, sleep=30, ignore_sigterm=True,
                               pids_file=pids_file)
-        result = {}
-        watchdog = threading.Timer(60.0, lambda: result.setdefault("hung", True))
-        watchdog.start()
-        started = time.monotonic()
         try:
-            verdict = self.probe(script, timeout_ms=1500)
-            elapsed = time.monotonic() - started
+            outcome = self.run_with_deadline(lambda: self.probe(script, timeout_ms=1500), seconds=60)
+            self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
+            verdict = outcome["verdict"]
+            self.assertEqual(verdict.kind, "skip", verdict.reason)
+            self.assertIn("timed out", verdict.reason)
+            self.assertLess(outcome["elapsed"], 30, "the probe outlived its own deadline")
+            recorded = _recorded_pids(pids_file)
+            self.assertEqual(len(recorded), 2, f"the fake did not report both processes: {recorded}")
+            # Checked BEFORE the fallback cleanup below, or the test would be grading its own kill.
+            for pid in recorded:
+                with self.subTest(pid=pid):
+                    self.assertFalse(_process_is_alive(pid), "a process the probe launched is still running")
         finally:
-            watchdog.cancel()
-            for pid in _recorded_pids(pids_file):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-        self.assertNotIn("hung", result, "the probe did not return within the watchdog's window")
-        self.assertEqual(verdict.kind, "skip", verdict.reason)
-        self.assertIn("timed out", verdict.reason)
-        self.assertLess(elapsed, 30, "the probe outlived its own deadline")
-        recorded = _recorded_pids(pids_file)
-        self.assertEqual(len(recorded), 2, f"the fake did not report both processes: {recorded}")
-        for pid in recorded:
-            with self.subTest(pid=pid):
-                self.assertFalse(_process_is_alive(pid), "a process the probe launched is still running")
+            _kill_all(_recorded_pids(pids_file))
 
     def test_group_liveness_treats_permission_denial_as_presence(self):
-        """A group we may not signal still exists — reading EPERM as absence is how a survivor gets reported clean."""
+        """A group we may not signal still exists — reading EPERM as absence is how a survivor gets reported clean.
+
+        Both errors are injected, so the case does not depend on what this machine happens to have running.
+        """
         from tests import test_codex_contract as module
-        self.assertTrue(module._group_is_alive(1), "an unsignalable group was reported gone")
-        self.assertFalse(module._group_is_alive(2 ** 22 - 1), "a non-existent group was reported alive")
+
+        def denied(pgid, sig):
+            raise PermissionError(1, "Operation not permitted")
+
+        def absent(pgid, sig):
+            raise ProcessLookupError(3, "No such process")
+
+        self.assertTrue(module._group_is_alive(4242, killpg=denied), "a group we may not signal was reported gone")
+        self.assertFalse(module._group_is_alive(4242, killpg=absent), "a vanished group was reported alive")
+        self.assertTrue(module._group_is_alive(4242, killpg=lambda pgid, sig: None))
 
     def test_a_descendant_outliving_its_leader_is_still_reaped(self):
         """A process group outlives its leader, so the group id must be captured at launch, not looked up during
@@ -605,17 +670,62 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
         pids_file = Path(self.mkdtemp()) / "pids.json"
         script, _ = self.fake(out=stream(HEALTHY), spawn_child=True, leader_exits=True, pids_file=pids_file)
         try:
-            verdict = self.probe(script, timeout_ms=1500)
+            outcome = self.run_with_deadline(lambda: self.probe(script, timeout_ms=1500), seconds=60)
+            self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
+            self.assertEqual(outcome["verdict"].kind, "skip", outcome["verdict"].reason)
+            recorded = _recorded_pids(pids_file)
+            self.assertEqual(len(recorded), 2, f"the fake did not report both processes: {recorded}")
+            self.assertFalse(_process_is_alive(recorded[1]), "the descendant outlived the probe")
         finally:
-            for pid in _recorded_pids(pids_file):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-        self.assertEqual(verdict.kind, "skip", verdict.reason)
-        recorded = _recorded_pids(pids_file)
-        self.assertEqual(len(recorded), 2, f"the fake did not report both processes: {recorded}")
-        self.assertFalse(_process_is_alive(recorded[1]), "the descendant outlived the probe")
+            _kill_all(_recorded_pids(pids_file))
+
+    def stalling_node(self, pids_file):
+        """A stand-in for `node` that never finishes and leaves a descendant holding the pipe.
+
+        The descendant is the point: killing the helper alone would leave it running, so this is what shows the
+        helper's whole process GROUP is reaped rather than just its leader.
+        """
+        script = Path(self.mkdtemp()) / "slow-node"
+        script.write_text(textwrap.dedent(f"""
+            #!/usr/bin/env python3
+            import json, os, time
+            child = os.fork()
+            if child > 0:
+                json.dump([os.getpid(), child], open({str(pids_file)!r}, "w"))
+                time.sleep(300)
+            time.sleep(300)
+        """).lstrip(), encoding="utf-8")
+        script.chmod(0o755)
+        return script
+
+    def test_a_stalled_parse_times_out_and_reaps(self):
+        """The parse runs inside the probe's one deadline, and its process group is reaped when it overruns."""
+        pids_file = Path(self.mkdtemp()) / "node-pid.json"
+        script, _ = self.fake(out=stream(HEALTHY))
+        slow = self.stalling_node(pids_file)
+        try:
+            outcome = self.run_with_deadline(
+                lambda: self.probe(script, timeout_ms=2000, node_bin=str(slow)), seconds=60)
+            self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
+            verdict = outcome["verdict"]
+            self.assertEqual(verdict.kind, "skip", verdict.reason)
+            self.assertIn("parsing", verdict.reason)
+            recorded = _recorded_pids(pids_file)
+            self.assertEqual(len(recorded), 2, "the stand-in parser did not record both processes")
+            for pid in recorded:
+                with self.subTest(pid=pid):
+                    self.assertFalse(_process_is_alive(pid), "a parser process outlived the probe")
+        finally:
+            _kill_all(_recorded_pids(pids_file))
+
+    def test_a_stalled_version_read_never_decides_the_contract(self):
+        """The version is diagnostic: a slow read leaves it empty, and the contract's verdict stands."""
+        script, _ = self.fake(out=stream(HEALTHY), version_sleep=30)
+        outcome = self.run_with_deadline(lambda: self.probe(script, timeout_ms=4000), seconds=60)
+        self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
+        verdict = outcome["verdict"]
+        self.assertEqual(verdict.kind, "pass", verdict.reason)
+        self.assertEqual(verdict.detail.get("version"), "")
 
     def test_an_unreapable_group_fails(self):
         """T9b — SIGKILL cannot be ignored, so the seam is how this branch is reachable."""

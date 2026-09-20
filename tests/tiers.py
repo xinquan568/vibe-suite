@@ -521,7 +521,7 @@ class Guard:
     """While active, records (test id, event, detail) for every process start, every load of code from a file in the
     repository, and every call into repository code outside tests/."""
 
-    def __init__(self, root, monitor=MONITOR):
+    def __init__(self, root, monitor=MONITOR, ambient=None):
         self.root = str(Path(root).resolve()) + "/"
         self.tests = self.root + "tests/"
         self.current = None
@@ -537,6 +537,7 @@ class Guard:
         # that is already loaded needs sys.monitoring, which owns its tool id and cannot be displaced (3.12+).
         self.monitor = monitor
         self.available = monitor is not None
+        self._ambient = ambient if ambient is not None else self._installed_instrumentation
         sys.addaudithook(self.observe)
         if self.available:
             tool = self.monitor.PROFILER_ID
@@ -649,12 +650,21 @@ class Guard:
         for event in self.pending:
             self._record("instrumentation", f"{event} (before enforcement)")
         self.pending.clear()
-        if sys.getprofile() is not None or sys.gettrace() is not None:
-            self._record("instrumentation", "a profile or trace hook is installed")
+        for what in self._ambient():
+            self._record("instrumentation", what)
+
+    def _installed_instrumentation(self):
+        """What is installed in this interpreter right now, besides the guard itself."""
+        found = []
+        if sys.getprofile() is not None:
+            found.append("a profile hook is installed")
+        if sys.gettrace() is not None:
+            found.append("a trace hook is installed")
         if self.available:
             for tool in range(6):
                 if tool != self.monitor.PROFILER_ID and self.monitor.get_tool(tool) is not None:
-                    self._record("instrumentation", f"monitoring tool {tool}: {self.monitor.get_tool(tool)}")
+                    found.append(f"monitoring tool {tool}: {self.monitor.get_tool(tool)}")
+        return found
 
     def check_ownership(self):
         """The monitoring tool id is ours for the whole run. A second profiling tool cannot take it silently: the

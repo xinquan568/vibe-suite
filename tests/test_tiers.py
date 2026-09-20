@@ -15,7 +15,9 @@ What these tests hold:
 - the command runs exactly the tier asked for and reports failure faithfully.
 """
 
+import contextlib
 import importlib
+import io
 import json
 import os
 import subprocess
@@ -524,8 +526,10 @@ class TestGuardUnit(TempDirMixin, unittest.TestCase):
         (self.root / "scripts").mkdir()
         (self.root / "scripts" / "mod.py").write_text("def work():\n    return 1\n", encoding="utf-8")
 
-    def guard(self, monitor=None):
-        guard = self.tiers.Guard(self.root, monitor=monitor or FakeMonitor())
+    def guard(self, monitor=None, ambient=list):
+        """A guard whose view of the interpreter is supplied, so a coverage run's tracer is not mistaken for the
+        subject of the test. `ambient` returns what else is installed; the default here is nothing."""
+        guard = self.tiers.Guard(self.root, monitor=monitor or FakeMonitor(), ambient=ambient)
         self.addCleanup(guard.stop)          # the hook stays installed for this process; stopping makes it inert
         guard.start("t")
         return guard
@@ -554,17 +558,22 @@ class TestGuardUnit(TempDirMixin, unittest.TestCase):
 
     def test_instrumentation_installed_before_the_run_is_reported_when_it_starts(self):
         """T26 - held while inactive, reported at the boundary, so the guard never runs with a suspended view."""
-        guard = self.tiers.Guard(self.root, monitor=FakeMonitor())
+        guard = self.tiers.Guard(self.root, monitor=FakeMonitor(), ambient=list)
         self.addCleanup(guard.stop)
         guard.observe("sys.settrace", ())
         self.assertEqual(guard.violations, [])
         guard.start("t")
         self.assertEqual([v[1] for v in guard.violations], ["instrumentation"])
 
+    def test_a_profile_or_trace_hook_already_installed_is_a_violation(self):
+        """T26 - the guard refuses to run under instrumentation it did not install, whoever installed it."""
+        guard = self.guard(ambient=lambda: ["a trace hook is installed"])
+        self.assertEqual([v[1] for v in guard.violations], ["instrumentation"])
+
     def test_another_monitoring_tool_is_a_violation(self):
         """T26 - a tool registered while the guard was inactive is found by the boundary scan."""
         monitor = FakeMonitor()
-        guard = self.tiers.Guard(self.root, monitor=monitor)
+        guard = self.tiers.Guard(self.root, monitor=monitor)   # the real scan, over a monitor under test control
         self.addCleanup(guard.stop)
         monitor.use_tool_id(4, "observer")
         guard.start("t")
@@ -573,7 +582,7 @@ class TestGuardUnit(TempDirMixin, unittest.TestCase):
     def test_a_displaced_tool_is_a_violation(self):
         """T26 - the guard owns its tool id for the whole run."""
         monitor = FakeMonitor()
-        guard = self.tiers.Guard(self.root, monitor=monitor)
+        guard = self.tiers.Guard(self.root, monitor=monitor, ambient=list)
         self.addCleanup(guard.stop)
         monitor.tools[monitor.PROFILER_ID] = "someone-else"
         guard.start("t")
@@ -581,7 +590,7 @@ class TestGuardUnit(TempDirMixin, unittest.TestCase):
 
     def test_call_monitoring_is_a_capability(self):
         """T27 - without sys.monitoring the guard still refuses processes and records loads, and says so."""
-        guard = self.tiers.Guard(self.root, monitor=None)
+        guard = self.tiers.Guard(self.root, monitor=None, ambient=list)
         self.addCleanup(guard.stop)
         self.assertFalse(guard.available)
         guard.start("t")
@@ -788,6 +797,112 @@ class TestGuardInAProcess(TempDirMixin, unittest.TestCase):
         self.assertIn("mod.py:gen", result.stdout, result.stdout)
 
     @unittest.skipUnless(getattr(sys, "monitoring", None), "call monitoring needs sys.monitoring (3.12+)")
+    def test_a_worker_started_while_the_tree_loads_is_covered(self):
+        """T24(c) - a thread a module starts at import, driven inside the test: the guard is already watching."""
+        root = self.tree(
+            "import importlib, sys, threading\nfrom pathlib import Path\n\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parent / 'scripts'))\n"
+            "mod = importlib.import_module('mod')\ngo, done, out = threading.Event(), threading.Event(), []\n\n\n"
+            "def _work():\n    go.wait(10)\n    out.append(mod.work())\n    done.set()\n\n\n"
+            "WORKER = threading.Thread(target=_work, daemon=True)\nWORKER.start()\n\n\n"
+            "def scratch_dir():\n    go.set()\n    done.wait(10)\n    WORKER.join(10)\n    return out[0]\n",
+            """
+            import unittest
+            from tmpdirs import scratch_dir
+            class Looks(unittest.TestCase):
+                def test_a(self):
+                    self.assertEqual(scratch_dir(), 'done')
+            """)
+        result = self.run_guarded(root)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("mod.py:work", result.stdout, result.stdout)
+
+    @unittest.skipUnless(getattr(sys, "monitoring", None), "call monitoring needs sys.monitoring (3.12+)")
+    def test_a_relative_import_then_a_directory_change_is_recorded(self):
+        """T24(b) - imported through a relative sys.path entry, called from somewhere else entirely."""
+        root = self.tree(
+            "import importlib, os, sys\n\nsys.path.insert(0, 'scripts')      # relative to the tree\n"
+            "mod = importlib.import_module('mod')\n\n\n"
+            "def scratch_dir():\n    os.chdir('/tmp')\n    return mod.work()\n",
+            """
+            import unittest
+            from tmpdirs import scratch_dir
+            class Looks(unittest.TestCase):
+                def test_a(self):
+                    self.assertEqual(scratch_dir(), 'done')
+            """)
+        result = self.run_guarded(root)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("call", result.stdout)
+
+    def test_a_module_cleanup_is_covered(self):
+        """T25 - addModuleCleanup runs after the last test of the module, still inside the guarded run."""
+        root = self.tree(
+            "import subprocess, unittest\n\n\ndef _run():\n    subprocess.run(['true'])\n\n\n"
+            "def scratch_dir():\n    unittest.addModuleCleanup(_run)\n    return 1\n",
+            "import unittest\nfrom tmpdirs import scratch_dir\n\n\n"
+            "def setUpModule():\n    scratch_dir()\n\n\n"
+            "class Looks(unittest.TestCase):\n    def test_a(self):\n        self.assertTrue(True)\n")
+        result = self.run_guarded(root)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("subprocess.Popen", result.stdout)
+
+    @unittest.skipUnless(getattr(sys, "monitoring", None), "sys.monitoring tools need 3.12+")
+    def test_a_real_monitoring_tool_is_refused_before_and_during_the_run(self):
+        """T26 - a second tool, registered for real, whether at import or inside a test."""
+        register = ("import sys\n\nM = sys.monitoring\n\n\ndef _take(tool=4):\n"
+                    "    M.use_tool_id(tool, 'observer')\n    M.register_callback(tool, M.events.PY_START,"
+                    " lambda code, offset: None)\n    M.set_events(tool, M.events.PY_START)\n")
+        for when, helper in (
+            ("at import", register + "\n\n_take()\n\n\ndef scratch_dir():\n    return 1\n"),
+            ("during the test", register + "\n\ndef scratch_dir():\n    _take()\n    return 1\n"),
+        ):
+            with self.subTest(registered=when):
+                root = self.tree(helper, """
+                    import unittest
+                    from tmpdirs import scratch_dir
+                    class Looks(unittest.TestCase):
+                        def test_a(self):
+                            self.assertEqual(scratch_dir(), 1)
+                """)
+                result = self.run_guarded(root)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("instrumentation", result.stdout)
+
+    def test_the_command_says_when_call_monitoring_is_missing(self):
+        """T27 - main's capability notice, exercised on any version through the monitor seam."""
+        tiers = load_tiers()
+        root = Path(self.mkdtemp())
+        (root / "tests").mkdir()
+        (root / "tests" / "test_capability_fixture.py").write_text(textwrap.dedent("""
+            import unittest
+            class Prose(unittest.TestCase):
+                def test_a(self):
+                    self.assertIn("a", "abc")
+        """), encoding="utf-8")
+        path_before, modules_before = list(sys.path), set(sys.modules)
+
+        def restore():
+            sys.path[:] = path_before
+            for name in set(sys.modules) - modules_before:
+                sys.modules.pop(name, None)
+            importlib.invalidate_caches()
+
+        self.addCleanup(restore)
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            exit_code = tiers.main(["contract", "--root", str(root)], monitor=None,
+                                   guard_factory=lambda r, monitor=None: self._stopped(
+                                       tiers.Guard(r, monitor=monitor, ambient=list)))
+        self.assertEqual(exit_code, 0, printed.getvalue())
+        self.assertIn("call monitoring unavailable", printed.getvalue())
+        self.assertIn("still enforced by the audit hook", printed.getvalue())
+
+    def _stopped(self, guard):
+        self.addCleanup(guard.stop)
+        return guard
+
+    @unittest.skipUnless(getattr(sys, "monitoring", None), "call monitoring needs sys.monitoring (3.12+)")
     def test_a_resumed_or_thrown_generator_is_recorded(self):
         """T24(d) - PY_RESUME and PY_THROW, the events a started generator arrives through."""
         for name, drive in (("resumed", "return next(values)"),
@@ -837,9 +952,15 @@ class TestGuardInAProcess(TempDirMixin, unittest.TestCase):
 
         def factory(root_arg, monitor=None):
             seen["modules"] = [name for name in sys.modules if "test_guard_ordering_fixture" in name]
-            return tiers.Guard(root_arg, monitor=monitor)
+            guard = tiers.Guard(root_arg, monitor=monitor, ambient=list)
+            seen["guard"] = guard
+            self.addCleanup(guard.stop)
+            return guard
 
-        exit_code = tiers.main(["contract", "--root", str(root)], guard_factory=factory)
+        exit_code = tiers.main(["contract", "--root", str(root)], monitor=None, guard_factory=factory)
+        self.assertIsNone(sys.monitoring.get_tool(sys.monitoring.PROFILER_ID)
+                          if getattr(sys, "monitoring", None) else None,
+                          "the in-process run left a monitoring tool registered")
         self.assertEqual(seen["modules"], [], "the guard was built after the tier's modules were loaded")
         self.assertIn("test_guard_ordering_fixture", ",".join(sys.modules), "the fixture module never loaded")
         self.assertEqual(exit_code, 0)

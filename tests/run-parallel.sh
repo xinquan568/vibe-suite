@@ -10,7 +10,8 @@
 #
 #   tests/run-parallel.sh [-j N] [-- <extra unittest args>]
 #
-# -j N : max parallel jobs (default: CPU count). Env NODE, CI, VIBE_SUITE_PINNED_TREES pass through.
+# -j N : max parallel jobs (default: CPU count). Env NODE, CI, VIBE_SUITE_PINNED_TREES,
+#        VIBE_SUITE_WORKSPACE_SKILLS pass through.
 set -euo pipefail
 
 JOBS="$( { command -v nproc >/dev/null 2>&1 && nproc; } || sysctl -n hw.ncpu 2>/dev/null || echo 4 )"

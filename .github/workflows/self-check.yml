@@ -1,6 +1,6 @@
 # Scheduled self-check (E8.4 / vibe-61).
 #
-# The suite auditing itself, on a schedule and on demand. Four jobs:
+# The suite auditing itself, on a schedule and on demand. Five jobs:
 #
 #   badge      refreshes the shields.io endpoint payload from the score history via
 #              `bin/vibe-badge`. The tool writes no files by design — the caller redirects —
@@ -12,6 +12,12 @@
 #              hand-edited `codex/` file is caught here even if no PR touched it. Mirror
 #              staleness is a drift defect: it appears with time, not with a commit, which is
 #              exactly what a scheduled run is for.
+#   reproducibility
+#              runs the two manifest-reproducibility gates and reports, by test id and reason, which
+#              of them did not run (tests/reproducibility_census.py). Both need a root that lives
+#              outside this repository, so on a runner both skip — and that is the point: M33's
+#              charge was that a gate which never executes gives the same green as one that passes.
+#              A counted skip in the run summary is the difference.
 #   codex-contract
 #              runs the opt-in real-CLI event-vocabulary probe once a week, and is a sequence of
 #              skipped steps when the OPENAI_API_KEY secret is absent (tests/test_codex_contract.py).
@@ -19,7 +25,7 @@
 #              POSIX/macOS support (README) on the weekly schedule — a compatibility smoke,
 #              off the PR path.
 #
-# All four jobs hold `contents: read` alone. This workflow reports; it changes nothing.
+# All five jobs hold `contents: read` alone. This workflow reports; it changes nothing.
 #
 # No model identifiers appear in this workflow (principle P9) — every tool uses its own
 # default.
@@ -139,6 +145,29 @@ jobs:
           if [ ${#files[@]} -eq 0 ]; then echo "no Node tests found under tests/node/"; exit 0; fi
           printf 'discovered %d Node test file(s)\n' "${#files[@]}"
           node --test "${files[@]}"
+
+  reproducibility:
+    name: reproducibility gates (weekly census)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.x'
+
+      - name: Reproducibility census
+        # Neither VIBE_SUITE_PINNED_TREES nor VIBE_SUITE_WORKSPACE_SKILLS is set here, deliberately:
+        # no runner holds either root, and SETTING one would make an unresolved root a failure and
+        # turn this job red for an honest absence. The job's product is the census, not a pass — it
+        # states weekly, in the run summary, which reproducibility gates did not execute and why.
+        # The pinned-tree gate keeps gating where it always did, in ci.yml's shard job.
+        run: |
+          set -euo pipefail
+          python3 tests/reproducibility_census.py
 
   codex-contract:
     name: codex event contract (weekly, opt-in)

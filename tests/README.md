@@ -59,6 +59,43 @@ consumer that reads them. A renamed *optional* event is indistinguishable from a
 vocabulary change is the mandatory set. An upstream outage will turn the weekly job red — the safe direction, since a
 red job is investigated and a silent green is not.
 
+## The reproducibility gates, and the census that reports them (opt in)
+
+Two gates check that a vendored manifest still describes the tree it stands for, and **both need a root that
+lives outside this repository**:
+
+| Variable | Points at | Gate |
+|---|---|---|
+| `VIBE_SUITE_PINNED_TREES` | the directory holding the `cc-suite` / `grill-for-claude` / `nlpm` checkouts | `TestManifestsAreReproducible` |
+| `VIBE_SUITE_WORKSPACE_SKILLS` | the live `.claude/skills` directory | `TestWorkspaceManifestIsReproducible` |
+
+Each obeys the same three-way contract, and **key membership decides, not the value**:
+
+| State | Outcome |
+|---|---|
+| unset | **skip**, with a reason that names the variable and what to point it at |
+| set to a path that works | the gate runs |
+| set and empty, or set to something that is not a checkout / directory | **fail** — never a skip |
+
+That last row is the load-bearing one. CI's shard job sets `VIBE_SUITE_PINNED_TREES` (`ci.yml`), so CI can never
+green-skip the pinned-tree gate; if the fetch step did not run, the gate goes red rather than quietly passing.
+
+**Neither root is guessed.** Until vibe-228 the pinned-tree root fell back to layout defaults — the directory beside
+the checkout, then a four-parent climb — and the workspace root was a hard-coded four-parent path to `.claude/skills`.
+That made whether a gate ran depend on what happened to sit next to your checkout, silently enrolled anything named
+like a pinned clone as the tree the manifests were verified against, and left the workspace gate executable on exactly
+one machine, where everywhere else it green-skipped. A local run now reads nothing outside the repository.
+
+Because a skip is the honest answer on a machine with no roots, the skip has to be **visible**:
+
+    python3 tests/reproducibility_census.py
+
+It runs both gates and prints every skip by test id and reason, with a count derived from `unittest`'s result object
+rather than from its printed output. Under GitHub Actions it appends the same table to `$GITHUB_STEP_SUMMARY`. Exit
+status is 0 unless a gate **failed or errored** — a counted skip is not a failure. The weekly `reproducibility` job in
+`.github/workflows/self-check.yml` runs exactly this command and sets neither variable, so the run summary states each
+week which reproducibility gates did not execute and why.
+
 ## Behaviour-only inner loop (the contract tier)
 
 A separate axis: about a quarter of the Python tests execute nothing — they read markdown, JSON or source text and

@@ -96,6 +96,58 @@ status is 0 unless a gate **failed or errored** — a counted skip is not a fail
 `.github/workflows/self-check.yml` runs exactly this command and sets neither variable, so the run summary states each
 week which reproducibility gates did not execute and why.
 
+## The judgment lane for `.vibe-test/` specs (opt in; weekly)
+
+`tests/test_vibe_test_specs.py` checks the specs **structurally**: they parse, name an artifact that exists, and use
+only headings a lane reads. Whether an artifact actually *meets* its spec (it triggers on the right requests, its output
+has the promised shape, it follows its rules) is a judgment. The `judgment-plan` → `judgment` → `judgment-report` jobs
+in `.github/workflows/self-check.yml` make that judgment weekly with a model. They run the tester's procedure in-session;
+the tester subagent itself is not invoked. `tests/judgment_lane.py` is the only repository code on the path:
+
+| Subcommand | Runs in | Does |
+|---|---|---|
+| `plan --root .` | `judgment-plan` | sorts the spec stems into batches of three: `{"include": [{"batch": 0, "specs": "a b c"}, …]}` |
+| `inventory --root . --specs "a b c" --out F` | `judgment` (before the model) | derives the checks the model must judge, one id per heading item (lanes 1-4) |
+| `report --root . --in DIR --plan-matrix JSON --out F` | `judgment-report` | validates each batch, recomputes lane 5, and writes the report |
+
+The model judges lanes 1-4 only. Lane 5 (the score) is recomputed from the score engine and never read from the model. A
+trigger's pass or fail is computed from the model's `predicted` answer. Rejection has two levels. If a document is not
+the schema (it is not JSON, has the wrong shape, holds a token-shaped string, or names a spec it was not assigned),
+every spec in its batch is reported `invalid batch`. If only one spec's verdict is wrong (a check id the inventory did
+not list, a missing id, or a field or value the schema does not name), only that spec is reported `invalid verdict`.
+The schema itself is stated in the model step's prompt, and a test holds the prompt to the validator's own tables.
+
+Nothing a batch contains can stop the report. An archive the reader cannot open (an encrypted, corrupt or unsupported
+member), JSON nested too deeply to parse, or an exception inside validation makes **that** batch `invalid batch` and
+leaves the others rendered. An archive over 4 MiB is refused twice: by its listed size before any download, and by
+its size on disk before it is parsed. The download stream itself is cut at one byte past the cap. Only stored or
+deflated members are read, because `zipfile`'s BZIP2 and LZMA readers decompress without an output bound. Validation
+work is bounded by the inventory: a verdict with more than 32 checks beyond its inventory, or a batch with more than 8
+spec entries beyond its assignment, is one message, not one per item.
+
+The model's own words reach the report in exactly three forms. A `note`, optional on every check, must be one line of at
+most 200 printable characters; it is always rendered after a `note: ` prefix, so it can never open or close a fence. A
+value quoted in a rejection (an unknown id, field or spec) is shown through `ascii()` and truncated to 60 characters, so
+it stays one line. The model id, validated by `MODEL_ID`, is rendered in a code span, which it cannot close.
+
+**The leg is untrusted from its model step on.** The model can reach the checkout, `.git/config`, the runner's
+environment files and its own transcript, so nothing after it runs repository code: a `jq` line records the model id,
+and the upload keeps `judgment-out/` for one day. The leg has no job outputs. The report job runs on a fresh runner
+and fetches only artifacts named exactly `judgment-batch-<k>` for a planned `k`, by explicit API endpoint, **before**
+any checkout. The helper reads `batch.json` and `model.txt` from each zip in memory (1 MiB each at most) and never
+extracts, under `python3 -I`. It recomputes the plan and requires it to equal the matrix it was handed, so a forged
+or truncated matrix writes no report.
+
+Without the `CLAUDE_CODE_OAUTH_TOKEN` secret, `judgment-plan` records `present=no` and the other two jobs are skipped
+visibly. The only thing that can be tested locally is everything except the model:
+
+    python3 -m unittest tests.test_judgment_lane -v
+
+That covers the helper, hostile archives, a golden report, and the three jobs' wiring, read from the parsed workflow.
+The gate and fetch scripts are extracted and executed against a stub `gh`. What no local test reaches is the first
+live run (an account setting, a quota). Also note that the workflow token is readable inside a leg: it is read-only,
+it expires when the job ends, and a raw batch artifact lives one day.
+
 ## Behaviour-only inner loop (the contract tier)
 
 A separate axis: about a quarter of the Python tests execute nothing — they read markdown, JSON or source text and

@@ -8,8 +8,10 @@ the exact score-engine invocation (D5), and both mandated fixtures. Runtime pred
 quality is the tester's judgment lane and is not simulated here.
 """
 
+import importlib.util
 import json
 import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -29,9 +31,13 @@ FOURTEEN = [
 STAGE_DELIVERED = ["scanner", "scorer", "vague-scanner", "checker", "tester"]
 #: Command specs delivered after the frozen stage — rung-5 NL-TDD REDs for later issues.
 #: AC-7's "14/14" stays exactly the agent list above; these are additional, typed inventories.
-COMMAND_SPECS = ["refresh-knowledge"]
+COMMAND_SPECS = ["refresh-knowledge",
+                 # vibe-229 (M35): the high-traffic commands
+                 "delegate", "roast", "score", "fix", "nl-audit", "preflight"]
 #: Skill specs — same rung-5 mechanism for skills/<name>/SKILL.md artifacts.
-SKILL_SPECS = ["runs-stats"]
+SKILL_SPECS = ["runs-stats",
+               # vibe-229 (M35): the workflow skills and the shared finding contract
+               "issue2pr", "refine-proposal", "vibe-core"]
 #: codex-src source specs (E7.1 / vibe-53) — the reverse-delegation source set, F9.6(d).
 #: Same rung-5 mechanism pointed at codex-src/<name>/SKILL.md.
 CODEX_SRC_SPECS = [
@@ -53,6 +59,33 @@ SOURCE_TOKENS = {
 }
 
 SKILL = REPO_ROOT / "skills" / "testing" / "SKILL.md"
+
+
+def _load_judgment_lane():
+    """The judgment lane's own helper, so the one-key rule is measured by the extractor the lane actually uses."""
+    spec = importlib.util.spec_from_file_location("judgment_lane_for_specs", REPO_ROOT / "tests" / "judgment_lane.py")
+    mod = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = previous
+    return mod
+
+
+JL = _load_judgment_lane()
+
+
+def frontmatter_bullet_problem(bullet):
+    """None when a `Frontmatter Valid` bullet of a new spec names exactly one candidate key and leads with it; otherwise
+    the problem. The rule's ONLY cardinality check is the `!= 1` below (vibe-229 round 2, C5)."""
+    keys = JL._candidate_keys(bullet)
+    if len(keys) != 1:
+        return f"names {len(keys)} candidate keys {keys}; exactly one is required"
+    if not bullet.lstrip("- ").startswith(f"`{keys[0]}`"):
+        return f"must lead with its one key `{keys[0]}`"
+    return None
 
 
 def squash(text):
@@ -303,6 +336,51 @@ class Fixtures(unittest.TestCase):
         self.assertTrue((root / "agents" / "local.md").is_file())
         local = (root / "agents" / "local.md").read_text(encoding="utf-8")
         self.assertIn("description: Use when", local)
+
+
+#: vibe-229 (M35): the specs added for the high-traffic commands and skills.
+M35_SPECS = ["delegate", "roast", "score", "fix", "nl-audit", "preflight",
+             "issue2pr", "refine-proposal", "vibe-core"]
+#: The only sections any lane evaluates (agents/tester.md:21-45; skills/testing/SKILL.md:35-93).
+EVALUATED_SECTIONS = {"Triggers On", "Does Not Trigger On", "Frontmatter Valid", "Output Contains",
+                      "Output Format", "Handles Input", "Follows Rules"}
+
+
+class NewSpecDiscipline(unittest.TestCase):
+    """The nine M35 specs are written so that every assertion in them is actually judged.
+
+    The two older specs carry `Behavior` sections, and no lane reads those — the judgment-lane report lists them as not
+    evaluated. New specs must not repeat that: behaviour goes into `Handles Input` rows or `Output Format` items, where a
+    lane judges it. And every `Frontmatter Valid` bullet names exactly one backticked key, so a frontmatter failure can
+    only ever name a key the spec itself chose (tests/judgment_lane.py binds the model's `key` to these candidates).
+    """
+
+    def test_every_new_spec_uses_only_evaluated_sections_and_keyed_frontmatter(self):
+        for name in M35_SPECS:
+            with self.subTest(spec=name):
+                text = (SPECS / f"{name}.spec.md").read_text(encoding="utf-8")
+                headings = re.findall(r"^## (.+?)\s*$", text, re.M)
+                self.assertTrue(headings, f"{name}: no sections")
+                self.assertEqual([h for h in headings if h not in EVALUATED_SECTIONS], [],
+                                 f"{name}: a section no lane evaluates")
+                for bullet in section_items(text, "Frontmatter Valid") or []:
+                    self.assertIsNone(frontmatter_bullet_problem(bullet), f"{name}: {bullet}")
+
+    def test_the_bullet_rule_refuses_two_candidate_keys(self):
+        """The negative case: a literal value in backticks, and a plain word that is a known field, each add a key."""
+        for bullet in ("`name` equal to `issue2pr`",
+                       "`description` present, naming version, auth mode, exec smoke and dynamic model discovery"):
+            with self.subTest(bullet=bullet):
+                self.assertIsNotNone(frontmatter_bullet_problem(bullet))
+
+    def test_every_new_spec_artifact_resolves(self):
+        for name in M35_SPECS:
+            with self.subTest(spec=name):
+                fm = spec_frontmatter((SPECS / f"{name}.spec.md").read_text(encoding="utf-8"))
+                self.assertTrue((REPO_ROOT / fm["artifact"]).is_file(), fm["artifact"])
+
+    def test_the_m35_list_is_exactly_the_new_command_and_skill_specs(self):
+        self.assertEqual(sorted(M35_SPECS), sorted(COMMAND_SPECS[1:] + SKILL_SPECS[1:]))
 
 
 if __name__ == "__main__":

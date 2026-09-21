@@ -11,8 +11,17 @@ Each program also states its codes in one marker line in its own header, in its 
 
 - **A Python program that raises an uncaught exception exits 1**: the interpreter's traceback exit. The
   tables list only the codes a program chooses.
+- **A Node program exits 1 on an error it does not handle.** The three CLIs (`codex-runner.mjs`,
+  `jobs-cli.mjs`, `preflight-cli.mjs`) run `main` through `scripts/lib/cli.mjs`'s `runMain`, which prints the
+  error to stderr and sets exit 1; elsewhere it is Node's own default. The two hooks catch the faults of their
+  main flow and exit 0 for those, as their tables say. An error outside those handlers (at module load, or an
+  asynchronous stream error such as a closed pipe) follows Node's default.
 - **A program built on `argparse` exits 2 on a usage error**, unless its table lists usage under
   another code (`scripts/watch_pr.py` uses 1).
+- **A help option prints the program's help and exits 0.** This holds for the 33 programs built on
+  `argparse`, and for the seven shell helpers with a `--help` branch (`init.sh`, `unbridge.sh` and the five
+  `migrate/*.sh`). The tables list only the other outcomes. The other programs have no help option: they treat
+  `--help` as any other argument, with the codes their tables list.
 - **The codes are per-program vocabularies, not one global scheme.** `2` is "usage" to
   `scripts/jobs-cli.mjs`, "closed without merge" to `scripts/watch_pr.py`, and "refusal" to
   `scripts/issue2pr_mode_driver.py`. Each is a contract its callers already rely on, so none was
@@ -45,7 +54,7 @@ they exist, and are otherwise a reviewed statement.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | badge emitted, including the no-data badge |
+| 0 | emitted: the badge (the no-data badge included), or with --attestation the attestation payload |
 | 2 | refused: an empty --scope, an unreadable or malformed history, or nothing to attest |
 
 ### `bin/vibe-build-case-studies-index`
@@ -168,7 +177,7 @@ they exist, and are otherwise a reviewed statement.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | done |
+| 0 | done, or a listing (--list-owned, --list-checkpoints) |
 | 1 | error |
 | 3 | a helper needs a decision |
 
@@ -270,7 +279,7 @@ they exist, and are otherwise a reviewed statement.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | ran: changes applied, or none needed |
+| 0 | ran: changes applied, none needed, or reported by --dry-run without writing |
 | 2 | the root is not a directory or was refused as a containment root (for example a symlink), or usage |
 | 3 | a write was refused by the atomic primitive |
 
@@ -280,7 +289,7 @@ they exist, and are otherwise a reviewed statement.
 | --- | --- |
 | 0 | written, or nothing to do |
 | 1 | error |
-| 3 | conflicts: nothing was written (see .vibe-suite-state/migration-conflicts.json) |
+| 3 | conflicts: the report .vibe-suite-state/migration-conflicts.json is written, and nothing else |
 
 ### `scripts/migrate/migrate-history.sh`
 
@@ -295,7 +304,7 @@ they exist, and are otherwise a reviewed statement.
 | --- | --- |
 | 0 | done, or nothing to do |
 | 1 | error |
-| 3 | a decision is required: without --confirm it reports and changes nothing |
+| 3 | a decision is required: without --confirm it writes a report and changes nothing else |
 
 ### `scripts/migrate/migrate-state.sh`
 
@@ -381,14 +390,14 @@ they exist, and are otherwise a reviewed statement.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | success, and every runtime fault (reported and swallowed) |
+| 0 | success, and any fault its handler catches (fail-open) |
 | 2 | usage: an unknown or missing --event |
 
 ### `scripts/stop-review-gate-hook.mjs`
 
 | Code | Meaning |
 | --- | --- |
-| 0 | always: the decision is the output, never the exit code |
+| 0 | every decision, and any fault its handler catches: the decision is the output, never the exit code |
 
 ### `scripts/trend_engine.py`
 
@@ -401,7 +410,7 @@ they exist, and are otherwise a reviewed statement.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | removed, nothing to remove, or help |
+| 0 | removed, or nothing to remove |
 | 1 | error, or an unknown argument |
 | 3 | dry run: --confirm is needed |
 

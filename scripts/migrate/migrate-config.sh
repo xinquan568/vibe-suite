@@ -11,7 +11,7 @@
 # other artifact — this script included — knows how `.vibe-suite.md` is spelled.
 #
 # Usage: migrate-config.sh [--workspace DIR] [--resolution FILE]
-#   Exit codes: 0 written, or nothing to do · 1 error · 3 conflicts: nothing was written (see .vibe-suite-state/migration-conflicts.json)
+#   Exit codes: 0 written, or nothing to do · 1 error · 3 conflicts: the report .vibe-suite-state/migration-conflicts.json is written, and nothing else
 
 set -euo pipefail
 # shellcheck source=scripts/migrate/common.sh

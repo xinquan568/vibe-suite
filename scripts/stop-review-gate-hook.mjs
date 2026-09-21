@@ -33,7 +33,7 @@
 //
 // **Node floor: 18.** No top-level await.
 //
-// Exit codes: 0 always: the decision is the output, never the exit code
+// Exit codes: 0 every decision, and any fault its handler catches: the decision is the output, never the exit code
 
 import { spawnSync } from "node:child_process";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";

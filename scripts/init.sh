@@ -26,7 +26,7 @@
 #                [--resolve-state true|false | --decline-state]
 #                [--confirm-sentinels yes|no] [--non-interactive]
 #                [--list-owned] [--list-checkpoints]
-# Exit codes: 0 done · 1 error · 3 a helper needs a decision
+# Exit codes: 0 done, or a listing (--list-owned, --list-checkpoints) · 1 error · 3 a helper needs a decision
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

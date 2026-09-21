@@ -8,7 +8,7 @@
 #
 # Usage: unbridge.sh [--workspace DIR] [--confirm]
 #   Without --confirm it reports what would be removed and changes nothing.
-# Exit codes: 0 removed, nothing to remove, or help · 1 error, or an unknown argument · 3 dry run: --confirm is needed
+# Exit codes: 0 removed, or nothing to remove · 1 error, or an unknown argument · 3 dry run: --confirm is needed
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 workspace="." confirm=0

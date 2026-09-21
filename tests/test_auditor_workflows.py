@@ -1683,7 +1683,7 @@ class TestParsedLint(unittest.TestCase):
     def test_census_recount_over_all_26_workflows(self):
         """The ruby-side census (counted during emission) must equal a Python
         recount of the emitted tree, per workflow; the totals pin the corpus:
-        26 workflows, 53 jobs, 301 steps, 140 run entries."""
+        26 workflows, 56 jobs, 316 steps, 146 run entries."""
         total = {"jobs": 0, "steps": 0, "runs": 0}
         count = 0
         for d in (WF_DIR, LIVE_WF_DIR):
@@ -1696,7 +1696,7 @@ class TestParsedLint(unittest.TestCase):
                 for key in total:
                     total[key] += census[key]
         self.assertEqual(count, 26)
-        self.assertEqual(total, {"jobs": 53, "steps": 301, "runs": 140})
+        self.assertEqual(total, {"jobs": 56, "steps": 316, "runs": 146})
 
     def test_decoding_changes_the_bash_n_verdict(self):
         """#165 item 8: the raw spelling of a double-quoted run scalar is a
@@ -1716,7 +1716,7 @@ class TestParsedLint(unittest.TestCase):
 
     def test_every_run_entry_passes_bash_n_decoded(self):
         """#165 item 8 (D7): `bash -n` over the PARSER-DECODED value of every
-        run entry Psych finds — all spellings, both directories, exactly 140.
+        run entry Psych finds — all spellings, both directories, exactly 146.
         The raw-text sibling in TestLintClean keeps its own count; this one is
         independent by enumerator AND by text handed to the shell."""
         live = sorted(set(LIVE_WF_DIR.glob("*.yml"))
@@ -1733,7 +1733,7 @@ class TestParsedLint(unittest.TestCase):
                                    capture_output=True, text=True)
                 with self.subTest(workflow=path.name, job=job, step=idx):
                     self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(checked, 140)
+        self.assertEqual(checked, 146)
 
     def test_run_steps_enumerated_from_the_parsed_document(self):
         """extract_run_blocks() misses a quoted "run": key (the recorded item-10
@@ -2011,7 +2011,7 @@ class TestLintClean(unittest.TestCase):
 
         The loop now covers both directories and both extensions. It does NOT cover quoted
         `"run":` keys, which the extractor does not recognise — the Psych enumerator
-        (`parsed_run_steps`, #165) does; it finds 140 run entries today, all block-scalar
+        (`parsed_run_steps`, #165) does; it finds 146 run entries today, all block-scalar
         unquoted spellings, so the two counts match in fact, not by construction. The
         decoded-text twin of this check lives in TestParsedLint.
         """
@@ -2043,13 +2043,13 @@ class TestLintClean(unittest.TestCase):
         # LIMIT: this recount uses the SAME extractor, so it detects a shrinking FILE
         # LIST but cannot reveal a spelling the extractor never recognised — a quoted `"run":`
         # key yields zero blocks in both counts. The genuinely independent enumerator
-        # (`parsed_run_steps`, #165) finds 140 run entries today, matching this count exactly
+        # (`parsed_run_steps`, #165) finds 146 run entries today, matching this count exactly
         # — TestParsedLint pins that equality and bash-checks the DECODED text.
         expected = sum(1 for pth in paths for _ in extract_run_blocks(pth.read_text()))
         self.assertEqual(checked, expected,
                          f"checked {checked} run blocks but the corpus holds {expected}")
         self.assertGreater(expected, 100,
-                           f"the corpus should hold ~140 run blocks, found {expected} — the "
+                           f"the corpus should hold ~146 run blocks, found {expected} — the "
                            f"extractor or the file list has narrowed")
 
 
@@ -5084,10 +5084,11 @@ class TestClaudeToolPolicy(unittest.TestCase):
     def test_corpus(self):
         self.assertEqual([], tool_policy_violations(self.texts))
 
-    def test_fifteen_model_steps_are_seen(self):
-        # 14 distinct plus the mirrored integration-test copy; a drift is a corpus change to look at
-        self.assertEqual(15, len(self.steps))
-        self.assertEqual(9, len({(name, s["job"]) for name, s in self.steps}))
+    def test_sixteen_model_steps_are_seen(self):
+        # 15 distinct plus the mirrored integration-test copy (the 16th is self-check's judgment leg, vibe-229);
+        # a drift is a corpus change to look at
+        self.assertEqual(16, len(self.steps))
+        self.assertEqual(10, len({(name, s["job"]) for name, s in self.steps}))
 
     def test_bash_allowed_roster_is_exactly_the_frozen_set(self):
         got = {(name, s["job"], s["step"]) for name, s in self.steps

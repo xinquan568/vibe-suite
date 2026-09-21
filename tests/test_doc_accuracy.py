@@ -113,7 +113,7 @@ class ClaudeMdAnchors(unittest.TestCase):
     def test_battery_commands_resolve(self):
         text = CLAUDE.read_text(encoding="utf-8")
         for rel in ("tools/model-pin-lint.py", "bin/vibe-check",
-                    "tools/legacy-string-sweep.sh"):
+                    "tools/legacy-string-sweep.sh", "tools/doc-claims-lint.py"):
             self.assertIn(rel, text, f"CLAUDE.md does not name {rel}")
             self.assertTrue((REPO_ROOT / rel).exists(), f"{rel} named but absent")
         self.assertIn("codex-src", text)

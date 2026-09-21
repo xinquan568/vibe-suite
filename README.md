@@ -62,6 +62,7 @@ python3 -m unittest discover -s tests               # run the suite
 jq empty .claude-plugin/plugin.json                 # validate a manifest
 python3 scripts/validate_audit_output.py <report>   # validate an audit report
 python3 tools/model-pin-lint.py                     # scan for pinned model identifiers (P9)
+python3 tools/doc-claims-lint.py                    # scan for stale status claims in shipped text
 ```
 
 `model-pin-lint` enforces P9: shipped artifacts never name a versioned model ID. It scans **tracked

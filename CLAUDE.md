@@ -20,6 +20,7 @@ python3 tests/tiers.py behaviour         # inner loop: behaviour tests only (`co
 node --test tests/node/*.test.mjs        # the Node suite (hooks, job store, events, …)
 python3 tools/model-pin-lint.py          # P9: no pinned model ids in shipped artifacts
 bash tools/legacy-string-sweep.sh        # AC-6: no retired namespace in shipped text
+python3 tools/doc-claims-lint.py         # no stale status claims in shipped text (vibe-230)
 bin/vibe-check .                         # structural checks
 bin/vibe-check . --mirrors               # codex/ staleness (both hash directions)
 python3 -m ruff check --select F811 scripts tools bin/vibe-check bin/vibe-badge bin/vibe-report bin/vibe-build-*   # dev-only: `pip install ruff`; CI's lint job runs it too

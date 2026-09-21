@@ -32,8 +32,9 @@
 // again for the canonical publication. Directory syncs are issued once per publication, never for a
 // scratch about to be unlinked.
 //
-// **Nothing here prevents a future edit from calling `fs` directly.** That is the AST lint of
-// issue #103's requirement 7, which is NOT delivered by this module and remains open.
+// **Nothing here prevents a future edit from calling `fs` directly.** That is requirement 7 of
+// issue #103, delivered separately by `tests/node/no-raw-fs-writes.mjs` (vibe-153), which the AC-7
+// gate runs over every `.mjs` under `scripts/`.
 
 import { randomBytes } from "node:crypto";
 import { constants, promises as fs } from "node:fs";

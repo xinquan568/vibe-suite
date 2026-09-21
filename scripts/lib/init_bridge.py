@@ -7,9 +7,9 @@ Nine targets, five codecs, one provenance record. The shell orchestrator owns ph
 how the sources acquired the defects this merge is fixing.
 
 Every target goes through `fsafe.write_atomic` — full-file replacement, fsync, rename, directory
-fsync. Two writers stay outside that guarantee and the exclusion is a fact about them, not a choice:
-`Store.set` does its own temp-write/replace without fsync (`store.py:109`), and each migration helper
-owns its writes.
+fsync. No writer on this path is outside the audited primitives: `Store.set` writes through
+`fsafe.write_atomic` too, and so does every migration helper under `scripts/migrate/` except
+`migrate-history.sh`, which publishes create-only through `fsafe.publish_new`.
 """
 
 import base64

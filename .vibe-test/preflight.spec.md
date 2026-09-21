@@ -26,7 +26,7 @@ it).
 - "re-run every bridge step without prompting"                      (repair's job — commands/repair.md)
 
 ## Frontmatter Valid
-- `description` present, naming version, auth mode, exec smoke and dynamic model discovery
+- `description` present, naming version, auth mode, exec smoke and dynamic discovery of the available models
 - `description` naming the python3, node and git runtimes
 - `argument-hint` offering `[--json]`
 - `model` absent — no model id is named (P9)

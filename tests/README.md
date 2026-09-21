@@ -117,6 +117,13 @@ every spec in its batch is reported `invalid batch`. If only one spec's verdict 
 not list, a missing id, or a field or value the schema does not name), only that spec is reported `invalid verdict`.
 The schema itself is stated in the model step's prompt, and a test holds the prompt to the validator's own tables.
 
+Nothing a batch contains can stop the report. An archive the reader cannot open (an encrypted, corrupt or unsupported
+member), JSON nested too deeply to parse, or an exception inside validation makes **that** batch `invalid batch` and
+leaves the others rendered. The model's own words reach the report in only two forms. A `note`, optional on every
+check, must be one line of at most 200 printable characters; it is always rendered after a `note: ` prefix, so it can
+never open or close a fence. A value quoted in a rejection (an unknown id, field or spec) is shown through `ascii()` and
+truncated to 60 characters, so it stays one line.
+
 **The leg is untrusted from its model step on.** The model can reach the checkout, `.git/config`, the runner's
 environment files and its own transcript, so nothing after it runs repository code: a `jq` line records the model id,
 and the upload keeps `judgment-out/` for one day. The leg has no job outputs. The report job runs on a fresh runner

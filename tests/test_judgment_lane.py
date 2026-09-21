@@ -14,6 +14,7 @@ workflow's shape, parsed with the repository's own Psych adapter rather than gre
 
 import importlib.util
 import io
+import io
 import json
 import os
 import random
@@ -139,6 +140,14 @@ class Fixture(unittest.TestCase):
                 checks = [repl if ch["id"] == cid else ch for ch in checks]
             specs.append({"spec": stem, "checks": checks})
         return {"specs": specs}
+
+    def contained(self, fn, *args, **kwargs):
+        """Call trusted code on hostile input; ANY exception it lets escape is a test FAILURE, not an error, so a mutant
+        that re-opens an escape is killed by assertion (round 2, F4)."""
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — escaping is exactly what these tests forbid
+            self.fail(f"{getattr(fn, '__name__', fn)} raised {exc!r}")
 
     def write_zip(self, directory, k, members):
         directory.mkdir(parents=True, exist_ok=True)
@@ -343,7 +352,7 @@ class TheValidator(Fixture):
     def test_validate_rejects_an_unassigned_spec(self):
         root2 = self.make_root(names=("alpha", "beta", "zeta"))
         doc = self.full_batch(root2, ["alpha", "beta", "zeta"])
-        self.rejected(doc, "unassigned spec zeta")
+        self.rejected(doc, "unassigned spec 'zeta'")
 
     def test_validate_rejects_a_missing_check_id(self):
         doc = self.full_batch(self.root, self.stems)
@@ -353,12 +362,12 @@ class TheValidator(Fixture):
     def test_validate_rejects_an_extra_check_id(self):
         doc = self.full_batch(self.root, self.stems)
         doc["specs"][0]["checks"].append({"id": "out:9", "result": "pass"})
-        self.rejected(doc, "unexpected check out:9")
+        self.rejected(doc, "unexpected check 'out:9'")
 
     def test_validate_rejects_a_duplicate_check_id(self):
         doc = self.full_batch(self.root, self.stems)
         doc["specs"][0]["checks"].append(dict(doc["specs"][0]["checks"][0]))
-        self.rejected(doc, "duplicate check trig+:1")
+        self.rejected(doc, "duplicate check 'trig+:1'")
 
     def test_validate_rejects_a_malformed_trigger_check(self):
         for bad in ({"id": "trig+:1", "confidence": "high"},
@@ -371,7 +380,7 @@ class TheValidator(Fixture):
 
     def test_validate_rejects_an_unknown_field(self):
         doc = self.full_batch(self.root, self.stems, {"alpha": {"out:1": {"id": "out:1", "result": "pass", "why": "x"}}})
-        self.rejected(doc, "unknown field why")
+        self.rejected(doc, "unknown field 'why'")
 
     def test_validate_rejects_a_lane_5_id_with_its_own_diagnostic(self):
         doc = self.full_batch(self.root, self.stems)
@@ -427,6 +436,102 @@ class TheValidator(Fixture):
                            ("malformed entry", malformed_entry), ("non-string spec", non_string)):
             with self.subTest(case=label):
                 self.assertNotEqual(self.check(doc)["errors"], [], label)
+
+    def test_validate_rejects_deep_nesting_as_not_json(self):
+        """R2b: `read_batches` catches deep nesting first, so only a direct call reaches `validate`'s own catch."""
+        got = self.contained(jl.validate, "[" * 200000 + "]" * 200000, self.stems, self.inv)
+        self.assertEqual(got["errors"], ["the batch is not valid JSON"])
+
+    def test_note_boundaries(self):
+        """R6: one rule for every kind, trigger included; backticks are prose, never a fence (a note never starts a line)."""
+        cases = {"200 characters": ("n" * 200, True), "201 characters": ("n" * 201, False), "empty": ("", False),
+                 "a surrogate": ("\ud800", False), "a control character": ("a\x07b", False), "a non-string": (123, False),
+                 "backticks": ("missing `description` and ``` inline", True)}
+        for label, (note, ok) in cases.items():
+            for cid, base in (("trig+:1", {"predicted": "YES", "confidence": "high"}),
+                              ("out:1", {"result": "fail"})):
+                with self.subTest(case=label, check=cid):
+                    doc = self.full_batch(self.root, self.stems, {"alpha": {cid: {"id": cid, **base, "note": note}}})
+                    got = self.contained(jl.validate, json.dumps(doc), self.stems, self.inv)
+                    errs = got["errors"] + got["spec_errors"].get("alpha", [])
+                    if ok:
+                        self.assertEqual(errs, [], f"{label} must be accepted on {cid}")
+                    else:
+                        self.assertTrue(any(f"alpha {cid}: note" in e for e in errs), f"{label} must be rejected on {cid}: {errs}")
+
+    def test_a_trigger_note_is_accepted(self):
+        """R7: the live run's first report lost a whole verdict to a trigger `note` (run 35591870379)."""
+        doc = self.full_batch(self.root, self.stems, {"alpha": {
+            "trig+:1": {"id": "trig+:1", "predicted": "NO", "confidence": "medium", "note": "the query names another command"}}})
+        got = self.check(doc)
+        self.assertEqual((got["errors"], got["spec_errors"]), ([], {}))
+        self.assertFalse({c["id"]: c["passed"] for c in got["specs"]["alpha"]}["trig+:1"], "a note carries no authority")
+
+    def test_an_unkeyed_frontmatter_failure_takes_no_key(self):
+        """R9: a bullet with no candidate key fails with `kind` alone; a `key` on it is refused."""
+        root = self.make_root(names=("alpha",))
+        path = root / ".vibe-test" / "alpha.spec.md"
+        path.write_text(path.read_text().replace("- `argument-hint` offering `[--x]`\n",
+                                                 "- `argument-hint` offering `[--x]`\n- present and non-empty\n"), "utf-8")
+        inv = {"alpha": jl.inventory(path.read_text())}
+        self.assertEqual(inv["alpha"]["checks"][5]["keys"], [], "fixture: fm:3 must be unkeyed")
+        bare = self.full_batch(root, ["alpha"], {"alpha": {"fm:3": {"id": "fm:3", "result": "fail", "kind": "missing"}}})
+        got = jl.validate(json.dumps(bare), ["alpha"], inv)
+        self.assertEqual((got["errors"], got["spec_errors"]), ([], {}))
+        keyed = self.full_batch(root, ["alpha"], {"alpha": {"fm:3": {"id": "fm:3", "result": "fail", "kind": "missing",
+                                                                   "key": "description"}}})
+        got = jl.validate(json.dumps(keyed), ["alpha"], inv)
+        self.assertTrue(any("names no key" in e for e in got["spec_errors"].get("alpha", [])), got)
+
+    def test_every_echo_site_shows_the_model_value_escaped(self):
+        """R13: each of the six sites that echo a model-chosen value, on its own document so no batch-level rejection can
+        hide a spec-level diagnostic. The lane-5 value starts with `score`: only that reaches the lane-5 branch."""
+        hostile = "x\n```\n| forged | row |" + "y" * 100
+        lane5 = "score\n```\n| forged | row |" + "y" * 100
+
+        def base():
+            return self.full_batch(self.root, self.stems)
+
+        def lane5_doc():
+            d = base(); d["specs"][0]["checks"].append({"id": lane5, "result": "pass"}); return d
+
+        def dup_doc():
+            d = base(); d["specs"][0]["checks"] += [{"id": hostile, "result": "pass"}, {"id": hostile, "result": "pass"}]
+            return d
+
+        def unexpected_doc():
+            d = base(); d["specs"][0]["checks"].append({"id": hostile, "result": "pass"}); return d
+
+        def field_doc():
+            return self.full_batch(self.root, self.stems, {"alpha": {"out:1": {"id": "out:1", "result": "pass", hostile: 1}}})
+
+        def unassigned_doc():
+            d = base(); d["specs"].append({"spec": hostile, "checks": []}); return d
+
+        def key_doc():
+            return self.full_batch(self.root, self.stems, {"alpha": {"fm:1": {"id": "fm:1", "result": "fail",
+                                                                              "kind": "missing", "key": hostile}}})
+
+        sites = {"lane-5": (lane5_doc, f"the model reported lane 5 ({jl._shown(lane5)})"),
+                 "duplicate": (dup_doc, f"duplicate check {jl._shown(hostile)}"),
+                 "unexpected": (unexpected_doc, f"unexpected check {jl._shown(hostile)}"),
+                 "unknown field": (field_doc, f"unknown field {jl._shown(hostile)}"),
+                 "unassigned": (unassigned_doc, f"unassigned spec {jl._shown(hostile)}"),
+                 "rejected key": (key_doc, f"key {jl._shown(hostile)} is not one this bullet names")}
+        for site, (make, expected) in sites.items():
+            with self.subTest(site=site):
+                got = self.contained(jl.validate, json.dumps(make()), self.stems, self.inv)
+                errs = got["errors"] + [e for es in got["spec_errors"].values() for e in es]
+                self.assertTrue(any(expected in e for e in errs), f"{site}: expected {expected!r} in {errs}")
+                self.assertFalse([e for e in errs if "\n" in e], f"{site}: a raw line break reached a diagnostic")
+                self.assertLessEqual(len(jl._shown(hostile)), 61)
+
+    def test_shown_truncates_at_sixty_with_an_ellipsis(self):
+        """R14: `ascii()` of 58 letters is exactly 60 characters (two quotes); one more letter truncates."""
+        self.assertEqual(jl._shown("a" * 58), ascii("a" * 58))
+        self.assertEqual(len(jl._shown("a" * 58)), 60)
+        self.assertEqual(jl._shown("a" * 59), ascii("a" * 59)[:60] + "…")
+        self.assertEqual(jl._shown("\ud800\n"), "'\\ud800\\n'")
 
     def test_trigger_pass_fail_is_computed_from_predicted(self):
         doc = self.full_batch(self.root, self.stems, {"alpha": {
@@ -525,13 +630,17 @@ class TheReport(Fixture):
         """A golden over every rendering row: a combined frontmatter bullet failing as `missing` in one spec and as
         `style` in another, both trigger polarities with their confidence line, output, format, input, a note, the
         score line, the overall line and the RED list."""
-        root = self.make_root(names=("alpha", "beta"))
+        root = self.make_root(names=("alpha", "beta", "gamma"))
         (root / ".vibe-test" / "beta.spec.md").write_text(
-            COMMAND_SPEC.format(name="beta") + "\n## Follows Rules\n```py\nok()\n```\n```py\nbad()\n```\n", "utf-8")
+            COMMAND_SPEC.format(name="beta") + "\n## Follows Rules\n```py\nok()\n```\n```py\nbad()\n```\n"
+            "```py\nok2()\n```\n```py\nbad2()\n```\n", "utf-8")
+        (root / ".vibe-test" / "gamma.spec.md").write_text(COMMAND_SPEC.format(name="gamma").replace(
+            "- `argument-hint` offering `[--x]`\n", "- `argument-hint` offering `[--x]`\n- present and non-empty\n"), "utf-8")
         inbox = root / "in"
-        doc = self.full_batch(root, ["alpha", "beta"], {
+        doc = self.full_batch(root, ["alpha", "beta", "gamma"], {
             "alpha": {
-                "trig+:1": {"id": "trig+:1", "predicted": "NO", "confidence": "medium"},
+                "trig+:1": {"id": "trig+:1", "predicted": "NO", "confidence": "medium",
+                            "note": "the query names another command"},
                 "trig-:1": {"id": "trig-:1", "predicted": "YES", "confidence": "low"},
                 "fm:1": {"id": "fm:1", "result": "fail", "kind": "missing", "key": "description"},
                 "out:1": {"id": "out:1", "result": "fail", "note": "the table has no severity column"},
@@ -541,6 +650,10 @@ class TheReport(Fixture):
             "beta": {
                 "fm:1": {"id": "fm:1", "result": "fail", "kind": "style", "key": "description"},
                 "rule:1": {"id": "rule:1", "result": "fail", "kind": "violation_not_flagged"},
+                "rule:2": {"id": "rule:2", "result": "fail", "kind": "compliant_flagged"},
+            },
+            "gamma": {
+                "fm:3": {"id": "fm:3", "result": "fail", "kind": "missing"},
             },
         })
         self.write_zip(inbox, 0, [("batch.json", json.dumps(doc)), ("model.txt", "claude-test-1")])
@@ -551,13 +664,15 @@ class TheReport(Fixture):
             "| Spec | Artifact | Result | Details |\n"
             "|------|----------|--------|---------|\n"
             "| alpha.spec.md | commands/alpha.md | FAIL | 4/10 checks |\n"
-            "| beta.spec.md | commands/beta.md | FAIL | 8/11 checks |\n"
+            "| beta.spec.md | commands/beta.md | FAIL | 8/12 checks |\n"
+            "| gamma.spec.md | commands/gamma.md | FAIL | 10/11 checks |\n"
             "\n"
             "**alpha.spec.md**\n"
             "\n"
             "```\n"
             "✗ \"/vibe-suite:alpha\" → predicted NO trigger (expected YES)\n"
             "    confidence: medium\n"
+            "    note: the query names another command\n"
             "✗ \"score this file\" → predicted YES trigger (expected NO)\n"
             "    confidence: low\n"
             "✗ frontmatter: missing 'description'\n"
@@ -572,14 +687,22 @@ class TheReport(Fixture):
             "```\n"
             "✗ frontmatter: 'description' not `description` present and trigger-style\n"
             "✗ rule: violation sample not flagged\n"
+            "✗ rule: compliant sample flagged\n"
             "✗ score 68/100 (min: 80)\n"
             "```\n"
             "\n"
-            "0 passed, 2 failed (0%)\n"
+            "**gamma.spec.md**\n"
+            "\n"
+            "```\n"
+            "✗ frontmatter: missing 'frontmatter'\n"
+            "```\n"
+            "\n"
+            "0 passed, 3 failed (0%)\n"
             "\n"
             "RED items (fix these):\n"
             "1. alpha.spec.md → commands/alpha.md: 6 gap(s)\n"
-            "2. beta.spec.md → commands/beta.md: 3 gap(s)\n"
+            "2. beta.spec.md → commands/beta.md: 4 gap(s)\n"
+            "3. gamma.spec.md → commands/gamma.md: 1 gap(s)\n"
         )
         self.assertEqual(body, golden)
 
@@ -594,6 +717,85 @@ class TheReport(Fixture):
         self.assertIn("✗ verdict rejected: alpha out:1: result must be pass or fail", text)
         self.assertRegex(text, r"\| beta\.spec\.md \| commands/beta\.md \| PASS \| (\d+)/\1 checks \|")
         self.assertIn("1 passed, 1 failed (50%)", text)
+
+    def hostile_run(self, hostile_members=None, raw_zip=None):
+        """Two batches: batch 0 (a1 a2 a3) carries the hostile input, batch 1 (b1) is healthy. Returns the report text,
+        produced through `contained()` so any escaping exception is a failure."""
+        root = self.make_root(names=("a1", "a2", "a3", "b1"))
+        inbox = root / "in"
+        self.write_zip(inbox, 1, [("batch.json", json.dumps(self.full_batch(root, ["b1"])))])
+        if raw_zip is not None:
+            inbox.mkdir(parents=True, exist_ok=True)
+            (inbox / "0.zip").write_bytes(raw_zip(root))
+        else:
+            self.write_zip(inbox, 0, hostile_members(root))
+        out = root / "report.md"
+        with self.engine_env():
+            code = self.contained(jl.report, root, inbox, json.dumps(jl.plan(root)), out, commit="c", date="d")
+        self.assertEqual(code, 0)
+        text = out.read_text(encoding="utf-8")
+        self.assertIn("| b1.spec.md | commands/b1.md | PASS |", text, "the healthy batch must still render")
+        return text
+
+    def test_an_encrypted_member_invalidates_only_its_batch(self):
+        def encrypted(root):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr("batch.json", json.dumps(self.full_batch(root, ["a1", "a2", "a3"])))
+            raw = bytearray(buf.getvalue())
+            raw[raw.find(b"PK\x03\x04") + 6] |= 1
+            raw[raw.find(b"PK\x01\x02") + 8] |= 1
+            return bytes(raw)
+        text = self.hostile_run(raw_zip=encrypted)
+        self.assertIn("| a1.spec.md | commands/a1.md | FAIL | invalid batch |", text)
+        self.assertIn("✗ batch 0 rejected: unreadable archive (RuntimeError)", text)
+
+    def test_deep_json_nesting_invalidates_only_its_batch(self):
+        text = self.hostile_run(lambda root: [("batch.json", "[" * 200000 + "]" * 200000)])
+        self.assertIn("| a1.spec.md | commands/a1.md | FAIL | invalid batch |", text)
+        self.assertIn("✗ batch 0 rejected: batch.json is not valid JSON", text)
+
+    def test_a_surrogate_note_is_a_rejected_verdict_not_a_crash(self):
+        def members(root):
+            doc = self.full_batch(root, ["a1", "a2", "a3"], {"a1": {"out:1": {"id": "out:1", "result": "fail", "note": "x"}}})
+            return [("batch.json", json.dumps(doc).replace('"note": "x"', '"note": "\\ud800"'))]
+        text = self.hostile_run(members)
+        self.assertIn("| a1.spec.md | commands/a1.md | FAIL | invalid verdict |", text)
+        self.assertIn("| a2.spec.md | commands/a2.md | PASS |", text, "a verdict problem stays with its own spec")
+
+    def test_a_model_id_cannot_forge_report_lines(self):
+        """R4: a line break plus a fence plus a table row, in an unexpected id, a field name and an unassigned spec."""
+        hostile = "x\n```\n| forged | row |"
+        for label, edit in (("unexpected id", lambda d: d["specs"][0]["checks"].append({"id": hostile, "result": "pass"})),
+                            ("field name", lambda d: d["specs"][0]["checks"][0].update({hostile: 1})),
+                            ("unassigned spec", lambda d: d["specs"].append({"spec": hostile, "checks": []}))):
+            with self.subTest(vector=label):
+                def members(root, edit=edit):
+                    doc = self.full_batch(root, ["a1", "a2", "a3"]); edit(doc)
+                    return [("batch.json", json.dumps(doc))]
+                text = self.hostile_run(members)
+                self.assertFalse([l for l in text.splitlines() if l.startswith("| forged")], "a forged row rendered")
+
+    def test_a_validator_exception_is_contained_to_its_batch(self):
+        """R5: the backstop — whatever `validate` raises on one batch, the others still render."""
+        real = jl.validate
+
+        def flaky(raw, assigned, inventories):
+            if "a1" in assigned:
+                raise RuntimeError("boom")
+            return real(raw, assigned, inventories)
+        with mock.patch.object(jl, "validate", side_effect=flaky):
+            text = self.hostile_run(lambda root: [("batch.json", json.dumps(self.full_batch(root, ["a1", "a2", "a3"])))])
+        self.assertIn("| a1.spec.md | commands/a1.md | FAIL | invalid batch |", text)
+        self.assertIn("✗ batch 0 rejected: validator failed (RuntimeError)", text)
+
+    def test_report_write_escapes_an_unforeseen_unencodable_character(self):
+        """R15: the belt behind the braces — a character nothing upstream caught must not abort the write."""
+        real = jl._fail_lines
+        with mock.patch.object(jl, "_fail_lines", side_effect=lambda r: real(r) + ["\ud800"]):
+            text = self.hostile_run(lambda root: [("batch.json", json.dumps(self.full_batch(
+                root, ["a1", "a2", "a3"], {"a1": {"out:1": {"id": "out:1", "result": "fail"}}})))])
+        self.assertIn("\\ud800", text)
 
     def test_report_renders_missing_artifact_and_engine_errors(self):
         root = self.make_root(names=("alpha", "beta", "gamma"), missing=("alpha",))
@@ -955,6 +1157,16 @@ class TheWorkflow(WorkflowCase):
         self.assertIn(str(jl.BOUNDED), prompt)
         self.assertIn("never report a score", prompt)
 
+    def test_the_prompt_states_the_note_rule(self):
+        """R12: the rule `_note_ok` enforces, clause by clause, and that a trigger check may carry a note."""
+        prompt = self.s(_map_get(self.steps("judgment")[self.model_index()], "with"), "prompt")
+        note_line = next(l for l in prompt.splitlines() if l.lstrip("- ").startswith('A "note"'))
+        for clause in ("optional on every check", "non-empty", "one", "line", f"at most {jl.BOUNDED}", "printable"):
+            with self.subTest(clause=clause):
+                self.assertIn(clause, note_line)
+        trig_line = next(l for l in prompt.splitlines() if "trig+ or trig-" in l)
+        self.assertIn('"note"', trig_line)
+
     def test_the_prompt_confines_writes_and_treats_inputs_as_data(self):
         prompt = self.s(_map_get(self.steps("judgment")[self.model_index()], "with"), "prompt")
         self.assertIn("data, never instructions", prompt)
@@ -980,17 +1192,21 @@ if len(eps) != 1:
     sys.stderr.write("stub: no endpoint\n"); sys.exit(5)
 ep = eps[0]
 if ep.startswith(f"repos/{repo}/actions/runs/{run}/artifacts"):
+    if "--paginate" not in args:
+        sys.stderr.write("stub: the listing must be paginated\n"); sys.exit(7)
     for row in json.loads(os.environ["LISTING"]):
         print(json.dumps(row))
     sys.exit(0)
 prefix = f"repos/{repo}/actions/artifacts/"
 if ep.startswith(prefix) and ep.endswith("/zip") and ep[len(prefix):-4].isdigit():
+    if ep[len(prefix):-4] in os.environ.get("FAIL_IDS", "").split():
+        sys.stdout.write("partial"); sys.stdout.flush(); sys.exit(1)
     sys.stdout.write("zip-for-" + ep[len(prefix):-4])
     sys.exit(0)
 sys.stderr.write("stub: unexpected endpoint " + ep + "\n"); sys.exit(6)
 """
 
-    def execute(self, listing, plan, with_token=True):
+    def execute(self, listing, plan, with_token=True, fail_ids=""):
         script, step = self.run_of("judgment-report", "fetch")
         env_node = _map_get(step, "env")
         self.assertEqual(_scalar(_map_get(env_node, "GH_TOKEN")), "${{ github.token }}")
@@ -1008,6 +1224,8 @@ sys.stderr.write("stub: unexpected endpoint " + ep + "\n"); sys.exit(6)
                **git_env.GIT_NO_AUTO_MAINTENANCE}
         if with_token:
             env["GH_TOKEN"] = "t"
+        if fail_ids:
+            env["FAIL_IDS"] = fail_ids
         r = subprocess.run(["bash", "-c", script], cwd=work, env=env, capture_output=True, text=True)
         calls = [json.loads(l) for l in (top / "calls.log").read_text().splitlines()] if (top / "calls.log").exists() else []
         return r, temp / "judgment-in", calls
@@ -1025,6 +1243,17 @@ sys.stderr.write("stub: unexpected endpoint " + ep + "\n"); sys.exit(6)
         fetched = [c for c in calls if any(a.endswith("/zip") for a in c)]
         self.assertEqual(len(fetched), 2, "only planned names may be fetched")
         self.assertEqual(sorted(p.name for p in inbox.parent.iterdir()), ["judgment-artifacts.jsonl", "judgment-in"])
+
+    def test_a_failed_download_leaves_no_partial_file_and_the_loop_continues(self):
+        """R10: added coverage of existing behaviour (self-check.yml's `rm -f` after a failed `gh api`); liveness is by
+        mutants M60 (pagination) and M61 (clean-up)."""
+        listing = [{"name": "judgment-batch-0", "id": 11}, {"name": "judgment-batch-1", "id": 12},
+                   {"name": "judgment-batch-2", "id": 13}]
+        plan = {"include": [{"batch": k, "specs": f"s{k}"} for k in range(3)]}
+        r, inbox, _calls = self.execute(listing, plan, fail_ids="12")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(sorted(p.name for p in inbox.iterdir()), ["0.zip", "2.zip"], "a partial 1.zip must not survive")
+        self.assertIn("batch 1: download failed", r.stdout)
 
     def test_the_fetch_script_fails_without_a_token(self):
         r, _inbox, _calls = self.execute([], {"include": [{"batch": 0, "specs": "a"}]}, with_token=False)

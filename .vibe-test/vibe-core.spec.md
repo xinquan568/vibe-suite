@@ -25,7 +25,7 @@ This spec restates what the skill already documents as a test; it adds no invent
 - "show how the score has trended over the last month"      (trend's job — commands/trend.md)
 
 ## Frontmatter Valid
-- `name` equal to `vibe-core`
+- `name` equal to the skill's directory name, vibe-core
 - `description` present, naming the severity scale and the six-field finding format
 - `description` trigger-style — "Load this before producing or consuming any audit finding"
 

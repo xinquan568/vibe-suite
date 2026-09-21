@@ -8,8 +8,10 @@ the exact score-engine invocation (D5), and both mandated fixtures. Runtime pred
 quality is the tester's judgment lane and is not simulated here.
 """
 
+import importlib.util
 import json
 import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -57,6 +59,33 @@ SOURCE_TOKENS = {
 }
 
 SKILL = REPO_ROOT / "skills" / "testing" / "SKILL.md"
+
+
+def _load_judgment_lane():
+    """The judgment lane's own helper, so the one-key rule is measured by the extractor the lane actually uses."""
+    spec = importlib.util.spec_from_file_location("judgment_lane_for_specs", REPO_ROOT / "tests" / "judgment_lane.py")
+    mod = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = previous
+    return mod
+
+
+JL = _load_judgment_lane()
+
+
+def frontmatter_bullet_problem(bullet):
+    """None when a `Frontmatter Valid` bullet of a new spec names exactly one candidate key and leads with it; otherwise
+    the problem. The rule's ONLY cardinality check is the `!= 1` below (vibe-229 round 2, C5)."""
+    keys = JL._candidate_keys(bullet)
+    if len(keys) != 1:
+        return f"names {len(keys)} candidate keys {keys}; exactly one is required"
+    if not bullet.lstrip("- ").startswith(f"`{keys[0]}`"):
+        return f"must lead with its one key `{keys[0]}`"
+    return None
 
 
 def squash(text):
@@ -335,11 +364,14 @@ class NewSpecDiscipline(unittest.TestCase):
                 self.assertEqual([h for h in headings if h not in EVALUATED_SECTIONS], [],
                                  f"{name}: a section no lane evaluates")
                 for bullet in section_items(text, "Frontmatter Valid") or []:
-                    keys = re.findall(r"`([A-Za-z][A-Za-z0-9-]*)`", bullet)
-                    self.assertGreaterEqual(len(keys), 1, f"{name}: a frontmatter bullet names no key: {bullet}")
-                    self.assertEqual(len(set(keys[:1])), 1)
-                    self.assertTrue(bullet.lstrip("- ").startswith("`"),
-                                    f"{name}: a frontmatter bullet must lead with its one key: {bullet}")
+                    self.assertIsNone(frontmatter_bullet_problem(bullet), f"{name}: {bullet}")
+
+    def test_the_bullet_rule_refuses_two_candidate_keys(self):
+        """The negative case: a literal value in backticks, and a plain word that is a known field, each add a key."""
+        for bullet in ("`name` equal to `issue2pr`",
+                       "`description` present, naming version, auth mode, exec smoke and dynamic model discovery"):
+            with self.subTest(bullet=bullet):
+                self.assertIsNotNone(frontmatter_bullet_problem(bullet))
 
     def test_every_new_spec_artifact_resolves(self):
         for name in M35_SPECS:

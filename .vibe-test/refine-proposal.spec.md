@@ -25,7 +25,7 @@ it adds no invented expectations.
 - "fix the findings from this nl-audit report"              (fix's job — commands/fix.md)
 
 ## Frontmatter Valid
-- `name` equal to `refine-proposal`
+- `name` equal to the skill's directory name, refine-proposal
 - `description` present, naming the freeze, baseline, and review-and-revise rounds
 - `description` trigger-style — "Use when a plan needs adversarial review"
 - `description` excludes code review and first drafts

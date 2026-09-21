@@ -214,8 +214,10 @@ def read_batches(in_dir, batch_ids):
                 with zipfile.ZipFile(path) as zf:
                     raw, err = _read_member(zf, BATCH_MEMBER)
                     model, _ = _read_member(zf, MODEL_MEMBER)
-            except (zipfile.BadZipFile, OSError, EOFError, NotImplementedError) as exc:
+            except zipfile.BadZipFile as exc:
                 raw, err, model = None, f"not a zip archive ({type(exc).__name__})", None
+            except Exception as exc:  # noqa: BLE001 — encrypted, unsupported or corrupt members: never abort the report
+                raw, err, model = None, f"unreadable archive ({type(exc).__name__})", None
             if err:
                 row["error"] = err
             elif raw is None:
@@ -224,7 +226,7 @@ def read_batches(in_dir, batch_ids):
                 row["raw"] = raw
                 try:
                     json.loads(raw)
-                except ValueError:
+                except (ValueError, RecursionError):
                     row["error"] = f"{BATCH_MEMBER} is not valid JSON"
             if model is not None:
                 model = model.strip()
@@ -245,7 +247,7 @@ FM_KINDS = ("missing", "style")
 RULE_KINDS = ("violation_not_flagged", "compliant_flagged")
 
 _FIELDS = {
-    "trig": ({"id", "predicted", "confidence"}, set()),
+    "trig": ({"id", "predicted", "confidence"}, {"note"}),
     "fm": ({"id", "result"}, {"kind", "key", "note"}),
     "rule": ({"id", "result"}, {"kind", "note"}),
     "out": ({"id", "result"}, {"note"}),
@@ -254,8 +256,18 @@ _FIELDS = {
 }
 
 
-def _bounded(value):
-    return isinstance(value, str) and 0 < len(value) <= BOUNDED and "\n" not in value and "\r" not in value
+def _note_ok(value):
+    """One non-empty line of at most BOUNDED printable characters. `isprintable()` is false for CR, LF, every other control
+    character and a lone surrogate, which is what a JSON `\\udXXX` escape can smuggle in. Backticks are fine: a note is
+    always rendered after a `note: ` prefix, so it can never start a line and close the report's code fence."""
+    return isinstance(value, str) and 0 < len(value) <= BOUNDED and value.isprintable()
+
+
+def _shown(value):
+    """A model-supplied value as a diagnostic may echo it: `ascii()` (so line breaks, control characters and surrogates
+    are escapes, and the echo is one line), at most 60 characters, `…` when cut."""
+    text = ascii(value)
+    return text if len(text) <= 60 else text[:60] + "…"
 
 
 def _check_one(check, spec_check, errors, where):
@@ -263,9 +275,11 @@ def _check_one(check, spec_check, errors, where):
     required, optional = _FIELDS[kind]
     fields = set(check)
     for f in sorted(fields - required - optional):
-        errors.append(f"{where}: unknown field {f}")
+        errors.append(f"{where}: unknown field {_shown(f)}")
     for f in sorted(required - fields):
         errors.append(f"{where}: missing field {f}")
+    if "note" in check and not _note_ok(check["note"]):
+        errors.append(f"{where}: note must be one non-empty line of at most {BOUNDED} printable characters")
     if kind == "trig":
         if check.get("predicted") not in PREDICTED:
             errors.append(f"{where}: predicted must be YES or NO")
@@ -275,8 +289,6 @@ def _check_one(check, spec_check, errors, where):
     result = check.get("result")
     if result not in RESULTS:
         errors.append(f"{where}: result must be pass or fail")
-    if "note" in check and not _bounded(check["note"]):
-        errors.append(f"{where}: note must be a single line of at most {BOUNDED} characters")
     if kind == "fm":
         if result == "fail":
             if check.get("kind") not in FM_KINDS:
@@ -284,7 +296,7 @@ def _check_one(check, spec_check, errors, where):
             keys = spec_check["keys"]
             if keys:
                 if check.get("key") not in keys:
-                    errors.append(f"{where}: key {check.get('key')!r} is not one this bullet names ({', '.join(keys)})")
+                    errors.append(f"{where}: key {_shown(check.get('key'))} is not one this bullet names ({', '.join(keys)})")
             elif "key" in check:
                 errors.append(f"{where}: this bullet names no key, so the failure takes none")
         elif "kind" in check or "key" in check:
@@ -309,7 +321,7 @@ def validate(raw, assigned, inventories):
         return {"errors": ["the batch contains a token-shaped string"], "spec_errors": {}, "specs": {}}
     try:
         doc = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return {"errors": ["the batch is not valid JSON"], "spec_errors": {}, "specs": {}}
     if not (isinstance(doc, dict) and set(doc) == {"specs"} and isinstance(doc["specs"], list)):
         return {"errors": ['the batch top level must be exactly {"specs": [...]}'], "spec_errors": {}, "specs": {}}
@@ -320,7 +332,7 @@ def validate(raw, assigned, inventories):
             continue
         stem = entry["spec"]
         if stem not in assigned:
-            errors.append(f"unassigned spec {stem}")
+            errors.append(f"unassigned spec {_shown(stem)}")
             continue
         if stem in seen:
             spec_errors.setdefault(stem, []).append(f"duplicate spec {stem}")
@@ -335,14 +347,14 @@ def validate(raw, assigned, inventories):
                 continue
             cid = check["id"]
             if cid == "score" or cid.startswith("score") or cid.startswith("lane5"):
-                mine.append(f"{stem}: the model reported lane 5 ({cid}); scores are computed, not reported")
+                mine.append(f"{stem}: the model reported lane 5 ({_shown(cid)}); scores are computed, not reported")
                 continue
             if cid in got_ids:
-                mine.append(f"{stem}: duplicate check {cid}")
+                mine.append(f"{stem}: duplicate check {_shown(cid)}")
                 continue
             got_ids.append(cid)
             if cid not in expected:
-                mine.append(f"{stem}: unexpected check {cid}")
+                mine.append(f"{stem}: unexpected check {_shown(cid)}")
                 continue
             passed = _check_one(check, expected[cid], mine, f"{stem} {cid}")
             results.append({"id": cid, "passed": passed, "check": check, "spec_check": expected[cid]})
@@ -367,8 +379,11 @@ def _fail_lines(result):
     sc, ch = result["spec_check"], result["check"]
     kind = sc["kind"]
     if kind == "trig":
-        return [f'✗ "{sc["text"]}" → predicted {ch["predicted"]} trigger (expected {sc["expected"]})',
-                f'    confidence: {ch["confidence"]}']
+        lines = [f'✗ "{sc["text"]}" → predicted {ch["predicted"]} trigger (expected {sc["expected"]})',
+                 f'    confidence: {ch["confidence"]}']
+        if ch.get("note"):
+            lines.append(f"    note: {ch['note']}")
+        return lines
     if kind == "fm":
         key = ch.get("key") or "frontmatter"
         line = (f"✗ frontmatter: missing '{key}'" if ch.get("kind") == "missing"
@@ -408,7 +423,10 @@ def report(root, in_dir, plan_matrix, out, commit="", date=""):
     validated = {}
     for k, row in batches.items():
         if row["present"] and not row["error"]:
-            validated[k] = validate(row["raw"], assigned[k], inventories)
+            try:
+                validated[k] = validate(row["raw"], assigned[k], inventories)
+            except Exception as exc:  # noqa: BLE001 — the backstop: one batch's surprise never costs the others
+                row["error"] = f"validator failed ({type(exc).__name__})"
 
     rows, blocks, red = [], [], []
     passed_specs = 0
@@ -480,7 +498,7 @@ def report(root, in_dir, plan_matrix, out, commit="", date=""):
     text += [f"{passed_specs} passed, {failed} failed ({percent}%)", ""]
     if red:
         text += ["RED items (fix these):", *[f"{n}. {item}" for n, item in enumerate(red, 1)]]
-    Path(out).write_text("\n".join(text) + "\n", encoding="utf-8")
+    Path(out).write_text("\n".join(text) + "\n", encoding="utf-8", errors="backslashreplace")
     return 0
 
 

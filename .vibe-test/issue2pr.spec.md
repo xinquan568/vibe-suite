@@ -25,7 +25,7 @@ no invented expectations.
 - "delegate this plan to Codex for implementation"          (delegate's job — commands/delegate.md)
 
 ## Frontmatter Valid
-- `name` equal to `issue2pr`
+- `name` equal to the skill's directory name, issue2pr
 - `description` present, naming the nine-step, three-phase pipeline
 - `description` names the profile as the source of every project-bound fact
 - `description` trigger-style — "Use when an issue should become a reviewed PR"

@@ -9,7 +9,8 @@
 # whole workspace, not just over the two directories row 8 names.
 #
 # Usage: survey.sh [--workspace DIR]
-# Writes a JSON report to stdout. Human-readable notes go to stderr. Always exits 0.
+# Writes a JSON report to stdout. Human-readable notes go to stderr.
+# Exit codes: 0 surveyed · 1 error: an unknown argument, a missing --workspace value, or not a directory
 
 set -euo pipefail
 # shellcheck source=scripts/migrate/common.sh
@@ -19,7 +20,7 @@ workspace="."
 while [ $# -gt 0 ]; do
     case "$1" in
         --workspace) workspace="${2:?--workspace needs a directory}"; shift 2 ;;
-        -h|--help) sed -n '3,12p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '3,13p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) vibe_die "unknown argument: $1" ;;
     esac
 done

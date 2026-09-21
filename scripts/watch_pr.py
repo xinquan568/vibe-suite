@@ -8,14 +8,11 @@ a state worth acting on before starting the next link. This program is that wait
 
 `gh` is the only dependency. The repository is an argument, never a constant.
 
-**Exit codes are the interface**, and the mode surface maps each to a chain action:
+**Exit codes are the interface**, and the mode surface maps each to a chain action.
 
-    0  merged                     4  a completed check failed
-    1  usage error                5  timeout
-    2  closed without merge       6  ten consecutive state-probe failures
-    3  activity newer than cursor 7  green and unarmed (--merge-when-green only)
+Exit codes: 0 merged · 1 usage error, or interrupted · 2 closed without merge · 3 activity newer than the cursor · 4 a completed check failed · 5 timeout · 6 ten consecutive state-probe failures · 7 green and unarmed (--merge-when-green only)
 
-**Exit 3 also carries WHO** (vibe-188 / grill H2 part b): the triggering activity's
+**The activity exit also carries WHO** (vibe-188 / grill H2 part b): the triggering activity's
 `author_association` (GitHub's `OWNER | MEMBER | COLLABORATOR | CONTRIBUTOR | FIRST_TIME_CONTRIBUTOR |
 FIRST_TIMER | MANNEQUIN | NONE`) and author login are printed as ONE JSON line on stdout —
 `{"at": "<iso>", "author": "<login>", "author_association": "<assoc>", "exit": 3}` — so the chain can
@@ -25,10 +22,10 @@ reported as the empty string, which the chain treats as not a collaborator.
 
 **Two properties that a re-implementation gets wrong by default**, both encoded below:
 
-- **Exit 5 is a timeout, not a state.** It is evaluated at the top of the iteration, *before* the
+- **The timeout exit is not a state.** It is evaluated at the top of the iteration, *before* the
   state probe, so the PR's state at that moment is unobserved — a PR that merged during the
-  preceding sleep still exits 5. Do not describe it as "still open"; nothing asked.
-- **Exit 6 counts state-probe failures only.** The rollup and activity calls degrade to a benign
+  preceding sleep still exits as a timeout. Do not describe it as "still open"; nothing asked.
+- **The error exit counts state-probe failures only.** The rollup and activity calls degrade to a benign
   value on failure, so a rate-limited check query never trips the error exit.
 """
 

@@ -365,3 +365,53 @@ class TestReadRefusesUnreadableState(unittest.TestCase):
         p = self.ws / "state.json"; p.write_bytes(b"")
         with self.assertRaises(store.StoreFormatError):
             store._read(p)
+
+
+class TestUnreadableProjectFile(unittest.TestCase):
+    """vibe-231: a `.vibe-suite.md` that cannot be READ degrades exactly like one that does not parse
+    (vibe-183) — the stored gate survives, `config_error` names the cause, the CLI exits 0 with one
+    stderr line. It used to escape `effective_config` as a traceback (exit 1)."""
+
+    def _break(self, ws, kind):
+        path = Path(ws) / ".vibe-suite.md"
+        if kind == "directory":
+            path.mkdir()
+        elif kind == "invalid-utf8":
+            path.write_bytes(b"---\nengine: " + bytes([0xFF]) + b"\n---\n")
+        else:
+            path.write_text("---\nengine: codex\n---\n", encoding="utf-8")
+            path.chmod(0)   # the temporary directory's own cleanup unlinks it
+
+    def _kinds(self):
+        kinds = {"directory": "IsADirectoryError", "invalid-utf8": "UnicodeDecodeError"}
+        if os.geteuid() != 0:   # permission bits do not bind root
+            kinds["unreadable"] = "PermissionError"
+        return kinds
+
+    def test_every_read_failure_yields_the_stored_gate_and_names_the_cause(self):
+        for kind, error in self._kinds().items():
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as ws:
+                store.Store(ws).set("gate.fail_policy", "closed")
+                self._break(ws, kind)
+                try:
+                    effective = store.effective_config(ws)
+                except (OSError, UnicodeDecodeError) as exc:
+                    self.fail(f"the read failure escaped effective_config: {exc!r}")
+                self.assertEqual(effective["gate"]["fail_policy"], "closed", "the stored policy survives")
+                self.assertTrue(effective["config_error"].startswith(
+                    f"config: .vibe-suite.md is not readable ({error}: "), effective["config_error"])
+
+    def test_the_cli_exits_zero_with_one_stderr_line_and_no_traceback(self):
+        for kind, error in self._kinds().items():
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as ws:
+                store.Store(ws).set("gate.fail_policy", "closed")
+                self._break(ws, kind)
+                result = subprocess.run([sys.executable, str(STORE_PY), "effective-config", ws],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                lines = result.stderr.splitlines()
+                self.assertEqual(len(lines), 1, result.stderr)
+                self.assertTrue(lines[0].startswith(
+                    f"store: config: .vibe-suite.md is not readable ({error}: "), lines[0])
+                self.assertEqual(json.loads(result.stdout)["gate"]["fail_policy"], "closed")

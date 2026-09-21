@@ -18,7 +18,7 @@
 # new store wins applies to live configuration too.
 #
 # Usage: migrate-sentinels.sh [--workspace DIR] [--confirm]
-#   without --confirm this reports and changes nothing.
+#   Exit codes: 0 done, or nothing to do · 1 error · 3 a decision is required: without --confirm it writes a report and changes nothing else
 
 set -euo pipefail
 # shellcheck source=scripts/migrate/common.sh

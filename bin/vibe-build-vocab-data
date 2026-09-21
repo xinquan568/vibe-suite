@@ -4,7 +4,7 @@
 
 Reads `<corpus>/manifest.json`, follows its `vocabulary` pointer, and emits
 `<out>/data/vocab.json` plus `<out>/vocab/index.md`. Per D-C an absent corpus is the honest
-pre-migration state: exit 0 with zero entries and a "no audit data yet" notice. Only a corpus
+pre-migration state: success with zero entries and a "no audit data yet" notice. Only a corpus
 whose manifest cannot be parsed is an error, and it renders nothing at all.
 
 The registry is read by a deliberately small block-YAML reader rather than a dependency: the
@@ -12,6 +12,8 @@ suite ships stdlib-only, and the registry shape is a fixed two-section list of c
 with their deprecated synonyms. Anything outside that shape is ignored rather than guessed at.
 
     bin/vibe-build-vocab-data --corpus <dir> --out <dir>
+
+Exit codes: 0 built (an absent corpus builds empty) · 2 refused
 """
 
 import argparse

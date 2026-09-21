@@ -13,6 +13,8 @@ unknown-key warning is the single signal a user needs to fix their file.
 Three of those defaults are corrections to inherited defects, so they matter as defaults —
 `stop_review_gate` ships **off** (D3), `fail_policy` defaults **open** (fixing cc-suite W3's blocked
 session end), and **no `gate.model` ships at all** (P9 forbids a pinned default, not the capability).
+
+Exit codes: 0 success · 1 the config was refused, or a set or view failed · 2 an engine outside the schema, or usage
 """
 
 import argparse

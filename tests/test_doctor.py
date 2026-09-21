@@ -866,3 +866,80 @@ class RuntimeVersionBoundsTest(unittest.TestCase):
         self.assertIsNone(doctor.RUNTIME_VERSION_PATTERNS["python3"].search("Python 3.12345"),
                           "an implausible component means the output is not the banner it resembles")
         self.assertIsNotNone(doctor.RUNTIME_VERSION_PATTERNS["python3"].search("Python 3.11.9"))
+
+
+@unittest.skipIf(os.geteuid() == 0, "permission bits do not bind root")
+class TestUnreadableInputsStillReport(DoctorCase):
+    """vibe-231: `doctor` always prints a report. Three reads used to abort it with a traceback and no
+    report: `.codex/config.toml` (read directly by `check_bridge`, and again inside
+    `init_bridge.dangling_registrations`) and a memory file (inside `detect_state`)."""
+
+    def unreadable(self, rel):
+        path = self.ws / rel
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o644)
+
+    def run_doctor(self):
+        result = self.doctor()
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)   # findings exist: the existing rule
+        report = json.loads(result.stdout)
+        self.assertIn("connectivity", {c["check"] for c in report["capabilities"]}, "diagnose ran to its end")
+        return report
+
+    def test_an_unreadable_codex_config_is_named_and_the_bridge_check_continues(self):
+        self.install()
+        self.unreadable(".codex/config.toml")
+        report = self.run_doctor()
+        texts = [(f["check"], f["finding"]) for f in report["findings"]]
+        self.assertTrue(any(c == "sentinels" and t.startswith(".codex/config.toml is not readable: ")
+                            for c, t in texts), texts)
+        self.assertTrue(any(c == "sentinels" and t.startswith("dangling registrations could not be checked: ")
+                            for c, t in texts), texts)
+        self.assertNotIn("bridge", {c for c, _t in texts}, "both reads are guarded; the backstop never fired")
+
+    def test_an_unreadable_memory_file_is_partial_and_named(self):
+        self.install()
+        self.unreadable("AGENTS.md")
+        report = self.run_doctor()
+        self.assertEqual(report["state"], "partial")
+        checks = {f["check"] for f in report["findings"]}
+        self.assertNotIn("state", checks, "detect_state guards the read itself; the backstop never fired")
+        named = [f for f in report["findings"] if "AGENTS.md" in f["finding"]]
+        self.assertTrue(named, report["findings"])
+
+
+class TestCheckBackstop(DoctorCase):
+    """vibe-231: a check that raises becomes one finding naming it, and the checks after it still run."""
+
+    def diagnose(self, **patches):
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import doctor
+        with mock.patch.dict(os.environ, CODEX_HOME=str(self.home)), \
+                mock.patch.multiple(doctor, **patches):
+            try:
+                return doctor, doctor.diagnose(self.ws)
+            except RuntimeError as exc:
+                self.fail(f"the injected failure escaped diagnose: {exc!r}")
+
+    def test_a_raising_check_is_a_finding_and_later_checks_still_run(self):
+        self.install()
+
+        def later(ws, out):
+            out.append({"severity": "[LOW]", "check": "advisors", "finding": "later check ran",
+                        "auto_fixable": False})
+
+        _doctor, report = self.diagnose(check_symlinks=mock.Mock(side_effect=RuntimeError("injected")),
+                                        check_advisors=later)
+        self.assertIn({"severity": "[HIGH]", "check": "symlinks",
+                       "finding": "the check could not run: RuntimeError: injected", "auto_fixable": False},
+                      report["findings"])
+        self.assertIn("later check ran", [f["finding"] for f in report["findings"]])
+
+    def test_a_raising_state_detection_is_partial_and_a_finding(self):
+        self.install()
+        _doctor, report = self.diagnose(detect_state=mock.Mock(side_effect=RuntimeError("injected")))
+        self.assertEqual(report["state"], "partial")
+        self.assertIn({"severity": "[HIGH]", "check": "state",
+                       "finding": "the check could not run: RuntimeError: injected", "auto_fixable": False},
+                      report["findings"])

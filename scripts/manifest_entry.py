@@ -17,6 +17,8 @@ A document failing both reports the **schema** failure. A profile mismatch on a 
 a manifest is not a useful thing to say.
 
     python3 scripts/manifest_entry.py <manifest.json> --profile <profile.md>
+
+Exit codes: 0 ok · 1 the manifest is unreadable · 2 schema failure, or usage · 3 profile mismatch, or the profile declares no repo_id or base_branch
 """
 
 import argparse

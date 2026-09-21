@@ -10,7 +10,7 @@ Modes: with no options, the structural checks run on the working directory; an e
 [dir] targets that root. `--report PATH` alone (no dir, no --mirrors) is REPORT-ONLY —
 no structural checks run and no plugin root is required. An explicit dir plus --report
 runs both. `--mirrors` always engages directory mode; before E7.2 ships the mirror hash
-manifest it refuses (exit 2) naming the dependency.
+manifest it refuses, naming the dependency.
 
 Check classes (root component surfaces only — nested plugin roots are other plugins):
 manifest-vs-disk, unregistered-skill, frontmatter (presence of the block and each
@@ -22,12 +22,13 @@ plugin must agree), mirrors (deferred; refusal pre-E7.2), report (fail-closed su
 validation against the CANONICAL schema — ADR-0001; the subset lives in
 scripts/validate_audit_output.py and is stated only there).
 
-Exit codes: 0 = every requested check ran, zero findings. 1 = findings (including a
-parsed report the canonical schema rejects). 2 = a requested check could not run: bad
-dir; root neither plugin nor monorepo; unparsable or structurally unusable plugin.json;
-unparsable configured hooks file or marketplace.json; unreadable or non-JSON report;
-UnsupportedSchemaError (the schema outran the checker — ADR-0001's loud halt);
---mirrors without its manifest; usage errors.
+Exit codes: 0 every requested check ran, zero findings · 1 findings · 2 a requested check could not run, or usage
+
+Findings include a parsed report the canonical schema rejects. A requested check could not run
+when: the dir is bad; the root is neither plugin nor monorepo; plugin.json is unparsable or
+structurally unusable; the configured hooks file or marketplace.json is unparsable; the report is
+unreadable or not JSON; UnsupportedSchemaError (the schema outran the checker — ADR-0001's loud
+halt); --mirrors runs without its manifest.
 """
 
 import argparse

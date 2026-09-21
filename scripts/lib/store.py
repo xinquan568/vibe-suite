@@ -169,6 +169,12 @@ def effective_config(workspace):
             config.ConfigContainmentError) as error:
         resolved = {}
         config_error = f"config: {error}"
+    except (OSError, UnicodeDecodeError) as error:
+        # vibe-231: a project file that cannot be READ (a directory, no permission, invalid UTF-8)
+        # degrades exactly like one that does not parse; it used to escape as a traceback.
+        resolved = {}
+        config_error = (f"config: {config.CONFIG_FILENAME} is not readable "
+                        f"({type(error).__name__}: {error})")
     # vibe-186 / grill S2 (B3): the gate is STORE-ONLY. The reader ignores a `gate` block in the
     # project file (with a warning naming the rule), so the effective gate is exactly the runtime
     # overrides over the fresh defaults — repository content a clone inherits can neither switch the
@@ -189,11 +195,14 @@ def _cli(argv):
 
     `effective-config <workspace>` prints the resolved configuration as one JSON object. There is
     deliberately **no write subcommand**: runtime writes belong to `/vibe-suite:config` (E1.8), and
-    a hook that could flip its own toggle would be a gate that disables itself. Exits: 0 success,
-    1 a state file too damaged to read (never a silent `{}` — see `_read`), 2 usage. A project
-    file that does not parse is NOT exit 1 (vibe-183): the store is intact, so the document is
-    printed with the gate resolved from runtime state + defaults and a `config_error` member, the
-    cause goes to stderr, and the exit is 0.
+    a hook that could flip its own toggle would be a gate that disables itself.
+
+    Exit codes: 0 success, including an unparseable or unreadable project file · 1 a state file too damaged to read, or holding a key or value outside the shadowable set · 2 usage
+
+    A state file too damaged to read is never a silent `{}` (see `_read`). A project file that does
+    not parse, or cannot be read, is a success (vibe-183, vibe-231): the store is intact, so the
+    document is printed with the gate resolved from runtime state + defaults and a `config_error`
+    member, and the cause goes to stderr.
     """
     if len(argv) != 2 or argv[0] != "effective-config":
         print("usage: store.py effective-config <workspace>", file=sys.stderr)

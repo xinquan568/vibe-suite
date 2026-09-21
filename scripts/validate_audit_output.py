@@ -16,6 +16,8 @@ The tradeoff is friction: adding a keyword to the schema requires adding it here
 and the invariant test in `tests/test_audit_output_schema.py` make that requirement mechanical rather
 than a matter of remembering.
 
+Exit codes: 0 valid · 1 invalid, or an unsupported schema · 2 usage
+
 Usage:
     python3 scripts/validate_audit_output.py <report.json> [schema.json]
 """

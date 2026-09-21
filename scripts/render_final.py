@@ -19,6 +19,8 @@ would make an optional feature load-bearing, which is the opposite of what an op
 `VIBE_SUITE_PANDOC_BIN` overrides which pandoc is used, mirroring `VIBE_SUITE_CODEX_BIN` in
 `codex-runner.mjs`. It exists for the same reason: the absent-tool branch is the one that matters, and
 testing it by emptying `PATH` removes the interpreter too.
+
+Exit codes: 0 ok · 2 bad input, or usage · 3 bad root · 4 the write failed
 """
 
 import argparse

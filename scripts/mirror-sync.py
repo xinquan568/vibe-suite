@@ -14,6 +14,8 @@ Inventory comes from the PRODUCTION TABLES below. The only injection point is th
 ``sets=`` parameter of :func:`generate` — a Python-API seam for unit tests; the CLI is
 unconditionally production-bound (no flag, no environment variable — pinned by
 ``tests/test_mirror_sync.py::ProductionBinding``).
+
+Exit codes: 0 ok · 1 a mirror error
 """
 
 import argparse

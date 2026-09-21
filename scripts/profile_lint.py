@@ -20,6 +20,8 @@ misspelled without consequence — `tdd_polcy` would never apply, and the profil
 while silently doing nothing. Refusing an unknown key is what makes the optional fields real.
 
 This program writes nothing.
+
+Exit codes: 0 valid · 1 invalid · 2 unreadable, or usage
 """
 
 import argparse

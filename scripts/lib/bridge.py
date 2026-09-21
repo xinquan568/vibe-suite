@@ -524,20 +524,41 @@ def load_json(path, *, strict=True):
 
 
 def main(argv):
+    """The shell callers' entry point.
+
+    Exit codes: 0 written, published or listed · 1 error · 2 usage · 3 publish: the destination already existed
+
+    vibe-231: a refusal or an I/O failure is one `bridge: …` line on stderr, never a traceback.
+    """
+    try:
+        return _main(argv)
+    except (fsafe.BridgeError, OSError) as exc:
+        print(f"bridge: {exc}", file=sys.stderr)
+        return 1
+
+
+def _main(argv):
     if len(argv) >= 4 and argv[1] == "write":
         # For shell callers. A native redirection (`printf ... > path`) **follows a symlink**, so a
         # link planted at a fixed path redirects the write onto whatever it points at — and
         # redirections are invisible to the AST lint, which is how one survived the sweep that
         # routed every Python write. Content arrives on stdin so no argv limit applies.
         root, dest = Path(argv[2]), Path(argv[3])
-        mode = int(argv[4], 8) if len(argv) >= 5 else None
+        mode = None
+        if len(argv) >= 5:
+            try:
+                mode = int(argv[4], 8)
+            except ValueError:
+                print(f"bridge: invalid mode {argv[4]!r} (octal expected)", file=sys.stderr)
+                return 2
         fsafe.write_atomic(root, dest, sys.stdin.read(), mode=mode)
         return 0
     if len(argv) >= 4 and argv[1] == "publish":
         # Create-only, for shell callers. `mv -f` clobbers; this refuses, which is what "a store
-        # that appeared while we ran still wins" requires.
+        # that appeared while we ran still wins" requires. vibe-231: "already there" is exit 3, so
+        # the caller can tell it from "created" (both used to exit 0).
         root, dest = Path(argv[2]), Path(argv[3])
-        return 0 if fsafe.publish_new(root, dest, sys.stdin.read()) else 0
+        return 0 if fsafe.publish_new(root, dest, sys.stdin.read()) else 3
     if len(argv) >= 3 and argv[1] == "list-owned":
         for name in inventory_enumerate(argv[2]):
             print(name)

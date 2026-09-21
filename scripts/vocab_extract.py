@@ -20,6 +20,8 @@ Output (stdout JSON, byte-identical across runs):
     {"root": "<as given>", "terms": [{"term", "count", "files"}, ...]}
 sorted by (-count, term); files sorted; tokens are lowercased matches of
 `[a-z][a-z0-9_-]+` at word boundaries.
+
+Exit codes: 0 extracted · 2 not a directory, or usage
 """
 
 import argparse

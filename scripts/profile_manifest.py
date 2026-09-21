@@ -17,6 +17,8 @@ A manifest carrying **both** spellings is refused rather than resolved. Two valu
 both be the answer, and picking one silently is worse than saying so.
 
 Writes go through `fsafe.write_atomic`.
+
+Exit codes: 0 ok · 1 bad input · 2 usage · 3 the write failed
 """
 
 import argparse

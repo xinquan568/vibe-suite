@@ -44,9 +44,10 @@ vibe_report_url() { printf '%s\n' "$(vibe_redact "$1")"; }
 # vibe_safe_write <path> <<< content — writes only when the destination does not exist.
 # "New store wins" in its most common form: if the new store is already there, the migration has
 # nothing to say about it. Returns 0 whether it wrote or skipped; callers that need to know check
-# vibe_exists first.
+# vibe_exists first. A destination that appears between the check below and the publish is the same
+# skip: `publish` exits 3 for it (vibe-231), and that is noted and mapped to 0 here.
 vibe_safe_write() {
-    local dest="$1"
+    local dest="$1" status=0
     if [ -e "$dest" ]; then
         vibe_note "$dest already exists — left as it is (new store wins)"
         cat > /dev/null
@@ -56,7 +57,13 @@ vibe_safe_write() {
     # fsynced, then linked into place. The old `mktemp` + `mv -f` followed a symlink at `$dest` and
     # `mv -f` would clobber whatever was there.
     mkdir -p "$(dirname "$dest")"
-    cat | python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/bridge.py" publish "$(dirname "$dest")" "$dest"
+    cat | python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/bridge.py" publish "$(dirname "$dest")" "$dest" \
+        || status=$?
+    if [ "$status" -eq 3 ]; then
+        vibe_note "$dest appeared concurrently — left as it is (new store wins)"
+        return 0
+    fi
+    return "$status"
 }
 
 vibe_exists() { [ -e "$1" ]; }
@@ -127,13 +134,6 @@ fsafe.write_atomic(target.parent.parent, target,
                     json.dumps(data, indent=2, sort_keys=True) + "\n",
                     mode=(target.lstat().st_mode & 0o7777) if target.is_file() else 0o600)
 PY
-}
-
-vibe_provenance_has() {
-    local path="$1" step="$2"
-    [ -f "$path" ] || return 1
-    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in d.get("steps",[]) else 1)' \
-        "$path" "$step" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------- snapshots

@@ -23,6 +23,8 @@ and so may a bad value under a *known* key; messages name the key and the expect
 
 **stdout belongs to the CLI's JSON.** The API returns warnings and never prints — a warning on
 stdout would corrupt the document its caller is parsing.
+
+Exit codes: 0 ok · 1 a config error
 """
 
 import json

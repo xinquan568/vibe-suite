@@ -4,11 +4,13 @@
 
 Reads `<corpus>/manifest.json`, follows its `rules` list, and emits `<out>/data/reference.json`
 plus `<out>/reference/index.md` and a page per rule. Per D-C an absent corpus is the honest
-pre-migration state: exit 0 with zero entries and a "no audit data yet" notice. Only a corpus
+pre-migration state: success with zero entries and a "no audit data yet" notice. Only a corpus
 whose manifest cannot be parsed is an error, and it renders nothing at all — a corrupt input
 must never degrade into a page that reads as healthy.
 
     bin/vibe-build-reference-md --corpus <dir> --out <dir>
+
+Exit codes: 0 built (an absent corpus builds empty) · 2 refused
 """
 
 import argparse

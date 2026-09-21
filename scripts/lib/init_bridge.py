@@ -10,6 +10,8 @@ Every target goes through `fsafe.write_atomic` — full-file replacement, fsync,
 fsync. No writer on this path is outside the audited primitives: `Store.set` writes through
 `fsafe.write_atomic` too, and so does every migration helper under `scripts/migrate/` except
 `migrate-history.sh`, which publishes create-only through `fsafe.publish_new`.
+
+Exit codes: 0 ok · 1 error · 2 unknown subcommand
 """
 
 import base64

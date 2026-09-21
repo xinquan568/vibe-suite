@@ -10,6 +10,7 @@
 # Jobs are ephemeral and are not migrated.
 #
 # Usage: migrate-state.sh [--workspace DIR] [--legacy-state DIR]...
+# Exit codes: 0 done, or nothing to do · 1 error · 3 a decision is required: the legacy stores disagree
 
 set -euo pipefail
 # shellcheck source=scripts/migrate/common.sh
@@ -21,7 +22,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --workspace)    workspace="${2:?--workspace needs a directory}"; shift 2 ;;
         --legacy-state) legacy_dirs+=("${2:?--legacy-state needs a directory}"); shift 2 ;;
-        -h|--help) sed -n '3,12p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '3,13p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) vibe_die "unknown argument: $1" ;;
     esac
 done

@@ -11,6 +11,8 @@ primitive (`scripts/lib/bridge.py`). Ticket identity comes from the resolved iss
 anchored `id_pattern`, passed as --id-pattern; the run refuses without it.
 
 Object model: ContainerRun / ExecutionRun / Ticket.
+
+Exit codes: 0 done · 1 runs root not found, bad timezone, or config key mismatch · 2 refusal
 """
 
 import argparse

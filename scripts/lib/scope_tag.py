@@ -6,7 +6,9 @@ Four canonical tags — `full` (no argument), `path:<posix-rel>` (a path argumen
 (bare --changed), `changed:<posix-rel>` (path plus --changed). One executable derivation exists
 so the two command docs can invoke it verbatim instead of restating the mapping: two restatements
 of one rule is how the apples-to-apples filter would silently stop matching. A path outside the
-root refuses (exit 2, nothing on stdout) — a tag for a foreign path would poison the history.
+root refuses (nothing on stdout) — a tag for a foreign path would poison the history.
+
+Exit codes: 0 ok · 2 refused
 """
 
 import argparse

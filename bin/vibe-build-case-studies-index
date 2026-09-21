@@ -5,7 +5,7 @@
 Reads `<corpus>/manifest.json`, follows its `articles` list, and emits
 `<out>/data/case-studies.json` plus `<out>/case-studies/index.md` — newest first, so the index
 opens on the most recent study. Per D-C an absent corpus is the honest pre-migration state:
-exit 0 with zero entries and a "no audit data yet" notice. Only a corpus whose manifest cannot
+success with zero entries and a "no audit data yet" notice. Only a corpus whose manifest cannot
 be parsed is an error, and it renders nothing at all.
 
 An article carries `--- title / date / repo ---` front matter. Where a field is missing the
@@ -13,6 +13,8 @@ filename supplies it (`2026-01-repo-alpha.md` dates and names itself), because a
 forgot its front matter should still be listed rather than silently dropped.
 
     bin/vibe-build-case-studies-index --corpus <dir> --out <dir>
+
+Exit codes: 0 built (an absent corpus builds empty) · 2 refused
 """
 
 import argparse

@@ -7,8 +7,12 @@ stamps the definition; a flag-less `reconcile` — what init / repair / update r
 stamped, unchanged definitions and holds everything else, disclosed and unwritten.
 
 Non-interactive by design: the command doc runs the interview in the host session and calls this
-with explicit flags, so every behavior here is scriptable and testable. Exit codes: 0 success,
-2 refusal (nothing written on refusal — `advisors.AdvisorError` is raised before any mutation).
+with explicit flags, so every behavior here is scriptable and testable.
+
+Exit codes: 0 success · 2 refusal: an advisor or bridge error, or usage
+
+A refusal does not promise that nothing was written: recovery of an interrupted transaction runs first for every
+operation but `list`, and an operation that fails part-way undoes what it can (see `advisors.py`).
 
 `add` resolves the claude-octopus backend per D-c: an explicit exact `--pin` (the P9 escape
 hatch), else the shipped pin file, else a refusal naming both remedies while E7.1's pin is

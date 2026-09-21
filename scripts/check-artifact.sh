@@ -1,7 +1,8 @@
 #!/bin/bash
 # SPDX-License-Identifier: ISC
 # PostToolUse hook: detect NL artifact edits and remind to score. Fail-open — if
-# anything goes wrong, emit nothing and exit 0. Never blocks (F9.7).
+# anything goes wrong, emit nothing and succeed. Never blocks (F9.7): its one non-zero exit is advisory.
+# Exit codes: 0 nothing to report, or a fault (fail-open) · 1 an advisory note the harness shows the operator; never blocks
 set +e
 
 input=$(cat 2>/dev/null)

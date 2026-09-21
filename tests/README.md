@@ -119,10 +119,16 @@ The schema itself is stated in the model step's prompt, and a test holds the pro
 
 Nothing a batch contains can stop the report. An archive the reader cannot open (an encrypted, corrupt or unsupported
 member), JSON nested too deeply to parse, or an exception inside validation makes **that** batch `invalid batch` and
-leaves the others rendered. The model's own words reach the report in only two forms. A `note`, optional on every
-check, must be one line of at most 200 printable characters; it is always rendered after a `note: ` prefix, so it can
-never open or close a fence. A value quoted in a rejection (an unknown id, field or spec) is shown through `ascii()` and
-truncated to 60 characters, so it stays one line.
+leaves the others rendered. An archive over 4 MiB is refused twice: by its listed size before any download, and by
+its size on disk before it is parsed. The download stream itself is cut at one byte past the cap. Only stored or
+deflated members are read, because `zipfile`'s BZIP2 and LZMA readers decompress without an output bound. Validation
+work is bounded by the inventory: a verdict with more than 32 checks beyond its inventory, or a batch with more than 8
+spec entries beyond its assignment, is one message, not one per item.
+
+The model's own words reach the report in exactly three forms. A `note`, optional on every check, must be one line of at
+most 200 printable characters; it is always rendered after a `note: ` prefix, so it can never open or close a fence. A
+value quoted in a rejection (an unknown id, field or spec) is shown through `ascii()` and truncated to 60 characters, so
+it stays one line. The model id, validated by `MODEL_ID`, is rendered in a code span, which it cannot close.
 
 **The leg is untrusted from its model step on.** The model can reach the checkout, `.git/config`, the runner's
 environment files and its own transcript, so nothing after it runs repository code: a `jq` line records the model id,

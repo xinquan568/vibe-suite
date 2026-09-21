@@ -36,6 +36,15 @@ BATCH_SIZE = 3
 BATCH_MEMBER = "batch.json"
 MODEL_MEMBER = "model.txt"
 MEMBER_CAP = 1 << 20
+#: An archive over this is never opened: it bounds the central directory `zipfile` loads before any member cap applies.
+#: The fetch step refuses the same number before downloading (self-check.yml), and a test holds the two together.
+ARCHIVE_CAP = 4 << 20
+#: Only these decompress with an output bound in `zipfile` (stored reads n bytes; deflate passes max_length). BZIP2 and
+#: LZMA do not: a 521-byte BZIP2 member reached 954 MiB in a fresh reader (vibe-229 round 3, probe_r3b).
+BOUNDED_COMPRESSION = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+#: Validation work is bounded by the inventory, not by the input: past these, one message replaces per-item work.
+MAX_EXTRA_CHECKS = 32
+MAX_EXTRA_ENTRIES = 8
 
 #: Section heading → (check-id prefix, lane, parser kind). Only these are evaluated (agents/tester.md:21-45).
 EVALUATED = {
@@ -193,6 +202,8 @@ def _read_member(zf, name):
     if len(matches) > 1:
         return None, f"duplicate member {name}"
     info = matches[0]
+    if info.compress_type not in BOUNDED_COMPRESSION:
+        return None, f"unsupported compression ({info.compress_type})"
     if info.file_size > MEMBER_CAP:
         return None, f"{name} exceeds {MEMBER_CAP} bytes"
     with zf.open(info) as fh:
@@ -210,6 +221,10 @@ def read_batches(in_dir, batch_ids):
         path = Path(in_dir) / f"{k}.zip"
         if path.is_file():
             row["present"] = True
+            if path.stat().st_size > ARCHIVE_CAP:
+                row["error"] = f"archive exceeds {ARCHIVE_CAP} bytes"
+                out[k] = row
+                continue
             try:
                 with zipfile.ZipFile(path) as zf:
                     raw, err = _read_member(zf, BATCH_MEMBER)
@@ -274,8 +289,11 @@ def _check_one(check, spec_check, errors, where):
     kind = spec_check["kind"]
     required, optional = _FIELDS[kind]
     fields = set(check)
-    for f in sorted(fields - required - optional):
+    unknown = sorted(fields - required - optional)
+    for f in unknown[:3]:
         errors.append(f"{where}: unknown field {_shown(f)}")
+    if len(unknown) > 3:
+        errors.append(f"{where}: and {len(unknown) - 3} more unknown fields")
     for f in sorted(required - fields):
         errors.append(f"{where}: missing field {f}")
     if "note" in check and not _note_ok(check["note"]):
@@ -325,6 +343,8 @@ def validate(raw, assigned, inventories):
         return {"errors": ["the batch is not valid JSON"], "spec_errors": {}, "specs": {}}
     if not (isinstance(doc, dict) and set(doc) == {"specs"} and isinstance(doc["specs"], list)):
         return {"errors": ['the batch top level must be exactly {"specs": [...]}'], "spec_errors": {}, "specs": {}}
+    if len(doc["specs"]) > len(assigned) + MAX_EXTRA_ENTRIES:
+        return {"errors": [f"too many spec entries ({len(doc['specs'])})"], "spec_errors": {}, "specs": {}}
     seen = []
     for entry in doc["specs"]:
         if not (isinstance(entry, dict) and set(entry) == {"spec", "checks"} and isinstance(entry.get("checks"), list)):
@@ -340,6 +360,11 @@ def validate(raw, assigned, inventories):
         seen.append(stem)
         mine = []
         expected = {c["id"]: c for c in inventories[stem]["checks"]}
+        if len(entry["checks"]) > len(expected) + MAX_EXTRA_CHECKS:
+            spec_errors.setdefault(stem, []).append(
+                f"{stem}: too many checks ({len(entry['checks'])}; the inventory has {len(expected)})")
+            specs[stem] = []
+            continue
         got_ids, results = [], []
         for check in entry["checks"]:
             if not isinstance(check, dict) or not isinstance(check.get("id"), str):
@@ -487,7 +512,7 @@ def report(root, in_dir, plan_matrix, out, commit="", date=""):
     text = ["Vibe Suite Test Report", "",
             "Judgment lane — advisory. Lanes 1-4 were judged by the tester's procedure, run in-session by a Claude "
             "session; this is not the tester subagent. Lane 5 was computed by the score engine, not by the model.",
-            f"Commit: {commit} · Date: {date} · Model: {', '.join(models) if models else 'not reported'}"]
+            f"Commit: {commit} · Date: {date} · Model: {', '.join(f'`{m}`' for m in models) if models else 'not reported'}"]
     if missing_batches:
         text.append("Missing: " + "; ".join(f"batch {k} produced no report" for k in missing_batches))
     if unevaluated:

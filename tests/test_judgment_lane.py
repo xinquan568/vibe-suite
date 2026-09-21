@@ -14,10 +14,10 @@ workflow's shape, parsed with the repository's own Psych adapter rather than gre
 
 import importlib.util
 import io
-import io
 import json
 import os
 import random
+import re
 import shutil
 import stat
 import subprocess
@@ -45,6 +45,10 @@ def _load():
 
 
 jl = _load()
+
+#: The archive cap the helper and the fetch script must both enforce (round 3). Held here, not read from the helper, so a
+#: test can fail by assertion against a helper that lacks the constant.
+EXPECTED_ARCHIVE_CAP = 4 << 20
 
 # --------------------------------------------------------------------------------------------------------------------
 # Fixtures: a throwaway repository root with specs, artifacts and a planted score engine.
@@ -533,6 +537,44 @@ class TheValidator(Fixture):
         self.assertEqual(jl._shown("a" * 59), ascii("a" * 59)[:60] + "…")
         self.assertEqual(jl._shown("\ud800\n"), "'\\ud800\\n'")
 
+    def test_too_many_checks_is_one_message_not_one_per_id(self):
+        """S8: past the inventory plus 32, a spec entry is one message and its ids are never examined."""
+        n = len(self.inv["alpha"]["checks"])
+        for extra, capped in ((33, True), (32, False)):
+            with self.subTest(extra=extra):
+                doc = self.full_batch(self.root, self.stems)
+                doc["specs"][0]["checks"] += [{"id": f"u{i}", "result": "pass"} for i in range(extra)]
+                got = self.contained(jl.validate, json.dumps(doc), self.stems, self.inv)
+                alpha = got["spec_errors"].get("alpha", [])
+                too_many = [e for e in alpha if "too many checks" in e]
+                unexpected = [e for e in alpha if "unexpected check" in e]
+                if capped:
+                    self.assertEqual(too_many, [f"alpha: too many checks ({n + extra}; the inventory has {n})"])
+                    self.assertEqual(unexpected, [], "a capped entry's ids must not be examined one by one")
+                else:
+                    self.assertEqual((len(too_many), len(unexpected)), (0, extra))
+
+    def test_too_many_spec_entries_is_document_level(self):
+        """S9: past the assignment plus 8, the batch is one document-level message, before any entry is examined."""
+        for extra, capped in ((9, True), (8, False)):
+            with self.subTest(extra=extra):
+                doc = self.full_batch(self.root, self.stems)
+                doc["specs"] += [{"spec": f"j{i}", "checks": []} for i in range(extra)]
+                got = self.contained(jl.validate, json.dumps(doc), self.stems, self.inv)
+                if capped:
+                    self.assertEqual(got["errors"], [f"too many spec entries ({len(self.stems) + extra})"])
+                else:
+                    self.assertEqual(len([e for e in got["errors"] if "unassigned spec" in e]), extra)
+
+    def test_unknown_fields_are_reported_three_at_most(self):
+        """S10: three named, then one count."""
+        check = {"id": "out:1", "result": "pass", **{f"f{i}": 1 for i in range(10)}}
+        doc = self.full_batch(self.root, self.stems, {"alpha": {"out:1": check}})
+        got = self.contained(jl.validate, json.dumps(doc), self.stems, self.inv)
+        alpha = got["spec_errors"].get("alpha", [])
+        self.assertEqual(len([e for e in alpha if ": unknown field " in e]), 3)
+        self.assertIn("alpha out:1: and 7 more unknown fields", alpha)
+
     def test_trigger_pass_fail_is_computed_from_predicted(self):
         doc = self.full_batch(self.root, self.stems, {"alpha": {
             "trig+:1": {"id": "trig+:1", "predicted": "NO", "confidence": "medium"},
@@ -797,6 +839,53 @@ class TheReport(Fixture):
                 root, ["a1", "a2", "a3"], {"a1": {"out:1": {"id": "out:1", "result": "fail"}}})))])
         self.assertIn("\\ud800", text)
 
+    def zip_bytes(self, members, compression=zipfile.ZIP_STORED):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, data, ct in members:
+                zf.writestr(name, data, compress_type=ct if ct is not None else compression)
+        return buf.getvalue()
+
+    def test_an_oversized_archive_is_refused_before_parsing(self):
+        """S1: a valid batch inside an archive over the cap is never parsed."""
+        text = self.hostile_run(raw_zip=lambda root: self.zip_bytes([
+            ("batch.json", json.dumps(self.full_batch(root, ["a1", "a2", "a3"])), None),
+            ("pad", b"0" * EXPECTED_ARCHIVE_CAP, None)]))
+        self.assertIn("| a1.spec.md | commands/a1.md | FAIL | invalid batch |", text)
+        self.assertIn(f"✗ batch 0 rejected: archive exceeds {EXPECTED_ARCHIVE_CAP} bytes", text)
+
+    def test_only_stored_or_deflated_members_are_read(self):
+        """S2: BZIP2 and LZMA decompress without an output bound in `zipfile`, so a `batch.json` using either is refused
+        unopened, however valid its content; DEFLATED is read."""
+        for ct, number in ((zipfile.ZIP_BZIP2, 12), (zipfile.ZIP_LZMA, 14), (zipfile.ZIP_DEFLATED, None)):
+            with self.subTest(compression=ct):
+                text = self.hostile_run(raw_zip=lambda root, ct=ct: self.zip_bytes([
+                    ("batch.json", json.dumps(self.full_batch(root, ["a1", "a2", "a3"])), ct)]))
+                if number is None:
+                    self.assertIn("| a1.spec.md | commands/a1.md | PASS |", text)
+                else:
+                    self.assertIn("| a1.spec.md | commands/a1.md | FAIL | invalid batch |", text)
+                    self.assertIn(f"✗ batch 0 rejected: unsupported compression ({number})", text)
+
+    def test_a_disallowed_model_member_leaves_the_batch_valid(self):
+        """S11: `model.txt` under the same allow-list, but its refusal costs only the model line."""
+        text = self.hostile_run(raw_zip=lambda root: self.zip_bytes([
+            ("batch.json", json.dumps(self.full_batch(root, ["a1", "a2", "a3"])), None),
+            ("model.txt", "claude-somewhere", zipfile.ZIP_LZMA)]))
+        self.assertIn("| a1.spec.md | commands/a1.md | PASS |", text)
+        self.assertIn("Model: not reported", text)
+        self.assertNotIn("claude-somewhere", text)
+
+    def test_the_model_id_renders_as_a_code_span(self):
+        """S3: ids `MODEL_ID` accepts can still be markdown; a code span keeps them literal (`MODEL_ID` admits no
+        backtick, so the span cannot be closed from inside)."""
+        for mid in ("__forged__", "[x][y]"):
+            with self.subTest(model=mid):
+                text = self.hostile_run(lambda root, mid=mid: [
+                    ("batch.json", json.dumps(self.full_batch(root, ["a1", "a2", "a3"]))), ("model.txt", mid)])
+                self.assertIn(f"Model: `{mid}`", text)
+                self.assertNotIn(f"Model: {mid}", text)
+
     def test_report_renders_missing_artifact_and_engine_errors(self):
         root = self.make_root(names=("alpha", "beta", "gamma"), missing=("alpha",))
         inbox = root / "in"
@@ -835,7 +924,7 @@ class TheReport(Fixture):
 
     def test_report_model_id_is_validated_or_not_reported(self):
         root = self.make_root(names=("alpha",))
-        cases = (("claude-opus-5", "Model: claude-opus-5"),
+        cases = (("claude-opus-5", "Model: `claude-opus-5`"),
                  ("claude opus; rm -rf /", "Model: not reported"),
                  (None, "Model: not reported"))
         for model, expected in cases:
@@ -1194,19 +1283,41 @@ ep = eps[0]
 if ep.startswith(f"repos/{repo}/actions/runs/{run}/artifacts"):
     if "--paginate" not in args:
         sys.stderr.write("stub: the listing must be paginated\n"); sys.exit(7)
-    for row in json.loads(os.environ["LISTING"]):
+    rows = json.loads(os.environ["LISTING"])
+    if "--jq" in args:
+        # as gh does: the API document through the caller's own --jq expression, so the production projection is tested
+        import subprocess
+        r = subprocess.run(["jq", "-c", args[args.index("--jq") + 1]], input=json.dumps({"artifacts": rows}),
+                           capture_output=True, text=True)
+        sys.stdout.write(r.stdout); sys.stderr.write(r.stderr); sys.exit(r.returncode)
+    for row in rows:
         print(json.dumps(row))
     sys.exit(0)
 prefix = f"repos/{repo}/actions/artifacts/"
 if ep.startswith(prefix) and ep.endswith("/zip") and ep[len(prefix):-4].isdigit():
     if ep[len(prefix):-4] in os.environ.get("FAIL_IDS", "").split():
         sys.stdout.write("partial"); sys.stdout.flush(); sys.exit(1)
+    sizes = dict(p.split(":") for p in os.environ.get("STREAM_BYTES", "").split())
+    if ep[len(prefix):-4] in sizes:
+        left, chunk = int(sizes[ep[len(prefix):-4]]), b"z" * 65536
+        try:
+            while left > 0:
+                sys.stdout.buffer.write(chunk[:left]); left -= len(chunk)
+            sys.stdout.buffer.flush()
+        except BrokenPipeError:
+            os._exit(1)
+        os._exit(0)
     sys.stdout.write("zip-for-" + ep[len(prefix):-4])
     sys.exit(0)
 sys.stderr.write("stub: unexpected endpoint " + ep + "\n"); sys.exit(6)
 """
 
-    def execute(self, listing, plan, with_token=True, fail_ids=""):
+    @staticmethod
+    def sized(rows):
+        """Listing rows as the API returns them: every artifact carries `size_in_bytes`."""
+        return [{"size_in_bytes": 100, "expired": False, **r} for r in rows]
+
+    def execute(self, listing, plan, with_token=True, fail_ids="", stream_bytes=""):
         script, step = self.run_of("judgment-report", "fetch")
         env_node = _map_get(step, "env")
         self.assertEqual(_scalar(_map_get(env_node, "GH_TOKEN")), "${{ github.token }}")
@@ -1226,14 +1337,16 @@ sys.stderr.write("stub: unexpected endpoint " + ep + "\n"); sys.exit(6)
             env["GH_TOKEN"] = "t"
         if fail_ids:
             env["FAIL_IDS"] = fail_ids
+        if stream_bytes:
+            env["STREAM_BYTES"] = stream_bytes
         r = subprocess.run(["bash", "-c", script], cwd=work, env=env, capture_output=True, text=True)
         calls = [json.loads(l) for l in (top / "calls.log").read_text().splitlines()] if (top / "calls.log").exists() else []
         return r, temp / "judgment-in", calls
 
     def test_the_fetch_script_authenticates_uses_explicit_endpoints_and_fetches_only_planned_names(self):
-        listing = [{"name": "judgment-batch-0", "id": 11}, {"name": "judgment-batch-2", "id": 13},
-                   {"name": "judgment-report", "id": 90}, {"name": "judgment-batch-../../x", "id": 91},
-                   {"name": "judgment-batch-9", "id": 92}]
+        listing = self.sized([{"name": "judgment-batch-0", "id": 11}, {"name": "judgment-batch-2", "id": 13},
+                              {"name": "judgment-report", "id": 90}, {"name": "judgment-batch-../../x", "id": 91},
+                              {"name": "judgment-batch-9", "id": 92}])
         plan = {"include": [{"batch": 0, "specs": "a"}, {"batch": 1, "specs": "b"}, {"batch": 2, "specs": "c"}]}
         r, inbox, calls = self.execute(listing, plan)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1247,20 +1360,61 @@ sys.stderr.write("stub: unexpected endpoint " + ep + "\n"); sys.exit(6)
     def test_a_failed_download_leaves_no_partial_file_and_the_loop_continues(self):
         """R10: added coverage of existing behaviour (self-check.yml's `rm -f` after a failed `gh api`); liveness is by
         mutants M60 (pagination) and M61 (clean-up)."""
-        listing = [{"name": "judgment-batch-0", "id": 11}, {"name": "judgment-batch-1", "id": 12},
-                   {"name": "judgment-batch-2", "id": 13}]
+        listing = self.sized([{"name": "judgment-batch-0", "id": 11}, {"name": "judgment-batch-1", "id": 12},
+                              {"name": "judgment-batch-2", "id": 13}])
         plan = {"include": [{"batch": k, "specs": f"s{k}"} for k in range(3)]}
         r, inbox, _calls = self.execute(listing, plan, fail_ids="12")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(sorted(p.name for p in inbox.iterdir()), ["0.zip", "2.zip"], "a partial 1.zip must not survive")
         self.assertIn("batch 1: download failed", r.stdout)
 
+    def test_an_oversized_or_unsized_artifact_is_never_downloaded(self):
+        """S4: the listing's own size decides before any request (trusted GitHub metadata)."""
+        listing = [{"name": "judgment-batch-0", "id": 11, "size_in_bytes": 100},
+                   {"name": "judgment-batch-1", "id": 12, "size_in_bytes": EXPECTED_ARCHIVE_CAP + 1},
+                   {"name": "judgment-batch-2", "id": 13}]
+        plan = {"include": [{"batch": k, "specs": f"s{k}"} for k in range(3)]}
+        r, inbox, calls = self.execute(listing, plan)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(sorted(p.name for p in inbox.iterdir()), ["0.zip"])
+        requested = [a for c in calls for a in c if a.endswith("/zip")]
+        self.assertEqual(requested, ["repos/o/r/actions/artifacts/11/zip"])
+        self.assertIn(f"batch 1: artifact too large ({EXPECTED_ARCHIVE_CAP + 1} bytes)", r.stdout)
+        self.assertIn("batch 2: no artifact size", r.stdout)
+
+    def test_the_fetch_cap_is_the_helper_cap(self):
+        """S5: one number in two files, the fetch script's and the helper's."""
+        script, _ = self.run_of("judgment-report", "fetch")
+        # operands extracted whole: a substring test would let 41943040 pass as 4194304
+        self.assertEqual(re.findall(r"-gt (\d+) \]", script), [str(EXPECTED_ARCHIVE_CAP)])
+        self.assertEqual(re.findall(r"head -c (\d+) ", script), [str(EXPECTED_ARCHIVE_CAP + 1)])
+        self.assertEqual(getattr(jl, "ARCHIVE_CAP", None), EXPECTED_ARCHIVE_CAP)
+
+    def test_an_oversized_stream_never_reaches_the_reader(self):
+        """S7: whatever the server streams, at most cap+1 bytes reach disk, and the reader refuses cap+1."""
+        plan = {"include": [{"batch": 0, "specs": "a"}, {"batch": 1, "specs": "b"}]}
+        listing = self.sized([{"name": "judgment-batch-0", "id": 11}, {"name": "judgment-batch-1", "id": 12}])
+        with self.subTest(stream="cap + 16 MiB: far past a pipe buffer, so the writer meets SIGPIPE"):
+            r, inbox, _calls = self.execute(listing, plan, stream_bytes=f"11:{EXPECTED_ARCHIVE_CAP + (16 << 20)}")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(sorted(p.name for p in inbox.iterdir()), ["1.zip"])
+            self.assertIn("batch 0: download failed", r.stdout)
+        with self.subTest(stream="exactly cap + 1: the pipeline succeeds and the reader refuses the file"):
+            r, inbox, _calls = self.execute(listing, plan, stream_bytes=f"11:{EXPECTED_ARCHIVE_CAP + 1}")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual((inbox / "0.zip").stat().st_size, EXPECTED_ARCHIVE_CAP + 1)
+            try:  # WorkflowCase has no contained(): the same exception-to-failure rule, spelled out
+                got = jl.read_batches(inbox, [0])
+            except Exception as exc:  # noqa: BLE001
+                self.fail(f"read_batches raised {exc!r}")
+            self.assertIn(f"archive exceeds {EXPECTED_ARCHIVE_CAP} bytes", got[0]["error"] or "")
+
     def test_the_fetch_script_fails_without_a_token(self):
         r, _inbox, _calls = self.execute([], {"include": [{"batch": 0, "specs": "a"}]}, with_token=False)
         self.assertNotEqual(r.returncode, 0)
 
     def test_the_fetch_script_refuses_a_non_numeric_batch(self):
-        r, inbox, _calls = self.execute([{"name": "judgment-batch-x", "id": 5}],
+        r, inbox, _calls = self.execute(self.sized([{"name": "judgment-batch-x", "id": 5}]),
                                         {"include": [{"batch": "x", "specs": "a"}]})
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(any(inbox.iterdir()) if inbox.exists() else False)

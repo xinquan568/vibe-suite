@@ -308,7 +308,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/judgment-in"
           listing="$RUNNER_TEMP/judgment-artifacts.jsonl"
           if ! gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
-                 --jq '.artifacts[] | {name: .name, id: .id}' > "$listing"; then
+                 --jq '.artifacts[] | {name: .name, id: .id, size: .size_in_bytes}' > "$listing"; then
             echo "could not list this run's artifacts"
             exit 1
           fi
@@ -321,7 +321,17 @@ jobs:
               echo "batch $k: no artifact"
               continue
             fi
-            if ! gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "$RUNNER_TEMP/judgment-in/$k.zip"; then
+            # 4194304 is tests/judgment_lane.py's ARCHIVE_CAP (a test holds the two together): refuse before requesting,
+            # and cap the stream itself, since the listed size is metadata, not the bytes served
+            size=$(jq -r --arg n "judgment-batch-$k" 'select(.name == $n) | .size' "$listing" | head -n 1)
+            case "$size" in
+              ''|*[!0-9]*) echo "batch $k: no artifact size"; continue ;;
+            esac
+            if [ "$size" -gt 4194304 ]; then
+              echo "batch $k: artifact too large ($size bytes)"
+              continue
+            fi
+            if ! gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" | head -c 4194305 > "$RUNNER_TEMP/judgment-in/$k.zip"; then
               echo "batch $k: download failed"
               rm -f "$RUNNER_TEMP/judgment-in/$k.zip"
             fi

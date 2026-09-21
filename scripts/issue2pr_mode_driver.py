@@ -4,7 +4,7 @@
 bookkeeping — the file and state operations `operational-modes.md` specifies — with every
 behavior read from that reference's marker-tagged JSON declaration blocks at runtime.
 Nothing here is a second statement of a mode rule: a behavior this driver cannot derive
-from a declared block is a failure naming the marker and key (exit 4), never a hardcoded
+from a declared block is a failure naming the marker and key (a declaration gap), never a hardcoded
 fallback.
 
 **This does not establish that a fresh reading of the markdown reproduces the goldens** —
@@ -14,8 +14,7 @@ judgment-bearing work (a squash-merge, a babysit round's nine steps) is *reporte
 required next action* and re-enters through declared result events; the driver itself
 writes only the declared bookkeeping.
 
-Exit codes: 0 done · 2 refusal (precondition, containment, illegal transition, bad input)
-· 4 declaration gap.
+Exit codes: 0 done · 2 refusal: precondition, containment, illegal transition, bad input, or usage · 4 declaration gap
 """
 
 import argparse
@@ -228,8 +227,9 @@ def mode_list(decl, args):
         state = {}
         try:
             state = load_json(child / "state.json")
-        except Refusal:
-            pass
+        except Refusal as exc:
+            # vibe-231: the row keeps its `?` cells; why they are `?` goes to stderr.
+            print(f"list: {child.name}: {exc}", file=sys.stderr)
         rows.append((child.stat().st_mtime, child.name, state))
     newest_first = "newest" in ops["order"]
     rows.sort(key=lambda r: r[0], reverse=newest_first)

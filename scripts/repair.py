@@ -13,6 +13,8 @@ failure cannot hide the rest.
 **No `--strictness`.** `init.sh` needs the band; the band's only job was computing `score_threshold`,
 which is what `.vibe-suite.md` actually stores. A stored 75 has no inverse to a band, so repair reads
 the threshold and never reconstructs the question.
+
+Exit codes: 0 every step fine · 1 at least one step failed · 2 nothing is installed here, or usage
 """
 
 import argparse
@@ -38,9 +40,12 @@ def installed(ws):
     would make it a silent, answer-less `init`."""
     try:
         registered = bool(bridge.inventory_enumerate(ws))
-    except Exception:
+    except Exception as exc:
         # Unreadable registrations mean something *is* installed, badly — which is exactly when
-        # repair should run. Raising here would suppress every per-step outcome.
+        # repair should run. Raising here would suppress every per-step outcome. vibe-231: the
+        # decision and its cause are stated, not only implied by a later step's failure.
+        print(f"repair: the registrations are unreadable ({exc}); proceeding as installed",
+              file=sys.stderr)
         registered = True
     return (registered
             or (ws / config_mod.CONFIG_FILENAME).is_file()

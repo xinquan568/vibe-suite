@@ -32,6 +32,8 @@
 //    workspace — walking straight past the untracked-file containment checks.
 //
 // **Node floor: 18.** No top-level await.
+//
+// Exit codes: 0 always: the decision is the output, never the exit code
 
 import { spawnSync } from "node:child_process";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";

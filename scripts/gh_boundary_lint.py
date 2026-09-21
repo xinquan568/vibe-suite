@@ -34,6 +34,8 @@ lint that guesses gets switched off**, which is the failure this file exists to 
 demonstrate.
 
 This program writes nothing.
+
+Exit codes: 0 clean · 1 a violation
 """
 
 import argparse

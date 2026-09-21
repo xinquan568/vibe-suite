@@ -49,6 +49,8 @@
 // **Testing seam:** `VIBE_SUITE_CODEX_BIN` overrides the executable so the suite runs hermetically
 // against fixtures. It selects the binary only — it does not relax sandbox arguments — and anyone who
 // can set it already controls the process environment.
+//
+// Exit codes: 0 foreground: the run completed; background: the launch was acknowledged; worker: the job ran (its outcome is in its record) · 1 the run failed, or a launch, claim or finalisation failed · 2 usage, or a refused dispatch: the resolved sandbox or effort (from flags, .vibe-suite.md or the resumed job) is not allowed, or a resume target has no thread id
 
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";

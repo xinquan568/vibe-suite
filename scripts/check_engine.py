@@ -27,7 +27,7 @@ judgment classes and feeds them back via --judgment. Mechanical classes:
                         exists. Verb terms flag only inside their scope's path globs;
                         noun-class terms are unscoped; deferred terms are never flagged.
 
-Refusals (exit 2): bad root; fewer than two artifacts ("check: consistency needs >=2
+A refusal is one of: bad root; fewer than two artifacts ("check: consistency needs >=2
 artifacts; found <n>"); malformed or invalid config; a registry.yaml outside the documented
 schema; a judgment file that is unreadable, unparsable, or carries an unknown class or a
 malformed finding shape.
@@ -40,6 +40,8 @@ empty; N == len(issues) exactly.
 The grammar's oracle is the hand-authored worksheet (tests/fixtures/check/broken/README.md);
 the edge definitions come from commands/shared/plugin-discover.md, the R51 semantics from
 skills/vocabulary/SKILL.md.
+
+Exit codes: 0 checked (issues are in the output, not the exit code) · 2 refusal, or usage
 """
 
 import argparse

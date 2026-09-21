@@ -25,7 +25,9 @@ output. The containment anchor is the nearest existing directory *above* `--out-
 out-dir is created through the symlink-refusing descent and a symlinked (or regular-file) out-dir is
 refused; symlinks at or above that anchor are followed (they are the user's existing directories).
 
-Exit codes: 0 rendered; 2 refused. Two kinds of refusal share the code: a *contract* refusal
+Exit codes: 0 rendered · 2 refused
+
+Two kinds of refusal share that code: a *contract* refusal
 (unreadable blob, schema violation) fires before any write, so nothing is written; an *output*
 refusal from the primitive (a symlinked or non-directory out-dir, a symlinked `index.html`, a
 symlink sitting at an archive name) can leave completed output behind — with a symlinked out-dir the

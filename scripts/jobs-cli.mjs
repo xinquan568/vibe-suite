@@ -15,9 +15,8 @@
 // `process.cwd()` — identical to codex-runner.mjs, so both sides of the store agree on where it is:
 // `<workspace>/.vibe-suite-state/jobs/<jobId>.json`.
 //
-// Exit codes: 0 — done (including "already finished" cancels); 1 — a true answer that is not
-// success (result not finished, nothing to cancel, ambiguous target, invalid/missing record, group
-// outlived escalation); 2 — usage. Callers branch on the exit code, never on output shape.
+// Exit codes: 0 done, including "already finished" cancels · 1 a true answer that is not success (result not finished, nothing to cancel, ambiguous target, invalid or missing record, group outlived escalation, or prune left a job or file it could not vouch for or remove) · 2 usage
+// Callers branch on the exit code, never on output shape.
 //
 // **Node floor: 18.** No top-level await — `main()` is invoked, not awaited at module scope
 // (cc-suite W7 class). All command logic lives here and in scripts/lib/, never in markdown

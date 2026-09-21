@@ -18,7 +18,7 @@
 // passes only where the real binary is absent measures the environment, not the code.
 //
 // Usage: node boot_probe.mjs <package@version> <command> [args…]
-// Exit: 0 ok, 1 handshake failed/timed out.
+// Exit codes: 0 ok · 1 the server could not be spawned, exited, returned an MCP error, timed out, or reported a name or version other than the pinned one, or usage
 
 import { spawn } from "node:child_process";
 

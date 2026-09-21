@@ -21,6 +21,8 @@ is three round trips for one answer.
 field — from the authenticated login, which left an unauthenticated user with no valid output at all.
 The template no longer needs a login; a login only makes it nicer. So a missing login is a warning and
 a skipped smoke check, and the skip is reported.
+
+Exit codes: 0 detected · 1 preconditions missing · 2 bad input, or usage
 """
 
 import argparse

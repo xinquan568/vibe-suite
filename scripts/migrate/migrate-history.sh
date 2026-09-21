@@ -7,6 +7,7 @@
 # must recognise its own marker rather than add another.
 #
 # Usage: migrate-history.sh [--workspace DIR]
+# Exit codes: 0 done, or nothing to do · 1 error
 
 set -euo pipefail
 # shellcheck source=scripts/migrate/common.sh
@@ -16,7 +17,7 @@ workspace="."
 while [ $# -gt 0 ]; do
     case "$1" in
         --workspace) workspace="${2:?--workspace needs a directory}"; shift 2 ;;
-        -h|--help) sed -n '3,9p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '3,10p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) vibe_die "unknown argument: $1" ;;
     esac
 done

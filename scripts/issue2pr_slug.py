@@ -7,14 +7,16 @@ The slug is the one title-derived token that reaches a `git` or `gh` argument �
 argv, the body is stdin — so its domain is a core rule, stated once in
 `skills/issue2pr/references/profile-contract.md` (`<!-- slug-rule -->`) and read from there at
 runtime. Every member of that block is executed or validated here; a missing, unsupported or
-unexpected member is a declaration gap named on stderr (exit 4) — never a fallback of this module's.
+unexpected member is a declaration gap named on stderr — never a fallback of this module's.
 
-    python3 scripts/issue2pr_slug.py -- "<title>"     # stdout: the slug; exit 2 if none can be made
-    python3 scripts/issue2pr_slug.py --check=<slug>   # exit 0 if the slug conforms, else exit 2
+    python3 scripts/issue2pr_slug.py -- "<title>"     # stdout: the slug; refuses if none can be made
+    python3 scripts/issue2pr_slug.py --check=<slug>   # succeeds only if the slug conforms
 
 The `--` keeps a `-`-led title out of the options. A title that leaves nothing after the declared
 normalisation steps (only separators, symbols, or non-Latin text) has no conforming slug and is
 refused with the reason — a run does not start on an empty slug.
+
+Exit codes: 0 the slug conforms, or was made · 2 no slug can be made, or it does not conform, or usage · 4 declaration gap
 """
 import argparse
 import json

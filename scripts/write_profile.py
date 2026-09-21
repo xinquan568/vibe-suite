@@ -19,6 +19,8 @@ and described, which is achievable; a two-file transaction is not.
 answers come from people, and the profile is read back by `profile_lint.py`'s **closed** grammar —
 balanced quotes, two-space indentation, no multi-line scalars, no escaping convention. Inventing an
 escaping scheme its parser does not implement would produce a file that renders and will not read back.
+
+Exit codes: 0 ok · 1 bad input · 2 guard refused, or usage · 3 invalid · 4 the write failed
 """
 
 import argparse

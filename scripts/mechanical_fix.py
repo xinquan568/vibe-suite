@@ -26,11 +26,7 @@ Usage:
 
     python3 scripts/mechanical_fix.py <root> [--dry-run] [--json]
 
-Exit codes:
-
-    0  ran; changes applied (or none needed)
-    2  the root is unreadable
-    3  a write was refused by the atomic primitive
+Exit codes: 0 ran: changes applied, or none needed · 2 the root is not a directory or was refused as a containment root (for example a symlink), or usage · 3 a write was refused by the atomic primitive
 """
 
 import argparse

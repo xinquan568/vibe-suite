@@ -10,7 +10,7 @@ splits the two fields and NUL terminates the record, so any byte a filesystem al
 (spaces, quotes, dashes, even newlines) travels inertly. Nothing here invokes a shell, builds a
 command string, or executes a discovered path; hostile names are data.
 
-Arg: --root <dir>. Every path is resolved against the root and refused (exit 2, all offenders
+Arg: --root <dir>. Every path is resolved against the root and refused (all offenders
 listed on stderr) if it is absolute, escapes the root after normalization, or does not exist.
 
 Output (stdout): JSON — per category {"files", "lines", "tokens"} plus "total".
@@ -19,6 +19,8 @@ Counting semantics (normative; commands/ls.md cites this file):
   lines  = newline count, POSIX `wc -l` semantics — an unterminated final line is not counted.
   tokens = per-file ceil(byte_length / 4), summed. Never a ceiling over aggregated bytes.
   Category values are sums over member files; "total" sums the category rows.
+
+Exit codes: 0 counted · 2 refused
 """
 
 import argparse

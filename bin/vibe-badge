@@ -12,11 +12,13 @@ Badge JSON on stdout — exactly {schemaVersion, label, message, color}, nothing
 redirects, and refresh is re-invocation (self-check wiring lands in E8.4). Output is a pure
 function of (history bytes, scope) — no wall clock anywhere.
 
-A missing history, or a scope with no score entries, is an honest "no data" badge (exit 0):
+A missing history, or a scope with no score entries, is an honest "no data" badge and a success:
 a repo before its first scored run still deserves a rendering badge, and a CI refresh must
 not fail on it. A history that is present but unreadable or malformed refuses instead —
-exit 2, nothing on stdout — because a corrupt record must not render as healthy. And
+nothing on stdout — because a corrupt record must not render as healthy. And
 --attestation with nothing to attest refuses likewise.
+
+Exit codes: 0 badge emitted, including the no-data badge · 2 refused: an empty --scope, an unreadable or malformed history, or nothing to attest
 """
 
 import argparse

@@ -16,6 +16,8 @@ its own (it holds job records and gate toggles), and an absent `.vibe-suite.md` 
 silently. So *uninitialised*, *partial* and *installed* are told apart on purpose: conflating them
 yields either a cascade of missing-component findings on a project nobody set up, or a claim that
 repair is safe when provenance cannot support it.
+
+Exit codes: 0 every finding is [GOOD] · 1 at least one other finding
 """
 
 import argparse
@@ -83,9 +85,13 @@ def detect_state(ws):
         owned = True          # unreadable registrations mean something is installed, badly
         return "partial"
     configured = (ws / config_mod.CONFIG_FILENAME).is_file()
-    memory = any(bridge.md_block_has(bridge.read_text_verbatim(ws / n), "memory")
-                 or bridge.md_block_has(bridge.read_text_verbatim(ws / n), "import")
-                 for n in MEMORY_FILES)
+    memory = False
+    for n in MEMORY_FILES:
+        try:
+            text = bridge.read_text_verbatim(ws / n)
+        except OSError:
+            return "partial"  # vibe-231: an unreadable memory file is present, badly — not fatal
+        memory = memory or bridge.md_block_has(text, "memory") or bridge.md_block_has(text, "import")
     if not (owned or configured or memory or provenance.is_file()):
         return "uninitialised"
     if not provenance.is_file():
@@ -128,11 +134,23 @@ def check_bridge(ws, out):
         out.append(finding("[HIGH]", "sentinels", f"registrations are unreadable: {exc}", False))
         names = []
     mcp, _ = safe_json(ws / ".mcp.json", out, "sentinels")
-    toml = bridge.read_text_verbatim(ws / ".codex" / "config.toml")
+    try:
+        toml = bridge.read_text_verbatim(ws / ".codex" / "config.toml")
+    except OSError as exc:
+        out.append(finding("[HIGH]", "sentinels", f".codex/config.toml is not readable: {exc}", False))
+        toml = ""
     # grill S4 (vibe-191): no `vibe-suite` binary ships, so no `vibe-mcp` registration is expected
     # and its absence is healthy. One that names the bare `vibe-suite` command is dangling (an
     # earlier revision wrote it; a host would resolve the name on PATH) — repair removes it.
-    for rel in init_bridge.dangling_registrations(ws):
+    # vibe-231: guarded here, not inside `init_bridge` (whose install paths this does not touch); a
+    # failure skips only the dangling-registration checks, and the finding says so.
+    try:
+        dangling = init_bridge.dangling_registrations(ws)
+    except Exception as exc:
+        out.append(finding("[HIGH]", "sentinels",
+                           f"dangling registrations could not be checked: {exc}", False))
+        dangling = []
+    for rel in dangling:
         out.append(finding("[MEDIUM]", "sentinels",
                            f"{rel} carries a dangling registration of the bare "
                            f"`{init_bridge.BARE_COMMAND}` command (no such binary ships) — "
@@ -498,12 +516,23 @@ def knowledge_capability(out):
                           "writes skills/<skill>/refreshed.json"}
 
 
+def _backstop(name, findings, run, default=None):
+    """vibe-231: `doctor` always prints a report. A check that raises becomes one finding naming
+    the check and the error, and the checks after it still run; the rest of THAT check is skipped."""
+    try:
+        return run()
+    except Exception as exc:
+        findings.append(finding("[HIGH]", name,
+                                f"the check could not run: {type(exc).__name__}: {exc}", False))
+        return default
+
+
 def diagnose(ws):
     ws = Path(ws).resolve()
-    state = detect_state(ws)
     findings, capabilities, pin_status = [], [], None
+    state = _backstop("state", findings, lambda: detect_state(ws), default="partial")
 
-    check_legacy(ws, findings)
+    _backstop("legacy", findings, lambda: check_legacy(ws, findings))
     if state == "uninitialised":
         # The missing-component cascade is suppressed — every bridge target is expected to be
         # absent. Legacy detection above still ran, because a project holding a legacy store needs
@@ -511,13 +540,13 @@ def diagnose(ws):
         findings.append(finding("[MEDIUM]", "not-initialised",
                                 "vibe-suite is not installed here; run /vibe-suite:init", False))
     else:
-        check_bridge(ws, findings)
-        check_symlinks(ws, findings)
-        pin_status = check_pins(ws, findings)
-        check_config(ws, findings)
-        check_provenance(ws, state, findings)
-        check_advisors(ws, findings)
-    check_retired_names(HERE.parent, findings)
+        _backstop("bridge", findings, lambda: check_bridge(ws, findings))
+        _backstop("symlinks", findings, lambda: check_symlinks(ws, findings))
+        pin_status = _backstop("pins", findings, lambda: check_pins(ws, findings))
+        _backstop("config", findings, lambda: check_config(ws, findings))
+        _backstop("provenance", findings, lambda: check_provenance(ws, state, findings))
+        _backstop("advisors", findings, lambda: check_advisors(ws, findings))
+    _backstop("retired-names", findings, lambda: check_retired_names(HERE.parent, findings))
 
     if state != "uninitialised" and pin_status == "no-version-recorded":
         capabilities.append({"check": "pins", "status": "unavailable",
@@ -525,15 +554,15 @@ def diagnose(ws):
                                            "recorded a plugin version"})
     for check, blocked in UNAVAILABLE:
         capabilities.append({"check": check, "status": "unavailable", "blocked_on": blocked})
-    check_mirror_staleness(
+    _backstop("mirror-staleness", findings, lambda: check_mirror_staleness(
         Path(os.environ.get("CLAUDE_PLUGIN_ROOT") or HERE.parent),
-        findings, capabilities)
-    knowledge = knowledge_capability(findings)
+        findings, capabilities))
+    knowledge = _backstop("knowledge-freshness", findings, lambda: knowledge_capability(findings))
     if isinstance(knowledge, dict) and "status" in knowledge:
         capabilities.append(knowledge)
     elif knowledge:
         findings.append(knowledge)
-    runtime_capability(capabilities)
+    _backstop("runtime", findings, lambda: runtime_capability(capabilities))
     capabilities.append({"check": "connectivity", "status": "see-preflight",
                          "blocked_on": "/vibe-suite:preflight owns the normalised lane result"})
 

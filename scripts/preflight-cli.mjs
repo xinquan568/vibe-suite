@@ -6,9 +6,9 @@
 //
 //   node scripts/preflight-cli.mjs [--json]
 //
-// Prints the engine availability matrix — codex probed live — and
-// exits: 0 — every probed lane available and no probe degraded to `unknown`; 1 — a probed lane
-// unavailable or degraded; 2 — usage. The matrix always prints; the exit code is for scripts.
+// Prints the engine availability matrix — codex probed live. The matrix always prints; the exit
+// code is for scripts.
+// Exit codes: 0 every probed engine and runtime available and no probe degraded to `unknown` · 1 a probed engine or runtime (python3, node, git) unavailable, below its floor, or degraded · 2 usage
 //
 // **Node floor: 18.** No top-level await — `main()` is invoked, not awaited at module scope.
 

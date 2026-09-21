@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 import bridge
@@ -1357,20 +1358,34 @@ def add(ws, name, pin=None, plugin_root=None, custom_text=None,
         return reconcile(ws, pin=pin, pin_file=pin_file, pending_file=pending_file,
                          confirm_danger=confirm_danger, register={name})
     except BaseException:
-        try:
-            if created_tl:
-                fsafe.remove_tree_at(ws, tl_rel)
-                fsafe.unlink_at(ws, AGENTS_REL / name)
-            if created_def:
-                fsafe.unlink_at(ws, AGENTS_REL / f"{name}.md")
-                try:
-                    fsafe.unlink_at(ws, AGENTS_REL)
-                    fsafe.unlink_at(ws, AGENTS_REL.parent)
-                except (OSError, fsafe.BridgeError):
-                    pass
-        except (OSError, fsafe.BridgeError):
-            pass
+        undo = []
+        if created_tl:
+            undo += [(fsafe.remove_tree_at, tl_rel), (fsafe.unlink_at, AGENTS_REL / name)]
+        if created_def:
+            undo.append((fsafe.unlink_at, AGENTS_REL / f"{name}.md"))
+        if _undo_created(ws, undo) and created_def:
+            # The shared parents may legitimately hold another advisor's files: a refusal to
+            # remove them is the expected outcome, not debris, so it stays silent.
+            try:
+                fsafe.unlink_at(ws, AGENTS_REL)
+                fsafe.unlink_at(ws, AGENTS_REL.parent)
+            except (OSError, fsafe.BridgeError):
+                pass
         raise
+
+
+def _undo_created(ws, steps):
+    """Remove what a failed add created, in order, stopping at the first failure as before. vibe-231:
+    a failure is no longer swallowed silently — stderr names the path that could not be removed and
+    every later one left with it. The original error is re-raised by the caller either way."""
+    for index, (remove, rel) in enumerate(steps):
+        try:
+            remove(ws, rel)
+        except (OSError, fsafe.BridgeError) as exc:
+            left = ", ".join(str(Path(ws) / r) for _remove, r in steps[index:])
+            print(f"advisors: cleanup after the failed add left {left}: {exc}", file=sys.stderr)
+            return False
+    return True
 
 
 def add_all(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False):
@@ -1405,11 +1420,8 @@ def add_all(ws, pin=None, pin_file=None, pending_file=None, confirm_danger=False
                          confirm_danger=confirm_danger, register=REGISTER_ALL)
     except BaseException:
         for name in reversed(created):
-            try:
-                fsafe.remove_tree_at(ws, timeline_rel(name))
-                fsafe.unlink_at(ws, AGENTS_REL / name)
-            except (OSError, fsafe.BridgeError):
-                pass
+            _undo_created(ws, [(fsafe.remove_tree_at, timeline_rel(name)),
+                               (fsafe.unlink_at, AGENTS_REL / name)])
         raise
 
 

@@ -8,8 +8,7 @@ CLI contract (pinned by tests/test_trend_goldens.py):
   stdout : deterministic JSON {"files": [{"path","current","previous","delta","flag"}],
            "trajectory": [{"run","mean_score","files"}], "status": {"history","scope_matches"}}
   stderr : exactly one warning line when the history is malformed; nothing otherwise.
-  exit   : 0 computed (all three history states); 2 contract refusal (bad stdin, bad args,
-           a history path outside the root).
+  Exit codes: 0 computed (all three history states) · 2 contract refusal: bad stdin, bad args, or a history path outside the root
 
 **Read first, append last — inside one owner.** The engine reads and normalizes the history
 once, computes deltas and the trajectory against that pre-append state, and only then appends

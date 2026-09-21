@@ -11,6 +11,8 @@ changed nothing, and untouched user content where they did.
 **The record is data, not authority.** `targets` and `parents_created` hold absolute paths and are
 only shape-validated by the writer. Every one is re-contained, `lstat`-classified and refused if it
 is not what the record claims, before anything is deleted.
+
+Exit codes: 0 removed, or nothing to remove · 1 error · 3 dry run: --confirm is needed
 """
 
 import json

@@ -1216,3 +1216,50 @@ class StampBoundExactlyOnce(unittest.TestCase):
         self.assertEqual(m["captured"], "different",
                          "the closure captured the differing value — the defect being detected")
         self.assertTrue(m["exact_str"], "and the final value is still an exact str")
+
+
+class TestSafeWriteRace(MigrationCase):
+    """vibe-231: `vibe_safe_write` checks `-e` and then publishes. A destination that appears between
+    the two is the same "new store wins" skip — `publish` exits 3, the helper notes it and returns 0 —
+    while a genuine publish failure still fails the helper. The race is made deterministic by a
+    `python3` shim on PATH that plants the destination before running the real interpreter."""
+
+    def race(self, plant):
+        shim = self.ws / "shim"
+        shim.mkdir()
+        (shim / "python3").write_text(f"#!/bin/sh\n{plant}\nexec {sys.executable} \"$@\"\n",
+                                      encoding="utf-8")
+        (shim / "python3").chmod(0o755)
+        dest = self.ws / "store" / "history.json"
+        script = (f"source {MIGRATE / 'common.sh'}\n"
+                  f"printf 'ours\\n' | vibe_safe_write {dest}\n"
+                  "echo after\n")
+        env = dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}", RACE_DEST=str(dest))
+        return dest, subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+
+    def test_a_destination_that_appears_concurrently_is_left_and_the_helper_succeeds(self):
+        dest, result = self.race('printf "theirs\\n" > "$RACE_DEST"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("after", result.stdout)
+        self.assertIn(f"note: {dest} appeared concurrently — left as it is (new store wins)", result.stderr)
+        self.assertEqual(dest.read_text(encoding="utf-8"), "theirs\n", "the store that appeared wins")
+
+    def test_a_clean_publish_writes_and_the_helper_succeeds(self):
+        """The ordinary path: nothing is planted (the shim runs `:`), `publish` creates the file and exits 0, and the
+        helper returns 0 silently so its caller goes on."""
+        dest, result = self.race(":")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "after\n")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(dest.read_text(encoding="utf-8"), "ours\n")
+
+    def test_a_genuine_publish_failure_still_fails_the_helper(self):
+        dest, result = self.race('ln -s /nonexistent "$RACE_DEST"')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("after", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn(f"bridge: {dest} is a symlink", result.stderr)
+
+    def test_the_uncalled_provenance_query_is_gone(self):
+        """It had no caller since vibe-10, and it discarded its own read errors (`2>/dev/null`)."""
+        self.assertNotIn("vibe_provenance_has", (MIGRATE / "common.sh").read_text(encoding="utf-8"))

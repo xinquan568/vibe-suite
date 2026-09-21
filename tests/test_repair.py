@@ -503,3 +503,18 @@ class TestAdvisorReconcile(RepairCase):
         self.assertEqual(doc["mcpServers"]["probe_advisor"]["command"], "node")
         self.assertRegex(args[-1], r"/versions/\d+\.\d+\.\d+/[^/]+/node_modules/claude-octopus/dist/index\.js$")
         self.assertIn("probe_advisor", toml.read_text())
+
+
+class TestUnreadableRegistrationsAreStated(RepairCase):
+    """vibe-231: repair treats unreadable registrations as "installed" on purpose; it now says so, and
+    why, on stderr. The JSON report on stdout keeps its shape."""
+
+    def test_the_decision_and_its_cause_go_to_stderr(self):
+        self.install()
+        (self.ws / ".mcp.json").write_text("{not json\n", encoding="utf-8")
+        result = self.repair()
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        self.assertIn("repair: the registrations are unreadable (", result.stderr)
+        self.assertIn(".mcp.json", result.stderr.split("repair: the registrations are unreadable (")[1])
+        self.assertIn("); proceeding as installed", result.stderr)
+        self.assertIn("ok", json.loads(result.stdout))

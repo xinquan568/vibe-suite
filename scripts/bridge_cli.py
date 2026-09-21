@@ -15,6 +15,8 @@ anything is written, and `.codex/config.toml` is left untouched.
 
 **Three hook namespaces, and this mirrors the third**: not the plugin's own `hooks/hooks.json`, not
 the owned `Stop` entry `init` writes, but the *project's* hooks in `.claude/settings.json`.
+
+Exit codes: 0 success · 1 failure: any step (skills, hooks, mcp, mirrors) raised, or the mirror generator is missing, timed out or failed
 """
 
 import argparse

@@ -16,6 +16,7 @@ the replace, which `write_atomic`'s own cleanup must turn into "destination unch
 import base64
 import hashlib
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -210,6 +211,67 @@ class TestWriteAtomicSoftFailure(TempDir):
         self.assertEqual(dest.read_bytes(), b"before\n")
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["state.json"],
                          "no .vibe-tmp scratch may survive a failure the writer itself caught")
+
+
+BRIDGE_PY = REPO_ROOT / "scripts" / "lib" / "bridge.py"
+
+
+class TestBridgeProgramExits(TempDir):
+    """vibe-231: `bridge.py`'s shell entry point. A refusal is one `bridge: …` line and exit 1, never a
+    traceback; a mode that is not octal is a usage error (2); `publish` over an existing destination
+    exits 3, so a caller can tell "already there" from "created" (both used to exit 0)."""
+
+    def run_bridge(self, *args, content="new\n"):
+        return subprocess.run([sys.executable, str(BRIDGE_PY), *map(str, args)], input=content,
+                              capture_output=True, text=True)
+
+    def assert_one_bridge_line(self, result, code):
+        self.assertEqual(result.returncode, code, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 1, result.stderr)
+        self.assertTrue(lines[0].startswith("bridge: "), lines[0])
+        return lines[0]
+
+    def test_a_write_outside_the_root_is_one_line_and_exit_1(self):
+        with tempfile.TemporaryDirectory() as other:
+            dest = Path(other).resolve() / "f"
+            self.assert_one_bridge_line(self.run_bridge("write", self.root, dest), 1)
+            self.assertFalse(dest.exists())
+
+    def test_a_write_through_a_symlinked_parent_is_one_line_and_exit_1(self):
+        with tempfile.TemporaryDirectory() as other:
+            (self.root / "link").symlink_to(other)
+            self.assert_one_bridge_line(self.run_bridge("write", self.root, self.root / "link" / "f"), 1)
+            self.assertFalse((Path(other) / "f").exists())
+
+    def test_a_mode_that_is_not_octal_is_a_usage_error(self):
+        dest = self.root / "f"
+        line = self.assert_one_bridge_line(self.run_bridge("write", self.root, dest, "9z"), 2)
+        self.assertEqual(line, "bridge: invalid mode '9z' (octal expected)")
+        self.assertFalse(dest.exists())
+
+    @unittest.skipIf(os.geteuid() == 0, "permission bits do not bind root")
+    def test_a_raw_os_error_is_one_line_and_exit_1(self):
+        """`list-owned` reads `.codex/config.toml` through `read_text_verbatim`, whose PermissionError is a plain
+        OSError, not a BridgeError: the handler's OSError arm is the only thing between it and a traceback."""
+        (self.root / ".codex").mkdir()
+        toml = self.root / ".codex" / "config.toml"
+        toml.write_text("".join(line + chr(10) for line in ("[mcp_servers.x]", 'command = "y"')), encoding="utf-8")
+        toml.chmod(0)
+        self.addCleanup(toml.chmod, 0o644)
+        line = self.assert_one_bridge_line(self.run_bridge("list-owned", self.root), 1)
+        self.assertIn("Permission denied", line)
+        self.assertIn("config.toml", line)
+
+    def test_publish_exits_0_when_it_creates_and_3_when_the_destination_existed(self):
+        dest = self.root / "f"
+        created = self.run_bridge("publish", self.root, dest, content="first\n")
+        self.assertEqual((created.returncode, created.stderr), (0, ""))
+        self.assertEqual(dest.read_text(encoding="utf-8"), "first\n")
+        existed = self.run_bridge("publish", self.root, dest, content="second\n")
+        self.assertEqual((existed.returncode, existed.stderr), (3, ""))
+        self.assertEqual(dest.read_text(encoding="utf-8"), "first\n", "create-only: the first store wins")
 
 
 if __name__ == "__main__":

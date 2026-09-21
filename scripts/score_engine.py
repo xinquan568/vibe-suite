@@ -19,10 +19,10 @@ CLI contract (pinned by tests/test_score_goldens.py):
   stdout : JSON {"files":[{"path","tier","score","band","verdict",
            "findings":[{"rule","check","line","penalty"}],"advisories":[{"rule","note"}]}],
            "run":{"files","total_penalty","considered_rows","skipped"}}
-  exit   : 0 scored; 1 history append failed; 2 contract refusal (bad record, bad root,
-           a path that is absolute, escapes the root, or does not exist, or a config file
-           that exists but cannot be parsed). A missing --config file is NOT a refusal:
-           the engine scores with the suite defaults.
+  Exit codes: 0 scored · 1 the history append failed · 2 contract refusal, or usage
+           A contract refusal is a bad record, a bad root, a path that is absolute, escapes the
+           root, or does not exist, or a config file that exists but cannot be parsed. A missing
+           --config file is NOT a refusal: the engine scores with the suite defaults.
 
 Scoring semantics (owning text: skills/scoring/SKILL.md; row classifications with their quoted
 predicates: scripts/score_engine_rows.md):
@@ -53,7 +53,7 @@ predicates: scripts/score_engine_rows.md):
   degenerate  : unparseable frontmatter/config -> one -25 parse finding, and every row that
                 does not need the parsed structure is still scored; empty (0-byte) file ->
                 score 0, band Rewrite; unreadable file -> absent from files[], listed in
-                run.skipped, exit stays 0
+                run.skipped, and the run still succeeds
 
 Artifact frontmatter is parsed by the permissive stdlib parser below — every schema-conforming
 SKILL.md/agent/command frontmatter parses (nested block mappings such as `metadata:`,

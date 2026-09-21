@@ -1066,5 +1066,23 @@ class TestDeclarationCoherence(unittest.TestCase):
                               path.read_text(encoding="utf-8"))
 
 
+class TestListNamesUnreadableState(DriverCase):
+    """vibe-231: a run whose `state.json` is refused keeps its `?` row; why it is `?` goes to stderr."""
+
+    def test_the_refusal_reason_is_printed_per_run(self):
+        root = Path(self.mkdtemp(dir=self.work, prefix="runs-"))
+        (root / "run-broken").mkdir()
+        (root / "run-broken" / "state.json").write_text("{not json", encoding="utf-8")
+        r = self.drive("list", "--runs-root", str(root))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = [l for l in r.stdout.splitlines() if l.startswith("run-broken")]
+        self.assertEqual(len(row), 1, r.stdout)
+        self.assertIn("?", row[0])
+        lines = r.stderr.splitlines()
+        self.assertEqual(len(lines), 1, r.stderr)
+        self.assertTrue(lines[0].startswith(f"list: run-broken: {root / 'run-broken' / 'state.json'} is not JSON: "),
+                        lines[0])
+
+
 if __name__ == "__main__":
     unittest.main()

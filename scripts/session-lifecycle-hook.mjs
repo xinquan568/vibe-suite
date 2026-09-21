@@ -12,10 +12,10 @@
 // contract, not a hook), environment export (no bridge consumes it yet — F1.6/E2.x), and
 // stale-registration migration (E0.8's engine, invoked by init in E2.1).
 //
-// **Always exits 0 for runtime faults.** A convenience hook that can break a session is not a
-// convenience — a damaged store or a failed reap is reported and swallowed. The one exception is a
-// USAGE error: an unknown or missing `--event` exits 2, because that is misconfiguration, not a
-// session runtime condition.
+// Exit codes: 0 success, and every runtime fault (reported and swallowed) · 2 usage: an unknown or missing --event
+// A convenience hook that can break a session is not a convenience, so a damaged store or a failed
+// reap is reported and swallowed. A missing or unknown `--event` is misconfiguration, not a session
+// runtime condition, so it is the one non-zero exit.
 //
 // **Node floor: 18.** No top-level await.
 

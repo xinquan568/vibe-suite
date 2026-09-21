@@ -2363,3 +2363,69 @@ class TestJournalImageIntegrity(unittest.TestCase):
         text = "---\ndescription: [x]\nmodel: sonnet\n---\n\nbody\n"
         with self.assertRaises(advisors.AdvisorError):
             advisors.parse_definition(text, "probe_advisor.md")
+
+
+class TestFailedCleanupIsNamed(unittest.TestCase):
+    """vibe-231: when the rollback of a failed add cannot remove what the add created, stderr names
+    the residual paths and the error; the original error still propagates. The shared parents'
+    best-effort removal stays silent — another advisor may legitimately keep them non-empty."""
+
+    def _add(self, ws, *, cleanup_error=None, **kw):
+        import contextlib
+        import io
+        err = io.StringIO()
+        patches = [mock.patch.object(advisors, "reconcile", side_effect=RuntimeError("injected"))]
+        if cleanup_error is not None:
+            patches.append(mock.patch.object(fsafe, "remove_tree_at", side_effect=cleanup_error))
+        with contextlib.ExitStack() as stack, contextlib.redirect_stderr(err):
+            for p in patches:
+                stack.enter_context(p)
+            # Catch broadly, then assert the TYPE: a cleanup exception that escaped and replaced the add's own error
+            # must fail this test by assertion, not surface as an error.
+            with self.assertRaises(BaseException) as raised:
+                advisors.add(ws, "probe_advisor", pin=PIN, **kw)
+        self.assertIs(type(raised.exception), RuntimeError, f"the add's own error was replaced: {raised.exception!r}")
+        self.assertEqual(str(raised.exception), "injected")
+        return err.getvalue()
+
+    def test_an_undeletable_timeline_is_named_with_everything_left_after_it(self):
+        ws = make_ws()
+        stderr = self._add(ws, cleanup_error=OSError("stuck"), custom_text=defn_text())
+        agents = ws / ".vibe-suite" / "agents"
+        self.assertEqual(stderr, f"advisors: cleanup after the failed add left {agents / 'probe_advisor' / 'timeline'}, "
+                                 f"{agents / 'probe_advisor'}, {agents / 'probe_advisor.md'}: stuck\n")
+        self.assertTrue((agents / "probe_advisor.md").is_file(), "the stop-at-first-failure order is kept")
+
+    def test_a_refused_cleanup_is_named_and_the_original_error_still_propagates(self):
+        """The other arm: the audited descent refuses (fsafe.BridgeError, not an OSError). It must be named the same
+        way, and must not replace the add's own error (`_add` asserts the injected RuntimeError propagates)."""
+        ws = make_ws()
+        stderr = self._add(ws, cleanup_error=fsafe.BridgeError("refused"), custom_text=defn_text())
+        agents = ws / ".vibe-suite" / "agents"
+        self.assertEqual(stderr, f"advisors: cleanup after the failed add left {agents / 'probe_advisor' / 'timeline'}, "
+                                 f"{agents / 'probe_advisor'}, {agents / 'probe_advisor.md'}: refused\n")
+
+    def test_a_clean_rollback_says_nothing_even_when_the_shared_parents_stay(self):
+        ws = make_ws()
+        add_definition(ws, name="other_advisor")   # keeps .vibe-suite/agents non-empty
+        stderr = self._add(ws, custom_text=defn_text())
+        self.assertEqual(stderr, "")
+        self.assertFalse((ws / ".vibe-suite" / "agents" / "probe_advisor.md").exists())
+        self.assertFalse((ws / ".vibe-suite" / "agents" / "probe_advisor").exists())
+
+    def test_add_all_names_each_advisor_it_could_not_clean(self):
+        import contextlib
+        import io
+        ws = make_ws()
+        add_definition(ws, name="alpha_one")
+        add_definition(ws, name="beta_two")
+        err = io.StringIO()
+        with mock.patch.object(advisors, "reconcile", side_effect=RuntimeError("injected")), \
+                mock.patch.object(fsafe, "remove_tree_at", side_effect=OSError("stuck")), \
+                contextlib.redirect_stderr(err):
+            with self.assertRaisesRegex(RuntimeError, "injected"):
+                advisors.add_all(ws, pin=PIN)
+        agents = ws / ".vibe-suite" / "agents"
+        self.assertEqual(err.getvalue().splitlines(), [
+            f"advisors: cleanup after the failed add left {agents / name / 'timeline'}, {agents / name}: stuck"
+            for name in ("beta_two", "alpha_one")])

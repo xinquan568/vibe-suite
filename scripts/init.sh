@@ -5,12 +5,12 @@
 # Two script families meet here and they take opposite rules. The **bridge** steps below are init's
 # own mutations and each runs exactly once per install — F1.1's fix for cc-suite's double
 # `bridge_skills.sh` run. The **§7A migration helpers** under `scripts/migrate/` carry the shared
-# exit contract instead: exit 3 means a decision is required, and `common.sh` names init as the
+# exit contract instead: a helper exits with its decision-required code, and `common.sh` names init as the
 # caller that asks and re-invokes.
 #
 # **Migration runs before any store this install writes.** `migrate-config.sh` skips once
 # `.vibe-suite.md` exists and `migrate-history.sh` skips once the new history does, so a
-# fresh-write-first order would suppress rows 1-3: the helper reports "new store wins", exits 0, and
+# fresh-write-first order would suppress rows 1-3: the helper reports "new store wins", succeeds, and
 # the legacy values are never read. Nothing fails; the settings simply never arrive.
 #
 # **Decisions are tri-state.** A flag absent means *not asked*; `--resolve-*` means *accepted with
@@ -26,6 +26,7 @@
 #                [--resolve-state true|false | --decline-state]
 #                [--confirm-sentinels yes|no] [--non-interactive]
 #                [--list-owned] [--list-checkpoints]
+# Exit codes: 0 done · 1 error · 3 a helper needs a decision
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,7 +58,7 @@ while [ $# -gt 0 ]; do
         --non-interactive)   non_interactive=1; shift ;;
         --list-owned)        list_owned=1; shift ;;
         --list-checkpoints)  list_checkpoints=1; shift ;;
-        --help)              sed -n '2,30p' "$0"; exit 0 ;;
+        --help)              sed -n '2,31p' "$0"; exit 0 ;;
         *)                   vibe_die "unknown argument: $1" ;;
     esac
 done

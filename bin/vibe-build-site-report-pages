@@ -4,11 +4,13 @@
 
 Reads `<corpus>/manifest.json`, follows its `repos` list to each repo's audit JSON, and emits
 `<out>/data/reports.json` plus `<out>/reports/index.md` and a page per repo. Per D-C an absent
-corpus is the honest pre-migration state: exit 0 with zero entries and a "no audit data yet"
+corpus is the honest pre-migration state: success with zero entries and a "no audit data yet"
 notice. A manifest that cannot be parsed is an error and renders nothing; so is an audit file
 that is present but corrupt, because a half-read audit would publish a score nobody measured.
 
     bin/vibe-build-site-report-pages --corpus <dir> --out <dir>
+
+Exit codes: 0 built (an absent corpus builds empty) · 2 refused
 """
 
 import argparse

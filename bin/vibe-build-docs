@@ -4,7 +4,7 @@
 
 Reads `<corpus>/manifest.json`, follows its `docs` list, and emits `<out>/data/docs.json` plus
 `<out>/docs/index.md` and a contents page per document. Per D-C an absent corpus is the honest
-pre-migration state: exit 0 with zero entries and a "no audit data yet" notice. Only a corpus
+pre-migration state: success with zero entries and a "no audit data yet" notice. Only a corpus
 whose manifest cannot be parsed is an error, and it renders nothing at all.
 
 Both source shapes the framework reference is published in are read — Markdown headings and
@@ -12,6 +12,8 @@ rendered HTML — because the corpus is mid-migration and a builder that underst
 them would report an empty docs section as if the pages did not exist.
 
     bin/vibe-build-docs --corpus <dir> --out <dir>
+
+Exit codes: 0 built (an absent corpus builds empty) · 2 refused
 """
 
 import argparse

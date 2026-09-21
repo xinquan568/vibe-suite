@@ -11,9 +11,7 @@
 # other artifact — this script included — knows how `.vibe-suite.md` is spelled.
 #
 # Usage: migrate-config.sh [--workspace DIR] [--resolution FILE]
-#   exit 0  written, or nothing to do
-#   exit 3  conflicts — see .vibe-suite-state/migration-conflicts.json; nothing was written
-#   exit 1  error
+#   Exit codes: 0 written, or nothing to do · 1 error · 3 conflicts: nothing was written (see .vibe-suite-state/migration-conflicts.json)
 
 set -euo pipefail
 # shellcheck source=scripts/migrate/common.sh
@@ -25,7 +23,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --workspace)  workspace="${2:?--workspace needs a directory}"; shift 2 ;;
         --resolution) resolution="${2:?--resolution needs a file}"; shift 2 ;;
-        -h|--help) sed -n '3,17p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '3,15p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) vibe_die "unknown argument: $1" ;;
     esac
 done

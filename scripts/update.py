@@ -31,6 +31,8 @@ before any stage writes, so a refusal really does leave the workspace untouched.
 
 Stages report independently and a later failure does not roll back an earlier success — the
 per-step isolation `repair.py` established. The exit status is the worst stage.
+
+Exit codes: 0 every stage passed · 1 a stage failed, or retired names leaked
 """
 
 import argparse

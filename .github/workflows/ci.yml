@@ -162,6 +162,14 @@ jobs:
           set -euo pipefail
           python3 tools/model-pin-lint.py
 
+      - name: No stale status claims in shipped text (vibe-230)
+        # `not yet built`, `when it lands`, `remains open`: each once described the codebase and outlived it.
+        # The phrases, the allowlist and the scope (model-pin-lint's shipped surface) live in the tool. In the
+        # required `lint (python + node)` job for the same reason as the P9 step above.
+        run: |
+          set -euo pipefail
+          python3 tools/doc-claims-lint.py
+
   loop-bounds:
     name: loop bounds (AC-4)
     runs-on: ubuntu-latest

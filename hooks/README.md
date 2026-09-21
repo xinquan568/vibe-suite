@@ -21,8 +21,9 @@ short-circuits before any dispatch. Infra failure (codex missing, timeout, no pa
 **fails open** with a warning; set `gate.fail_policy: closed` to invert that. `gate.model` selects
 the review model; unset means the backend's own default (never a pinned id — P9).
 
-**Enabling it:** `/vibe-suite:config` will own this toggle (E1.8, not yet built). Until then it is
-a runtime-store write:
+**Enabling it:** `/vibe-suite:config --set stop_review_gate=on` sets exactly this toggle and nothing else
+(`scripts/config_cli.py`). It writes the runtime-store key `gate.stop_review_gate` through `Store.set`,
+which is what this one-liner does directly:
 
 ```bash
 python3 -c "import runpy; runpy.run_path('scripts/_bootstrap.py'); import store; \

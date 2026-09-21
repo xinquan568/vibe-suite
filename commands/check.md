@@ -7,8 +7,8 @@ argument-hint: "[path]"
 
 Answers "do these artifacts agree with each other?" — reference integrity, orphans, drift,
 contradictions. Quality of a single artifact is `/vibe-suite:score`'s lane; manifest-vs-disk
-and frontmatter presence belong to the deterministic CI validator (`bin/vibe-check`, when it
-lands) — neither is checked here.
+and frontmatter presence belong to the deterministic CI validator (`bin/vibe-check`) — neither
+is checked here.
 
 ## Arguments
 

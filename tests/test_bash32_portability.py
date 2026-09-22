@@ -9,7 +9,7 @@ bash-4 construct in shipped shell passes every local run and fails only the week
 
 This test is a census over text, not a shell parser. It enumerates every shell file and workflow the macOS job's
 Python suite can execute (`IN_SCOPE`, with every exclusion in `OUT_OF_SCOPE` named with its reason) and holds each
-to two rules:
+to three rules:
 
 1. The words `mapfile` and `readarray` do not appear, in any role, on any line that is not a whole-line comment.
    This is deliberately not a command-position rule: a text census cannot parse bash (assignment prefixes,

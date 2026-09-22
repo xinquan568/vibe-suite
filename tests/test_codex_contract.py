@@ -427,6 +427,10 @@ class FakeBinary(TempDirMixin):
         script.write_text(textwrap.dedent(f"""
             #!/usr/bin/env python3
             import json, os, signal, sys, time
+            if sys.argv[1:] == ["--warm"]:
+                # the warm-up exec: the fixture itself leaves the marker; nothing logged, no child, no output
+                open({str(root / "warmed")!r}, "w").close()
+                sys.exit(0)
             if {ignore_sigterm!r}:
                 # A child mid-write ignores SIGTERM; only the second signal ends it. This is what makes the
                 # termination policy's SIGKILL load-bearing rather than decorative.
@@ -466,15 +470,112 @@ class FakeBinary(TempDirMixin):
             sys.exit({code!r})
         """).lstrip(), encoding="utf-8")
         script.chmod(0o755)
+        warm(script, root)
         return script, argv_log
+
+
+WARM_TIMEOUT_S = 60.0
+
+
+def warm(script, root, group_alive=None, wait=None):
+    """Exec a freshly written fixture once, with `--warm`, before any probe execs it.
+
+    macOS charges the FIRST launch of a newly created executable an assessment — about half a second idle, up to
+    several seconds when the process table is busy — whatever the file's interpreter; the interpreter itself starts
+    in tens of milliseconds. Paid inside the probe's budget, that cost is what made the timing tests flaky
+    (vibe-337): a 1500 ms budget was inside the fixture's own start-up distribution. Paid here, before the probe
+    runs, the probe's exec is the file's second and costs the interpreter only.
+
+    The fixture proves the exec by leaving a marker beside itself on `--warm`. The run is bounded, in its own process
+    group whose id is captured at launch, and that group is reaped by the probe's own `_reap` on every path — a
+    fixture that answered has exited and its group is empty; one that ignored `--warm`, forked and exited its leader
+    is not left behind. Whether the group is gone is decided by `group_alive` (the probe's `_group_is_alive`, which
+    reads a denied signal as presence); a group that outlives SIGKILL is reported as "cleanup unconfirmed", never
+    as a warmed fixture. The check for that is inside the `finally`, right after the reap: an exception raised
+    earlier (the group capture, the wait itself) is not allowed to carry the leftover process past it. `wait` is a
+    seam for exactly that test; production waits on the leader under `WARM_TIMEOUT_S`.
+    """
+    group_alive = group_alive or _group_is_alive
+    wait = wait or (lambda process: process.wait(timeout=WARM_TIMEOUT_S))
+    marker = Path(root) / "warmed"
+    process, pgid, timed_out, confirmed = None, None, False, False
+    # A KeyboardInterrupt is raised by Python's SIGINT handler, which runs on the MAIN thread whichever thread the
+    # signal reached — so a per-thread mask is not the mechanism. From before the launch until the verdict below is
+    # delivered, the main thread's handler is replaced by one that only records the interrupt; the previous handler
+    # is restored on every path, and a recorded interrupt is raised then — after the verdict, never inside the
+    # region. The fixtures are written on the main thread (the probe's worker thread never calls this); off the
+    # main thread no handler can be installed, and the region runs undeferred, which the docstring declares.
+    deferred = []
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.signal(signal.SIGINT, lambda signum, frame: deferred.append(signum))
+    try:
+        try:
+            process = subprocess.Popen([str(script), "--warm"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                       start_new_session=True)
+            pgid = process.pid                              # the session leader's pid is its group id, until read
+            try:
+                pgid = os.getpgid(process.pid)              # captured at launch: a group outlives its leader
+            except ProcessLookupError:
+                pass
+            try:
+                wait(process)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+        finally:
+            # every path — answered, hung, ignored `--warm` and forked, or an exception above — and the verdict on
+            # the group is given HERE, so a pending exception cannot carry a leftover process past it. The cleanup's
+            # own failure (the liveness seam raising) is the same verdict: a last SIGKILL is sent and the refusal
+            # names it, with the cleanup's exception chained as its cause.
+            if process is not None:
+                try:
+                    confirmed = _reap(process, pgid, group_alive)
+                except BaseException as exc:
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    raise AssertionError(f"cleanup unconfirmed: the reap of {Path(script).name}'s warm-up process "
+                                         f"group raised {type(exc).__name__}: {exc}") from exc
+                if not confirmed:
+                    raise AssertionError(f"cleanup unconfirmed: {Path(script).name}'s warm-up process group outlived "
+                                         f"SIGKILL")
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
+    if deferred:
+        raise KeyboardInterrupt("deferred until the warm-up's cleanup verdict was delivered")
+    if timed_out:
+        raise AssertionError(f"{Path(script).name} did not answer --warm within {WARM_TIMEOUT_S:.0f} s")
+    if not marker.is_file():
+        raise AssertionError(f"{Path(script).name} did not leave the warm marker: its --warm path did not run")
+
+
+def wait_for_pids(pids_file, seconds=30.0):
+    """The fixture's first observable write — both pids, valid — awaited on the TEST's deadline.
+
+    Diagnostic, not a cure (vibe-337): the probe's own deadline runs on regardless, so what keeps the fixture from
+    being reaped before it writes is the warm-up and the budget's headroom. This wait makes the failure, when there
+    is one, say "the fixture did not start" by name instead of surfacing later as a missing pid.
+    """
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        recorded = _recorded_pids(pids_file)
+        if len(recorded) == 2 and all(isinstance(pid, int) and pid > 0 for pid in recorded):
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"the fixture did not start within {seconds:.0f} s: {pids_file} has no valid pid pair")
 
 
 class ProbeVerdicts(FakeBinary, unittest.TestCase):
     """T1-T18 — the probe's own behaviour, driven by fakes. No real call is ever spent here."""
 
-    def run_with_deadline(self, call, seconds):
+    def run_with_deadline(self, call, seconds, ready=None):
         """Run `call` on a worker thread and give up on it after `seconds`, so a hang fails this test rather than
-        stalling the suite. The thread is a daemon: if it never returns, it cannot keep the runner alive."""
+        stalling the suite. The thread is a daemon: if it never returns, it cannot keep the runner alive.
+
+        `ready`, when given, runs on THIS thread while the worker runs the probe: it waits for the fixture's first
+        observable write on the test's own deadline (vibe-337) and raises, by name, if the fixture never starts."""
         outcome = {}
         started = time.monotonic()
 
@@ -488,7 +589,9 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
 
         worker = threading.Thread(target=run, daemon=True)
         worker.start()
-        worker.join(seconds)
+        if ready is not None:
+            ready()
+        worker.join(max(0.0, seconds - (time.monotonic() - started)))
         if "error" in outcome:
             raise outcome["error"]
         return outcome
@@ -496,6 +599,136 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
     def probe(self, script, **kwargs):
         from tests import test_codex_contract as module
         return module.probe(binary=str(script), opted_in=True, **kwargs)
+
+    def test_every_fixture_is_exec_d_once_before_the_probe(self):
+        """vibe-337: the first launch of a newly created executable is charged by the OS, not by the interpreter;
+        the fixture writers pay it before the probe runs and leave a marker. Without the marker, the probe's exec
+        would be the file's first."""
+        script, _ = self.fake(out=stream(HEALTHY))
+        self.assertTrue((script.parent / "warmed").is_file(), "the fake binary was not exec'd before the probe")
+        self.assertFalse((script.parent / "argv.json").exists(), "the warm-up exec must log nothing")
+        slow = self.stalling_node(Path(self.mkdtemp()) / "pids.json")
+        self.assertTrue((slow.parent / "warmed").is_file(), "the stand-in parser was not exec'd before the probe")
+        for fixture in (script, slow):
+            with self.subTest(fixture=fixture.name):
+                self.assertEqual(subprocess.run([str(fixture), "--warm"], capture_output=True, timeout=60).returncode, 0)
+        # the marker is the fixture's own act: a script that ignores --warm leaves none, and warm() says so by name
+        from tests import test_codex_contract as module
+        deaf = Path(self.mkdtemp()) / "deaf"
+        deaf.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        deaf.chmod(0o755)
+        with self.assertRaises(AssertionError) as caught:
+            module.warm(deaf, deaf.parent)
+        self.assertIn("did not leave the warm marker", str(caught.exception))
+        # a fixture that ignores --warm, forks and exits its leader: the descendant must not outlive the warm-up,
+        # and the refusal must come after the cleanup (A7)
+        root = Path(self.mkdtemp())
+        forker = root / "forker"
+        forker.write_text("#!/bin/sh\nsleep 120 &\necho $! > " + str(root / "child.pid") + "\nexit 0\n", encoding="utf-8")
+        forker.chmod(0o755)
+        with self.assertRaises(AssertionError) as caught:
+            module.warm(forker, root)
+        self.assertIn("did not leave the warm marker", str(caught.exception))
+        child = int((root / "child.pid").read_text().strip())
+        try:
+            self.assertFalse(_process_is_alive(child), "the warm-up's descendant outlived it")
+        finally:
+            _kill_all([child])
+        # a group the seam reports alive after SIGKILL is "cleanup unconfirmed", even for a fixture that answered
+        ok_script, _ = self.fake(out=stream(HEALTHY))
+        with self.assertRaises(AssertionError) as caught:
+            module.warm(ok_script, ok_script.parent, group_alive=lambda pgid: True)
+        self.assertIn("cleanup unconfirmed", str(caught.exception))
+
+        # an exception raised after launch (the wait itself, here) does not carry a leftover group past the check:
+        # with the group reported alive the refusal is "cleanup unconfirmed"; with it gone, the exception propagates
+        def failing_wait(process):
+            raise OSError("the wait itself failed")
+
+        try:
+            module.warm(ok_script, ok_script.parent, group_alive=lambda pgid: True, wait=failing_wait)
+        except AssertionError as exc:
+            self.assertIn("cleanup unconfirmed", str(exc))
+        except Exception as exc:                        # the wait's own exception must not carry the group past the verdict
+            self.fail(f"a post-launch exception carried the leftover group past the cleanup verdict: {exc!r}")
+        else:
+            self.fail("warm() returned with its group reported alive")
+        with self.assertRaises(OSError):
+            module.warm(ok_script, ok_script.parent, wait=failing_wait)
+
+        # the timeout verdict, through the seam: a wait that reports the bound expired is refused by name, after the
+        # (confirmed) cleanup
+        def expiring_wait(process):
+            raise subprocess.TimeoutExpired(cmd="--warm", timeout=module.WARM_TIMEOUT_S)
+
+        with self.assertRaises(AssertionError) as caught:
+            module.warm(ok_script, ok_script.parent, wait=expiring_wait)
+        self.assertIn("did not answer --warm within", str(caught.exception))
+
+        # a SIGINT that reaches the process INSIDE the region — sent from this thread, and sent from another thread
+        # (Python runs the handler on the main thread either way) — is deferred: the reap runs to its verdict, the
+        # handler is restored, and only then is the KeyboardInterrupt raised
+        original = signal.getsignal(signal.SIGINT)
+        for sender in ("this thread", "another thread"):
+            with self.subTest(sender=sender):
+                seen = []
+
+                def alive_interrupting(pgid, sender=sender):
+                    seen.append("before")
+                    if sender == "this thread":
+                        os.kill(os.getpid(), signal.SIGINT)
+                    else:
+                        other = threading.Thread(target=lambda: os.kill(os.getpid(), signal.SIGINT))
+                        other.start()
+                        other.join()
+                    time.sleep(0.05)                 # a bytecode boundary or two: an undeferred handler fires here
+                    seen.append("after")             # reached only if the interrupt was deferred
+                    return False
+
+                script_i, _ = self.fake(out=stream(HEALTHY))
+                with self.assertRaises(KeyboardInterrupt, msg="the deferred interrupt must be raised after the verdict"):
+                    module.warm(script_i, script_i.parent, group_alive=alive_interrupting)
+                self.assertEqual(seen, ["before", "after"], "the interrupt was not deferred past the reap")
+                self.assertIs(signal.getsignal(signal.SIGINT), original, "the SIGINT handler was not restored")
+
+        # the cleanup's own failure is the same verdict: a liveness seam that raises must not carry the group past it
+        def raising_alive(pgid):
+            raise RuntimeError("the liveness check itself failed")
+
+        try:
+            module.warm(ok_script, ok_script.parent, group_alive=raising_alive)
+        except AssertionError as exc:
+            self.assertIn("cleanup unconfirmed", str(exc))
+            self.assertIsInstance(exc.__cause__, RuntimeError, "the cleanup's exception is chained as the cause")
+        except Exception as exc:
+            self.fail(f"the cleanup's own exception escaped the cleanup verdict: {exc!r}")
+        else:
+            self.fail("warm() returned although its cleanup could not confirm the group's absence")
+
+    def test_a_fixture_that_never_starts_fails_by_name(self):
+        """vibe-337: the readiness wait reports the fixture, not a missing pid later."""
+        from tests import test_codex_contract as module
+        never = Path(self.mkdtemp()) / "never.json"
+        with self.assertRaises(AssertionError) as caught:
+            module.wait_for_pids(never, seconds=0.2)
+        self.assertIn("did not start", str(caught.exception))
+        self.assertIn("never.json", str(caught.exception))
+        half = Path(self.mkdtemp()) / "half.json"
+        half.write_text("[1]", encoding="utf-8")            # one pid is not the fixture's write: both must be there
+        with self.assertRaises(AssertionError):
+            module.wait_for_pids(half, seconds=0.2)
+        for bad in ("[0, 5]", "[-1, 2]", "[3, 0]"):          # a pid pair with a non-positive value is not valid
+            invalid = Path(self.mkdtemp()) / "invalid.json"
+            invalid.write_text(bad, encoding="utf-8")
+            with self.subTest(pids=bad), self.assertRaises(AssertionError):
+                module.wait_for_pids(invalid, seconds=0.2)
+        written = Path(self.mkdtemp()) / "pids.json"
+        written.write_text("[1, 2]", encoding="utf-8")
+        module.wait_for_pids(written, seconds=0.2)          # returns at once when the write is there
+        # and the wait runs on the test's thread while the probe runs on its worker: its failure is the test's
+        with self.assertRaises(AssertionError):
+            self.run_with_deadline(lambda: time.sleep(0.05), seconds=5,
+                                   ready=lambda: module.wait_for_pids(never, seconds=0.1))
 
     def test_the_probe_is_opt_in(self):
         """T1 — without the variable the probe does not even look for a binary."""
@@ -673,7 +906,8 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
         script, _ = self.fake(out=stream(HEALTHY), spawn_child=True, sleep=30, ignore_sigterm=True,
                               pids_file=pids_file)
         try:
-            outcome = self.run_with_deadline(lambda: self.probe(script, timeout_ms=1500), seconds=60)
+            outcome = self.run_with_deadline(lambda: self.probe(script, timeout_ms=4000), seconds=60,
+                                             ready=lambda: wait_for_pids(pids_file))
             self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
             verdict = outcome["verdict"]
             self.assertEqual(verdict.kind, "skip", verdict.reason)
@@ -711,7 +945,8 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
         pids_file = Path(self.mkdtemp()) / "pids.json"
         script, _ = self.fake(out=stream(HEALTHY), spawn_child=True, leader_exits=True, pids_file=pids_file)
         try:
-            outcome = self.run_with_deadline(lambda: self.probe(script, timeout_ms=1500), seconds=60)
+            outcome = self.run_with_deadline(lambda: self.probe(script, timeout_ms=4000), seconds=60,
+                                             ready=lambda: wait_for_pids(pids_file))
             self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
             self.assertEqual(outcome["verdict"].kind, "skip", outcome["verdict"].reason)
             recorded = _recorded_pids(pids_file)
@@ -729,7 +964,10 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
         script = Path(self.mkdtemp()) / "slow-node"
         script.write_text(textwrap.dedent(f"""
             #!/usr/bin/env python3
-            import json, os, time
+            import json, os, sys, time
+            if sys.argv[1:] == ["--warm"]:
+                open({str(script.parent / "warmed")!r}, "w").close()
+                sys.exit(0)
             child = os.fork()
             if child > 0:
                 json.dump([os.getpid(), child], open({str(pids_file)!r}, "w"))
@@ -737,6 +975,7 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
             time.sleep(300)
         """).lstrip(), encoding="utf-8")
         script.chmod(0o755)
+        warm(script, script.parent)
         return script
 
     def test_a_stalled_parse_times_out_and_reaps(self):
@@ -746,7 +985,8 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
         slow = self.stalling_node(pids_file)
         try:
             outcome = self.run_with_deadline(
-                lambda: self.probe(script, timeout_ms=2000, node_bin=str(slow)), seconds=60)
+                lambda: self.probe(script, timeout_ms=4000, node_bin=str(slow)), seconds=60,
+                ready=lambda: wait_for_pids(pids_file))
             self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
             verdict = outcome["verdict"]
             self.assertEqual(verdict.kind, "skip", verdict.reason)
@@ -777,7 +1017,7 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
             return {}, None
 
         outcome = self.run_with_deadline(
-            lambda: self.probe(script, timeout_ms=1500, optional_check=slow), seconds=60)
+            lambda: self.probe(script, timeout_ms=4000, optional_check=slow), seconds=60)
         self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
         verdict = outcome["verdict"]
         self.assertEqual(verdict.kind, "skip", verdict.reason)
@@ -815,7 +1055,8 @@ class ProbeVerdicts(FakeBinary, unittest.TestCase):
         pids_file = Path(self.mkdtemp()) / "version-pids.json"
         script, _ = self.fake(out=stream(HEALTHY), version_sleep=30, version_child=True, pids_file=pids_file)
         try:
-            outcome = self.run_with_deadline(lambda: self.probe(script, timeout_ms=3000), seconds=60)
+            outcome = self.run_with_deadline(lambda: self.probe(script, timeout_ms=4000), seconds=60,
+                                             ready=lambda: wait_for_pids(pids_file))
             self.assertIn("verdict", outcome, "the probe did not return within the test's own deadline")
             self.assertEqual(outcome["verdict"].kind, "pass", outcome["verdict"].reason)
             recorded = _recorded_pids(pids_file)

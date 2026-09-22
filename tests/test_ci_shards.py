@@ -206,6 +206,47 @@ class RunParallelBehaviour(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0, "run-parallel exited 0 despite a failing module")
 
+    def test_empty_discovery_reaches_the_no_tests_guard(self):
+        """vibe-340: with nothing under tests/, the collector must leave FILES empty and let the script's own guard
+        report it — not die on an unbound-variable expansion first (bash 3.2 + set -u)."""
+        root = self._tree({})
+        r = subprocess.run(["bash", str(root / "tests" / "run-parallel.sh")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("no tests found under tests/", r.stderr)
+        self.assertNotIn("unbound variable", r.stderr)
+
+    def test_extra_arguments_after_double_dash_reach_unittest(self):
+        """`run-parallel.sh -- -v` forwards `-v` to every `python3 -m unittest` (vibe-340: EXTRA is guarded, and
+        must still expand when set)."""
+        root = self._tree({"test_alpha.py": "import unittest\nclass T(unittest.TestCase):\n"
+                                            "    def test_a(self): self.assertTrue(True)\n"})
+        r = subprocess.run(["bash", str(root / "tests" / "run-parallel.sh"), "--", "-v"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("test_a (", r.stderr, "unittest -v names each test; -v did not reach it")
+
+    def test_list_preserves_every_record_in_order_with_newlines_and_backslashes(self):
+        """The collector, on its own (`--list`): every `test_*.py` under tests/, sorted, one NUL-terminated record
+        each, with an embedded newline and a backslash carried through intact. `find -print0` | `sort -z` |
+        `read -r -d ''` is the chain under test; xargs and unittest are not involved."""
+        names = ["test_zeta.py", "test_al\npha.py", "test_back\\slash.py", "test_mid.py"]
+        root = self._tree({n: "" for n in names})
+        r = subprocess.run(["bash", str(root / "tests" / "run-parallel.sh"), "--list"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        records = r.stdout.split("\0")
+        self.assertEqual(records[-1], "", "every record is NUL-terminated")
+        expected = sorted("tests." + n[:-3] for n in names)
+        self.assertEqual(records[:-1], expected)
+
+    def test_without_extra_arguments_unittest_is_not_verbose(self):
+        """The control for the test above: with no `--`, EXTRA is empty and expands to nothing."""
+        root = self._tree({"test_alpha.py": "import unittest\nclass T(unittest.TestCase):\n"
+                                            "    def test_a(self): self.assertTrue(True)\n"})
+        r = subprocess.run(["bash", str(root / "tests" / "run-parallel.sh")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("test_a (", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

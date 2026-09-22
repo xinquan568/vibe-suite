@@ -16,9 +16,11 @@ set -euo pipefail
 
 JOBS="$( { command -v nproc >/dev/null 2>&1 && nproc; } || sysctl -n hw.ncpu 2>/dev/null || echo 4 )"
 EXTRA=()
+LIST=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -j) JOBS="$2"; shift 2 ;;
+    --list) LIST=1; shift ;;
     --) shift; EXTRA=("$@"); break ;;
     *) echo "run-parallel.sh: unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -34,22 +36,26 @@ tmp="$(mktemp)"
 if ! find tests -maxdepth 1 -name 'test_*.py' -print0 > "$tmp"; then
   echo "run-parallel.sh: test discovery failed" >&2; rm -f "$tmp"; exit 1
 fi
-mapfile -d '' -t FILES < <(sort -z < "$tmp"); rm -f "$tmp"
+# `read -d ''` in a loop, not `mapfile`: macOS ships bash 3.2, which has no mapfile (vibe-340).
+FILES=()
+while IFS= read -r -d '' f; do FILES+=("$f"); done < <(sort -z < "$tmp"); rm -f "$tmp"
 MODULES=()
-for f in "${FILES[@]}"; do
+for f in ${FILES[@]+"${FILES[@]}"}; do
   m="${f#tests/}"; m="${m%.py}"; MODULES+=("tests.$m")
 done
 if [ "${#MODULES[@]}" -eq 0 ]; then
   echo "run-parallel.sh: no tests found under tests/" >&2
   exit 1
 fi
+# `--list`: the collector's records, NUL-delimited, for a test to compare byte for byte (vibe-340).
+if [ "$LIST" = 1 ]; then printf '%s\0' "${MODULES[@]}"; exit 0; fi
 printf 'run-parallel.sh: %d module(s), -P %s\n' "${#MODULES[@]}" "$JOBS" >&2
 
 # Each module is one `python3 -m unittest` process. xargs returns 123 if any invocation exits
 # non-zero, which we normalise to 1. A failing module's output is preserved (xargs interleaves
 # per-process; each process's block is contiguous enough to read).
 if printf '%s\n' "${MODULES[@]}" \
-    | xargs -P "$JOBS" -I '{}' python3 -m unittest "${EXTRA[@]}" '{}'; then
+    | xargs -P "$JOBS" -I '{}' python3 -m unittest ${EXTRA[@]+"${EXTRA[@]}"} '{}'; then
   echo "run-parallel.sh: all ${#MODULES[@]} modules passed" >&2
 else
   echo "run-parallel.sh: at least one module failed" >&2

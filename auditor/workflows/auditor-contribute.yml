@@ -805,7 +805,7 @@ jobs:
                   -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
               fi
               if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
-                 git "${CRED_ARGS[@]}" -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null
+                 git ${CRED_ARGS[@]+"${CRED_ARGS[@]}"} -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null
               then
                 break
               fi
@@ -836,7 +836,7 @@ jobs:
                 -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
             fi
             if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
-               git "${CRED_ARGS[@]}" -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null
+               git ${CRED_ARGS[@]+"${CRED_ARGS[@]}"} -C "$DATA_REPO" push -q origin "HEAD:$BRANCH" 2>/dev/null
             then
               reserved=true
               echo "RESERVED:$REPO — reservation appended and pushed to auditor-data"
@@ -1407,7 +1407,7 @@ jobs:
                 vf_try=1
                 while [ "$vf_try" -le 3 ]; do
                   if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
-                       git -C "$vf_data" "${CRED_ARGS[@]}" push -q origin HEAD 2>/dev/null; then
+                       git -C "$vf_data" ${CRED_ARGS[@]+"${CRED_ARGS[@]}"} push -q origin HEAD 2>/dev/null; then
                     vf_pushed=1
                     break
                   fi
@@ -1415,7 +1415,7 @@ jobs:
                   # Replay the append on top of whatever landed. Never force: the ledger is
                   # append-only and somebody else's row is not ours to discard.
                   if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
-                       git -C "$vf_data" "${CRED_ARGS[@]}" fetch -q origin 2>/dev/null; then
+                       git -C "$vf_data" ${CRED_ARGS[@]+"${CRED_ARGS[@]}"} fetch -q origin 2>/dev/null; then
                     git -C "$vf_data" rebase -q FETCH_HEAD >/dev/null 2>&1 \
                       || git -C "$vf_data" rebase --abort >/dev/null 2>&1 || true
                   fi
@@ -1461,7 +1461,7 @@ jobs:
               -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
           fi
           if ! GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
-             git "${CRED_ARGS[@]}" -C "$TARGET_DIR" push -q "$FORK_REMOTE" \
+             git ${CRED_ARGS[@]+"${CRED_ARGS[@]}"} -C "$TARGET_DIR" push -q "$FORK_REMOTE" \
               "refs/heads/$BRANCH:refs/heads/$BRANCH" 2>/dev/null; then
             echo "REFUSE:pre-pr-failure — the submission branch did not reach the fork" >&2
             outcome pre-pr-failure fork-push-failed ""
@@ -1600,7 +1600,7 @@ jobs:
                   -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
               fi
               if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
-                 git "${CRED_ARGS[@]}" -C "$DATA_DIR" push -q origin "HEAD:${DATA_BRANCH:-auditor-data}" 2>/dev/null
+                 git ${CRED_ARGS[@]+"${CRED_ARGS[@]}"} -C "$DATA_DIR" push -q origin "HEAD:${DATA_BRANCH:-auditor-data}" 2>/dev/null
               then
                 pushed=1
               fi
@@ -1993,7 +1993,7 @@ jobs:
                 -c 'credential.helper=!f() { echo "username=x-access-token"; echo "password=${GIT_AUTH_TOKEN}"; }; f')
             fi
             if GIT_AUTH_TOKEN="${PAT_SECRET:-${GH_TOKEN:-}}" \
-               git "${CRED_ARGS[@]}" -C "$DATA_DIR" push -q origin "HEAD:$DATA_BRANCH" 2>/dev/null
+               git ${CRED_ARGS[@]+"${CRED_ARGS[@]}"} -C "$DATA_DIR" push -q origin "HEAD:$DATA_BRANCH" 2>/dev/null
             then pushed=1; fi
           fi
           if [ "$pushed" != "1" ]; then
